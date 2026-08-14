@@ -123,7 +123,7 @@ fn read_project(root: &Path) -> Value {
 
 fn assert_project_root_safe(root: &Path) {
     for ancestor in root.ancestors() {
-        if ancestor == Path::new("/var") {
+        if ancestor == Path::new("/tmp") || ancestor == Path::new("/var") {
             continue;
         }
         if fs::symlink_metadata(ancestor)

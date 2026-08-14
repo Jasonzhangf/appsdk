@@ -2648,7 +2648,10 @@ fn ensure_appsdk_gitignore(root: &Path) {
         let mut updated = String::with_capacity(content.len());
         updated.push_str(&content[..begin]);
         updated.push_str(APPSDK_GITIGNORE_BLOCK);
-        updated.push_str(&content[end_after..]);
+        let suffix = &content[end_after..];
+        if !suffix.trim().is_empty() {
+            updated.push_str(suffix);
+        }
         if updated != content {
             fs::write(path, updated).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
         }

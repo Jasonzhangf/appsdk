@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://appsdk.local/contracts/records/regression-report.schema.json",
   "type": "object",
-  "required": ["regression_report_id", "module_id", "source_commit", "artifact_hash", "public_api_hash", "scope_hash", "input_hash", "suite_id", "command", "test_count", "passed", "failed", "skipped", "result", "producer", "created_at"],
+  "required": ["regression_report_id", "module_id", "source_commit", "artifact_hash", "public_api_hash", "scope_hash", "input_hash", "suite_id", "command", "test_count", "passed", "failed", "skipped", "result", "producer", "test_characteristics", "created_at"],
   "properties": {
     "regression_report_id": {"type": "string"},
     "module_id": {"type": "string"},

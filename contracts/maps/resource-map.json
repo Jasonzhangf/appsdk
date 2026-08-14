@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "resources": [
+    {"resource_id":"project_contract","owner":"appsdk::project_contract","truth_store":".appsdk/project.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"lifecycle_records","owner":"appsdk::record_graph","truth_store":".appsdk/records/**","allowed_operations":["read","validate","write"]},
+    {"resource_id":"compiled_artifact","owner":"appsdk::compiler","truth_store":"generated/project.compiled.json","allowed_operations":["read","write"]}
+  ]
+}

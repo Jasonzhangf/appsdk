@@ -1,0 +1,26 @@
+name: appsdk-verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
+      - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
+      - run: cargo test --manifest-path rust/Cargo.toml
+      - run: cargo build --release --manifest-path rust/Cargo.toml
+      - run: |
+          tmp="$(mktemp -d)"
+          rust/target/release/appsdk new "$tmp/project"
+          rust/target/release/appsdk verify "$tmp/project"
+          test -d "$tmp/project/playground"
+          test -d "$tmp/project/active/lib"
+          test -d "$tmp/project/protected/source"
+          test -d "$tmp/project/generated"
+          test -d "$tmp/project/.appsdk-control"
+          ! find "$tmp/project" -type f \( -name '*.mjs' -o -name '*.rs' \) | grep .

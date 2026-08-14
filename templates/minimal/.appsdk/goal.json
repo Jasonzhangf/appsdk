@@ -1,0 +1,15 @@
+{
+  "goal_id": "goal-change-me",
+  "issue_id": null,
+  "raw_request": "Describe the intended change before implementation.",
+  "understood_objective": "The objective will be restated and confirmed before admission.",
+  "acceptance_criteria": ["The user-confirmed acceptance criteria are recorded before implementation."],
+  "non_goals": [],
+  "assumptions": [],
+  "ambiguities": [],
+  "questions": [],
+  "status": "received",
+  "confirmed_by": null,
+  "confirmed_at": null,
+  "created_at": "2026-01-01T00:00:00Z"
+}

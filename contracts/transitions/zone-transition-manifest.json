@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/transitions/zone-transition-manifest.json",
+  "type": "object",
+  "required": ["zones", "transitions", "forbidden_runtime_edges"],
+  "properties": {
+    "zones": {"const": ["playground", "active", "protected", "generated"]},
+    "transitions": {"type": "array", "minItems": 16, "items": {"type": "object", "required": ["from", "to", "allowed", "requirements", "owner", "runtime_allowed", "artifact_required", "record_required"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "allowed": {"type": "boolean"}, "requirements": {"type": "array", "items": {"type": "string"}}, "owner": {"type": "string"}, "runtime_allowed": {"type": "boolean"}, "artifact_required": {"type": "boolean"}, "record_required": {"type": "array", "items": {"type": "string"}}}}},
+    "forbidden_runtime_edges": {"type": "array", "items": {"type": "object", "required": ["from", "to"], "properties": {"from": {"type": "string"}, "to": {"type": "string"}}}}
+  }
+}

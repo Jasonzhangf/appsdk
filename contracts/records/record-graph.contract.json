@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/records/record-graph.contract.json",
+  "type": "object",
+  "required": ["rules", "freshness_rules"],
+  "properties": {
+    "rules": {"type": "array", "items": {"type": "string"}},
+    "freshness_rules": {"type": "array", "items": {"type": "string"}}
+  }
+}

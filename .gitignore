@@ -1,0 +1,6 @@
+artifacts/
+dist/
+.DS_Store
+.agent-collab/
+.appsdk-control/
+rust/target/

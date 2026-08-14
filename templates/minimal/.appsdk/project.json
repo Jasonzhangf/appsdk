@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "project_id": "change-me",
+  "sdk": {
+    "name": "appsdk",
+    "version": "0.1.0"
+  },
+  "lifecycle": {
+    "stage": "draft"
+  },
+  "access": {
+    "protected_paths": [
+    ".appsdk/**",
+    "artifacts/**",
+    "protected/source/**",
+      "docs/generated/**"
+    ]
+  },
+  "governance": {
+    "playground_root": "playground/experiments/**",
+    "active_root": "active/lib/**",
+    "protected_root": "protected/**",
+    "generated_root": "generated/**",
+    "active_kind": "immutable_consumable_library",
+    "protected_kinds": ["source", "contracts", "history"],
+    "generated_kinds": ["compiler_output", "indexes"],
+    "freeze_requirements": [
+      "git_clean",
+      "source_commit_or_tag",
+      "library_hash",
+      "public_api_hash",
+      "review_pass",
+      "previous_active_immutable"
+    ],
+    "promotion_requires": [
+      "experiment_evidence",
+      "architecture_review_pass",
+      "unique_owner",
+      "required_gates"
+    ],
+    "runtime_forbidden_roots": [
+      "playground/**",
+      "generated/**"
+    ],
+    "record_contracts": [
+      "contracts/records/evidence-record.schema.json",
+      "contracts/records/goal-clarification-record.schema.json",
+      "contracts/records/review-record.schema.json",
+      "contracts/records/promotion-record.schema.json",
+      "contracts/records/freeze-record.schema.json",
+      "contracts/records/record-graph.contract.json"
+    ],
+    "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
+    "zone_transition_manifest": "contracts/transitions/zone-transition-manifest.json",
+    "playground_retention": "archive_then_remove",
+    "debug_merge_comment_required": true
+  },
+  "lifecycles": {
+    "issue": "open",
+    "library": "draft",
+    "source_snapshot": "mutable",
+    "artifact": "generated"
+  },
+  "modules": [
+    {
+      "module_id": "app-core",
+      "stage": "source_implemented",
+      "owned_paths": ["playground/experiments/**", "protected/source/**", "tests/core/**"],
+      "source_owner": "app-core",
+      "active_artifact": "active/lib/app-core/**",
+      "generated_outputs": ["generated/**"]
+    }
+  ]
+}

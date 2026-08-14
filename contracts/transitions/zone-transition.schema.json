@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/transitions/zone-transition.schema.json",
+  "type": "object",
+  "required": ["from", "to", "allowed", "requirements"],
+  "properties": {
+    "from": {"enum": ["playground", "active", "protected", "generated"]},
+    "to": {"enum": ["playground", "active", "protected", "generated"]},
+    "allowed": {"type": "boolean"},
+    "requirements": {"type": "array", "items": {"type": "string"}},
+    "owner": {"type": "string"}
+  }
+}

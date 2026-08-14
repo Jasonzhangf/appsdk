@@ -1,0 +1,4 @@
+interface:
+  display_name: "AppSDK Project Governance"
+  short_description: "Integrate projects without SDK source pollution"
+  default_prompt: "Use $appsdk-project-governance to bootstrap and govern this project through clarification, Playground, review, promotion, and freeze."

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/host-execution.contract.json",
+  "type": "object",
+  "required": ["physical_isolation", "write_adapter"],
+  "properties": {
+    "physical_isolation": {"enum": ["isolated_worktree", "container_mount", "race_resistant_adapter"]},
+    "write_adapter": {"enum": ["host_owned"]}
+  }
+}

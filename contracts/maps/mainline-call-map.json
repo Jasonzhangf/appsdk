@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "lifecycle_id":"appsdk-governance",
+  "nodes":["clarify","playground","review","promotion","compile","active","protected","verify"],
+  "edges":[
+    {"from":"clarify","to":"playground","owner":"appsdk::goal"},
+    {"from":"playground","to":"review","owner":"appsdk::lifecycle"},
+    {"from":"review","to":"promotion","owner":"appsdk::lifecycle"},
+    {"from":"promotion","to":"compile","owner":"appsdk::compiler"},
+    {"from":"compile","to":"active","owner":"appsdk::publisher"},
+    {"from":"active","to":"protected","owner":"appsdk::freezer"},
+    {"from":"protected","to":"verify","owner":"appsdk::verifier"},
+    {"from":"verify","to":"playground","owner":"appsdk::workspace","return_path":true}
+  ]
+}

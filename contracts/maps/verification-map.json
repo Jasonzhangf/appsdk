@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "gates":[
+    {"gate_id":"contract_valid","command":"appsdk verify <project>","required_for":["compile","promotion","freeze"]},
+    {"gate_id":"sdk_pinned","command":"appsdk pin-lock <project> --binary <sdk>","required_for":["compile","promotion","freeze"]},
+    {"gate_id":"record_graph","command":"appsdk verify <project>","required_for":["architecture_stable","freeze","publish"]},
+    {"gate_id":"vcs_clean","command":"appsdk verify <project>","required_for":["freeze"]}
+  ]
+}

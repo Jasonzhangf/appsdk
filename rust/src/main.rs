@@ -2849,6 +2849,38 @@ fn freeze_module(root: &Path, module_id: &str) {
             fail("PROTECTED_ARCHIVE_SOURCE_MISSING");
         }
     }
+    for path in candidate["modules"][index]
+        .get("contract_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
+    {
+        let relative = path
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+        let source = safe_owned_path(root, relative, "contract_path");
+        let archive_relative = relative
+            .trim_start_matches("contracts/")
+            .trim_start_matches("contracts")
+            .trim_start_matches('/');
+        let target = staging_archive.join("contracts").join(
+            archive_relative
+                .trim_end_matches("/**")
+                .trim_end_matches('/'),
+        );
+        if relative.ends_with("/**") {
+            if !source.exists() {
+                fail("PROTECTED_ARCHIVE_CONTRACT_MISSING");
+            }
+            copy_tree(&source, &target);
+        } else if source.exists() && source.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+            }
+            fs::copy(&source, target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+        } else {
+            fail("PROTECTED_ARCHIVE_CONTRACT_MISSING");
+        }
+    }
     for artifact_path in candidate["modules"][index]
         .get("artifact_paths")
         .and_then(Value::as_array)

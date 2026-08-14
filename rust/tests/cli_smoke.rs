@@ -766,6 +766,22 @@ fn frozen_module_keeps_other_modules_mutable() {
     ])
     .status
     .success());
+    // Protected archive must contain the frozen module's source, library,
+    // contract files, module contract, and hashes, so a frozen module is a
+    // self-contained audit unit.
+    for path in [
+        "protected/history/app-core/source/playground/experiments",
+        "protected/history/app-core/library/app-core.placeholder",
+        "protected/history/app-core/contracts/records/evidence-record.schema.json",
+        "protected/history/app-core/contracts/transitions/zone-transition-manifest.json",
+        "protected/history/app-core/module-contract.json",
+        "protected/history/app-core/freeze-artifact.json",
+    ] {
+        assert!(
+            root.join(path).exists(),
+            "protected archive is incomplete: {path}"
+        );
+    }
     let frozen_artifact_hash = {
         let value: Value = serde_json::from_str(
             &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json"))

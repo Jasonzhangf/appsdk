@@ -9,6 +9,208 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
+const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
+    (
+        "contracts/sdk-bundle.manifest.json",
+        "contracts",
+        include_str!("../../contracts/sdk-bundle.manifest.json"),
+    ),
+    (
+        "contracts/project.schema.json",
+        "contracts",
+        include_str!("../../contracts/project.schema.json"),
+    ),
+    (
+        "contracts/transitions/zone-transition.manifest.json",
+        "contracts",
+        include_str!("../../contracts/transitions/zone-transition.manifest.json"),
+    ),
+    (
+        "contracts/lifecycle-state-machines.manifest.json",
+        "contracts",
+        include_str!("../../contracts/lifecycle-state-machines.manifest.json"),
+    ),
+    (
+        "contracts/records/record-graph.contract.json",
+        "contracts",
+        include_str!("../../contracts/records/record-graph.contract.json"),
+    ),
+    (
+        "contracts/records/evidence-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/evidence-record.schema.json"),
+    ),
+    (
+        "contracts/records/review-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/review-record.schema.json"),
+    ),
+    (
+        "contracts/records/promotion-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/promotion-record.schema.json"),
+    ),
+    (
+        "contracts/records/freeze-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/freeze-record.schema.json"),
+    ),
+    (
+        "contracts/records/regression-report.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/regression-report.schema.json"),
+    ),
+    (
+        "docs/design/appsdk-project-integration.md",
+        "docs",
+        include_str!("../../docs/design/appsdk-project-integration.md"),
+    ),
+    (
+        "docs/architecture/appsdk-governance-architecture.md",
+        "docs",
+        include_str!("../../docs/architecture/appsdk-governance-architecture.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/SKILL.md",
+        "rules",
+        include_str!("../../skills/appsdk-project-governance/SKILL.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/SKILL.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/SKILL.md"),
+    ),
+];
+
+fn sdk_bundle_manifest_resources() -> Value {
+    serde_json::from_str::<Value>(SDK_BUNDLE_MANIFEST)
+        .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"))
+        .get("resources")
+        .cloned()
+        .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_MANIFEST"))
+}
+
+fn sdk_resource_install_relative(source: &str, class: &str) -> String {
+    match class {
+        "contracts" => format!(
+            ".appsdk/contracts/{}",
+            source
+                .strip_prefix("contracts/")
+                .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE"))
+        ),
+        "docs" => format!(
+            ".appsdk/docs/{}",
+            source
+                .strip_prefix("docs/")
+                .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE"))
+        ),
+        "rules" => ".appsdk/rules/appsdk-project-governance.md".into(),
+        "skills" => ".appsdk/skills/appsdk-project-governance/SKILL.md".into(),
+        _ => fail("INVALID_SDK_BUNDLE"),
+    }
+}
+
+fn sdk_bundle_resource_entries() -> Vec<(String, String, &'static str)> {
+    let resources = sdk_bundle_manifest_resources()
+        .as_object()
+        .cloned()
+        .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_MANIFEST"));
+    let mut entries = Vec::new();
+    for (class, paths) in &resources {
+        let paths = paths
+            .as_array()
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_MANIFEST"));
+        for path in paths {
+            let source = path
+                .as_str()
+                .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_MANIFEST"));
+            let content = SDK_BUNDLE_RESOURCES
+                .iter()
+                .find(|(embedded_source, embedded_class, _)| {
+                    *embedded_source == source && *embedded_class == class
+                })
+                .map(|(_, _, content)| *content)
+                .unwrap_or_else(|| fail(format!("SDK_BUNDLE_MANIFEST_MISMATCH:{}", source)));
+            entries.push((source.to_string(), class.clone(), content));
+        }
+    }
+    if entries.len() != SDK_BUNDLE_RESOURCES.len() {
+        fail("SDK_BUNDLE_RESOURCE_SET_MISMATCH");
+    }
+    entries
+}
+
+fn sdk_bundle_digest() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"manifest\0");
+    hasher.update(SDK_BUNDLE_MANIFEST.as_bytes());
+    for (path, class, content) in sdk_bundle_resource_entries() {
+        hasher.update(b"resource\0");
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(class.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(content.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn assert_bundle_manifest() {
+    let manifest: Value = serde_json::from_str(SDK_BUNDLE_MANIFEST)
+        .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
+        || manifest.get("version").and_then(Value::as_str) != Some("0.1.0")
+        || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
+    {
+        fail("INVALID_SDK_BUNDLE_MANIFEST");
+    }
+    let _ = sdk_bundle_resource_entries();
+}
+
+fn install_bundle_resources(root: &Path) {
+    assert_bundle_manifest();
+    let mut installed = Vec::new();
+    for (source, class, content) in sdk_bundle_resource_entries() {
+        let target = root.join(sdk_resource_install_relative(&source, &class));
+        assert_no_symlink_components(root, &target, "sdk_resource");
+        if fs::symlink_metadata(&target)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            fail(format!(
+                "GOVERNANCE_PATH_SYMLINK:sdk_resource:{}",
+                target.display()
+            ));
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|_| fail("SDK_RESOURCE_WRITE_FAILED"));
+        }
+        fs::write(&target, content).unwrap_or_else(|_| fail("SDK_RESOURCE_WRITE_FAILED"));
+        installed.push(serde_json::json!({
+            "source": source,
+            "class": class,
+            "path": target.strip_prefix(root).unwrap().to_string_lossy(),
+            "digest": digest_bytes(content.as_bytes())
+        }));
+    }
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "sdk": "appsdk",
+        "version": "0.1.0",
+        "bundle_digest": sdk_bundle_digest(),
+        "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
+        "resources": installed
+    });
+    let record_path = root.join(".appsdk/sdk-resources.json");
+    fs::write(
+        record_path,
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap_or_else(|_| fail("SDK_RESOURCE_RECORD_WRITE_FAILED"));
+}
+
 fn fail(message: impl AsRef<str>) -> ! {
     eprintln!("{}", message.as_ref());
     std::process::exit(1);
@@ -551,24 +753,45 @@ fn assert_sdk_lock(root: &Path, project: &Value, require_pinned: bool) {
             fail("INVALID_SDK_LOCK_DIGEST");
         }
     }
+    for key in ["bundle_digest", "bundle_manifest_digest"] {
+        let digest = lock.get(key).and_then(Value::as_str).unwrap_or("");
+        let placeholder = digest == "sha256:replace-with-sdk-bundle-digest"
+            || digest == "sha256:replace-with-bundle-manifest-digest";
+        if require_pinned && placeholder {
+            fail("SDK_LOCK_NOT_PINNED");
+        }
+        if (!placeholder && digest.len() != 71)
+            || !digest.starts_with("sha256:")
+            || (!placeholder && !digest[7..].chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            fail("INVALID_SDK_BUNDLE_DIGEST");
+        }
+    }
     if require_pinned {
         if lock.get("binary_ref").and_then(Value::as_str) != Some("project-sdk") {
             fail("INVALID_SDK_LOCK_BINARY_REF");
         }
-        let executable = root.join(".appsdk/sdk.bin");
+        let running = std::env::current_exe().unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
         let actual =
-            digest_bytes(&fs::read(executable).unwrap_or_else(|_| fail("SDK_BINARY_MISSING")));
+            digest_bytes(&fs::read(running).unwrap_or_else(|_| fail("SDK_BINARY_MISSING")));
         if lock.get("digest").and_then(Value::as_str) != Some(actual.as_str())
             || lock.get("compiler_digest").and_then(Value::as_str) != Some(actual.as_str())
         {
             fail("SDK_BINARY_DIGEST_MISMATCH");
         }
-        let running = std::env::current_exe().unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
-        let running_digest =
-            digest_bytes(&fs::read(running).unwrap_or_else(|_| fail("SDK_BINARY_MISSING")));
-        if lock.get("digest").and_then(Value::as_str) != Some(running_digest.as_str()) {
-            fail("RUNNING_SDK_BINARY_DIGEST_MISMATCH");
+        if lock.get("bundle_digest").and_then(Value::as_str) != Some(sdk_bundle_digest().as_str())
+            || lock.get("bundle_manifest_digest").and_then(Value::as_str)
+                != Some(digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()).as_str())
+        {
+            fail("SDK_BUNDLE_DIGEST_MISMATCH");
         }
+    }
+    let manifest_resources = sdk_bundle_manifest_resources();
+    match lock.get("bundle_resources") {
+        Some(declared) if declared == &manifest_resources => {}
+        Some(_) => fail("SDK_LOCK_BUNDLE_RESOURCES_MISMATCH"),
+        None if require_pinned => fail("SDK_LOCK_BUNDLE_RESOURCES_MISSING"),
+        None => {}
     }
 }
 
@@ -3389,6 +3612,79 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
     println!("active {} {}", module_id, version);
 }
 
+fn assert_sdk_resources(root: &Path, required: bool) {
+    let path = root.join(".appsdk/sdk-resources.json");
+    if !path.exists() {
+        if required {
+            fail("MISSING_SDK_RESOURCES");
+        }
+        return;
+    }
+    if fs::symlink_metadata(&path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:sdk_resources");
+    }
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(&path).unwrap_or_else(|_| fail("INVALID_SDK_RESOURCES")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_RESOURCES"));
+    assert_bundle_manifest();
+    if record.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
+        || record.get("version").and_then(Value::as_str) != Some("0.1.0")
+        || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
+        || record.get("manifest_digest").and_then(Value::as_str)
+            != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
+    {
+        fail("SDK_RESOURCES_BUNDLE_MISMATCH");
+    }
+    let entries = record
+        .get("resources")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_SDK_RESOURCES"));
+    let bundle_entries = sdk_bundle_resource_entries();
+    if entries.len() != bundle_entries.len() {
+        fail("SDK_RESOURCE_SET_MISMATCH");
+    }
+    for (source, class, content) in bundle_entries {
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.get("source").and_then(Value::as_str) == Some(source.as_str())
+                    && entry.get("class").and_then(Value::as_str) == Some(class.as_str())
+            })
+            .unwrap_or_else(|| fail(format!("SDK_RESOURCE_MISSING:{}", source)));
+        let relative = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_RESOURCES"));
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            || (relative != ".appsdk" && !relative.starts_with(".appsdk/"))
+            || relative != sdk_resource_install_relative(&source, &class)
+        {
+            fail(format!("SDK_RESOURCE_PATH_ESCAPE:{}", relative));
+        }
+        let expected = digest_bytes(content.as_bytes());
+        if entry.get("digest").and_then(Value::as_str) != Some(expected.as_str()) {
+            fail(format!("SDK_RESOURCE_DIGEST_RECORD_MISMATCH:{}", source));
+        }
+        let target = root.join(relative);
+        assert_no_symlink_components(root, &target, "sdk_resource_record");
+        if !target.is_file() || file_sha256(&target, "sdk_resource") != expected {
+            fail(format!("SDK_RESOURCE_MISMATCH:{}", relative));
+        }
+    }
+}
+
 fn verify(root: &Path) {
     assert_project_root_safe(root);
     let project = read_project(root);
@@ -3398,7 +3694,16 @@ fn verify(root: &Path) {
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
         fail("UNSUPPORTED_PROJECT_SCHEMA");
     }
-    if required_str(&project, "/sdk/name", "INVALID_SDK_CONTRACT") != "appsdk" {
+    if required_str(&project, "/sdk/name", "INVALID_SDK_CONTRACT") != "appsdk"
+        || project
+            .pointer("/sdk/bundle_manifest")
+            .and_then(Value::as_str)
+            != Some(".appsdk/contracts/sdk-bundle.manifest.json")
+        || project
+            .pointer("/sdk/resource_record")
+            .and_then(Value::as_str)
+            != Some(".appsdk/sdk-resources.json")
+    {
         fail("INVALID_SDK_CONTRACT");
     }
     if project
@@ -3674,6 +3979,13 @@ fn verify(root: &Path) {
             "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
         ),
     );
+    assert_sdk_resources(
+        root,
+        matches!(
+            stage,
+            "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
+        ),
+    );
     assert_goal_contract(root, false);
     let lock_file = root.join(".appsdk").join("sdk.lock");
     let lock: Value = serde_json::from_str(
@@ -3919,7 +4231,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0"},
+  "sdk": {"name": "appsdk", "version": "0.1.0", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "governance": {
@@ -3952,7 +4264,7 @@ fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
         ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.0","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.0","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -4111,6 +4423,7 @@ fn init_project(root: &Path) {
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
     ensure_governance_layout(root);
     write_project_scaffold(root);
+    install_bundle_resources(root);
     println!("initialized {}", root.display());
 }
 
@@ -4150,6 +4463,7 @@ fn new_project(root: &Path) {
     }
     ensure_governance_layout(root);
     write_project_scaffold(root);
+    install_bundle_resources(root);
     println!("created {}", root.display());
 }
 
@@ -4170,6 +4484,19 @@ fn pin_lock(root: &Path, binary: &Path) {
     );
     lock.insert("digest".into(), Value::String(digest.clone()));
     lock.insert("compiler_digest".into(), Value::String(digest));
+    lock.insert("bundle_digest".into(), Value::String(sdk_bundle_digest()));
+    lock.insert(
+        "bundle_manifest_digest".into(),
+        Value::String(digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes())),
+    );
+    lock.insert(
+        "bundle_resources".into(),
+        serde_json::from_str::<Value>(SDK_BUNDLE_MANIFEST)
+            .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE"))
+            .get("resources")
+            .cloned()
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE")),
+    );
     let pinned_binary = root.join(".appsdk/sdk.bin");
     if fs::symlink_metadata(&pinned_binary)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -4178,6 +4505,7 @@ fn pin_lock(root: &Path, binary: &Path) {
         fail("GOVERNANCE_PATH_SYMLINK:sdk_binary");
     }
     fs::copy(&binary, &pinned_binary).unwrap_or_else(|_| fail("SDK_BINARY_WRITE_FAILED"));
+    install_bundle_resources(root);
     lock.insert("binary_ref".into(), Value::String("project-sdk".into()));
     lock.insert(
         "contract_schema".into(),

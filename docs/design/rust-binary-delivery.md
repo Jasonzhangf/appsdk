@@ -39,7 +39,7 @@ appsdk verify ./my-app
 ```
 
 `pin-lock` 将 binary digest 写入 `.appsdk/sdk.lock` 的 `digest` 和
-`compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；`pin-lock` 会把外部 binary 复制到项目 `.appsdk/sdk.bin`，不写入机器绝对路径。后续 `compile`、promotion、freeze 都校验该副本 digest。
+`compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；本地会生成忽略且不可作为执行入口的 `.appsdk/sdk.bin` 见证副本。后续 `verify`、`compile`、promotion、freeze 只执行当前全局 `appsdk`，并校验当前运行 binary、Bundle 和锁定摘要；干净 checkout 不依赖本地见证副本。
 
 `compile`、promotion、module promotion、freeze、record graph 和 Active publish 均由 Rust 执行。
 

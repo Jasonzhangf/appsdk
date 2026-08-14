@@ -6,7 +6,7 @@ AppSDK is an external governance implementation. A new project consumes its CLI/
 
 ```text
 external AppSDK installation
-  -> CLI / compiler / contracts / harness / adapters
+  -> versioned Bundle: CLI / compiler / contracts / docs / rules / skills
   -> .appsdk project contract + sdk.lock
   -> compiled manifest and verified artifact
   -> project runtime consumes Active
@@ -55,7 +55,13 @@ Ignore:
 
 `.appsdk-control/` may contain local review sessions, worker heartbeat, temporary harness output, and caches. It must not contain project truth, immutable rules, SDK lock, maps, or lifecycle records.
 
-## SDK lock
+## SDK Bundle and lock
+
+消费者只使用全局安装的 AppSDK Bundle。Bundle 版本必须同时绑定 Rust CLI、machine contracts、文档、规则和 skills；不能让项目自行扫描一个不受版本控制的全局目录。Bundle manifest 是机器真源，`init`/`new` 将其中声明的 Skill、规则和文档安装到项目 `.appsdk/`，并生成 `.appsdk/sdk-resources.json`。
+
+项目中的手动合同（例如 `project.json`、records、maps）由 AI/开发者维护，SDK 只校验 schema、引用、owner、scope 和生命周期关系。`.appsdk/sdk-resources.json` 是自动生成文件，只能由 SDK 重建；`verify` 会校验资源文件摘要和 Bundle digest，发现手工改写立即 fail-fast。
+
+`contracts/sdk-bundle.manifest.json` 声明当前 Bundle 的资源集合和安装位置；初始化后项目内的机器真源位于 `.appsdk/contracts/sdk-bundle.manifest.json`。它和 binary 同版本发布；`pin-lock` 把 binary digest、Bundle digest、manifest digest 和资源集合一起写入锁。
 
 `.appsdk/sdk.lock` binds the project to the external implementation:
 
@@ -65,6 +71,9 @@ Ignore:
   "version": "0.1.0",
   "digest": "sha256:replace-with-compiled-sdk-digest",
   "compiler_digest": "sha256:replace-with-compiler-digest",
+  "bundle_digest": "sha256:replace-with-sdk-bundle-digest",
+  "bundle_manifest_digest": "sha256:replace-with-bundle-manifest-digest",
+  "bundle_resources": {"contracts": [], "docs": [], "rules": [], "skills": []},
   "binary_ref": "project-sdk",
   "contract_schema": 1
 }
@@ -100,6 +109,8 @@ appsdk init ./existing-workspace --project-root new-code
 appsdk new ./my-app
 appsdk verify ./my-app
 ```
+
+初始化会自动安装 `.appsdk/docs/`、`.appsdk/rules/` 和 `.appsdk/skills/`。这些是项目治理输入，不是 runtime capability；runtime 只消费编译后的 manifest 和 Active library。
 
 Then fill and confirm `.appsdk/goal.json`, bind project maps and module ownership, and follow the promotion contract. Template creation requires an empty, non-symlinked destination.
 

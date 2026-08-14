@@ -23,4 +23,9 @@ jobs:
           test -d "$tmp/project/protected/source"
           test -d "$tmp/project/generated"
           test -d "$tmp/project/.appsdk-control"
+          test -f "$tmp/project/.appsdk/sdk-resources.json"
+          test -f "$tmp/project/.appsdk/contracts/project.schema.json"
+          test -f "$tmp/project/.appsdk/docs/design/appsdk-project-integration.md"
+          test -f "$tmp/project/.appsdk/rules/appsdk-project-governance.md"
+          test -f "$tmp/project/.appsdk/skills/appsdk-project-governance/SKILL.md"
           ! find "$tmp/project" -type f \( -name '*.mjs' -o -name '*.rs' \) | grep .

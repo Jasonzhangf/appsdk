@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -114,6 +115,10 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         ".appsdk/project.json",
         ".appsdk/goal.json",
         ".appsdk/sdk.lock",
+        ".appsdk/sdk-resources.json",
+        ".appsdk/docs/design/appsdk-project-integration.md",
+        ".appsdk/rules/appsdk-project-governance.md",
+        ".appsdk/skills/appsdk-project-governance/SKILL.md",
         ".appsdk/maps/resource-map.json",
         "playground/experiments",
         "active/lib",
@@ -136,6 +141,100 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         "{}",
         String::from_utf8_lossy(&verified.stderr)
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_tampered_installed_sdk_resource() {
+    let root = temp_root("sdk-resource-integrity");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    assert!(run(&["init", root_text]).status.success());
+    let resource = root.join(".appsdk/skills/appsdk-project-governance/SKILL.md");
+    fs::write(&resource, "tampered\n").unwrap();
+    let result = run(&["verify", root_text]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_RESOURCE_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_symlinked_sdk_resources_record() {
+    let root = temp_root("sdk-resources-symlink");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    assert!(run(&["init", root_text]).status.success());
+    let record_path = root.join(".appsdk/sdk-resources.json");
+    let original = root.join(".appsdk/sdk-resources.original.json");
+    fs::rename(&record_path, &original).unwrap();
+    symlink(&original, &record_path).unwrap();
+    let result = run(&["verify", root_text]);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("GOVERNANCE_PATH_SYMLINK:sdk_resources")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_escaping_sdk_resource_record_path() {
+    let root = temp_root("sdk-resources-escape");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    assert!(run(&["init", root_text]).status.success());
+    let record_path = root.join(".appsdk/sdk-resources.json");
+    let mut record: Value =
+        serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
+    record["resources"][0]["path"] = Value::String("../escape".into());
+    fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run(&["verify", root_text]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_RESOURCE_PATH_ESCAPE"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_tampered_lock_bundle_resources() {
+    let root = temp_root("lock-bundle-resources");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    assert!(run(&["init", root_text]).status.success());
+    pin_test_lock(root_text);
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["bundle_resources"]["contracts"][0] = Value::String("contracts/tampered.json".into());
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run(&["verify", root_text]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_LOCK_BUNDLE_RESOURCES_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_rejects_symlinked_control_parent() {
+    let root = temp_root("init-symlink-parent");
+    fs::create_dir_all(&root).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(root.join(".appsdk")).unwrap();
+    symlink(&outside, root.join(".appsdk/docs")).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    let result = run(&["init", root_text]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("GOVERNANCE_PATH_SYMLINK"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -178,6 +277,57 @@ fn pin_test_lock(root: &str) {
             .status
             .success()
     );
+}
+
+#[test]
+fn pinned_global_binary_verifies_without_local_sdk_witness() {
+    let root = temp_root("global-sdk-no-local-witness");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/goal.json"),
+        r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#,
+    )
+    .unwrap();
+    pin_test_lock(root_text);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    let compile = run(&["compile", root_text]);
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    assert!(run(&["promote", root_text, "--to", "compiled"])
+        .status
+        .success());
+    fs::remove_file(root.join(".appsdk/sdk.bin")).unwrap();
+
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["digest"] = Value::String(format!("sha256:{}", "0".repeat(64)));
+    lock["compiler_digest"] = lock["digest"].clone();
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SDK_BINARY_DIGEST_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn canonical(value: &Value) -> String {

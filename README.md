@@ -14,6 +14,7 @@ Goal clarification -> claim -> Playground source -> review PASS -> mainline merg
 核心命令：
 
 ```bash
+appsdk prepare ./existing-workspace
 appsdk init ./existing-workspace --project-root new-code
 appsdk new ./my-app
 appsdk pin-lock ./my-app --binary /path/to/appsdk
@@ -26,7 +27,7 @@ appsdk publish-active ./my-app --module app-core --version active-v1
 
 ```
 
-`appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块。它不会覆盖已有项目合同或已有 Git 忽略规则。编译输出、索引、Active library 和本地控制面不会进入 Git。
+`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，`appsdk init` 才允许执行。`appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块。
 
 治理设计：
 

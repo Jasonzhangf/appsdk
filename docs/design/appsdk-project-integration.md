@@ -78,6 +78,14 @@ Runtime may consume only the compiled manifest and verified Active artifact. Run
 
 ## Bootstrap
 
+初始化前先创建需求准备文档：
+
+```bash
+appsdk prepare ./existing-workspace
+```
+
+AI 使用 `.appsdk-prepare.json` 模板向用户确认：这是新项目、模块重构、项目重构还是 debug；新项目根目录是什么；旧代码和 V3 等 legacy roots 是什么；新代码、Protected 和禁止修改边界是什么。用户确认后将 `status` 更新为 `confirmed`，然后才能执行 `init`。没有确认记录时，`init` 会 fail-fast。
+
 已有项目先执行：
 
 ```bash

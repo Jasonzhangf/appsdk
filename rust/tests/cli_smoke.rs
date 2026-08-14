@@ -64,12 +64,38 @@ fn run(args: &[&str]) -> std::process::Output {
     Command::new(binary()).args(args).output().unwrap()
 }
 
+fn confirm_preparation(root: &PathBuf, project_root: &str, change_kind: &str) {
+    fs::write(
+        root.join(".appsdk-prepare.json"),
+        format!(
+            r#"{{"schema_version":1,"preparation_id":"prepare-test","status":"confirmed","objective":"test objective","change_kind":"{}","project_root":"{}","legacy_roots":["legacy"],"new_roots":["{}"],"protected_roots":["{}/protected"],"runtime_forbidden_roots":["{}/generated"],"boundary":{{"allowed_paths":["{}"],"forbidden_paths":["v3/**"],"payload_control_separation":"confirmed"}},"acceptance_criteria":["pass"],"non_goals":["v3"],"assumptions":[],"questions":[],"confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}}"#,
+            change_kind, project_root, project_root, project_root, project_root, project_root
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn prepare_creates_template_and_init_rejects_unconfirmed_record() {
+    let root = temp_root("prepare-gate");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["prepare", root_text]).status.success());
+    let template = fs::read_to_string(root.join(".appsdk-prepare.json")).unwrap();
+    assert!(template.contains("\"status\": \"draft\""));
+    let init = run(&["init", root_text]);
+    assert!(!init.status.success());
+    assert!(String::from_utf8_lossy(&init.stderr).contains("PREPARATION_NOT_CONFIRMED"));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
     let root = temp_root("init-existing");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join(".gitignore"), "# project rules\nnode_modules/\n").unwrap();
     let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
 
     let first = run(&["init", root_text]);
     assert!(
@@ -114,6 +140,7 @@ fn init_can_place_new_project_in_configured_subdirectory() {
     fs::create_dir_all(&workspace).unwrap();
     fs::write(workspace.join("legacy.rs"), "legacy source\n").unwrap();
     let workspace_text = workspace.to_str().unwrap();
+    confirm_preparation(&workspace, "next-code", "project_refactor");
 
     let result = run(&["init", workspace_text, "--project-root", "next-code"]);
     assert!(

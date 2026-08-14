@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/prepare.schema.json",
+  "type": "object",
+  "required": ["schema_version", "preparation_id", "status", "objective", "change_kind", "project_root", "boundary", "confirmed_by", "confirmed_at"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "preparation_id": {"type": "string"},
+    "status": {"enum": ["draft", "clarification_pending", "confirmed"]},
+    "objective": {"type": "string", "minLength": 1},
+    "change_kind": {"enum": ["new_project", "module_refactor", "project_refactor", "debug"]},
+    "project_root": {"type": "string", "minLength": 1},
+    "legacy_roots": {"type": "array", "items": {"type": "string"}},
+    "new_roots": {"type": "array", "items": {"type": "string"}},
+    "protected_roots": {"type": "array", "items": {"type": "string"}},
+    "runtime_forbidden_roots": {"type": "array", "items": {"type": "string"}},
+    "boundary": {"type": "object", "required": ["allowed_paths", "forbidden_paths", "payload_control_separation"]},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "non_goals": {"type": "array", "items": {"type": "string"}},
+    "questions": {"type": "array"},
+    "confirmed_by": {"type": "string", "minLength": 1},
+    "confirmed_at": {"type": "string", "minLength": 1}
+  }
+}

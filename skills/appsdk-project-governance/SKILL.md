@@ -21,7 +21,13 @@ Never copy the AppSDK source, compiler, or harness into the business project. Ne
 
 ## Existing project bootstrap
 
-For an existing project, begin with the SDK CLI instead of manually creating governance directories:
+For an existing project, begin with a preparation record instead of manually creating governance directories:
+
+```bash
+appsdk prepare <workspace>
+```
+
+The AI must read `.appsdk-prepare.json`, ask the user about change kind, project root, legacy roots, new roots, Protected roots, allowed paths, forbidden paths, and payload/control separation, then update the record to `status: confirmed`. Do not initialize before confirmation.
 
 ```bash
 appsdk init <workspace> --project-root <relative-path>

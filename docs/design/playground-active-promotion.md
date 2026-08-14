@@ -42,6 +42,14 @@ Active is the immutable, current consumable library surface. It is not active so
 
 An Active library version enters through a promotion record after architecture review and compilation. Direct copy, direct patch, and dual ownership are not promotion mechanisms. The old Active library remains immutable as a historical version; it cannot become fallback or shadow writer.
 
+Changing a frozen module starts with an explicit version opening:
+
+```bash
+appsdk begin-version <project> --module <id> --from <current-version> --to <new-version>
+```
+
+The command verifies the current Active index, frozen record, previous artifact hash, and Protected history; moves the old Protected archive and record graph into versioned history; records `version_base`; and reopens only that module at `source_implemented`. It never edits or deletes the previous Active library.
+
 ### Protected source and contracts
 
 Protected contains source and contracts after a successful promotion. It is the historical source of the Active library. Git must record the source commit/tag, artifact hash, public API hash, review PASS, and previous Active version. Protected + Git support audit, detection, and recovery; they do not prevent a same-repository shell agent from reading the source.

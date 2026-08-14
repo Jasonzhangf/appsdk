@@ -130,7 +130,12 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
     assert!(second.status.success());
     let gitignore_after = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert_eq!(gitignore_after.matches("# BEGIN APPSDK MANAGED").count(), 1);
-    assert!(run(&["verify", root_text]).status.success());
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -898,6 +903,163 @@ fn frozen_module_keeps_other_modules_mutable() {
     ])
     .status
     .success());
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
+    let root = temp_root("begin-version");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    enable_regression_contract(&root);
+    init_git(&root);
+    fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#).unwrap();
+    pin_test_lock(root_text);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    assert!(run(&["compile", root_text]).status.success());
+    assert!(run(&["promote", root_text, "--to", "compiled"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "controlled_verified"])
+        .status
+        .success());
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage
+        ])
+        .status
+        .success());
+    }
+    let module_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let v1_hash = module_artifact["artifact_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    write_records(&root, "app-core", &v1_hash, false);
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable"
+    ])
+    .status
+    .success());
+    write_records(&root, "app-core", &v1_hash, true);
+    let regression_hash = write_regression_report(&root, "app-core", &v1_hash);
+    let freeze_file = root.join(".appsdk/records/freeze-record-app-core.json");
+    let mut freeze: Value =
+        serde_json::from_str(&fs::read_to_string(&freeze_file).unwrap()).unwrap();
+    freeze["regression_report_id"] = Value::String("regression-app-core-v1".into());
+    freeze["regression_report_hash"] = Value::String(regression_hash);
+    fs::write(
+        &freeze_file,
+        serde_json::to_string_pretty(&freeze).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "freeze-v1"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "frozen"
+    ])
+    .status
+    .success());
+    assert!(run(&[
+        "publish-active",
+        root_text,
+        "--module",
+        "app-core",
+        "--version",
+        "active-v1"
+    ])
+    .status
+    .success());
+    let active_v1 = root.join("active/lib/app-core/active-v1/artifact.json");
+    let active_v1_text = fs::read_to_string(&active_v1).unwrap();
+
+    let wrong_from = run(&[
+        "begin-version",
+        root_text,
+        "--module",
+        "app-core",
+        "--from",
+        "active-v0",
+        "--to",
+        "active-v2",
+    ]);
+    assert!(!wrong_from.status.success());
+    assert!(String::from_utf8_lossy(&wrong_from.stderr).contains("MODULE_VERSION_FROM_NOT_CURRENT"));
+
+    let opened = run(&[
+        "begin-version",
+        root_text,
+        "--module",
+        "app-core",
+        "--from",
+        "active-v1",
+        "--to",
+        "active-v2",
+    ]);
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    let project: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
+            .unwrap();
+    assert_eq!(project["modules"][0]["stage"], "source_implemented");
+    assert_eq!(
+        project["modules"][0]["version_base"],
+        serde_json::json!({
+            "previous_active_version": "active-v1",
+            "new_active_version": "active-v2",
+            "base_artifact_hash": v1_hash,
+            "base_source_commit": "commit-1"
+        })
+    );
+    assert_eq!(fs::read_to_string(&active_v1).unwrap(), active_v1_text);
+    assert!(root
+        .join("protected/history-versions/app-core/active-v1/freeze-artifact.json")
+        .is_file());
+    assert!(!root.join("protected/history/app-core").exists());
+    assert!(root
+        .join(".appsdk/records/history/app-core/active-v1/freeze-record-app-core.json")
+        .is_file());
     let verified = run(&["verify", root_text]);
     assert!(
         verified.status.success(),

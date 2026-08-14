@@ -165,6 +165,18 @@ fn module_record_name(kind: &str, module_id: &str) -> String {
     format!("{}-{}.json", kind, module_id)
 }
 
+fn assert_version(value: &str, error: &str) {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        || value == "."
+        || value == ".."
+    {
+        fail(error);
+    }
+}
+
 fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     let zone = contract_root(root, project, "/governance/zone_transition_contract");
     let canonical_project = project
@@ -722,7 +734,7 @@ fn assert_vcs_clean(root: &Path, project: &Value, module_id: &str) {
     if !prefix_probe.status.success() {
         fail("VCS_ADAPTER_UNAVAILABLE");
     }
-    let prefix = String::from_utf8_lossy(&prefix_probe.stdout)
+    let _prefix = String::from_utf8_lossy(&prefix_probe.stdout)
         .trim()
         .to_string();
     if !project_root.starts_with(&canonical_git_root) {
@@ -1342,6 +1354,13 @@ fn assert_artifact_matches(project: &Value, artifact: &Value) {
             "regression",
         ] {
             if key == "stage"
+                && module.get("version_base").is_some()
+                && module.get("stage").and_then(Value::as_str) == Some("source_implemented")
+                && compiled.get("stage").and_then(Value::as_str) == Some("frozen")
+            {
+                continue;
+            }
+            if key == "stage"
                 && module.get("stage").and_then(Value::as_str) == Some("frozen")
                 && compiled.get("stage").and_then(Value::as_str) == Some("architecture_stable")
             {
@@ -1616,6 +1635,26 @@ fn assert_project_contract(root: &Path, project: &Value) {
         {
             fail(format!("INVALID_PROJECT_MODULE:{}", id));
         }
+        if let Some(version_base) = module.get("version_base") {
+            for path in [
+                "/previous_active_version",
+                "/new_active_version",
+                "/base_artifact_hash",
+                "/base_source_commit",
+            ] {
+                record_str(version_base, path, "module-version-base");
+            }
+            if module.get("stage").and_then(Value::as_str) == Some("frozen")
+                || version_base
+                    .get("previous_active_version")
+                    .and_then(Value::as_str)
+                    == version_base
+                        .get("new_active_version")
+                        .and_then(Value::as_str)
+            {
+                fail(format!("INVALID_MODULE_VERSION_BASE:{}", id));
+            }
+        }
         let build = module
             .get("build")
             .and_then(Value::as_object)
@@ -1752,6 +1791,144 @@ fn write_project(root: &Path, project: &Value) {
         fail("GOVERNANCE_PATH_SYMLINK:project");
     }
     atomic_write_json(&target, project, "PROJECT_WRITE_FAILED");
+}
+
+fn begin_version(root: &Path, module_id: &str, from: &str, to: &str) {
+    assert_project_root_safe(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    assert_version(from, "INVALID_ACTIVE_VERSION");
+    assert_version(to, "INVALID_ACTIVE_VERSION");
+    if from == to {
+        fail("MODULE_VERSION_MUST_ADVANCE");
+    }
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    assert_project_contract(root, &project);
+    let modules = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"));
+    let index = modules
+        .iter()
+        .position(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    if modules[index].get("stage").and_then(Value::as_str) != Some("frozen") {
+        fail(format!("MODULE_VERSION_REQUIRES_FROZEN:{}", module_id));
+    }
+
+    let active_root = contract_root(root, &project, "/governance/active_root");
+    let module_active = active_root.join(module_id);
+    let current_file = module_active.join("current.json");
+    let from_path = module_active.join(from);
+    let to_path = module_active.join(to);
+    assert_no_symlink_components(root, &module_active, "active_module");
+    assert_no_symlink_components(root, &current_file, "active_index");
+    assert_no_symlink_components(root, &from_path, "previous_active");
+    assert_no_symlink_components(root, &to_path, "new_active");
+    let current: Value = serde_json::from_str(
+        &fs::read_to_string(&current_file).unwrap_or_else(|_| fail("ACTIVE_INDEX_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_ACTIVE_INDEX"));
+    if current.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || current.get("version").and_then(Value::as_str) != Some(from)
+    {
+        fail("MODULE_VERSION_FROM_NOT_CURRENT");
+    }
+    if !from_path.is_dir() {
+        fail("PREVIOUS_ACTIVE_MISSING");
+    }
+    if to_path.exists() {
+        fail(format!("ACTIVE_VERSION_EXISTS:{}", to));
+    }
+    let previous_artifact_file = from_path.join("artifact.json");
+    let previous_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(&previous_artifact_file)
+            .unwrap_or_else(|_| fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_PREVIOUS_ACTIVE_ARTIFACT"));
+    module_artifact_matches_project(&modules[index], &previous_artifact);
+    let previous_hash = record_str(
+        &previous_artifact,
+        "/artifact_hash",
+        "previous_active_artifact",
+    );
+    if current.get("artifact_hash").and_then(Value::as_str) != Some(previous_hash) {
+        fail("ACTIVE_INDEX_MISMATCH");
+    }
+    let freeze = read_record(root, &freeze_record_name(module_id));
+    if record_str(&freeze, "/active_version", "freeze-record.json") != from
+        || record_str(&freeze, "/library_hash", "freeze-record.json") != previous_hash
+    {
+        fail("MODULE_VERSION_FREEZE_MISMATCH");
+    }
+    let protected_archive = contract_root(root, &project, "/governance/protected_root")
+        .join("history")
+        .join(module_id);
+    assert_no_symlink_components(root, &protected_archive, "protected_archive");
+    if !protected_archive.is_dir() {
+        fail("PROTECTED_HISTORY_MISSING");
+    }
+
+    let history_root = root.join(".appsdk").join("records").join("history");
+    let history_version = history_root.join(module_id).join(from);
+    assert_no_symlink_components(root, &history_root, "record_history");
+    assert_no_symlink_components(root, &history_version, "record_history_version");
+    if history_version.exists() {
+        fail("MODULE_VERSION_HISTORY_EXISTS");
+    }
+    fs::create_dir_all(&history_version).unwrap_or_else(|_| fail("MODULE_VERSION_OPEN_FAILED"));
+    for name in [
+        module_record_name("evidence-record", module_id),
+        module_record_name("review-record", module_id),
+        module_record_name("promotion-record", module_id),
+        module_record_name("regression-report", module_id),
+        freeze_record_name(module_id),
+    ] {
+        fs::copy(
+            root.join(".appsdk").join("records").join(&name),
+            history_version.join(&name),
+        )
+        .unwrap_or_else(|_| fail("MODULE_VERSION_HISTORY_INCOMPLETE"));
+    }
+    let promotion = read_record(root, &module_record_name("promotion-record", module_id));
+    let cleanup_id = record_str(
+        &promotion,
+        "/playground_cleanup_record_id",
+        "promotion-record.json",
+    );
+    let cleanup_name = format!("playground-cleanup-{}.json", cleanup_id);
+    fs::copy(
+        root.join(".appsdk").join("records").join(&cleanup_name),
+        history_version.join(&cleanup_name),
+    )
+    .unwrap_or_else(|_| fail("MODULE_VERSION_HISTORY_INCOMPLETE"));
+    let versioned_protected = contract_root(root, &project, "/governance/protected_root")
+        .join("history-versions")
+        .join(module_id)
+        .join(from);
+    assert_no_symlink_components(root, &versioned_protected, "protected_version_history");
+    if versioned_protected.exists() {
+        fail("PROTECTED_VERSION_HISTORY_EXISTS");
+    }
+    fs::create_dir_all(versioned_protected.parent().unwrap())
+        .unwrap_or_else(|_| fail("MODULE_VERSION_OPEN_FAILED"));
+    fs::rename(&protected_archive, &versioned_protected)
+        .unwrap_or_else(|_| fail("MODULE_VERSION_OPEN_FAILED"));
+
+    let mut candidate = project.clone();
+    candidate["modules"][index]["stage"] = Value::String("source_implemented".into());
+    candidate["modules"][index]["version_base"] = serde_json::json!({
+        "previous_active_version": from,
+        "new_active_version": to,
+        "base_artifact_hash": previous_hash,
+        "base_source_commit": record_str(&freeze, "/source_commit_or_tag", "freeze-record.json")
+    });
+    write_project(root, &candidate);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&candidate["modules"][index]["version_base"]).unwrap()
+    );
 }
 
 fn freeze_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
@@ -2505,6 +2682,35 @@ fn assert_record_graph(
         if previous_immutable != previous_version.is_some() {
             fail("FREEZE_PREVIOUS_ACTIVE_CLAIM_MISMATCH");
         }
+        if let Some(version_base) = module.get("version_base") {
+            if freeze
+                .get("previous_active_version")
+                .and_then(Value::as_str)
+                != version_base
+                    .get("previous_active_version")
+                    .and_then(Value::as_str)
+                || promotion
+                    .get("previous_active_version")
+                    .and_then(Value::as_str)
+                    != version_base
+                        .get("previous_active_version")
+                        .and_then(Value::as_str)
+                || promotion.get("new_active_version").and_then(Value::as_str)
+                    != version_base
+                        .get("new_active_version")
+                        .and_then(Value::as_str)
+                || promotion.get("base_artifact_hash").and_then(Value::as_str)
+                    != version_base
+                        .get("base_artifact_hash")
+                        .and_then(Value::as_str)
+                || promotion.get("base_commit").and_then(Value::as_str)
+                    != version_base
+                        .get("base_source_commit")
+                        .and_then(Value::as_str)
+            {
+                fail("MODULE_VERSION_RECORD_MISMATCH");
+            }
+        }
         if let Some(previous) = freeze
             .get("previous_active_version")
             .and_then(Value::as_str)
@@ -2975,15 +3181,7 @@ fn freeze_module(root: &Path, module_id: &str) {
 fn publish_active(root: &Path, module_id: &str, version: &str) {
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
-    if version.is_empty()
-        || !version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-        || version == "."
-        || version == ".."
-    {
-        fail("INVALID_ACTIVE_VERSION");
-    }
+    assert_version(version, "INVALID_ACTIVE_VERSION");
     let project = read_project(root);
     assert_project_contract(root, &project);
     assert_declared_contracts(root, &project, true);
@@ -3009,6 +3207,37 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
             "ACTIVE_PUBLISH_REQUIRES_FROZEN_MODULE:{}",
             module_id
         ));
+    }
+    if let Some(version_base) = module.get("version_base") {
+        if version_base
+            .get("new_active_version")
+            .and_then(Value::as_str)
+            != Some(version)
+        {
+            fail("ACTIVE_VERSION_BASE_MISMATCH");
+        }
+        let previous = record_str(
+            version_base,
+            "/previous_active_version",
+            "module-version-base",
+        );
+        let previous_artifact = contract_root(root, &project, "/governance/active_root")
+            .join(module_id)
+            .join(previous)
+            .join("artifact.json");
+        let previous_value: Value = serde_json::from_str(
+            &fs::read_to_string(previous_artifact)
+                .unwrap_or_else(|_| fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_PREVIOUS_ACTIVE_ARTIFACT"));
+        if record_str(
+            &previous_value,
+            "/artifact_hash",
+            "previous_active_artifact",
+        ) != record_str(version_base, "/base_artifact_hash", "module-version-base")
+        {
+            fail("PREVIOUS_ACTIVE_HASH_MISMATCH");
+        }
     }
     let artifact = read_module_artifact(root, &project, module_id);
     module_artifact_matches_project(module, &artifact);
@@ -3147,6 +3376,17 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
         fail(error);
     }
     fs::remove_file(lock).unwrap_or_else(|_| fail("ACTIVE_PUBLISH_FAILED"));
+    if module.get("version_base").is_some() {
+        let mut candidate = project.clone();
+        candidate["modules"][modules
+            .iter()
+            .position(|entry| entry.get("module_id").and_then(Value::as_str) == Some(module_id))
+            .unwrap_or_else(|| fail("MODULE_NOT_FOUND"))]
+        .as_object_mut()
+        .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"))
+        .remove("version_base");
+        write_project(root, &candidate);
+    }
     println!("active {} {}", module_id, version);
 }
 
@@ -3287,6 +3527,26 @@ fn verify(root: &Path) {
                 .unwrap_or(true)
         {
             fail("INVALID_MODULE_SURFACES");
+        }
+        if let Some(version_base) = module.get("version_base") {
+            for path in [
+                "/previous_active_version",
+                "/new_active_version",
+                "/base_artifact_hash",
+                "/base_source_commit",
+            ] {
+                record_str(version_base, path, "module-version-base");
+            }
+            if stage == "frozen"
+                || version_base
+                    .get("previous_active_version")
+                    .and_then(Value::as_str)
+                    == version_base
+                        .get("new_active_version")
+                        .and_then(Value::as_str)
+            {
+                fail(format!("INVALID_MODULE_VERSION_BASE:{}", module_id));
+            }
         }
         let build = module
             .get("build")
@@ -3960,6 +4220,17 @@ fn main() {
             if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk compile-module <dir> --module <id>"); }
             compile_module(&root, &args.next().unwrap_or_else(|| fail("USAGE: appsdk compile-module <dir> --module <id>")));
         }
+        Some("begin-version") => {
+            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>")));
+            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
+            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"));
+            if args.next().as_deref() != Some("--from") { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
+            let from = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"));
+            if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
+            let to = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"));
+            if args.next().is_some() { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
+            begin_version(&root, &module_id, &from, &to);
+        }
         Some("promote") => {
             let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk promote <dir> --to <stage>")));
             if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk promote <dir> --to <stage>"); }
@@ -4032,7 +4303,7 @@ fn main() {
             }
             prepare_project(Path::new(&workspace));
         }
-        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

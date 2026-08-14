@@ -51,6 +51,8 @@ appsdk init <workspace> --project-root <relative-path>
 12. After freeze, ordinary full-regression execution for that unchanged module may be disabled to reduce CI load. Keep the suite and report. Any source, contract, public API, artifact, or dependency input change invalidates the report and requires regression re-enablement before a new freeze.
 13. Close every experiment with a PlaygroundCleanupRecord; archive evidence to Protected history, then remove the experiment directory under the declared retention policy.
 
+For a frozen module change, run `appsdk begin-version <project> --module <id> --from <current> --to <new>` before formal source edits. The command must bind and preserve the current Active artifact, Protected archive, and record graph; direct edits to the old Active or Protected version are forbidden.
+
 ## Debug flow
 
 Clarify goal first. Then use evidence-first debugging: baseline, first divergence, positive intervention, negative intervention, and unique owner. Experiments stay in Playground. Formal fixes go through the same review, promotion, compile, and freeze gates, with a merge comment recording root cause, approved design ID, owner, and reason.

@@ -24,6 +24,7 @@ version
 new
 verify
 compile
+begin-version
 promote
 promote-module
 freeze
@@ -41,6 +42,8 @@ appsdk verify ./my-app
 `compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；`pin-lock` 会把外部 binary 复制到项目 `.appsdk/sdk.bin`，不写入机器绝对路径。后续 `compile`、promotion、freeze 都校验该副本 digest。
 
 `compile`、promotion、module promotion、freeze、record graph 和 Active publish 均由 Rust 执行。
+
+`begin-version` 是 frozen module 的唯一重新开发入口。它验证并保留旧 Active/Protected/record graph，建立 previous/new version 绑定，再仅重开目标 module。
 
 ## Build
 

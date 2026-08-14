@@ -86,4 +86,6 @@ Active v1
 
 Every new version records `previous_active_version`, `base_source_commit`, `base_library_hash`, `change_set_id`, `migration_id`, and `compatibility_level`.
 
+`appsdk begin-version` creates the machine binding before source changes: `previous_active_version`, `new_active_version`, `base_artifact_hash`, and `base_source_commit`. Promotion and Freeze records for the new version must match that binding; publishing clears the mutable binding only after the new Active version is committed.
+
 Every formal debug merge also records `root_cause`, `design_id`, and `change_reason_comment`; promotion is rejected without them. Every closed experiment records its cleanup disposition so Playground cannot grow without bound.

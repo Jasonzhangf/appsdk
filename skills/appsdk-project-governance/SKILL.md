@@ -24,10 +24,10 @@ Never copy the AppSDK source, compiler, or harness into the business project. Ne
 For an existing project, begin with the SDK CLI instead of manually creating governance directories:
 
 ```bash
-appsdk init <project>
+appsdk init <workspace> --project-root <relative-path>
 ```
 
-`init` is idempotent. It creates the four governance zones and `.appsdk-control/`, fills only missing governance files, and appends one managed `.gitignore` block for local control state, compiled Active libraries, and generated outputs. It preserves existing project files and existing ignore rules. Use `appsdk new` only for an empty destination.
+`init` is idempotent. The workspace may contain legacy code; the configured relative path becomes the new AppSDK project root. It creates the four governance zones and `.appsdk-control/` under that root, fills only missing governance files, and appends one managed `.gitignore` block for local control state, compiled Active libraries, and generated outputs. It preserves existing project files and existing ignore rules. Absolute paths and `..` traversal are rejected. Use `appsdk new` only for an empty destination.
 
 ## New project flow
 

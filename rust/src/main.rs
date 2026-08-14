@@ -2745,6 +2745,49 @@ fn write_project_scaffold(root: &Path) {
     );
 }
 
+fn assert_init_workspace_safe(workspace: &Path) {
+    if fs::symlink_metadata(workspace)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail(format!("TARGET_SYMLINK:{}", workspace.display()));
+    }
+    if workspace.exists() && !workspace.is_dir() {
+        fail(format!("TARGET_NOT_DIRECTORY:{}", workspace.display()));
+    }
+    for ancestor in workspace.ancestors() {
+        if ancestor == Path::new("/tmp") || ancestor == Path::new("/var") {
+            continue;
+        }
+        if fs::symlink_metadata(ancestor)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            fail(format!("TARGET_PARENT_SYMLINK:{}", ancestor.display()));
+        }
+    }
+}
+
+fn resolve_init_target(workspace: &Path, project_root: Option<&str>) -> PathBuf {
+    assert_init_workspace_safe(workspace);
+    let Some(project_root) = project_root else {
+        return workspace.to_path_buf();
+    };
+    let relative = Path::new(project_root);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        fail("INVALID_PROJECT_ROOT");
+    }
+    workspace.join(relative)
+}
+
 fn init_project(root: &Path) {
     if root.exists()
         && fs::symlink_metadata(root)
@@ -2892,13 +2935,24 @@ fn main() {
             new_project(Path::new(&root));
         }
         Some("init") => {
-            let root = args.next().unwrap_or_else(|| fail("USAGE: appsdk init <dir>"));
+            let workspace =
+                args.next()
+                    .unwrap_or_else(|| fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]"));
+            let project_root = match args.next().as_deref() {
+                None => None,
+                Some("--project-root") => Some(
+                    args.next()
+                        .unwrap_or_else(|| fail("USAGE: appsdk init <workspace> --project-root <relative-path>")),
+                ),
+                Some(_) => fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]"),
+            };
             if args.next().is_some() {
-                fail("USAGE: appsdk init <dir>");
+                fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]");
             }
-            init_project(Path::new(&root));
+            let root = resolve_init_target(Path::new(&workspace), project_root.as_deref());
+            init_project(&root);
         }
-        _ => fail("USAGE: appsdk version | init <dir> | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail("USAGE: appsdk version | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

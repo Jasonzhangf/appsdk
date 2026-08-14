@@ -108,6 +108,37 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn init_can_place_new_project_in_configured_subdirectory() {
+    let workspace = temp_root("init-subdirectory");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("legacy.rs"), "legacy source\n").unwrap();
+    let workspace_text = workspace.to_str().unwrap();
+
+    let result = run(&["init", workspace_text, "--project-root", "next-code"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let project = workspace.join("next-code");
+    assert!(workspace.join("legacy.rs").exists());
+    assert!(project.join(".appsdk/project.json").exists());
+    assert!(project.join("playground/experiments").exists());
+    assert!(project.join("active/lib").exists());
+    assert!(project.join("protected/source").exists());
+    assert!(project.join("generated").exists());
+    assert!(fs::read_to_string(project.join(".gitignore"))
+        .unwrap()
+        .contains("/generated/"));
+    assert!(run(&["verify", project.to_str().unwrap()]).status.success());
+
+    let invalid = run(&["init", workspace_text, "--project-root", "../escape"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("INVALID_PROJECT_ROOT"));
+    fs::remove_dir_all(workspace).unwrap();
+}
+
 fn pin_test_lock(root: &str) {
     let sdk_binary = binary();
     assert!(

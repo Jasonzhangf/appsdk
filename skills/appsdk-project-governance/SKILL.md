@@ -46,8 +46,10 @@ appsdk init <workspace> --project-root <relative-path>
 7. After user confirmation, bind scope, owner, allowed/forbidden paths, and required gates.
 8. Work only in the module's Playground scope. Produce EvidenceRecords, then ReviewRecord with AI confidence and reviewed artifact/scope hashes.
 9. Promote only when the record graph is valid and evidence targets the exact module and candidate artifact.
-10. Compile the candidate library, publish the immutable Active artifact, archive source/contracts to Protected, create FreezeRecord, and verify.
-11. Close every experiment with a PlaygroundCleanupRecord; archive evidence to Protected history, then remove the experiment directory under the declared retention policy.
+10. Before freeze, run the module's declared regression suite and create a RegressionReport bound to the exact source commit, artifact hash, public API hash, scope hash, and input hash. Regression and bug-reproduction evidence must combine whitebox and blackbox coverage; unit and focused tests may be whitebox only.
+11. Compile the candidate library, publish the immutable Active artifact, archive source/contracts to Protected, create FreezeRecord with the RegressionReport ID/hash, and verify.
+12. After freeze, ordinary full-regression execution for that unchanged module may be disabled to reduce CI load. Keep the suite and report. Any source, contract, public API, artifact, or dependency input change invalidates the report and requires regression re-enablement before a new freeze.
+13. Close every experiment with a PlaygroundCleanupRecord; archive evidence to Protected history, then remove the experiment directory under the declared retention policy.
 
 ## Debug flow
 
@@ -59,6 +61,7 @@ Clarify goal first. Then use evidence-first debugging: baseline, first divergenc
 - project tests and required gates
 - candidate artifact hash and public API hash
 - record graph references, freshness, scope, module, and version relations
+- RegressionReport whitebox + blackbox coverage, non-zero passing tests, exact input binding, and FreezeRecord report hash
 - Protected and Active immutability
 - final architecture review with explicit PASS
 

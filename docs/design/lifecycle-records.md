@@ -8,6 +8,7 @@ String requirements are only declarations. A closed lifecycle requires records w
 - `EvidenceRecord`: one red/positive/negative test, replay, build, artifact, runtime, or gate result;
 - `ReviewRecord`: reviewer identity, reviewed commit, verdict, evidence IDs, and AI confidence rationale;
 - `PromotionRecord`: issue/experiment, base/source commits, old/new Active versions, hashes, review, gates, compatibility, and migration;
+- `RegressionReport`: freeze candidate's whitebox and blackbox regression result bound to source, scope, artifact, API, and declared regression inputs;
 - `FreezeRecord`: source tag, Active version, library/API hashes, Git clean, old Active immutability, and adapter owners.
 - `PlaygroundCleanupRecord`: experiment disposition, archived evidence path, removed Playground paths, cleanup actor, and timestamp.
 
@@ -20,6 +21,7 @@ GoalClarificationRecord (confirmed/admitted)
   -> EvidenceRecord
   -> ReviewRecord
   -> PromotionRecord
+  -> RegressionReport
   -> FreezeRecord
 ```
 
@@ -35,6 +37,7 @@ Required checks:
 - `FreezeRecord.promotion_id` resolves to the promoted record;
 - `FreezeRecord.promotion_record_hash` matches the referenced PromotionRecord;
 - `FreezeRecord.artifact_record_id` resolves to the published artifact evidence;
+- `FreezeRecord.regression_report_id/hash` resolves to the exact passing RegressionReport;
 - review verdict is `pass` for the referenced commit, scope, and artifact.
 
 These checks belong to a record-reference gate. Individual schema validity is insufficient.
@@ -52,6 +55,12 @@ Evidence is invalid when:
 - reviewed commit changes after review.
 
 AI confidence is evidence metadata and review input. It is not a promotion result. `review_verdict=pass` is the promotion admission result.
+
+## Regression freeze gate
+
+Unit and focused tests may be whitebox-only. Regression suites and bug reproduction must include both whitebox and blackbox evidence. Freeze requires a non-zero passing report with no disallowed skips, exact command/suite identity, and matching source, scope, artifact, public API, and input hashes.
+
+After freeze, ordinary execution of the unchanged module's full regression suite may be disabled. The suite declaration and report remain immutable verification inputs. Source, contract, public API, artifact, or dependency changes invalidate the report and require regression re-enablement before a new version can freeze.
 
 ## Separated lifecycles
 

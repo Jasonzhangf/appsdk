@@ -80,6 +80,10 @@ fn bootstrap_contracts(root: &Path) {
             include_str!("../../contracts/records/promotion-record.schema.json"),
         ),
         (
+            "contracts/records/regression-report.schema.json",
+            include_str!("../../contracts/records/regression-report.schema.json"),
+        ),
+        (
             "contracts/records/freeze-record.schema.json",
             include_str!("../../contracts/records/freeze-record.schema.json"),
         ),
@@ -185,6 +189,7 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         "contracts/records/goal-clarification-record.schema.json",
         "contracts/records/review-record.schema.json",
         "contracts/records/promotion-record.schema.json",
+        "contracts/records/regression-report.schema.json",
         "contracts/records/freeze-record.schema.json",
         "contracts/records/record-graph.contract.json",
     ];
@@ -268,6 +273,9 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
             }
             "contracts/records/promotion-record.schema.json" => {
                 include_str!("../../contracts/records/promotion-record.schema.json")
+            }
+            "contracts/records/regression-report.schema.json" => {
+                include_str!("../../contracts/records/regression-report.schema.json")
             }
             "contracts/records/freeze-record.schema.json" => {
                 include_str!("../../contracts/records/freeze-record.schema.json")
@@ -568,6 +576,7 @@ fn build_artifact(project: &Value) -> Value {
                 "source_owner",
                 "active_artifact",
                 "generated_outputs",
+                "regression",
             ] {
                 output.insert(
                     key.into(),
@@ -856,6 +865,7 @@ fn assert_artifact_matches(project: &Value, artifact: &Value) {
             "active_artifact",
             "owned_paths",
             "generated_outputs",
+            "regression",
         ] {
             if key == "stage"
                 && module.get("stage").and_then(Value::as_str) == Some("frozen")
@@ -1258,6 +1268,11 @@ fn recover_freeze_transaction(root: &Path, project: &Value, module_id: &str) -> 
                     .join(module_record_name("promotion-record", module_id)),
             ),
             (
+                "regression-report.json",
+                root.join(".appsdk/records")
+                    .join(module_record_name("regression-report", module_id)),
+            ),
+            (
                 "freeze-record.json",
                 root.join(".appsdk/records")
                     .join(freeze_record_name(module_id)),
@@ -1560,6 +1575,97 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
     }
 }
 
+fn assert_regression_report(
+    root: &Path,
+    module_id: &str,
+    module: &Value,
+    promotion: &Value,
+    artifact: &Value,
+) -> (Value, String) {
+    let name = module_record_name("regression-report", module_id);
+    let report = read_record(root, &name);
+    for path in [
+        "/regression_report_id",
+        "/module_id",
+        "/source_commit",
+        "/artifact_hash",
+        "/public_api_hash",
+        "/scope_hash",
+        "/input_hash",
+        "/suite_id",
+        "/command/program",
+        "/command/working_directory",
+        "/producer/adapter",
+        "/producer/identity",
+        "/created_at",
+    ] {
+        record_str(&report, path, &name);
+    }
+    let tc = report
+        .get("test_characteristics")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_REPORT:{}", name)));
+    if tc.get("whitebox") != Some(&Value::Bool(true))
+        || tc.get("blackbox") != Some(&Value::Bool(true))
+    {
+        fail(format!("INVALID_REGRESSION_REPORT:{}", name));
+    }
+    let policy = module
+        .get("regression")
+        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+    if record_str(&report, "/module_id", &name) != module_id
+        || record_str(&report, "/source_commit", &name)
+            != record_str(promotion, "/source_commit", "promotion-record.json")
+        || record_str(&report, "/artifact_hash", &name)
+            != record_str(artifact, "/artifact_hash", "artifact")
+        || record_str(&report, "/public_api_hash", &name)
+            != record_str(promotion, "/public_api_hash", "promotion-record.json")
+        || record_str(&report, "/scope_hash", &name)
+            != record_str(promotion, "/scope_hash", "promotion-record.json")
+        || record_str(&report, "/input_hash", &name)
+            != record_str(artifact, "/artifact_hash", "artifact")
+        || record_str(&report, "/suite_id", &name)
+            != record_str(policy, "/suite_id", "regression-policy")
+        || report.get("command") != policy.get("command")
+    {
+        fail("REGRESSION_REPORT_INPUT_MISMATCH");
+    }
+    let test_count = report
+        .get("test_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("INVALID_REGRESSION_REPORT"));
+    let passed = report
+        .get("passed")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("INVALID_REGRESSION_REPORT"));
+    let failed = report
+        .get("failed")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("INVALID_REGRESSION_REPORT"));
+    let skipped = report
+        .get("skipped")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("INVALID_REGRESSION_REPORT"));
+    let minimum = policy
+        .get("minimum_test_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("INVALID_REGRESSION_CONTRACT"));
+    if report.get("result").and_then(Value::as_str) != Some("pass")
+        || test_count < minimum
+        || passed != test_count
+        || failed != 0
+        || (!policy
+            .get("allow_skipped")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && skipped != 0)
+    {
+        fail("REGRESSION_REPORT_NOT_PASSED");
+    }
+    let report_hash = sha256(&canonical(&report));
+    (report, report_hash)
+}
+
 fn assert_record_graph(
     root: &Path,
     module_id: Option<&str>,
@@ -1678,9 +1784,21 @@ fn assert_record_graph(
     }
     if require_freeze {
         let module_id = module_id.unwrap_or_else(|| fail("FREEZE_RECORD_MODULE_REQUIRED"));
+        let project = read_project(root);
+        let module = project
+            .get("modules")
+            .and_then(Value::as_array)
+            .and_then(|modules| {
+                modules.iter().find(|module| {
+                    module.get("module_id").and_then(Value::as_str) == Some(module_id)
+                })
+            })
+            .unwrap_or_else(|| fail("MODULE_NOT_FOUND"));
+        let (regression, regression_hash) =
+            assert_regression_report(root, module_id, module, &promotion, artifact);
         let freeze_name = freeze_record_name(module_id);
         let freeze = read_record(root, &freeze_name);
-        let active_root = contract_root(root, &read_project(root), "/governance/active_root");
+        let active_root = contract_root(root, &project, "/governance/active_root");
         let active_version = record_str(&freeze, "/active_version", &freeze_name);
         let active_artifact = active_root
             .join(module_id)
@@ -1709,6 +1827,8 @@ fn assert_record_graph(
             "/promotion_id",
             "/promotion_record_hash",
             "/artifact_record_id",
+            "/regression_report_id",
+            "/regression_report_hash",
             "/source_commit_or_tag",
             "/active_version",
             "/library_hash",
@@ -1784,6 +1904,16 @@ fn assert_record_graph(
         }
         if record_str(&freeze, "/artifact_record_id", &freeze_name) != evidence_id {
             fail("FREEZE_RECORD_ARTIFACT_RECORD_MISMATCH");
+        }
+        if record_str(&freeze, "/regression_report_id", &freeze_name)
+            != record_str(
+                &regression,
+                "/regression_report_id",
+                "regression-report.json",
+            )
+            || record_str(&freeze, "/regression_report_hash", &freeze_name) != regression_hash
+        {
+            fail("FREEZE_RECORD_REGRESSION_REPORT_MISMATCH");
         }
         if record_str(&freeze, "/promotion_record_hash", &freeze_name)
             != sha256(&canonical(&promotion))
@@ -2054,6 +2184,13 @@ fn freeze_module(root: &Path, module_id: &str) {
     let promotion_name = module_record_name("promotion-record", module_id);
     let review = read_record(root, &review_name);
     let promotion = read_record(root, &promotion_name);
+    let (regression, regression_hash) = assert_regression_report(
+        root,
+        module_id,
+        &candidate["modules"][index],
+        &promotion,
+        &promoted_artifact,
+    );
     let freeze_name = freeze_record_name(module_id);
     let mut freeze = read_record(root, &freeze_name);
     let artifact = promoted_artifact.clone();
@@ -2070,6 +2207,15 @@ fn freeze_module(root: &Path, module_id: &str) {
         fail("FREEZE_RECORD_PUBLIC_API_HASH_MISMATCH");
     }
     freeze["promotion_record_hash"] = Value::String(sha256(&canonical(&promotion)));
+    freeze["regression_report_id"] = Value::String(
+        record_str(
+            &regression,
+            "/regression_report_id",
+            "regression-report.json",
+        )
+        .into(),
+    );
+    freeze["regression_report_hash"] = Value::String(regression_hash);
     for path in candidate["modules"][index]
         .get("owned_paths")
         .and_then(Value::as_array)
@@ -2150,6 +2296,11 @@ fn freeze_module(root: &Path, module_id: &str) {
                 .join(module_record_name("promotion-record", module_id)),
         ),
         (
+            "regression-report.json",
+            root.join(".appsdk/records")
+                .join(module_record_name("regression-report", module_id)),
+        ),
+        (
             "freeze-record.json",
             root.join(".appsdk/records").join(&freeze_name),
         ),
@@ -2164,6 +2315,11 @@ fn freeze_module(root: &Path, module_id: &str) {
     write_artifact_value(root, &candidate, &artifact);
     write_record(root, &review_name, &review);
     write_record(root, &promotion_name, &promotion);
+    write_record(
+        root,
+        &module_record_name("regression-report", module_id),
+        &regression,
+    );
     write_record(root, &freeze_record_name(module_id), &freeze);
     assert_record_graph(root, Some(module_id), &artifact, true);
     write_project(root, &candidate);
@@ -2460,6 +2616,84 @@ fn verify(root: &Path) {
         {
             fail("INVALID_MODULE_SURFACES");
         }
+        let regression = module
+            .get("regression")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        let required_before_freeze = regression
+            .get("required_before_freeze")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        if (!required_before_freeze
+            && matches!(stage, "architecture_stable" | "frozen" | "retired"))
+            || regression
+                .get("suite_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            || regression
+                .get("input_paths")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values.is_empty()
+                        || values
+                            .iter()
+                            .any(|value| value.as_str().filter(|path| !path.is_empty()).is_none())
+                })
+                .unwrap_or(true)
+            || regression
+                .get("minimum_test_count")
+                .and_then(Value::as_u64)
+                .filter(|count| *count > 0)
+                .is_none()
+            || regression
+                .get("allow_skipped")
+                .and_then(Value::as_bool)
+                .is_none()
+            || regression
+                .get("ordinary_mode_after_freeze")
+                .and_then(Value::as_str)
+                != Some("disabled")
+            || regression
+                .get("reenable_on")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    [
+                        "source_change",
+                        "contract_change",
+                        "public_api_change",
+                        "artifact_change",
+                        "dependency_change",
+                    ]
+                    .iter()
+                    .any(|required| !values.iter().any(|value| value.as_str() == Some(*required)))
+                })
+                .unwrap_or(true)
+        {
+            fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
+        }
+        let command = regression
+            .get("command")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        if command
+            .get("program")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+            || command
+                .get("working_directory")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            || command
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().any(|value| value.as_str().is_none()))
+                .unwrap_or(true)
+        {
+            fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
+        }
     }
     let project_id = project
         .get("project_id")
@@ -2721,13 +2955,13 @@ fn write_project_scaffold(root: &Path) {
     "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
     "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
     "runtime_forbidden_roots": ["playground/**", "generated/**"],
-    "record_contracts": ["contracts/records/evidence-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "record_contracts": ["contracts/records/evidence-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
     "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true
   },
   "lifecycles": {"issue": "open", "library": "draft", "source_snapshot": "mutable", "artifact": "generated"},
-  "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**","protected/source/**","tests/core/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"]}]
+  "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**","protected/source/**","tests/core/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**","tests/core/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
 "#,
     );

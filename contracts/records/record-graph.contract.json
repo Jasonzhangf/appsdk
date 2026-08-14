@@ -5,6 +5,7 @@
   "required": ["rules", "freshness_rules"],
   "properties": {
     "rules": {"type": "array", "items": {"type": "string"}},
-    "freshness_rules": {"type": "array", "items": {"type": "string"}}
+    "freshness_rules": {"type": "array", "items": {"type": "string"}},
+    "regression_rules": {"type": "array", "items": {"type": "string"}}
   }
 }

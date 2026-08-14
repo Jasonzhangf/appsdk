@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://appsdk.local/contracts/records/freeze-record.schema.json",
   "type": "object",
-  "required": ["freeze_id", "issue_id", "module_id", "promotion_id", "promotion_record_hash", "artifact_record_id", "source_commit_or_tag", "active_version", "library_hash", "public_api_hash", "review_id", "previous_active_immutable", "git_clean", "clean_scope", "owners", "created_at"],
+  "required": ["freeze_id", "issue_id", "module_id", "promotion_id", "promotion_record_hash", "artifact_record_id", "regression_report_id", "regression_report_hash", "source_commit_or_tag", "active_version", "library_hash", "public_api_hash", "review_id", "previous_active_immutable", "git_clean", "clean_scope", "owners", "created_at"],
   "properties": {
     "freeze_id": {"type": "string"},
     "issue_id": {"type": "string"},
@@ -10,6 +10,8 @@
     "promotion_id": {"type": "string"},
     "promotion_record_hash": {"type": "string"},
     "artifact_record_id": {"type": "string"},
+    "regression_report_id": {"type": "string"},
+    "regression_report_hash": {"type": "string"},
     "source_commit_or_tag": {"type": "string"},
     "active_version": {"type": "string"},
     "previous_active_version": {"type": ["string", "null"]},

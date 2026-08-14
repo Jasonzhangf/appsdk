@@ -47,6 +47,7 @@
       "contracts/records/goal-clarification-record.schema.json",
       "contracts/records/review-record.schema.json",
       "contracts/records/promotion-record.schema.json",
+      "contracts/records/regression-report.schema.json",
       "contracts/records/freeze-record.schema.json",
       "contracts/records/record-graph.contract.json"
     ],
@@ -68,7 +69,21 @@
       "owned_paths": ["playground/experiments/**", "protected/source/**", "tests/core/**"],
       "source_owner": "app-core",
       "active_artifact": "active/lib/app-core/**",
-      "generated_outputs": ["generated/**"]
+      "generated_outputs": ["generated/**"],
+      "regression": {
+        "required_before_freeze": true,
+        "suite_id": "app-core-regression",
+        "command": {
+          "program": "cargo",
+          "args": ["test"],
+          "working_directory": "."
+        },
+        "input_paths": ["playground/experiments/**", "tests/core/**"],
+        "minimum_test_count": 1,
+        "allow_skipped": false,
+        "ordinary_mode_after_freeze": "disabled",
+        "reenable_on": ["source_change", "contract_change", "public_api_change", "artifact_change", "dependency_change"]
+      }
     }
   ]
 }

@@ -253,6 +253,76 @@ fn write_records(root: &PathBuf, artifact_hash: &str, include_freeze: bool) {
     }
 }
 
+fn write_regression_report(root: &PathBuf, artifact_hash: &str) -> String {
+    let report = serde_json::json!({
+        "regression_report_id": "regression-app-core-v1",
+        "module_id": "app-core",
+        "source_commit": "commit-1",
+        "artifact_hash": artifact_hash,
+        "public_api_hash": "api-1",
+        "scope_hash": "scope-1",
+        "input_hash": artifact_hash,
+        "suite_id": "app-core-regression",
+        "command": {
+            "program": "cargo",
+            "args": ["test", "--test", "app-core"],
+            "working_directory": "."
+        },
+        "test_count": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "result": "pass",
+        "producer": {
+            "adapter": "cargo",
+            "identity": "appsdk-regression-gate"
+        },
+        "created_at": "2026-01-01T00:00:00Z",
+        "test_characteristics": {
+            "whitebox": true,
+            "blackbox": true
+        }
+    });
+    let hash = digest(&canonical(&report));
+    fs::write(
+        root.join(".appsdk/records/regression-report-app-core.json"),
+        serde_json::to_string_pretty(&report).unwrap() + "\n",
+    )
+    .unwrap();
+    hash
+}
+
+fn enable_regression_contract(root: &PathBuf) {
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["modules"][0]["regression"] = serde_json::json!({
+        "required_before_freeze": true,
+        "suite_id": "app-core-regression",
+        "command": {
+            "program": "cargo",
+            "args": ["test", "--test", "app-core"],
+            "working_directory": "."
+        },
+        "input_paths": ["playground/experiments/**"],
+        "minimum_test_count": 1,
+        "allow_skipped": false,
+        "ordinary_mode_after_freeze": "disabled",
+        "reenable_on": [
+            "source_change",
+            "contract_change",
+            "public_api_change",
+            "artifact_change",
+            "dependency_change"
+        ]
+    });
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn new_project_rejects_unconfirmed_compile_and_promote() {
     let root = temp_root("negative");
@@ -300,9 +370,9 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
   "sdk": {"name": "appsdk", "version": "0.1.0"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths":[".appsdk/**"]},
-  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/evidence-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
+  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/evidence-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
   "lifecycles": {"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},
-  "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"]}]
+    "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
 "#).unwrap();
     pin_test_lock(root_text);
@@ -394,17 +464,27 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     let root = temp_root("full-lifecycle");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
+    enable_regression_contract(&root);
     init_git(&root);
     fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#).unwrap();
     fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.0","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
 "#, "a".repeat(64), "b".repeat(64))).unwrap();
-    fs::write(root.join(".appsdk/project.json"), r#"{"schema_version":1,"project_id":"change-me","sdk":{"name":"appsdk","version":"0.1.0"},"lifecycle":{"stage":"draft"},"access":{"protected_paths":[".appsdk/**"]},"governance":{"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/evidence-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},"lifecycles":{"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},"modules":[{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"]}]}
-"#).unwrap();
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["lifecycle"]["stage"] = Value::String("draft".into());
+    project["modules"][0]["stage"] = Value::String("source_implemented".into());
+    project["modules"][0]["owned_paths"] = serde_json::json!(["playground/experiments/**"]);
+    project["modules"][0]["generated_outputs"] = serde_json::json!(["generated/**"]);
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
     pin_test_lock(root_text);
-    assert!(run(&["promote", root_text, "--to", "source_implemented"])
-        .status
-        .success());
+    let source_promote = run(&["promote", root_text, "--to", "source_implemented"]);
+    assert!(source_promote.status.success());
     assert!(run(&["promote", root_text, "--to", "contract_bound"])
         .status
         .success());
@@ -472,6 +552,38 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         .status()
         .unwrap()
         .success());
+    let missing_regression = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "frozen",
+    ]);
+    assert!(!missing_regression.status.success());
+    assert!(String::from_utf8_lossy(&missing_regression.stderr)
+        .contains("MISSING_RECORD:regression-report-app-core.json"));
+    let regression_report_hash = write_regression_report(&root, &architecture_hash);
+    let freeze_record = root.join(".appsdk/records/freeze-record-app-core.json");
+    let mut freeze_record_value: Value =
+        serde_json::from_str(&fs::read_to_string(&freeze_record).unwrap()).unwrap();
+    freeze_record_value["regression_report_id"] = Value::String("regression-app-core-v1".into());
+    freeze_record_value["regression_report_hash"] = Value::String(regression_report_hash);
+    fs::write(
+        &freeze_record,
+        serde_json::to_string_pretty(&freeze_record_value).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "regression-report"])
+        .status()
+        .unwrap()
+        .success());
     let freeze = run(&[
         "promote-module",
         root_text,
@@ -494,16 +606,15 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(root
         .join("protected/history/app-core/source-snapshot.json")
         .exists());
-    assert!(run(&[
+    let pub_result = run(&[
         "publish-active",
         root_text,
         "--module",
         "app-core",
         "--version",
-        "active-v1"
-    ])
-    .status
-    .success());
+        "active-v1",
+    ]);
+    assert!(pub_result.status.success());
     let verified = run(&["verify", root_text]);
     assert!(
         verified.status.success(),
@@ -511,7 +622,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         String::from_utf8_lossy(&verified.stderr)
     );
     assert!(root
-        .join("active/app-core/active-v1/artifact.json")
+        .join("active/lib/app-core/active-v1/artifact.json")
         .exists());
     let duplicate = run(&[
         "publish-active",

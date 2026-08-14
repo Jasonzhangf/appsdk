@@ -1644,13 +1644,12 @@ fn assert_project_contract(root: &Path, project: &Value) {
             ] {
                 record_str(version_base, path, "module-version-base");
             }
-            if module.get("stage").and_then(Value::as_str) == Some("frozen")
-                || version_base
-                    .get("previous_active_version")
+            if version_base
+                .get("previous_active_version")
+                .and_then(Value::as_str)
+                == version_base
+                    .get("new_active_version")
                     .and_then(Value::as_str)
-                    == version_base
-                        .get("new_active_version")
-                        .and_then(Value::as_str)
             {
                 fail(format!("INVALID_MODULE_VERSION_BASE:{}", id));
             }
@@ -3537,13 +3536,12 @@ fn verify(root: &Path) {
             ] {
                 record_str(version_base, path, "module-version-base");
             }
-            if stage == "frozen"
-                || version_base
-                    .get("previous_active_version")
+            if version_base
+                .get("previous_active_version")
+                .and_then(Value::as_str)
+                == version_base
+                    .get("new_active_version")
                     .and_then(Value::as_str)
-                    == version_base
-                        .get("new_active_version")
-                        .and_then(Value::as_str)
             {
                 fail(format!("INVALID_MODULE_VERSION_BASE:{}", module_id));
             }

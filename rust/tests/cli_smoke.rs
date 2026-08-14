@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn binary() -> PathBuf {
@@ -301,6 +301,101 @@ fn write_regression_report(root: &PathBuf, module_id: &str, artifact_hash: &str)
     )
     .unwrap();
     hash
+}
+
+fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash: &str) {
+    let records = root.join(".appsdk/records");
+    let promotion = serde_json::json!({
+        "promotion_id": "promotion-2",
+        "issue_id": "issue-1",
+        "experiment_id": "experiment-2",
+        "module_id": module_id,
+        "base_commit": "commit-1",
+        "source_commit": "commit-1",
+        "previous_active_version": "active-v1",
+        "new_active_version": "active-v2",
+        "base_artifact_hash": base_hash,
+        "artifact_hash": artifact_hash,
+        "scope_hash": "scope-2",
+        "public_api_hash": "api-2",
+        "review_id": "review-2",
+        "evidence_ids": ["evidence-2"],
+        "required_gate_results": [{"gate_id":"blackbox","result":"pass","producer":"test"}],
+        "change_set_id": "change-2",
+        "compatibility_level": "compatible",
+        "root_cause": "versioned test change",
+        "design_id": "design-2",
+        "change_reason_comment": "publish a reviewed second active version",
+        "playground_cleanup_record_id": "cleanup-2",
+        "created_at": "2026-01-01T00:00:00Z"
+    });
+    let regression = serde_json::json!({
+        "regression_report_id": "regression-app-core-v2",
+        "module_id": module_id,
+        "source_commit": "commit-1",
+        "artifact_hash": artifact_hash,
+        "public_api_hash": "api-2",
+        "scope_hash": "scope-2",
+        "input_hash": artifact_hash,
+        "suite_id": "app-core-regression",
+        "command": {"program":"cargo","args":["test","--test","app-core"],"working_directory":"."},
+        "test_count": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "result": "pass",
+        "producer": {"adapter":"cargo","identity":"appsdk-regression-gate"},
+        "created_at": "2026-01-01T00:00:00Z",
+        "test_characteristics": {"whitebox":true,"blackbox":true}
+    });
+    fs::write(
+        records.join(format!("evidence-record-{module_id}.json")),
+        format!(r#"{{"evidence_id":"evidence-2","issue_id":"issue-1","experiment_id":"experiment-2","kind":"build","source_commit":"commit-1","artifact_hash":"{}","scope":{{"module_id":"{}"}},"producer":{{"adapter":"test","identity":"test"}},"result":"pass","created_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","input_hashes":["input-2"],"scope_hash":"scope-2"}}"#, artifact_hash, module_id),
+    ).unwrap();
+    fs::write(
+        records.join(format!("review-record-{module_id}.json")),
+        format!(r#"{{"review_id":"review-2","issue_id":"issue-1","promotion_id":"promotion-2","reviewer":{{"adapter":"test","identity":"test"}},"verdict":"pass","evidence_ids":["evidence-2"],"reviewed_commit":"commit-1","reviewed_artifact_hash":"{}","reviewed_scope_hash":"scope-2","ai_confidence":1.0,"confidence_rationale":"versioned blackbox evidence","created_at":"2026-01-01T00:00:00Z"}}"#, artifact_hash),
+    ).unwrap();
+    fs::write(
+        records.join(format!("promotion-record-{module_id}.json")),
+        serde_json::to_string_pretty(&promotion).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join("playground-cleanup-cleanup-2.json"),
+        r#"{"cleanup_id":"cleanup-2","disposition":"archive_then_remove","removed_paths":["playground/experiments/app-core-v2"],"created_at":"2026-01-01T00:00:00Z"}"#,
+    ).unwrap();
+    fs::write(
+        records.join(format!("regression-report-{module_id}.json")),
+        serde_json::to_string_pretty(&regression).unwrap() + "\n",
+    )
+    .unwrap();
+    let freeze = serde_json::json!({
+        "freeze_id": "freeze-2",
+        "issue_id": "issue-1",
+        "module_id": module_id,
+        "promotion_id": "promotion-2",
+        "promotion_record_hash": digest(&canonical(&promotion)),
+        "artifact_record_id": "evidence-2",
+        "regression_report_id": "regression-app-core-v2",
+        "regression_report_hash": digest(&canonical(&regression)),
+        "source_commit_or_tag": "commit-1",
+        "active_version": "active-v2",
+        "previous_active_version": "active-v1",
+        "library_hash": artifact_hash,
+        "public_api_hash": "api-2",
+        "review_id": "review-2",
+        "previous_active_immutable": true,
+        "git_clean": true,
+        "clean_scope": {"base_commit":"commit-1","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"},
+        "owners": {"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"},
+        "created_at": "2026-01-01T00:00:00Z"
+    });
+    fs::write(
+        records.join(format!("freeze-record-{module_id}.json")),
+        serde_json::to_string_pretty(&freeze).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 fn enable_regression_contract(root: &PathBuf) {
@@ -1060,6 +1155,84 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
     assert!(root
         .join(".appsdk/records/history/app-core/active-v1/freeze-record-app-core.json")
         .is_file());
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(run(&["compile-module", root_text, "--module", "app-core"])
+        .status
+        .success());
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage,
+        ])
+        .status
+        .success());
+    }
+    let v2_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let v2_hash = v2_artifact["artifact_hash"].as_str().unwrap();
+    write_v2_records(&root, "app-core", &v1_hash, v2_hash);
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ])
+    .status
+    .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "freeze-v2"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "frozen",
+    ])
+    .status
+    .success());
+    let published = run(&[
+        "publish-active",
+        root_text,
+        "--module",
+        "app-core",
+        "--version",
+        "active-v2",
+    ]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    assert_eq!(fs::read_to_string(&active_v1).unwrap(), active_v1_text);
+    assert!(root
+        .join("active/lib/app-core/active-v2/artifact.json")
+        .is_file());
+    let project: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
+            .unwrap();
+    assert!(project["modules"][0].get("version_base").is_none());
     let verified = run(&["verify", root_text]);
     assert!(
         verified.status.success(),

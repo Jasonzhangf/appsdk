@@ -70,6 +70,14 @@
       "source_owner": "app-core",
       "active_artifact": "active/lib/app-core/**",
       "generated_outputs": ["generated/**"],
+      "contract_paths": ["contracts/records/**", "contracts/transitions/**"],
+      "dependency_modules": [],
+      "build": {
+        "program": "sh",
+        "args": ["-c", "mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],
+        "working_directory": "."
+      },
+      "artifact_paths": ["app-core.placeholder"],
       "regression": {
         "required_before_freeze": true,
         "suite_id": "app-core-regression",

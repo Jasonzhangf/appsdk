@@ -210,19 +210,19 @@ fn digest(value: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn write_records(root: &PathBuf, artifact_hash: &str, include_freeze: bool) {
+fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_freeze: bool) {
     let records = root.join(".appsdk/records");
     fs::create_dir_all(&records).unwrap();
     fs::write(
-        records.join("evidence-record-app-core.json"),
+        records.join(format!("evidence-record-{module_id}.json")),
         format!(
-            r#"{{"evidence_id":"evidence-1","issue_id":"issue-1","experiment_id":"experiment-1","kind":"build","source_commit":"commit-1","artifact_hash":"{}","scope":{{"module_id":"app-core"}},"producer":{{"adapter":"test","identity":"test"}},"result":"pass","created_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","input_hashes":["input-1"],"scope_hash":"scope-1"}}"#,
-            artifact_hash
+            r#"{{"evidence_id":"evidence-1","issue_id":"issue-1","experiment_id":"experiment-1","kind":"build","source_commit":"commit-1","artifact_hash":"{}","scope":{{"module_id":"{}"}},"producer":{{"adapter":"test","identity":"test"}},"result":"pass","created_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","input_hashes":["input-1"],"scope_hash":"scope-1"}}"#,
+            artifact_hash, module_id
         ),
     )
     .unwrap();
     fs::write(
-        records.join("review-record-app-core.json"),
+        records.join(format!("review-record-{module_id}.json")),
         format!(
             r#"{{"review_id":"review-1","issue_id":"issue-1","promotion_id":"promotion-1","reviewer":{{"adapter":"test","identity":"test"}},"verdict":"pass","evidence_ids":["evidence-1"],"reviewed_commit":"commit-1","reviewed_artifact_hash":"{}","reviewed_scope_hash":"scope-1","ai_confidence":1.0,"confidence_rationale":"blackbox evidence","created_at":"2026-01-01T00:00:00Z"}}"#,
             artifact_hash
@@ -230,12 +230,16 @@ fn write_records(root: &PathBuf, artifact_hash: &str, include_freeze: bool) {
     )
     .unwrap();
     let promotion = format!(
-        r#"{{"promotion_id":"promotion-1","issue_id":"issue-1","experiment_id":"experiment-1","module_id":"app-core","base_commit":"base-1","source_commit":"commit-1","previous_active_version":null,"new_active_version":"active-v1","artifact_hash":"{}","scope_hash":"scope-1","public_api_hash":"api-1","review_id":"review-1","evidence_ids":["evidence-1"],"required_gate_results":[{{"gate_id":"blackbox","result":"pass","producer":"test"}}],"change_set_id":"change-1","compatibility_level":"compatible","root_cause":"test root cause","design_id":"design-1","change_reason_comment":"test reason","playground_cleanup_record_id":"cleanup-1","created_at":"2026-01-01T00:00:00Z"}}"#,
-        artifact_hash
+        r#"{{"promotion_id":"promotion-1","issue_id":"issue-1","experiment_id":"experiment-1","module_id":"{}","base_commit":"base-1","source_commit":"commit-1","previous_active_version":null,"new_active_version":"active-v1","artifact_hash":"{}","scope_hash":"scope-1","public_api_hash":"api-1","review_id":"review-1","evidence_ids":["evidence-1"],"required_gate_results":[{{"gate_id":"blackbox","result":"pass","producer":"test"}}],"change_set_id":"change-1","compatibility_level":"compatible","root_cause":"test root cause","design_id":"design-1","change_reason_comment":"test reason","playground_cleanup_record_id":"cleanup-1","created_at":"2026-01-01T00:00:00Z"}}"#,
+        module_id, artifact_hash
     );
-    fs::write(records.join("promotion-record-app-core.json"), &promotion).unwrap();
     fs::write(
-        records.join("playground-cleanup-cleanup-1.json"),
+        records.join(format!("promotion-record-{module_id}.json")),
+        &promotion,
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("playground-cleanup-cleanup-1.json")),
         r#"{"cleanup_id":"cleanup-1","disposition":"archive_then_remove","removed_paths":["playground/experiments/app-core"],"created_at":"2026-01-01T00:00:00Z"}"#,
     )
     .unwrap();
@@ -243,20 +247,20 @@ fn write_records(root: &PathBuf, artifact_hash: &str, include_freeze: bool) {
         let promotion_value: Value = serde_json::from_str(&promotion).unwrap();
         let promotion_hash = digest(&canonical(&promotion_value));
         fs::write(
-            records.join("freeze-record-app-core.json"),
+            records.join(format!("freeze-record-{module_id}.json")),
             format!(
-                r#"{{"freeze_id":"freeze-1","issue_id":"issue-1","module_id":"app-core","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"evidence-1","source_commit_or_tag":"commit-1","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"base-1","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:00:00Z"}}"#,
-                promotion_hash, artifact_hash
+                r#"{{"freeze_id":"freeze-1","issue_id":"issue-1","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"evidence-1","source_commit_or_tag":"commit-1","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"base-1","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:00:00Z"}}"#,
+                module_id, promotion_hash, artifact_hash
             ),
         )
         .unwrap();
     }
 }
 
-fn write_regression_report(root: &PathBuf, artifact_hash: &str) -> String {
+fn write_regression_report(root: &PathBuf, module_id: &str, artifact_hash: &str) -> String {
     let report = serde_json::json!({
         "regression_report_id": "regression-app-core-v1",
-        "module_id": "app-core",
+        "module_id": module_id,
         "source_commit": "commit-1",
         "artifact_hash": artifact_hash,
         "public_api_hash": "api-1",
@@ -285,7 +289,9 @@ fn write_regression_report(root: &PathBuf, artifact_hash: &str) -> String {
     });
     let hash = digest(&canonical(&report));
     fs::write(
-        root.join(".appsdk/records/regression-report-app-core.json"),
+        root.join(format!(
+            ".appsdk/records/regression-report-{module_id}.json"
+        )),
         serde_json::to_string_pretty(&report).unwrap() + "\n",
     )
     .unwrap();
@@ -372,7 +378,7 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
   "access": {"protected_paths":[".appsdk/**"]},
   "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/evidence-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
   "lifecycles": {"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},
-    "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
+    "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
 "#).unwrap();
     pin_test_lock(root_text);
@@ -488,12 +494,24 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(run(&["promote", root_text, "--to", "contract_bound"])
         .status
         .success());
+    let edge_compile = run(&["compile", root_text]);
+    assert!(
+        edge_compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&edge_compile.stderr)
+    );
     assert!(run(&["promote", root_text, "--to", "compiled"])
         .status
         .success());
     assert!(run(&["promote", root_text, "--to", "controlled_verified"])
         .status
         .success());
+    let edge_compile = run(&["compile", root_text]);
+    assert!(
+        edge_compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&edge_compile.stderr)
+    );
     for stage in ["contract_bound", "compiled", "controlled_verified"] {
         assert!(run(&[
             "promote-module",
@@ -516,15 +534,16 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     ])
     .status
     .success());
-    let mut artifact: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("generated/project.compiled.json")).unwrap(),
+    let module_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
     )
     .unwrap();
-    artifact["modules"][0]["stage"] = Value::String("architecture_stable".into());
-    let unsigned = artifact.as_object_mut().unwrap();
-    unsigned.remove("artifact_hash");
-    let architecture_hash = digest(&canonical(&Value::Object(unsigned.clone())));
-    write_records(&root, &architecture_hash, false);
+    let architecture_hash = module_artifact
+        .get("artifact_hash")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+    write_records(&root, "app-core", &architecture_hash, false);
     let architecture = run(&[
         "promote-module",
         root_text,
@@ -541,7 +560,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!run(&["freeze", root_text, "--module", "app-core"])
         .status
         .success());
-    write_records(&root, &architecture_hash, true);
+    write_records(&root, "app-core", &architecture_hash, true);
     assert!(Command::new("git")
         .args(["-C", root_text, "add", "."])
         .status()
@@ -563,7 +582,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!missing_regression.status.success());
     assert!(String::from_utf8_lossy(&missing_regression.stderr)
         .contains("MISSING_RECORD:regression-report-app-core.json"));
-    let regression_report_hash = write_regression_report(&root, &architecture_hash);
+    let regression_report_hash = write_regression_report(&root, "app-core", &architecture_hash);
     let freeze_record = root.join(".appsdk/records/freeze-record-app-core.json");
     let mut freeze_record_value: Value =
         serde_json::from_str(&fs::read_to_string(&freeze_record).unwrap()).unwrap();
@@ -634,5 +653,240 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     ]);
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("ACTIVE_VERSION_EXISTS"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn frozen_module_keeps_other_modules_mutable() {
+    let root = temp_root("module-independence");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    enable_regression_contract(&root);
+    init_git(&root);
+    fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#).unwrap();
+    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.0","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
+"#, "a".repeat(64), "b".repeat(64))).unwrap();
+    pin_test_lock(root_text);
+
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    assert!(run(&["compile", root_text]).status.success());
+    assert!(run(&["promote", root_text, "--to", "compiled"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "controlled_verified"])
+        .status
+        .success());
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage
+        ])
+        .status
+        .success());
+    }
+    let module_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let architecture_hash = module_artifact
+        .get("artifact_hash")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+    write_records(&root, "app-core", &architecture_hash, false);
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable"
+    ])
+    .status
+    .success());
+    write_records(&root, "app-core", &architecture_hash, true);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "promotion-records"])
+        .status()
+        .unwrap()
+        .success());
+    let regression_report_hash = write_regression_report(&root, "app-core", &architecture_hash);
+    let freeze_record = root.join(".appsdk/records/freeze-record-app-core.json");
+    let mut freeze_record_value: Value =
+        serde_json::from_str(&fs::read_to_string(&freeze_record).unwrap()).unwrap();
+    freeze_record_value["regression_report_id"] = Value::String("regression-app-core-v1".into());
+    freeze_record_value["regression_report_hash"] = Value::String(regression_report_hash);
+    fs::write(
+        &freeze_record,
+        serde_json::to_string_pretty(&freeze_record_value).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "regression-report"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "frozen"
+    ])
+    .status
+    .success());
+    assert!(run(&[
+        "publish-active",
+        root_text,
+        "--module",
+        "app-core",
+        "--version",
+        "active-v1"
+    ])
+    .status
+    .success());
+    let frozen_artifact_hash = {
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        value
+            .get("artifact_hash")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string()
+    };
+
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    let app_core_regression = project["modules"][0]["regression"].clone();
+    project["modules"].as_array_mut().unwrap().push(serde_json::json!({
+        "module_id": "app-edge",
+        "stage": "source_implemented",
+        "owned_paths": ["playground/experiments-edge/**"],
+        "source_owner": "app-edge",
+        "active_artifact": "active/lib/app-edge/**",
+        "generated_outputs": ["generated/**"],
+        "contract_paths": ["contracts/records/**", "contracts/transitions/**"],
+        "dependency_modules": [],
+        "build": {
+            "program": "sh",
+            "args": ["-c", "mkdir -p generated/modules/app-edge/lib && printf 'app-edge placeholder\\n' > generated/modules/app-edge/lib/app-edge.placeholder"],
+            "working_directory": "."
+        },
+        "artifact_paths": ["app-edge.placeholder"],
+        "regression": app_core_regression
+    }));
+    fs::create_dir_all(root.join("playground/experiments-edge")).unwrap();
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "add app-edge module"])
+        .status()
+        .unwrap()
+        .success());
+
+    assert!(run(&["compile", root_text]).status.success());
+    let frozen_after: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        frozen_after
+            .get("artifact_hash")
+            .and_then(Value::as_str)
+            .unwrap(),
+        frozen_artifact_hash
+    );
+    let edge_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-edge/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(
+        edge_artifact
+            .get("artifact_hash")
+            .and_then(Value::as_str)
+            .unwrap(),
+        frozen_artifact_hash
+    );
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        let promoted = run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-edge",
+            "--to",
+            stage,
+        ]);
+        assert!(
+            promoted.status.success(),
+            "promote app-edge {} failed: {}",
+            stage,
+            String::from_utf8_lossy(&promoted.stderr)
+        );
+    }
+    let edge_hash = edge_artifact
+        .get("artifact_hash")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+    write_records(&root, "app-edge", &edge_hash, false);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "app-edge records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-edge",
+        "--to",
+        "architecture_stable"
+    ])
+    .status
+    .success());
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }

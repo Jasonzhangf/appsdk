@@ -669,9 +669,11 @@ fn assert_no_symlink_components(root: &Path, path: &Path, label: &str) {
 fn safe_owned_path(root: &Path, relative: &str, label: &str) -> PathBuf {
     let trimmed = relative.trim_end_matches("/**").trim_end_matches('/');
     let path = Path::new(trimmed);
-    if trimmed.is_empty()
-        || path.is_absolute()
-        || path.components().any(|component| {
+    if trimmed.is_empty() || path.is_absolute() {
+        fail(format!("INVALID_OWNED_PATH:{}", label));
+    }
+    if trimmed != "."
+        && path.components().any(|component| {
             matches!(
                 component,
                 std::path::Component::ParentDir | std::path::Component::CurDir
@@ -773,6 +775,455 @@ fn staging_path(root: &Path, project: &Value, module_id: &str) -> PathBuf {
     generated_root(root, project)
         .join("active-publish")
         .join(format!("{}.{}", module_id, std::process::id()))
+}
+
+fn module_generated_dir(root: &Path, project: &Value, module_id: &str) -> PathBuf {
+    generated_root(root, project)
+        .join("modules")
+        .join(module_id)
+}
+
+fn module_artifact_file(root: &Path, project: &Value, module_id: &str) -> PathBuf {
+    module_generated_dir(root, project, module_id).join("module.compiled.json")
+}
+
+fn module_lib_root(root: &Path, project: &Value, module_id: &str) -> PathBuf {
+    module_generated_dir(root, project, module_id).join("lib")
+}
+
+fn safe_module_artifact_path(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    relative: &str,
+) -> PathBuf {
+    let lib_root = module_lib_root(root, project, module_id);
+    let candidate = Path::new(relative);
+    if relative.is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        fail(format!("INVALID_MODULE_ARTIFACT_PATH:{}", module_id));
+    }
+    let target = lib_root.join(candidate);
+    if target.starts_with(&lib_root) {
+        target
+    } else {
+        fail(format!("INVALID_MODULE_ARTIFACT_PATH:{}", module_id));
+    }
+}
+
+fn file_sha256(path: &Path, label: &str) -> String {
+    if fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail(format!("ARTIFACT_PATH_SYMLINK:{}", label));
+    }
+    let bytes = fs::read(path).unwrap_or_else(|_| fail(format!("ARTIFACT_PATH_MISSING:{}", label)));
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn hash_tree(root: &Path, prefix: &Path, label: &str) -> String {
+    if !root.exists() {
+        fail(format!("HASH_TREE_MISSING:{}", label));
+    }
+    let mut files = Vec::new();
+    collect_files(root, prefix, label, &mut files);
+    files.sort();
+    let mut hasher = Sha256::new();
+    for (relative, hash) in files {
+        hasher.update(relative.as_os_str().as_encoded_bytes());
+        hasher.update([0u8]);
+        hasher.update(hash.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn collect_files(root: &Path, prefix: &Path, label: &str, files: &mut Vec<(PathBuf, String)>) {
+    let entries =
+        fs::read_dir(root).unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)));
+    let mut entries = entries.collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        entry
+            .as_ref()
+            .map(|entry| entry.file_name())
+            .unwrap_or_default()
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)));
+        if entry
+            .file_type()
+            .unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)))
+            .is_symlink()
+        {
+            fail(format!("HASH_TREE_SYMLINK:{}", label));
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, prefix, label, files);
+        } else if path.is_file() {
+            let relative = path
+                .strip_prefix(prefix)
+                .unwrap_or_else(|_| fail(format!("HASH_TREE_PREFIX:{}", label)))
+                .to_path_buf();
+            files.push((relative, file_sha256(&path, label)));
+        }
+    }
+}
+
+fn module_build_command(module: &Value, module_id: &str) -> Value {
+    module
+        .get("build")
+        .cloned()
+        .unwrap_or_else(|| fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id)))
+}
+
+fn run_module_build(root: &Path, module: &Value, module_id: &str) {
+    let build = module_build_command(module, module_id);
+    let program = build
+        .get("program")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id)));
+    let args = build
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id))
+                        })
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id)));
+    let working_directory = build
+        .get("working_directory")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id)));
+    let working = safe_owned_path(root, working_directory, "module_build_working_directory");
+    let output = Command::new(program)
+        .args(&args)
+        .current_dir(&working)
+        .output()
+        .unwrap_or_else(|_| fail(format!("MODULE_BUILD_FAILED:{}", module_id)));
+    if !output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        fail(format!("MODULE_BUILD_FAILED:{}", module_id));
+    }
+}
+
+fn hash_module_paths(
+    root: &Path,
+    _project: &Value,
+    module: &Value,
+    module_id: &str,
+    key: &str,
+) -> String {
+    let paths = module
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}:{}", module_id, key)));
+    let mut hasher = Sha256::new();
+    for path in paths {
+        let relative = path
+            .as_str()
+            .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}:{}", module_id, key)));
+        let safe = safe_owned_path(root, relative, "module_path_hash");
+        let mut base = safe.clone();
+        if relative.ends_with("/**") {
+            base = safe_owned_path(
+                root,
+                relative.trim_end_matches("/**").trim_end_matches('/'),
+                "module_path_hash",
+            );
+        }
+        hasher.update(relative.as_bytes());
+        hasher.update([0u8]);
+        if safe.is_file() {
+            hasher.update(file_sha256(&safe, "module_path").as_bytes());
+        } else if safe.is_dir() || (relative.ends_with("/**") && base.exists()) {
+            hasher.update(hash_tree(&base, &base, relative).as_bytes());
+        } else {
+            fail(format!("MODULE_PATH_MISSING:{}:{}", module_id, relative));
+        }
+        hasher.update([0u8]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn module_dependency_hashes(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+) -> Vec<Value> {
+    let dependencies = module
+        .get("dependency_modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            fail(format!(
+                "INVALID_MODULE_CONTRACT:{}:dependency_modules",
+                module_id
+            ))
+        });
+    let modules = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"));
+    let mut entries = Vec::new();
+    for dependency in dependencies {
+        let dependency_id = dependency
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "INVALID_MODULE_CONTRACT:{}:dependency_modules",
+                    module_id
+                ))
+            });
+        let dependency_module = modules
+            .iter()
+            .find(|module| module.get("module_id").and_then(Value::as_str) == Some(dependency_id))
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "MODULE_DEPENDENCY_NOT_FOUND:{}:{}",
+                    module_id, dependency_id
+                ))
+            });
+        if dependency_module.get("stage").and_then(Value::as_str) != Some("frozen") {
+            fail(format!(
+                "MODULE_DEPENDENCY_NOT_FROZEN:{}:{}",
+                module_id, dependency_id
+            ));
+        }
+        let artifact_file = module_artifact_file(root, project, dependency_id);
+        if !artifact_file.is_file() {
+            fail(format!(
+                "MODULE_DEPENDENCY_ARTIFACT_MISSING:{}",
+                dependency_id
+            ));
+        }
+        let artifact: Value = serde_json::from_str(
+            &fs::read_to_string(&artifact_file)
+                .unwrap_or_else(|_| fail("MODULE_ARTIFACT_READ_FAILED")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+        let hash = record_str(&artifact, "/artifact_hash", "module-artifact");
+        entries.push(serde_json::json!({"module_id": dependency_id, "artifact_hash": hash}));
+    }
+    entries
+}
+
+fn hash_module_artifacts(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+) -> Vec<Value> {
+    let paths = module
+        .get("artifact_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            fail(format!(
+                "INVALID_MODULE_CONTRACT:{}:artifact_paths",
+                module_id
+            ))
+        });
+    let mut entries = Vec::new();
+    for path in paths {
+        let relative = path
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "INVALID_MODULE_CONTRACT:{}:artifact_paths",
+                    module_id
+                ))
+            });
+        let target = safe_module_artifact_path(root, project, module_id, relative);
+        entries.push(serde_json::json!({
+            "path": relative,
+            "hash": file_sha256(&target, &format!("module_artifact:{}", module_id))
+        }));
+    }
+    entries
+}
+
+fn module_public_api_hash(artifact_entries: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    for entry in artifact_entries {
+        hasher.update(
+            entry
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        hasher.update([0u8]);
+        hasher.update(
+            entry
+                .get("hash")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        hasher.update([0u8]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn build_module_artifact(root: &Path, project: &Value, module: &Value, module_id: &str) -> Value {
+    let source_hash = hash_module_paths(root, project, module, module_id, "owned_paths");
+    let contract_hash = hash_module_paths(root, project, module, module_id, "contract_paths");
+    let dependency_hashes = module_dependency_hashes(root, project, module, module_id);
+    let build_command = module_build_command(module, module_id);
+    let artifact_entries = hash_module_artifacts(root, project, module, module_id);
+    let public_api_hash = module_public_api_hash(&artifact_entries);
+    let mut unsigned = serde_json::Map::new();
+    unsigned.insert("artifact_schema".into(), Value::from(1));
+    unsigned.insert("module_id".into(), Value::String(module_id.into()));
+    unsigned.insert(
+        "stage".into(),
+        module
+            .get("stage")
+            .cloned()
+            .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT")),
+    );
+    unsigned.insert("source_hash".into(), Value::String(source_hash));
+    unsigned.insert("contract_hash".into(), Value::String(contract_hash));
+    unsigned.insert("dependency_hashes".into(), Value::Array(dependency_hashes));
+    unsigned.insert("build".into(), build_command);
+    unsigned.insert(
+        "artifact_paths".into(),
+        module
+            .get("artifact_paths")
+            .cloned()
+            .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT")),
+    );
+    unsigned.insert("artifacts".into(), Value::Array(artifact_entries));
+    unsigned.insert("public_api_hash".into(), Value::String(public_api_hash));
+    let mut unsigned = unsigned;
+    unsigned.remove("stage");
+    let unsigned_value = Value::Object(unsigned);
+    let artifact_hash = sha256(&canonical(&unsigned_value));
+    let mut artifact = unsigned_value
+        .as_object()
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+        .clone();
+    artifact.insert(
+        "stage".into(),
+        module
+            .get("stage")
+            .cloned()
+            .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT")),
+    );
+    artifact.insert("artifact_hash".into(), Value::String(artifact_hash));
+    Value::Object(artifact)
+}
+
+fn read_module_artifact(root: &Path, project: &Value, module_id: &str) -> Value {
+    let file = module_artifact_file(root, project, module_id);
+    if fs::symlink_metadata(&file)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:module_artifact");
+    }
+    serde_json::from_str(
+        &fs::read_to_string(&file).unwrap_or_else(|_| fail("MISSING_RECORD:module-artifact")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"))
+}
+
+fn write_module_artifact_value(root: &Path, project: &Value, module_id: &str, artifact: &Value) {
+    let dir = module_generated_dir(root, project, module_id);
+    fs::create_dir_all(&dir).unwrap_or_else(|_| fail("MODULE_ARTIFACT_WRITE_FAILED"));
+    let target = dir.join("module.compiled.json");
+    if fs::symlink_metadata(&target)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:module_artifact");
+    }
+    atomic_write_json(&target, artifact, "MODULE_ARTIFACT_WRITE_FAILED");
+}
+
+fn module_artifact_matches_project(module: &Value, artifact: &Value) -> Value {
+    let module_id = record_str(module, "/module_id", "module");
+    if artifact.get("artifact_schema").and_then(Value::as_u64) != Some(1)
+        || record_str(artifact, "/module_id", "module-artifact") != module_id
+        || artifact.get("build") != module.get("build")
+        || artifact.get("artifact_paths") != module.get("artifact_paths")
+    {
+        fail(format!("MODULE_ARTIFACT_MISMATCH:{}", module_id));
+    }
+    let stored_hash = record_str(artifact, "/artifact_hash", "module-artifact");
+    let mut unsigned = artifact.clone();
+    unsigned
+        .as_object_mut()
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+        .remove("artifact_hash");
+    unsigned
+        .as_object_mut()
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+        .remove("stage");
+    if stored_hash != sha256(&canonical(&unsigned)) {
+        fail(format!("MODULE_ARTIFACT_HASH_MISMATCH:{}", module_id));
+    }
+    artifact.clone()
+}
+
+fn compile_module(root: &Path, module_id: &str) -> Value {
+    assert_project_root_safe(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    assert_project_contract(root, &project);
+    let modules = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"));
+    let index = modules
+        .iter()
+        .position(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    let module = &modules[index];
+    if module.get("stage").and_then(Value::as_str) == Some("frozen") {
+        fail(format!(
+            "FROZEN_MODULE_REQUIRES_VERSIONED_ARTIFACT:{}",
+            module_id
+        ));
+    }
+    run_module_build(root, module, module_id);
+    let mut module_with_stage = module.clone();
+    let target_stage = module
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"))
+        .to_string();
+    module_with_stage["stage"] = Value::String(target_stage);
+    let artifact = build_module_artifact(root, &project, &module_with_stage, module_id);
+    write_module_artifact_value(root, &project, module_id, &artifact);
+    println!("{}", serde_json::to_string_pretty(&artifact).unwrap());
+    artifact
 }
 
 fn write_artifact_value(root: &Path, project: &Value, artifact: &Value) {
@@ -896,7 +1347,7 @@ fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: O
             .get("modules")
             .and_then(Value::as_array)
             .map(|modules| {
-                modules.iter().any(|module| {
+                modules.iter().all(|module| {
                     matches!(
                         module.get("stage").and_then(Value::as_str),
                         Some("frozen" | "retired")
@@ -1109,8 +1560,72 @@ fn assert_project_contract(root: &Path, project: &Value) {
                             .any(|value| value.as_str().filter(|v| !v.is_empty()).is_none())
                 })
                 .unwrap_or(true)
+            || module
+                .get("contract_paths")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values.is_empty()
+                        || values
+                            .iter()
+                            .any(|value| value.as_str().filter(|v| !v.is_empty()).is_none())
+                })
+                .unwrap_or(true)
+            || module
+                .get("dependency_modules")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .any(|value| value.as_str().filter(|v| !v.is_empty()).is_none())
+                })
+                .unwrap_or(true)
+            || module.get("build").and_then(Value::as_object).is_none()
+            || module
+                .get("artifact_paths")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values.is_empty()
+                        || values
+                            .iter()
+                            .any(|value| value.as_str().filter(|v| !v.is_empty()).is_none())
+                })
+                .unwrap_or(true)
         {
             fail(format!("INVALID_PROJECT_MODULE:{}", id));
+        }
+        let build = module
+            .get("build")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| fail(format!("INVALID_PROJECT_MODULE:{}", id)));
+        for key in ["program", "working_directory"] {
+            if build
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                fail(format!("INVALID_PROJECT_MODULE:{}:build/{}", id, key));
+            }
+        }
+        if build
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().any(|value| value.as_str().is_none()))
+            .unwrap_or(true)
+        {
+            fail(format!("INVALID_PROJECT_MODULE:{}:build/args", id));
+        }
+        for dependency in module
+            .get("dependency_modules")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| fail(format!("INVALID_PROJECT_MODULE:{}", id)))
+        {
+            let dependency = dependency
+                .as_str()
+                .unwrap_or_else(|| fail(format!("INVALID_PROJECT_MODULE:{}", id)));
+            if !ids.contains(dependency) && dependency != id {
+                fail(format!("INVALID_PROJECT_MODULE:{}:dependency", id));
+            }
         }
         for value in module["owned_paths"]
             .as_array()
@@ -1151,19 +1666,24 @@ fn assert_project_contract(root: &Path, project: &Value) {
             .as_array()
             .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"))
         {
-            let path = value
-                .as_str()
-                .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"))
-                .trim_end_matches("/**")
-                .trim_end_matches('/')
-                .to_string();
-            owned_surfaces.push((path, id.to_string()));
             safe_owned_path(
                 root,
                 value
                     .as_str()
                     .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE")),
                 "module_generated_output",
+            );
+        }
+        for value in module["contract_paths"]
+            .as_array()
+            .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"))
+        {
+            safe_owned_path(
+                root,
+                value
+                    .as_str()
+                    .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE")),
+                "module_contract_path",
             );
         }
     }
@@ -1185,6 +1705,16 @@ fn compile(root: &Path) {
     let project = read_project(root);
     assert_compile_preconditions(root, &project, None);
     assert_declared_contracts(root, &project, true);
+    let modules = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"));
+    for module in modules {
+        let module_id = record_str(module, "/module_id", "module");
+        if module.get("stage").and_then(Value::as_str) != Some("frozen") {
+            compile_module(root, module_id);
+        }
+    }
     let artifact = write_artifact(root, &project);
     println!("{}", serde_json::to_string_pretty(&artifact).unwrap());
 }
@@ -1256,6 +1786,10 @@ fn recover_freeze_transaction(root: &Path, project: &Value, module_id: &str) -> 
             (
                 "project.compiled.json",
                 generated_root(root, project).join("project.compiled.json"),
+            ),
+            (
+                "module.compiled.json",
+                module_artifact_file(root, project, module_id),
             ),
             (
                 "review-record.json",
@@ -1974,7 +2508,24 @@ fn assert_record_graph(
                     .unwrap_or_else(|_| fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING")),
             )
             .unwrap_or_else(|_| fail("INVALID_PREVIOUS_ACTIVE_ARTIFACT"));
-            assert_artifact_matches(&project, &previous_value);
+            if previous_value
+                .get("module_id")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                let module = project
+                    .get("modules")
+                    .and_then(Value::as_array)
+                    .and_then(|modules| {
+                        modules.iter().find(|module| {
+                            module.get("module_id").and_then(Value::as_str) == Some(module_id)
+                        })
+                    })
+                    .unwrap_or_else(|| fail("MODULE_NOT_FOUND"));
+                module_artifact_matches_project(module, &previous_value);
+            } else {
+                assert_artifact_matches(&project, &previous_value);
+            }
             let previous_hash = record_str(
                 &previous_value,
                 "/artifact_hash",
@@ -1988,17 +2539,7 @@ fn assert_record_graph(
             {
                 fail("PREVIOUS_ACTIVE_HASH_MISMATCH");
             }
-            if previous_value
-                .pointer("/modules")
-                .and_then(Value::as_array)
-                .map(|modules| {
-                    modules.iter().any(|entry| {
-                        entry.get("module_id").and_then(Value::as_str) == Some(module_id)
-                    })
-                })
-                .unwrap_or(false)
-                == false
-            {
+            if record_str(&previous_value, "/module_id", "previous_active_artifact") != module_id {
                 fail("PREVIOUS_ACTIVE_MODULE_MISSING");
             }
         }
@@ -2052,20 +2593,6 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
         return;
     }
     assert_declared_contracts(root, &project, true);
-    if target != "frozen"
-        && project
-            .get("modules")
-            .and_then(Value::as_array)
-            .map(|modules| {
-                modules.iter().any(|module| {
-                    module.get("module_id").and_then(Value::as_str) != Some(module_id)
-                        && module.get("stage").and_then(Value::as_str) == Some("frozen")
-                })
-            })
-            .unwrap_or(false)
-    {
-        fail("FROZEN_MODULE_REQUIRES_VERSIONED_ARTIFACT");
-    }
     if target == "frozen" {
         freeze_module(root, module_id);
         return;
@@ -2117,8 +2644,25 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
     candidate["modules"][index]["stage"] = Value::String(target.into());
     assert_compile_preconditions(root, &candidate, Some(module_id));
     let artifact = build_artifact(&candidate);
+    let module_artifact = if matches!(
+        target,
+        "contract_bound" | "compiled" | "controlled_verified" | "architecture_stable"
+    ) {
+        let module_artifact = read_module_artifact(root, &project, module_id);
+        let mut staged = module_artifact_matches_project(&modules[index], &module_artifact);
+        staged["stage"] = Value::String(target.into());
+        write_module_artifact_value(root, &project, module_id, &staged);
+        Some(staged)
+    } else {
+        None
+    };
     if target == "architecture_stable" {
-        assert_record_graph(root, Some(module_id), &artifact, false);
+        assert_record_graph(
+            root,
+            Some(module_id),
+            module_artifact.as_ref().unwrap_or(&artifact),
+            false,
+        );
     }
     write_artifact_value(root, &project, &artifact);
     write_project(root, &candidate);
@@ -2165,7 +2709,19 @@ fn freeze_module(root: &Path, module_id: &str) {
     assert_compile_preconditions(root, &project, Some(module_id));
     let promoted_artifact = read_compiled_artifact(root, &project);
     assert_artifact_matches(&project, &promoted_artifact);
-    assert_record_graph(root, Some(module_id), &promoted_artifact, false);
+    let module_artifact = module_artifact_matches_project(
+        &project["modules"][index],
+        &read_module_artifact(root, &project, module_id),
+    );
+    if module_artifact.get("stage").and_then(Value::as_str) != Some("architecture_stable") {
+        fail(format!(
+            "MODULE_ARTIFACT_NOT_ARCHITECTURE_STABLE:{}",
+            module_id
+        ));
+    }
+    let mut staged_module_artifact = module_artifact.clone();
+    staged_module_artifact["stage"] = Value::String("frozen".into());
+    let module_artifact = staged_module_artifact.clone();
     let archive = contract_root(root, &project, "/governance/protected_root")
         .join("history")
         .join(module_id);
@@ -2189,12 +2745,12 @@ fn freeze_module(root: &Path, module_id: &str) {
         module_id,
         &candidate["modules"][index],
         &promotion,
-        &promoted_artifact,
+        &module_artifact,
     );
     let freeze_name = freeze_record_name(module_id);
     let mut freeze = read_record(root, &freeze_name);
-    let artifact = promoted_artifact.clone();
-    let reviewed_hash = record_str(&artifact, "/artifact_hash", "artifact");
+    let artifact = module_artifact.clone();
+    let reviewed_hash = record_str(&artifact, "/artifact_hash", "module-artifact");
     if record_str(&review, "/reviewed_artifact_hash", "review-record.json") != reviewed_hash
         || record_str(&promotion, "/artifact_hash", "promotion-record.json") != reviewed_hash
     {
@@ -2235,6 +2791,11 @@ fn freeze_module(root: &Path, module_id: &str) {
     )
     .unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
     fs::write(
+        staging_archive.join("module-artifact.json"),
+        serde_json::to_string_pretty(&artifact).unwrap() + "\n",
+    )
+    .unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+    fs::write(
         staging_archive.join("module-contract.json"),
         serde_json::to_string_pretty(&candidate["modules"][index]).unwrap() + "\n",
     )
@@ -2265,6 +2826,24 @@ fn freeze_module(root: &Path, module_id: &str) {
             fail("PROTECTED_ARCHIVE_SOURCE_MISSING");
         }
     }
+    for artifact_path in candidate["modules"][index]
+        .get("artifact_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
+    {
+        let relative = artifact_path
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+        let source = safe_module_artifact_path(root, &project, module_id, relative);
+        let target = staging_archive.join("library").join(relative);
+        if !source.is_file() {
+            fail("PROTECTED_ARCHIVE_LIBRARY_MISSING");
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+        }
+        fs::copy(&source, &target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+    }
     let mut source_snapshot = serde_json::Map::new();
     source_snapshot.insert("module_id".into(), Value::String(module_id.into()));
     source_snapshot.insert(
@@ -2284,6 +2863,10 @@ fn freeze_module(root: &Path, module_id: &str) {
         (
             "project.compiled.json",
             generated_root(root, &project).join("project.compiled.json"),
+        ),
+        (
+            "module.compiled.json",
+            module_artifact_file(root, &project, module_id),
         ),
         (
             "review-record.json",
@@ -2312,7 +2895,8 @@ fn freeze_module(root: &Path, module_id: &str) {
         &serde_json::json!({"phase":"prepared","pid":std::process::id()}),
         "FREEZE_TRANSACTION_FAILED",
     );
-    write_artifact_value(root, &candidate, &artifact);
+    write_module_artifact_value(root, &project, module_id, &module_artifact);
+    write_artifact_value(root, &candidate, &build_artifact(&candidate));
     write_record(root, &review_name, &review);
     write_record(root, &promotion_name, &promotion);
     write_record(
@@ -2371,21 +2955,16 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
             module_id
         ));
     }
-    let artifact_file = generated_root(root, &project).join("project.compiled.json");
-    if fs::symlink_metadata(&artifact_file)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        fail("GOVERNANCE_PATH_SYMLINK:artifact");
+    let artifact = read_module_artifact(root, &project, module_id);
+    module_artifact_matches_project(module, &artifact);
+    if artifact.get("stage").and_then(Value::as_str) != Some("frozen") {
+        fail(format!(
+            "ACTIVE_PUBLISH_REQUIRES_FROZEN_MODULE_ARTIFACT:{}",
+            module_id
+        ));
     }
-    let artifact: Value = serde_json::from_str(
-        &fs::read_to_string(&artifact_file)
-            .unwrap_or_else(|_| fail("COMPILED_STAGE_REQUIRES_ARTIFACT")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_ARTIFACT_SCHEMA"));
-    assert_artifact_matches(&project, &artifact);
     assert_record_graph(root, Some(module_id), &artifact, true);
-    let artifact_hash = record_str(&artifact, "/artifact_hash", "artifact");
+    let artifact_hash = record_str(&artifact, "/artifact_hash", "module-artifact");
     if record_str(
         &read_record(root, &freeze_record_name(module_id)),
         "/active_version",
@@ -2463,6 +3042,23 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
             serde_json::to_string_pretty(&artifact).unwrap() + "\n",
         )
         .map_err(|_| "ACTIVE_PUBLISH_FAILED".to_string())?;
+        let artifacts = artifact
+            .get("artifacts")
+            .and_then(Value::as_array)
+            .ok_or("ACTIVE_PUBLISH_FAILED".to_string())?;
+        fs::create_dir_all(staging.join("lib")).map_err(|_| "ACTIVE_PUBLISH_FAILED".to_string())?;
+        for entry in artifacts {
+            let relative = entry
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("ACTIVE_PUBLISH_FAILED".to_string())?;
+            let source = safe_module_artifact_path(&root, &project, module_id, relative);
+            let target = staging.join("lib").join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|_| "ACTIVE_PUBLISH_FAILED".to_string())?;
+            }
+            fs::copy(&source, &target).map_err(|_| "ACTIVE_PUBLISH_FAILED".to_string())?;
+        }
         fs::write(
             staging.join("current.json"),
             format!(
@@ -2613,8 +3209,51 @@ fn verify(root: &Path) {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .is_none()
+            || module
+                .get("contract_paths")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values.is_empty()
+                        || values.iter().any(|value| {
+                            value.as_str().map(|entry| entry.is_empty()).unwrap_or(true)
+                        })
+                })
+                .unwrap_or(true)
+            || module.get("build").and_then(Value::as_object).is_none()
+            || module
+                .get("artifact_paths")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values.is_empty()
+                        || values.iter().any(|value| {
+                            value.as_str().map(|entry| entry.is_empty()).unwrap_or(true)
+                        })
+                })
+                .unwrap_or(true)
         {
             fail("INVALID_MODULE_SURFACES");
+        }
+        let build = module
+            .get("build")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}", module_id)));
+        if build
+            .get("program")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+            || build
+                .get("working_directory")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            || build
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().any(|value| value.as_str().is_none()))
+                .unwrap_or(true)
+        {
+            fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id));
         }
         let regression = module
             .get("regression")
@@ -2747,7 +3386,7 @@ fn verify(root: &Path) {
         let artifact = read_compiled_artifact(root, &project);
         assert_artifact_matches(&project, &artifact);
     }
-    let artifact = if artifact_file.exists() {
+    let _artifact = if artifact_file.exists() {
         Some(read_compiled_artifact(root, &project))
     } else {
         None
@@ -2805,12 +3444,32 @@ fn verify(root: &Path) {
                         .unwrap_or_else(|_| fail("ACTIVE_ARTIFACT_MISSING")),
                 )
                 .unwrap_or_else(|_| fail("INVALID_ACTIVE_ARTIFACT"));
-                assert_artifact_matches(&project, &active_value);
-                if let Some(generated) = &artifact {
-                    if record_str(generated, "/artifact_hash", "artifact")
-                        != record_str(&active_value, "/artifact_hash", "active_artifact")
-                    {
-                        fail("ACTIVE_ARTIFACT_HASH_MISMATCH");
+                module_artifact_matches_project(module, &active_value);
+                let generated_module = read_module_artifact(root, &project, id);
+                module_artifact_matches_project(module, &generated_module);
+                if record_str(&active_value, "/artifact_hash", "active_artifact")
+                    != record_str(&generated_module, "/artifact_hash", "module-artifact")
+                    || record_str(&active_value, "/artifact_hash", "active_artifact")
+                        != record_str(&version, "/library_hash", &freeze_name)
+                {
+                    fail("ACTIVE_ARTIFACT_HASH_MISMATCH");
+                }
+                let active_entries = active_value
+                    .get("artifacts")
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| fail("INVALID_ACTIVE_ARTIFACT"));
+                for entry in active_entries {
+                    let relative = entry
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| fail("INVALID_ACTIVE_ARTIFACT"));
+                    let expected = entry
+                        .get("hash")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| fail("INVALID_ACTIVE_ARTIFACT"));
+                    let active_lib = active_path.join("lib").join(relative);
+                    if file_sha256(&active_lib, "active_library") != expected {
+                        fail("ACTIVE_LIBRARY_HASH_MISMATCH");
                     }
                 }
             }
@@ -2829,7 +3488,7 @@ fn verify(root: &Path) {
         })
         .unwrap_or(false)
     {
-        let artifact = read_compiled_artifact(root, &project);
+        let _artifact = read_compiled_artifact(root, &project);
         for module in project
             .get("modules")
             .and_then(Value::as_array)
@@ -2839,10 +3498,16 @@ fn verify(root: &Path) {
                 module.get("stage").and_then(Value::as_str),
                 Some("architecture_stable" | "frozen" | "retired")
             ) {
+                let module_id = module
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
+                let module_artifact = read_module_artifact(root, &project, module_id);
+                module_artifact_matches_project(module, &module_artifact);
                 assert_record_graph(
                     root,
-                    module.get("module_id").and_then(Value::as_str),
-                    &artifact,
+                    Some(module_id),
+                    &module_artifact,
                     matches!(
                         module.get("stage").and_then(Value::as_str),
                         Some("frozen" | "retired")
@@ -2961,7 +3626,7 @@ fn write_project_scaffold(root: &Path) {
     "debug_merge_comment_required": true
   },
   "lifecycles": {"issue": "open", "library": "draft", "source_snapshot": "mutable", "artifact": "generated"},
-  "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**","protected/source/**","tests/core/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**","tests/core/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
+  "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**","protected/source/**","tests/core/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**","tests/core/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
 "#,
     );
@@ -3235,6 +3900,11 @@ fn main() {
             pin_lock(&root, Path::new(&binary));
         }
         Some("compile") => compile(Path::new(&args.next().unwrap_or_else(|| ".".into()))),
+        Some("compile-module") => {
+            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk compile-module <dir> --module <id>")));
+            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk compile-module <dir> --module <id>"); }
+            compile_module(&root, &args.next().unwrap_or_else(|| fail("USAGE: appsdk compile-module <dir> --module <id>")));
+        }
         Some("promote") => {
             let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk promote <dir> --to <stage>")));
             if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk promote <dir> --to <stage>"); }
@@ -3307,7 +3977,7 @@ fn main() {
             }
             prepare_project(Path::new(&workspace));
         }
-        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

@@ -2774,6 +2774,9 @@ fn resolve_init_target(workspace: &Path, project_root: Option<&str>) -> PathBuf 
         return workspace.to_path_buf();
     };
     let relative = Path::new(project_root);
+    if relative == Path::new(".") {
+        return workspace.to_path_buf();
+    }
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
         || relative.components().any(|component| {
@@ -2786,6 +2789,103 @@ fn resolve_init_target(workspace: &Path, project_root: Option<&str>) -> PathBuf 
         fail("INVALID_PROJECT_ROOT");
     }
     workspace.join(relative)
+}
+
+fn preparation_file(workspace: &Path) -> PathBuf {
+    workspace.join(".appsdk-prepare.json")
+}
+
+fn preparation_template() -> &'static str {
+    r#"{
+  "schema_version": 1,
+  "preparation_id": "prepare-change-me",
+  "status": "draft",
+  "objective": "Describe the confirmed project or module change.",
+  "change_kind": null,
+  "project_root": null,
+  "legacy_roots": [],
+  "new_roots": [],
+  "protected_roots": [],
+  "runtime_forbidden_roots": [],
+  "boundary": {
+    "allowed_paths": [],
+    "forbidden_paths": [],
+    "payload_control_separation": "must be confirmed"
+  },
+  "acceptance_criteria": [],
+  "non_goals": [],
+  "assumptions": [],
+  "questions": [
+    {"question_id":"scope-kind","question":"Is this a new project, module refactor, project refactor, or debug task?","status":"open"},
+    {"question_id":"project-root","question":"Which relative directory is the new AppSDK project root?","status":"open"},
+    {"question_id":"legacy-boundary","question":"Which existing directories remain read-only and outside the new project?","status":"open"},
+    {"question_id":"new-boundary","question":"Which directories may the new project create or modify?","status":"open"}
+  ],
+  "confirmed_by": null,
+  "confirmed_at": null,
+  "created_at": "2026-01-01T00:00:00Z"
+}
+"#
+}
+
+fn read_preparation(workspace: &Path) -> Value {
+    let path = preparation_file(workspace);
+    if fs::symlink_metadata(&path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("PREPARATION_SYMLINK");
+    }
+    let text = fs::read_to_string(path).unwrap_or_else(|_| fail("PREPARATION_MISSING"));
+    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| fail("PREPARATION_INVALID"));
+    if value.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || value.get("status").and_then(Value::as_str) != Some("confirmed")
+        || value
+            .get("objective")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+        || value
+            .get("change_kind")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                matches!(
+                    *value,
+                    "new_project" | "module_refactor" | "project_refactor" | "debug"
+                )
+            })
+            .is_none()
+        || value.get("project_root").and_then(Value::as_str).is_none()
+        || value
+            .get("confirmed_by")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+        || value.get("confirmed_at").and_then(Value::as_str).is_none()
+    {
+        fail("PREPARATION_NOT_CONFIRMED");
+    }
+    value
+}
+
+fn prepare_project(workspace: &Path) {
+    assert_init_workspace_safe(workspace);
+    fs::create_dir_all(workspace).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    let path = preparation_file(workspace);
+    if fs::symlink_metadata(&path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("PREPARATION_SYMLINK");
+    }
+    if !path.exists() {
+        fs::write(&path, preparation_template())
+            .unwrap_or_else(|_| fail("PREPARATION_WRITE_FAILED"));
+        println!("created {}", path.display());
+    } else {
+        let text = fs::read_to_string(&path).unwrap_or_else(|_| fail("PREPARATION_INVALID"));
+        println!("{}", text);
+    }
 }
 
 fn init_project(root: &Path) {
@@ -2949,10 +3049,31 @@ fn main() {
             if args.next().is_some() {
                 fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]");
             }
-            let root = resolve_init_target(Path::new(&workspace), project_root.as_deref());
+            let workspace_path = Path::new(&workspace);
+            let preparation = read_preparation(workspace_path);
+            let prepared_root = preparation
+                .get("project_root")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| fail("PREPARATION_PROJECT_ROOT_MISSING"));
+            if let Some(explicit_root) = project_root.as_deref() {
+                let _ = resolve_init_target(workspace_path, Some(explicit_root));
+            }
+            if project_root.as_deref().is_some_and(|root| root != prepared_root) {
+                fail("PREPARATION_PROJECT_ROOT_MISMATCH");
+            }
+            let root = resolve_init_target(workspace_path, Some(prepared_root));
             init_project(&root);
         }
-        _ => fail("USAGE: appsdk version | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        Some("prepare") => {
+            let workspace = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk prepare <workspace>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk prepare <workspace>");
+            }
+            prepare_project(Path::new(&workspace));
+        }
+        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

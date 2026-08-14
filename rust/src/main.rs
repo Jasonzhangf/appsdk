@@ -704,7 +704,28 @@ fn assert_vcs_clean(root: &Path, project: &Value, module_id: &str) {
     let project_root = root
         .canonicalize()
         .unwrap_or_else(|_| fail("PROJECT_ROOT_MISSING"));
-    if git_root.canonicalize().ok().as_ref() != Some(&project_root) {
+    let canonical_git_root = git_root
+        .canonicalize()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    // The project may live in a subdirectory of a larger repository (for example
+    // a V4 subproject inside a monorepo). Cleanliness must be scoped to the
+    // project-relative prefix so unrelated sibling changes never block freeze.
+    let prefix_probe = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "rev-parse",
+            "--show-prefix",
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !prefix_probe.status.success() {
+        fail("VCS_ADAPTER_UNAVAILABLE");
+    }
+    let prefix = String::from_utf8_lossy(&prefix_probe.stdout)
+        .trim()
+        .to_string();
+    if !project_root.starts_with(&canonical_git_root) {
         fail("VCS_PROJECT_ROOT_MISMATCH");
     }
     if !project
@@ -719,14 +740,16 @@ fn assert_vcs_clean(root: &Path, project: &Value, module_id: &str) {
     {
         fail("MODULE_NOT_FOUND");
     }
-    let output = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or("."),
-            "status",
-            "--porcelain",
-            "--",
-        ])
+    let mut vcs_scope = Command::new("git");
+    vcs_scope.args([
+        "-C",
+        root.to_str().unwrap_or("."),
+        "status",
+        "--porcelain",
+        "--",
+    ]);
+    vcs_scope.arg(project_root.to_str().unwrap_or("."));
+    let output = vcs_scope
         .output()
         .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
     if !output.status.success() {

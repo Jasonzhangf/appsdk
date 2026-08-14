@@ -3685,7 +3685,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     }
 }
 
-fn verify(root: &Path) {
+fn verify(root: &Path, admission: bool) {
     assert_project_root_safe(root);
     let project = read_project(root);
     assert_governance_maps(root);
@@ -4000,10 +4000,12 @@ fn verify(root: &Path) {
     }
     let artifact_file = generated_root(root, &project).join("project.compiled.json");
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
-    if matches!(
-        stage,
-        "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
-    ) && !artifact_file.exists()
+    if !admission
+        && matches!(
+            stage,
+            "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
+        )
+        && !artifact_file.exists()
     {
         fail("COMPILED_STAGE_REQUIRES_ARTIFACT");
     }
@@ -4021,7 +4023,7 @@ fn verify(root: &Path) {
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
     {
-        if module.get("stage").and_then(Value::as_str) == Some("frozen") {
+        if !admission && module.get("stage").and_then(Value::as_str) == Some("frozen") {
             let id = module
                 .get("module_id")
                 .and_then(Value::as_str)
@@ -4100,18 +4102,19 @@ fn verify(root: &Path) {
             }
         }
     }
-    if project
-        .get("modules")
-        .and_then(Value::as_array)
-        .map(|modules| {
-            modules.iter().any(|module| {
-                matches!(
-                    module.get("stage").and_then(Value::as_str),
-                    Some("architecture_stable" | "frozen" | "retired")
-                )
+    if !admission
+        && project
+            .get("modules")
+            .and_then(Value::as_array)
+            .map(|modules| {
+                modules.iter().any(|module| {
+                    matches!(
+                        module.get("stage").and_then(Value::as_str),
+                        Some("architecture_stable" | "frozen" | "retired")
+                    )
+                })
             })
-        })
-        .unwrap_or(false)
+            .unwrap_or(false)
     {
         let _artifact = read_compiled_artifact(root, &project);
         for module in project
@@ -4533,7 +4536,17 @@ fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("version") => println!("appsdk 0.1.0 (rust)"),
-        Some("verify") => verify(Path::new(&args.next().unwrap_or_else(|| ".".into()))),
+        Some("verify") => {
+            let first = args.next().unwrap_or_else(|| ".".into());
+            if first == "--admission" {
+                let root = args
+                    .next()
+                    .unwrap_or_else(|| fail("USAGE: appsdk verify [--admission] <dir>"));
+                verify(Path::new(&root), true);
+            } else {
+                verify(Path::new(&first), false);
+            }
+        }
         Some("pin-lock") => {
             let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk pin-lock <dir> --binary <path>")));
             if args.next().as_deref() != Some("--binary") { fail("USAGE: appsdk pin-lock <dir> --binary <path>"); }

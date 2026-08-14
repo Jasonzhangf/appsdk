@@ -330,6 +330,44 @@ fn pinned_global_binary_verifies_without_local_sdk_witness() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn verify_admission_skips_generated_artifact_requirement() {
+    let root = temp_root("verify-admission");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/goal.json"),
+        r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#,
+    )
+    .unwrap();
+    pin_test_lock(root_text);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    let compile = run(&["compile", root_text]);
+    assert!(compile.status.success());
+    assert!(run(&["promote", root_text, "--to", "compiled"])
+        .status
+        .success());
+    fs::remove_file(root.join("generated/project.compiled.json")).unwrap();
+
+    let full = run(&["verify", root_text]);
+    assert!(!full.status.success());
+    assert!(String::from_utf8_lossy(&full.stderr).contains("COMPILED_STAGE_REQUIRES_ARTIFACT"));
+
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admission.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn canonical(value: &Value) -> String {
     match value {
         Value::Null => "null".into(),

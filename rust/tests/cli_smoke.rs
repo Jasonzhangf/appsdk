@@ -110,7 +110,9 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
     assert!(gitignore.contains(".appsdk-control/"));
     assert!(gitignore.contains(".appsdk/sdk.bin"));
     assert!(gitignore.contains("/active/lib/"));
+    assert!(gitignore.contains("/protected/"));
     assert!(gitignore.contains("/generated/"));
+    assert!(gitignore.contains("Cargo.lock"));
     for path in [
         ".appsdk/project.json",
         ".appsdk/goal.json",

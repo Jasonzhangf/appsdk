@@ -4154,7 +4154,7 @@ fn verify(root: &Path, admission: bool) {
 const APPSDK_GITIGNORE_BEGIN: &str = "# BEGIN APPSDK MANAGED";
 const APPSDK_GITIGNORE_END: &str = "# END APPSDK MANAGED";
 const APPSDK_GITIGNORE_BLOCK: &str =
-    "# BEGIN APPSDK MANAGED\n.appsdk-control/\n.appsdk/sdk.bin\n/active/lib/\n/generated/\n# END APPSDK MANAGED\n";
+    "# BEGIN APPSDK MANAGED\n.appsdk-control/\n.appsdk/sdk.bin\n/active/lib/\n/protected/\n/generated/\nCargo.lock\n# END APPSDK MANAGED\n";
 
 fn ensure_appsdk_gitignore(root: &Path) {
     let path = root.join(".gitignore");

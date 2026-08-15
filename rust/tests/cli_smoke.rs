@@ -270,6 +270,44 @@ fn init_can_place_new_project_in_configured_subdirectory() {
     fs::remove_dir_all(workspace).unwrap();
 }
 
+#[test]
+fn init_target_accepts_matching_parent_preparation() {
+    let workspace = temp_root("init-target-parent-preparation");
+    fs::create_dir_all(&workspace).unwrap();
+    confirm_preparation(&workspace, "v4", "project_refactor");
+    let target = workspace.join("v4");
+
+    let result = run(&["init", target.to_str().unwrap()]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(target.join(".appsdk/project.json").exists());
+    assert!(run(&["verify", target.to_str().unwrap()]).status.success());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn init_target_accepts_matching_nested_parent_preparation() {
+    let workspace = temp_root("init-target-nested-parent-preparation");
+    fs::create_dir_all(&workspace).unwrap();
+    confirm_preparation(&workspace, "services/v4", "project_refactor");
+    let target = workspace.join("services/v4");
+
+    let result = run(&["init", target.to_str().unwrap()]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(target.join(".appsdk/project.json").exists());
+    assert!(run(&["verify", target.to_str().unwrap()]).status.success());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
 fn pin_test_lock(root: &str) {
     let sdk_binary = binary();
     assert!(

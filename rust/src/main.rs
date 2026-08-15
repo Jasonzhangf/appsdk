@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -4322,6 +4322,20 @@ fn preparation_file(workspace: &Path) -> PathBuf {
     workspace.join(".appsdk-prepare.json")
 }
 
+fn preparation_exists(workspace: &Path) -> bool {
+    let path = preparation_file(workspace);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                fail("PREPARATION_SYMLINK");
+            }
+            true
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(_) => fail("PREPARATION_INVALID"),
+    }
+}
+
 fn preparation_template() -> &'static str {
     r#"{
   "schema_version": 1,
@@ -4393,6 +4407,28 @@ fn read_preparation(workspace: &Path) -> Value {
         fail("PREPARATION_NOT_CONFIRMED");
     }
     value
+}
+
+fn read_init_preparation(workspace: &Path) -> (Value, PathBuf) {
+    for preparation_workspace in workspace.ancestors() {
+        assert_init_workspace_safe(preparation_workspace);
+        if !preparation_exists(preparation_workspace) {
+            continue;
+        }
+        let preparation = read_preparation(preparation_workspace);
+        if preparation_workspace == workspace {
+            return (preparation, preparation_workspace.to_path_buf());
+        }
+        let project_root = preparation
+            .get("project_root")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("PREPARATION_PROJECT_ROOT_MISSING"));
+        if resolve_init_target(preparation_workspace, Some(project_root)) != workspace {
+            fail("PREPARATION_PROJECT_ROOT_MISMATCH");
+        }
+        return (preparation, preparation_workspace.to_path_buf());
+    }
+    fail("PREPARATION_MISSING")
 }
 
 fn prepare_project(workspace: &Path) {
@@ -4619,18 +4655,18 @@ fn main() {
                 fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]");
             }
             let workspace_path = Path::new(&workspace);
-            let preparation = read_preparation(workspace_path);
+            let (preparation, preparation_workspace) = read_init_preparation(workspace_path);
             let prepared_root = preparation
                 .get("project_root")
                 .and_then(Value::as_str)
                 .unwrap_or_else(|| fail("PREPARATION_PROJECT_ROOT_MISSING"));
             if let Some(explicit_root) = project_root.as_deref() {
-                let _ = resolve_init_target(workspace_path, Some(explicit_root));
+                let _ = resolve_init_target(&preparation_workspace, Some(explicit_root));
             }
             if project_root.as_deref().is_some_and(|root| root != prepared_root) {
                 fail("PREPARATION_PROJECT_ROOT_MISMATCH");
             }
-            let root = resolve_init_target(workspace_path, Some(prepared_root));
+            let root = resolve_init_target(&preparation_workspace, Some(prepared_root));
             init_project(&root);
         }
         Some("prepare") => {

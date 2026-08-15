@@ -1387,6 +1387,32 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
         "{}",
         String::from_utf8_lossy(&verified.stderr)
     );
+    // Version transitions may legitimately change the module build command
+    // (for example migrating a frozen consumer to a resolver-managed link
+    // surface). The previous Active artifact stays immutable; only the current
+    // module contract advances, and the v2 regression still gates freeze.
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["modules"][0]["build"]["args"] = serde_json::json!([
+        "-c",
+        "mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder v2\\n' > generated/modules/app-core/lib/app-core.placeholder"
+    ]);
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "v2 build command change"])
+        .status()
+        .unwrap()
+        .success());
     assert!(run(&["compile-module", root_text, "--module", "app-core"])
         .status
         .success());

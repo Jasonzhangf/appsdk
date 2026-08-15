@@ -68,7 +68,7 @@ Ignore:
 ```json
 {
   "sdk": "appsdk",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "digest": "sha256:replace-with-compiled-sdk-digest",
   "compiler_digest": "sha256:replace-with-compiler-digest",
   "bundle_digest": "sha256:replace-with-sdk-bundle-digest",

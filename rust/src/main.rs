@@ -161,7 +161,7 @@ fn assert_bundle_manifest() {
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
         || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || manifest.get("version").and_then(Value::as_str) != Some("0.1.0")
+        || manifest.get("version").and_then(Value::as_str) != Some("0.1.2")
         || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
     {
         fail("INVALID_SDK_BUNDLE_MANIFEST");
@@ -198,7 +198,7 @@ fn install_bundle_resources(root: &Path) {
     let record = serde_json::json!({
         "schema_version": 1,
         "sdk": "appsdk",
-        "version": "0.1.0",
+        "version": "0.1.2",
         "bundle_digest": sdk_bundle_digest(),
         "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": installed
@@ -1448,6 +1448,37 @@ fn module_artifact_matches_project(module: &Value, artifact: &Value) -> Value {
     artifact.clone()
 }
 
+/// Previous-active contract check: the already-published Active surface must
+/// keep the same module identity and artifact surface, and must stay
+/// self-consistent (its own signed hash still recomputes). The `build`
+/// command is per-version reproduction metadata and may legitimately change
+/// when a new version is opened (for example migrating a frozen consumer to a
+/// resolver-managed link surface); it is therefore not compared against the
+/// current module contract. The previous artifact remains hash-bound by its
+/// own freeze record and by `version_base.base_artifact_hash`.
+fn previous_active_matches_module(module: &Value, artifact: &Value) {
+    let module_id = record_str(module, "/module_id", "module");
+    if artifact.get("artifact_schema").and_then(Value::as_u64) != Some(1)
+        || record_str(artifact, "/module_id", "module-artifact") != module_id
+        || artifact.get("artifact_paths") != module.get("artifact_paths")
+    {
+        fail(format!("MODULE_ARTIFACT_MISMATCH:{}", module_id));
+    }
+    let stored_hash = record_str(artifact, "/artifact_hash", "module-artifact");
+    let mut unsigned = artifact.clone();
+    unsigned
+        .as_object_mut()
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+        .remove("artifact_hash");
+    unsigned
+        .as_object_mut()
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+        .remove("stage");
+    if stored_hash != sha256(&canonical(&unsigned)) {
+        fail(format!("MODULE_ARTIFACT_HASH_MISMATCH:{}", module_id));
+    }
+}
+
 fn compile_module(root: &Path, module_id: &str) -> Value {
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
@@ -2069,7 +2100,7 @@ fn begin_version(root: &Path, module_id: &str, from: &str, to: &str) {
             .unwrap_or_else(|_| fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING")),
     )
     .unwrap_or_else(|_| fail("INVALID_PREVIOUS_ACTIVE_ARTIFACT"));
-    module_artifact_matches_project(&modules[index], &previous_artifact);
+    previous_active_matches_module(&modules[index], &previous_artifact);
     let previous_hash = record_str(
         &previous_artifact,
         "/artifact_hash",
@@ -2973,7 +3004,7 @@ fn assert_record_graph(
                         })
                     })
                     .unwrap_or_else(|| fail("MODULE_NOT_FOUND"));
-                module_artifact_matches_project(module, &previous_value);
+                previous_active_matches_module(module, &previous_value);
             } else {
                 assert_artifact_matches(&project, &previous_value);
             }
@@ -3633,7 +3664,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     assert_bundle_manifest();
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || record.get("version").and_then(Value::as_str) != Some("0.1.0")
+        || record.get("version").and_then(Value::as_str) != Some("0.1.2")
         || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
         || record.get("manifest_digest").and_then(Value::as_str)
             != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
@@ -4234,7 +4265,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.2", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "governance": {
@@ -4267,7 +4298,7 @@ fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
         ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.0","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.2","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -4571,7 +4602,7 @@ fn pin_lock(root: &Path, binary: &Path) {
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("version") => println!("appsdk 0.1.0 (rust)"),
+        Some("version") => println!("appsdk 0.1.2 (rust)"),
         Some("verify") => {
             let first = args.next().unwrap_or_else(|| ".".into());
             if first == "--admission" {

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "sdk": "appsdk",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "runtime_entrypoint": "rust-binary",
   "resources": {
     "contracts": [

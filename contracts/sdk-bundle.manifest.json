@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "sdk": "appsdk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "runtime_entrypoint": "rust-binary",
   "resources": {
     "contracts": [
@@ -10,14 +10,20 @@
       "contracts/transitions/zone-transition.manifest.json",
       "contracts/lifecycle-state-machines.manifest.json",
       "contracts/records/record-graph.contract.json",
+      "contracts/records/worktree-record.schema.json",
+      "contracts/records/reproduction-record.schema.json",
       "contracts/records/evidence-record.schema.json",
+      "contracts/records/fix-candidate-record.schema.json",
       "contracts/records/review-record.schema.json",
+      "contracts/records/effectiveness-record.schema.json",
+      "contracts/records/merge-record.schema.json",
       "contracts/records/promotion-record.schema.json",
       "contracts/records/freeze-record.schema.json",
       "contracts/records/regression-report.schema.json"
     ],
     "docs": [
       "docs/design/appsdk-project-integration.md",
+      "docs/design/fix-lifecycle-v2.md",
       "docs/architecture/appsdk-governance-architecture.md"
     ],
     "rules": [

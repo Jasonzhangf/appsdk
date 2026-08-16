@@ -37,6 +37,16 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/record-graph.contract.json"),
     ),
     (
+        "contracts/records/worktree-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/worktree-record.schema.json"),
+    ),
+    (
+        "contracts/records/reproduction-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/reproduction-record.schema.json"),
+    ),
+    (
         "contracts/records/evidence-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/evidence-record.schema.json"),
@@ -45,6 +55,21 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/records/review-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/review-record.schema.json"),
+    ),
+    (
+        "contracts/records/fix-candidate-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/fix-candidate-record.schema.json"),
+    ),
+    (
+        "contracts/records/effectiveness-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/effectiveness-record.schema.json"),
+    ),
+    (
+        "contracts/records/merge-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/merge-record.schema.json"),
     ),
     (
         "contracts/records/promotion-record.schema.json",
@@ -65,6 +90,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "docs/design/appsdk-project-integration.md",
         "docs",
         include_str!("../../docs/design/appsdk-project-integration.md"),
+    ),
+    (
+        "docs/design/fix-lifecycle-v2.md",
+        "docs",
+        include_str!("../../docs/design/fix-lifecycle-v2.md"),
     ),
     (
         "docs/architecture/appsdk-governance-architecture.md",
@@ -161,7 +191,7 @@ fn assert_bundle_manifest() {
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
         || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || manifest.get("version").and_then(Value::as_str) != Some("0.1.2")
+        || manifest.get("version").and_then(Value::as_str) != Some("0.1.3")
         || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
     {
         fail("INVALID_SDK_BUNDLE_MANIFEST");
@@ -198,7 +228,7 @@ fn install_bundle_resources(root: &Path) {
     let record = serde_json::json!({
         "schema_version": 1,
         "sdk": "appsdk",
-        "version": "0.1.2",
+        "version": "0.1.3",
         "bundle_digest": sdk_bundle_digest(),
         "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": installed
@@ -256,6 +286,22 @@ fn bootstrap_contracts(root: &Path) {
     );
     write_embedded_contract(
         root,
+        ".appsdk/maps/module-registry.json",
+        r#"{
+  "schema_version": 1,
+  "modules": [{
+    "module_id": "app-core",
+    "status": "active",
+    "owner": "app-core",
+    "owned_paths": ["playground/experiments/**", "tests/core/**"],
+    "forbidden_paths": ["active/lib/**", "protected/**", "generated/**"],
+    "verification_gates": ["fix_lifecycle_graph", "mainline_merge_identity"]
+  }]
+}
+"#,
+    );
+    write_embedded_contract(
+        root,
         "contracts/transitions/zone-transition-manifest.json",
         include_str!("../../contracts/transitions/zone-transition.manifest.json"),
     );
@@ -266,6 +312,14 @@ fn bootstrap_contracts(root: &Path) {
     );
     for (relative, content) in [
         (
+            "contracts/records/worktree-record.schema.json",
+            include_str!("../../contracts/records/worktree-record.schema.json"),
+        ),
+        (
+            "contracts/records/reproduction-record.schema.json",
+            include_str!("../../contracts/records/reproduction-record.schema.json"),
+        ),
+        (
             "contracts/records/evidence-record.schema.json",
             include_str!("../../contracts/records/evidence-record.schema.json"),
         ),
@@ -274,8 +328,20 @@ fn bootstrap_contracts(root: &Path) {
             include_str!("../../contracts/records/goal-clarification-record.schema.json"),
         ),
         (
+            "contracts/records/fix-candidate-record.schema.json",
+            include_str!("../../contracts/records/fix-candidate-record.schema.json"),
+        ),
+        (
             "contracts/records/review-record.schema.json",
             include_str!("../../contracts/records/review-record.schema.json"),
+        ),
+        (
+            "contracts/records/effectiveness-record.schema.json",
+            include_str!("../../contracts/records/effectiveness-record.schema.json"),
+        ),
+        (
+            "contracts/records/merge-record.schema.json",
+            include_str!("../../contracts/records/merge-record.schema.json"),
         ),
         (
             "contracts/records/promotion-record.schema.json",
@@ -399,9 +465,14 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         fail("NON_CANONICAL_GOVERNANCE_CONTRACT");
     }
     let canonical_records = [
+        "contracts/records/worktree-record.schema.json",
+        "contracts/records/reproduction-record.schema.json",
         "contracts/records/evidence-record.schema.json",
+        "contracts/records/fix-candidate-record.schema.json",
         "contracts/records/goal-clarification-record.schema.json",
         "contracts/records/review-record.schema.json",
+        "contracts/records/effectiveness-record.schema.json",
+        "contracts/records/merge-record.schema.json",
         "contracts/records/promotion-record.schema.json",
         "contracts/records/regression-report.schema.json",
         "contracts/records/freeze-record.schema.json",
@@ -476,14 +547,29 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         let value: Value = serde_json::from_str(&text)
             .unwrap_or_else(|_| fail("INVALID_DECLARED_RECORD_CONTRACT"));
         let canonical_text = match relative {
+            "contracts/records/worktree-record.schema.json" => {
+                include_str!("../../contracts/records/worktree-record.schema.json")
+            }
+            "contracts/records/reproduction-record.schema.json" => {
+                include_str!("../../contracts/records/reproduction-record.schema.json")
+            }
             "contracts/records/evidence-record.schema.json" => {
                 include_str!("../../contracts/records/evidence-record.schema.json")
             }
             "contracts/records/goal-clarification-record.schema.json" => {
                 include_str!("../../contracts/records/goal-clarification-record.schema.json")
             }
+            "contracts/records/fix-candidate-record.schema.json" => {
+                include_str!("../../contracts/records/fix-candidate-record.schema.json")
+            }
             "contracts/records/review-record.schema.json" => {
                 include_str!("../../contracts/records/review-record.schema.json")
+            }
+            "contracts/records/effectiveness-record.schema.json" => {
+                include_str!("../../contracts/records/effectiveness-record.schema.json")
+            }
+            "contracts/records/merge-record.schema.json" => {
+                include_str!("../../contracts/records/merge-record.schema.json")
             }
             "contracts/records/promotion-record.schema.json" => {
                 include_str!("../../contracts/records/promotion-record.schema.json")
@@ -515,6 +601,7 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
 fn assert_governance_maps(root: &Path) {
     for (name, key) in [
         ("resource-map.json", "resources"),
+        ("module-registry.json", "modules"),
         ("function-map.json", "functions"),
         ("mainline-call-map.json", "edges"),
         ("verification-map.json", "gates"),
@@ -1675,6 +1762,16 @@ fn assert_project_contract(root: &Path, project: &Value) {
     {
         fail("INVALID_PROJECT_CONTRACT");
     }
+    let sdk_version = project
+        .pointer("/sdk/version")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
+    if sdk_version != "0.1.3" {
+        fail(format!(
+            "PROJECT_SDK_VERSION_PIN_MISMATCH:{}:required_binary=appsdk-{}",
+            sdk_version, sdk_version
+        ));
+    }
     assert_identifier(
         project
             .get("project_id")
@@ -2354,6 +2451,7 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
                 "evidence_id",
                 "issue_id",
                 "experiment_id",
+                "phase",
                 "source_commit",
                 "created_at",
                 "expires_at",
@@ -2367,9 +2465,17 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
                 "review_id",
                 "issue_id",
                 "promotion_id",
+                "review_kind",
+                "fix_candidate_id",
                 "reviewed_commit",
+                "reviewed_tree_hash",
+                "reviewed_diff_hash",
                 "reviewed_artifact_hash",
                 "reviewed_scope_hash",
+                "resource_map_hash",
+                "function_map_hash",
+                "mainline_call_map_hash",
+                "verification_map_hash",
                 "confidence_rationale",
                 "created_at",
             ][..],
@@ -2384,8 +2490,16 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
                 "module_id",
                 "base_commit",
                 "source_commit",
+                "candidate_commit",
+                "merged_commit",
                 "new_active_version",
                 "review_id",
+                "worktree_record_id",
+                "reproduction_record_id",
+                "fix_candidate_id",
+                "architecture_review_id",
+                "effectiveness_record_id",
+                "merge_record_id",
                 "root_cause",
                 "design_id",
                 "change_reason_comment",
@@ -2653,12 +2767,628 @@ fn assert_regression_report(
     (report, report_hash)
 }
 
+fn git_value(root: &Path, args: &[&str], error: &str) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|_| fail(error));
+    if !output.status.success() {
+        fail(error);
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn record_time(record: &Value, name: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(record_str(record, "/created_at", name))
+        .unwrap_or_else(|_| fail(format!("INVALID_RECORD_TIME:{}", name)))
+        .with_timezone(&Utc)
+}
+
+fn evidence_by_id(root: &Path, module_id: &str, evidence_id: &str) -> Value {
+    assert_identifier(evidence_id, "INVALID_EVIDENCE_ID");
+    let relative = format!(
+        ".appsdk/records/evidence/{}/{}.json",
+        module_id, evidence_id
+    );
+    let file = safe_owned_path(root, &relative, "evidence_record");
+    serde_json::from_str(
+        &fs::read_to_string(&file)
+            .unwrap_or_else(|_| fail(format!("MISSING_EVIDENCE_RECORD:{}", evidence_id))),
+    )
+    .unwrap_or_else(|_| fail(format!("INVALID_EVIDENCE_RECORD:{}", evidence_id)))
+}
+
+fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) {
+    let worktree_name = module_record_name("worktree-record", module_id);
+    let reproduction_name = module_record_name("reproduction-record", module_id);
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let review_name = module_record_name("review-record", module_id);
+    let worktree = read_record(root, &worktree_name);
+    let reproduction = read_record(root, &reproduction_name);
+    let candidate = read_record(root, &candidate_name);
+    let review = read_record(root, &review_name);
+    let issue_id = record_str(&worktree, "/issue_id", &worktree_name);
+    let scope_hash = record_str(&worktree, "/scope_hash", &worktree_name);
+    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
+    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    if record_str(&worktree, "/module_id", &worktree_name) != module_id
+        || record_str(&reproduction, "/module_id", &reproduction_name) != module_id
+        || record_str(&candidate, "/module_id", &candidate_name) != module_id
+        || record_str(&reproduction, "/issue_id", &reproduction_name) != issue_id
+        || record_str(&candidate, "/issue_id", &candidate_name) != issue_id
+        || record_str(&review, "/issue_id", &review_name) != issue_id
+    {
+        fail("FIX_ARCHITECTURE_SCOPE_MISMATCH");
+    }
+    if worktree.get("initial_clean") != Some(&Value::Bool(true))
+        || worktree.get("final_clean") != Some(&Value::Bool(true))
+        || worktree.get("isolation_mode").and_then(Value::as_str) != Some("isolated_worktree")
+    {
+        fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
+    }
+    if record_str(&reproduction, "/worktree_id", &reproduction_name)
+        != record_str(&worktree, "/worktree_id", &worktree_name)
+        || record_str(&candidate, "/worktree_id", &candidate_name)
+            != record_str(&worktree, "/worktree_id", &worktree_name)
+        || record_str(&reproduction, "/base_commit", &reproduction_name)
+            != record_str(&worktree, "/base_commit", &worktree_name)
+        || record_str(&candidate, "/base_commit", &candidate_name)
+            != record_str(&worktree, "/base_commit", &worktree_name)
+        || reproduction.get("result").and_then(Value::as_str) != Some("reproduced")
+    {
+        fail("FIX_REPRODUCTION_GRAPH_MISMATCH");
+    }
+    if record_str(&worktree, "/head_commit", &worktree_name) != candidate_commit
+        || record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
+        || record_str(&review, "/review_kind", &review_name) != "architecture"
+        || record_str(&review, "/fix_candidate_id", &review_name)
+            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(&review, "/reviewed_commit", &review_name) != candidate_commit
+        || record_str(&review, "/reviewed_tree_hash", &review_name) != candidate_tree
+        || record_str(&review, "/reviewed_diff_hash", &review_name)
+            != record_str(&candidate, "/diff_hash", &candidate_name)
+        || record_str(&review, "/reviewed_scope_hash", &review_name) != scope_hash
+        || record_str(&review, "/reviewed_artifact_hash", &review_name)
+            != record_str(artifact, "/artifact_hash", "artifact")
+        || review.get("verdict").and_then(Value::as_str) != Some("pass")
+    {
+        fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
+    }
+    for (path, map) in [
+        ("/resource_map_hash", "resource-map.json"),
+        ("/function_map_hash", "function-map.json"),
+        ("/mainline_call_map_hash", "mainline-call-map.json"),
+        ("/verification_map_hash", "verification-map.json"),
+    ] {
+        if record_str(&review, path, &review_name)
+            != file_sha256(&root.join(".appsdk/maps").join(map), map)
+        {
+            fail("ARCHITECTURE_REVIEW_MAP_STALE");
+        }
+    }
+    let confidence = review
+        .get("ai_confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or_else(|| fail("INVALID_REVIEW_CONFIDENCE"));
+    if !(0.0..=1.0).contains(&confidence)
+        || record_str(&review, "/confidence_rationale", &review_name).is_empty()
+    {
+        fail("INVALID_REVIEW_CONFIDENCE");
+    }
+    let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
+    let baseline = evidence_by_id(root, module_id, baseline_id);
+    if record_str(&baseline, "/phase", baseline_id) != "baseline_reproduction"
+        || baseline.get("result").and_then(Value::as_str) != Some("pass")
+        || baseline.get("input_hashes") != reproduction.get("input_hashes")
+    {
+        fail("BASELINE_REPRODUCTION_EVIDENCE_MISMATCH");
+    }
+    let mut candidate_phases = Vec::new();
+    for value in record_array(&candidate, "/verification_evidence_ids", &candidate_name) {
+        let id = value
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_CANDIDATE_EVIDENCE_ID"));
+        let evidence = evidence_by_id(root, module_id, id);
+        if record_str(&evidence, "/issue_id", id) != issue_id
+            || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+            || record_str(&evidence, "/scope_hash", id) != scope_hash
+            || record_str(&evidence, "/source_commit", id) != candidate_commit
+            || evidence.get("result").and_then(Value::as_str) != Some("pass")
+            || record_time(&evidence, id) > record_time(&review, &review_name)
+        {
+            fail("FIX_CANDIDATE_EVIDENCE_MISMATCH");
+        }
+        candidate_phases.push(record_str(&evidence, "/phase", id).to_string());
+    }
+    for phase in [
+        "fix_candidate",
+        "positive_intervention",
+        "negative_intervention",
+    ] {
+        if !candidate_phases.iter().any(|value| value == phase) {
+            fail(format!("MISSING_FIX_EVIDENCE_PHASE:{}", phase));
+        }
+    }
+    for value in record_array(&review, "/evidence_ids", &review_name) {
+        let id = value
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
+        let evidence = evidence_by_id(root, module_id, id);
+        if record_str(&evidence, "/issue_id", id) != issue_id
+            || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+            || record_str(&evidence, "/scope_hash", id) != scope_hash
+            || record_str(&evidence, "/source_commit", id) != candidate_commit
+            || evidence.get("result").and_then(Value::as_str) != Some("pass")
+            || record_str(&evidence, "/phase", id) == "post_architecture_effectiveness"
+            || record_time(&evidence, id) > record_time(&review, &review_name)
+        {
+            fail("ARCHITECTURE_REVIEW_EVIDENCE_MISMATCH");
+        }
+    }
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+        || !(record_time(&worktree, &worktree_name)
+            <= record_time(&reproduction, &reproduction_name)
+            && record_time(&reproduction, &reproduction_name)
+                <= record_time(&candidate, &candidate_name)
+            && record_time(&candidate, &candidate_name) <= record_time(&review, &review_name))
+    {
+        fail("FIX_ARCHITECTURE_ORDER_OR_IDENTITY_INVALID");
+    }
+}
+
+fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
+    let reproduction_name = module_record_name("reproduction-record", module_id);
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let review_name = module_record_name("review-record", module_id);
+    let effectiveness_name = module_record_name("effectiveness-record", module_id);
+    let reproduction = read_record(root, &reproduction_name);
+    let candidate = read_record(root, &candidate_name);
+    let review = read_record(root, &review_name);
+    let effectiveness = read_record(root, &effectiveness_name);
+    let issue_id = record_str(&candidate, "/issue_id", &candidate_name);
+    let scope_hash = record_str(&candidate, "/scope_hash", &candidate_name);
+    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
+    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    if record_str(&effectiveness, "/issue_id", &effectiveness_name) != issue_id
+        || record_str(&effectiveness, "/module_id", &effectiveness_name) != module_id
+        || record_str(&effectiveness, "/fix_candidate_id", &effectiveness_name)
+            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(
+            &effectiveness,
+            "/architecture_review_id",
+            &effectiveness_name,
+        ) != record_str(&review, "/review_id", &review_name)
+        || record_str(&effectiveness, "/reviewed_commit", &effectiveness_name) != candidate_commit
+        || record_str(&effectiveness, "/reviewed_tree_hash", &effectiveness_name) != candidate_tree
+        || effectiveness.get("reproduction_input_hashes") != reproduction.get("input_hashes")
+        || effectiveness.get("source_unchanged_since_review") != Some(&Value::Bool(true))
+        || effectiveness.get("result").and_then(Value::as_str) != Some("pass")
+        || record_time(&review, &review_name) > record_time(&effectiveness, &effectiveness_name)
+    {
+        fail("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH");
+    }
+    let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
+    if record_str(&effectiveness, "/baseline_evidence_id", &effectiveness_name) != baseline_id {
+        fail("POST_ARCHITECTURE_BASELINE_MISMATCH");
+    }
+    let mut ids = vec![record_str(
+        &effectiveness,
+        "/fixed_replay_evidence_id",
+        &effectiveness_name,
+    )
+    .to_string()];
+    for path in [
+        "/positive_evidence_ids",
+        "/negative_evidence_ids",
+        "/blackbox_evidence_ids",
+    ] {
+        ids.extend(
+            record_array(&effectiveness, path, &effectiveness_name)
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| fail("INVALID_EFFECTIVENESS_EVIDENCE_ID"))
+                        .to_string()
+                }),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    let mut phases = Vec::new();
+    for id in ids {
+        let evidence = evidence_by_id(root, module_id, &id);
+        if record_str(&evidence, "/issue_id", &id) != issue_id
+            || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+            || record_str(&evidence, "/scope_hash", &id) != scope_hash
+            || record_str(&evidence, "/source_commit", &id) != candidate_commit
+            || evidence.get("result").and_then(Value::as_str) != Some("pass")
+            || record_time(&evidence, &id) < record_time(&review, &review_name)
+        {
+            fail("POST_ARCHITECTURE_EFFECTIVENESS_EVIDENCE_MISMATCH");
+        }
+        phases.push(record_str(&evidence, "/phase", &id).to_string());
+    }
+    for phase in [
+        "positive_intervention",
+        "negative_intervention",
+        "post_architecture_effectiveness",
+    ] {
+        if !phases.iter().any(|value| value == phase) {
+            fail(format!("MISSING_EFFECTIVENESS_EVIDENCE_PHASE:{}", phase));
+        }
+    }
+}
+
+fn assert_fix_merge_gate(root: &Path, module_id: &str) {
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let effectiveness_name = module_record_name("effectiveness-record", module_id);
+    let merge_name = module_record_name("merge-record", module_id);
+    let candidate = read_record(root, &candidate_name);
+    let effectiveness = read_record(root, &effectiveness_name);
+    let merge = read_record(root, &merge_name);
+    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
+    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    let merge_commit = record_str(&merge, "/merge_commit", &merge_name);
+    if record_str(&merge, "/issue_id", &merge_name)
+        != record_str(&candidate, "/issue_id", &candidate_name)
+        || record_str(&merge, "/module_id", &merge_name) != module_id
+        || record_str(&merge, "/fix_candidate_id", &merge_name)
+            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(&merge, "/effectiveness_id", &merge_name)
+            != record_str(&effectiveness, "/effectiveness_id", &effectiveness_name)
+        || record_str(&merge, "/candidate_commit", &merge_name) != candidate_commit
+        || record_str(&merge, "/candidate_tree_hash", &merge_name) != candidate_tree
+        || record_str(&merge, "/merged_tree_hash", &merge_name) != candidate_tree
+        || merge.get("change_identity").and_then(Value::as_str) != Some("exact")
+        || merge.get("result").and_then(Value::as_str) != Some("pass")
+        || record_time(&effectiveness, &effectiveness_name) > record_time(&merge, &merge_name)
+    {
+        fail("MAINLINE_MERGE_RECORD_MISMATCH");
+    }
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+        || git_value(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", merge_commit)],
+            "MAINLINE_MERGE_COMMIT_MISSING",
+        ) != candidate_tree
+    {
+        fail("MAINLINE_MERGE_IDENTITY_MISMATCH");
+    }
+    let candidate_merged = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            candidate_commit,
+            merge_commit,
+        ])
+        .status()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !candidate_merged.success() {
+        fail("FIX_CANDIDATE_NOT_MERGED");
+    }
+    let mainline_head = git_value(
+        root,
+        &[
+            "rev-parse",
+            record_str(&merge, "/mainline_ref", &merge_name),
+        ],
+        "MAINLINE_REF_MISSING",
+    );
+    let merge_on_mainline = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["merge-base", "--is-ancestor", merge_commit, &mainline_head])
+        .status()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !merge_on_mainline.success() {
+        fail("RECORDED_MERGE_NOT_ON_MAINLINE");
+    }
+}
+
+fn assert_fix_lifecycle_graph(
+    root: &Path,
+    module_id: &str,
+    review: &Value,
+    promotion: &Value,
+    artifact: &Value,
+) {
+    assert_fix_architecture_gate(root, module_id, artifact);
+    assert_fix_effectiveness_gate(root, module_id);
+    assert_fix_merge_gate(root, module_id);
+    let worktree_name = module_record_name("worktree-record", module_id);
+    let reproduction_name = module_record_name("reproduction-record", module_id);
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let effectiveness_name = module_record_name("effectiveness-record", module_id);
+    let merge_name = module_record_name("merge-record", module_id);
+    let worktree = read_record(root, &worktree_name);
+    let reproduction = read_record(root, &reproduction_name);
+    let candidate = read_record(root, &candidate_name);
+    let effectiveness = read_record(root, &effectiveness_name);
+    let merge = read_record(root, &merge_name);
+
+    let issue_id = record_str(&worktree, "/issue_id", &worktree_name);
+    let scope_hash = record_str(&worktree, "/scope_hash", &worktree_name);
+    let base_commit = record_str(&worktree, "/base_commit", &worktree_name);
+    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
+    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    let review_id = record_str(review, "/review_id", "review-record.json");
+    for (record, name) in [
+        (&reproduction, reproduction_name.as_str()),
+        (&candidate, candidate_name.as_str()),
+        (&effectiveness, effectiveness_name.as_str()),
+        (&merge, merge_name.as_str()),
+        (review, "review-record.json"),
+        (promotion, "promotion-record.json"),
+    ] {
+        if record_str(record, "/issue_id", name) != issue_id {
+            fail("FIX_LIFECYCLE_ISSUE_MISMATCH");
+        }
+    }
+    for (record, name) in [
+        (&worktree, worktree_name.as_str()),
+        (&reproduction, reproduction_name.as_str()),
+        (&candidate, candidate_name.as_str()),
+        (&effectiveness, effectiveness_name.as_str()),
+        (&merge, merge_name.as_str()),
+    ] {
+        if record_str(record, "/module_id", name) != module_id {
+            fail("FIX_LIFECYCLE_MODULE_MISMATCH");
+        }
+    }
+    if worktree.get("initial_clean") != Some(&Value::Bool(true))
+        || worktree.get("final_clean") != Some(&Value::Bool(true))
+        || worktree.get("isolation_mode").and_then(Value::as_str) != Some("isolated_worktree")
+    {
+        fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
+    }
+    if record_str(&reproduction, "/worktree_id", &reproduction_name)
+        != record_str(&worktree, "/worktree_id", &worktree_name)
+        || record_str(&candidate, "/worktree_id", &candidate_name)
+            != record_str(&worktree, "/worktree_id", &worktree_name)
+        || record_str(&reproduction, "/base_commit", &reproduction_name) != base_commit
+        || record_str(&candidate, "/base_commit", &candidate_name) != base_commit
+        || reproduction.get("result").and_then(Value::as_str) != Some("reproduced")
+    {
+        fail("FIX_REPRODUCTION_GRAPH_MISMATCH");
+    }
+    if record_str(&worktree, "/head_commit", &worktree_name) != candidate_commit
+        || record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
+        || record_str(review, "/review_kind", "review-record.json") != "architecture"
+        || record_str(review, "/fix_candidate_id", "review-record.json")
+            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(review, "/reviewed_commit", "review-record.json") != candidate_commit
+        || record_str(review, "/reviewed_tree_hash", "review-record.json") != candidate_tree
+        || record_str(review, "/reviewed_scope_hash", "review-record.json") != scope_hash
+        || record_str(review, "/reviewed_diff_hash", "review-record.json")
+            != record_str(&candidate, "/diff_hash", &candidate_name)
+        || review.get("verdict").and_then(Value::as_str) != Some("pass")
+    {
+        fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
+    }
+    for (path, map) in [
+        ("/resource_map_hash", "resource-map.json"),
+        ("/function_map_hash", "function-map.json"),
+        ("/mainline_call_map_hash", "mainline-call-map.json"),
+        ("/verification_map_hash", "verification-map.json"),
+    ] {
+        if record_str(review, path, "review-record.json")
+            != file_sha256(&root.join(".appsdk/maps").join(map), map)
+        {
+            fail("ARCHITECTURE_REVIEW_MAP_STALE");
+        }
+    }
+    if record_str(&effectiveness, "/fix_candidate_id", &effectiveness_name)
+        != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(
+            &effectiveness,
+            "/architecture_review_id",
+            &effectiveness_name,
+        ) != review_id
+        || record_str(&effectiveness, "/reviewed_commit", &effectiveness_name) != candidate_commit
+        || record_str(&effectiveness, "/reviewed_tree_hash", &effectiveness_name) != candidate_tree
+        || effectiveness.get("source_unchanged_since_review") != Some(&Value::Bool(true))
+        || effectiveness.get("result").and_then(Value::as_str) != Some("pass")
+        || effectiveness.get("reproduction_input_hashes") != reproduction.get("input_hashes")
+    {
+        fail("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH");
+    }
+    let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
+    if record_str(&effectiveness, "/baseline_evidence_id", &effectiveness_name) != baseline_id {
+        fail("POST_ARCHITECTURE_BASELINE_MISMATCH");
+    }
+    let mut required_evidence = vec![baseline_id.to_string()];
+    required_evidence.push(
+        record_str(
+            &effectiveness,
+            "/fixed_replay_evidence_id",
+            &effectiveness_name,
+        )
+        .to_string(),
+    );
+    for path in [
+        "/positive_evidence_ids",
+        "/negative_evidence_ids",
+        "/blackbox_evidence_ids",
+    ] {
+        required_evidence.extend(
+            record_array(&effectiveness, path, &effectiveness_name)
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| fail("INVALID_EFFECTIVENESS_EVIDENCE_ID"))
+                        .to_string()
+                }),
+        );
+    }
+    required_evidence.extend(
+        record_array(&candidate, "/verification_evidence_ids", &candidate_name)
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .unwrap_or_else(|| fail("INVALID_CANDIDATE_EVIDENCE_ID"))
+                    .to_string()
+            }),
+    );
+    required_evidence.sort();
+    required_evidence.dedup();
+    let mut phases = Vec::new();
+    for id in &required_evidence {
+        let evidence = evidence_by_id(root, module_id, id);
+        if record_str(&evidence, "/evidence_id", id) != id
+            || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+            || record_str(&evidence, "/issue_id", id) != issue_id
+            || record_str(&evidence, "/scope_hash", id) != scope_hash
+            || evidence.get("result").and_then(Value::as_str) != Some("pass")
+        {
+            fail("FIX_EVIDENCE_SCOPE_MISMATCH");
+        }
+        phases.push(record_str(&evidence, "/phase", id).to_string());
+    }
+    for phase in [
+        "baseline_reproduction",
+        "fix_candidate",
+        "positive_intervention",
+        "negative_intervention",
+        "post_architecture_effectiveness",
+    ] {
+        if !phases.iter().any(|value| value == phase) {
+            fail(format!("MISSING_FIX_EVIDENCE_PHASE:{}", phase));
+        }
+    }
+    for value in record_array(review, "/evidence_ids", "review-record.json") {
+        let id = value
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
+        let evidence = evidence_by_id(root, module_id, id);
+        if record_str(&evidence, "/phase", id) == "post_architecture_effectiveness"
+            || record_time(&evidence, id) > record_time(review, "review-record.json")
+        {
+            fail("ARCHITECTURE_REVIEW_USES_POST_REVIEW_EVIDENCE");
+        }
+    }
+    if record_str(&merge, "/fix_candidate_id", &merge_name)
+        != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(&merge, "/effectiveness_id", &merge_name)
+            != record_str(&effectiveness, "/effectiveness_id", &effectiveness_name)
+        || record_str(&merge, "/candidate_commit", &merge_name) != candidate_commit
+        || record_str(&merge, "/candidate_tree_hash", &merge_name) != candidate_tree
+        || merge.get("change_identity").and_then(Value::as_str) != Some("exact")
+        || merge.get("result").and_then(Value::as_str) != Some("pass")
+    {
+        fail("MAINLINE_MERGE_RECORD_MISMATCH");
+    }
+    let merge_commit = record_str(&merge, "/merge_commit", &merge_name);
+    if record_str(&merge, "/merged_tree_hash", &merge_name) != candidate_tree {
+        fail("MAINLINE_MERGE_TREE_DIFFERS_FROM_REVIEWED_CANDIDATE");
+    }
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+        || git_value(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", merge_commit)],
+            "MAINLINE_MERGE_COMMIT_MISSING",
+        ) != record_str(&merge, "/merged_tree_hash", &merge_name)
+    {
+        fail("MAINLINE_MERGE_IDENTITY_MISMATCH");
+    }
+    let ancestor = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            candidate_commit,
+            merge_commit,
+        ])
+        .status()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !ancestor.success() {
+        fail("FIX_CANDIDATE_NOT_MERGED");
+    }
+    let mainline_head = git_value(
+        root,
+        &[
+            "rev-parse",
+            record_str(&merge, "/mainline_ref", &merge_name),
+        ],
+        "MAINLINE_REF_MISSING",
+    );
+    let merge_on_mainline = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["merge-base", "--is-ancestor", merge_commit, &mainline_head])
+        .status()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !merge_on_mainline.success() {
+        fail("RECORDED_MERGE_NOT_ON_MAINLINE");
+    }
+    if record_str(promotion, "/worktree_record_id", "promotion-record.json")
+        != record_str(&worktree, "/worktree_id", &worktree_name)
+        || record_str(
+            promotion,
+            "/reproduction_record_id",
+            "promotion-record.json",
+        ) != record_str(&reproduction, "/reproduction_id", &reproduction_name)
+        || record_str(promotion, "/fix_candidate_id", "promotion-record.json")
+            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(
+            promotion,
+            "/architecture_review_id",
+            "promotion-record.json",
+        ) != review_id
+        || record_str(
+            promotion,
+            "/effectiveness_record_id",
+            "promotion-record.json",
+        ) != record_str(&effectiveness, "/effectiveness_id", &effectiveness_name)
+        || record_str(promotion, "/merge_record_id", "promotion-record.json")
+            != record_str(&merge, "/merge_id", &merge_name)
+        || record_str(promotion, "/candidate_commit", "promotion-record.json") != candidate_commit
+        || record_str(promotion, "/merged_commit", "promotion-record.json") != merge_commit
+        || record_str(promotion, "/source_commit", "promotion-record.json") != merge_commit
+    {
+        fail("PROMOTION_FIX_LIFECYCLE_REFERENCE_MISMATCH");
+    }
+    if !(record_time(&worktree, &worktree_name) <= record_time(&reproduction, &reproduction_name)
+        && record_time(&reproduction, &reproduction_name)
+            <= record_time(&candidate, &candidate_name)
+        && record_time(&candidate, &candidate_name) <= record_time(review, "review-record.json")
+        && record_time(review, "review-record.json")
+            <= record_time(&effectiveness, &effectiveness_name)
+        && record_time(&effectiveness, &effectiveness_name) <= record_time(&merge, &merge_name)
+        && record_time(&merge, &merge_name) <= record_time(promotion, "promotion-record.json"))
+    {
+        fail("FIX_LIFECYCLE_ORDER_INVALID");
+    }
+}
+
 fn assert_record_graph(
     root: &Path,
     module_id: Option<&str>,
     artifact: &Value,
     require_freeze: bool,
 ) {
+    if let Some(module_id) = module_id {
+        let _ = read_record(root, &module_record_name("worktree-record", module_id));
+    }
     let evidence_name = module_id
         .map(|id| module_record_name("evidence-record", id))
         .unwrap_or_else(|| "evidence-record.json".into());
@@ -2672,6 +3402,9 @@ fn assert_record_graph(
     let review = read_record(root, &review_name);
     let promotion = read_record(root, &promotion_name);
     assert_record_schema(&evidence, &review, &promotion);
+    if let Some(module_id) = module_id {
+        assert_fix_lifecycle_graph(root, module_id, &review, &promotion, artifact);
+    }
     let cleanup_id = record_str(
         &promotion,
         "/playground_cleanup_record_id",
@@ -3139,11 +3872,10 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
         None
     };
     if target == "architecture_stable" {
-        assert_record_graph(
+        assert_fix_architecture_gate(
             root,
-            Some(module_id),
+            module_id,
             module_artifact.as_ref().unwrap_or(&artifact),
-            false,
         );
     }
     write_artifact_value(root, &project, &artifact);
@@ -3664,7 +4396,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     assert_bundle_manifest();
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || record.get("version").and_then(Value::as_str) != Some("0.1.2")
+        || record.get("version").and_then(Value::as_str) != Some("0.1.3")
         || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
         || record.get("manifest_digest").and_then(Value::as_str)
             != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
@@ -4163,15 +4895,31 @@ fn verify(root: &Path, admission: bool) {
                     .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
                 let module_artifact = read_module_artifact(root, &project, module_id);
                 module_artifact_matches_project(module, &module_artifact);
-                assert_record_graph(
-                    root,
-                    Some(module_id),
-                    &module_artifact,
-                    matches!(
-                        module.get("stage").and_then(Value::as_str),
-                        Some("frozen" | "retired")
-                    ),
-                );
+                if module.get("stage").and_then(Value::as_str) == Some("architecture_stable") {
+                    let records = root.join(".appsdk/records");
+                    let effectiveness_exists = records
+                        .join(module_record_name("effectiveness-record", module_id))
+                        .is_file();
+                    let merge_exists = records
+                        .join(module_record_name("merge-record", module_id))
+                        .is_file();
+                    let promotion_exists = records
+                        .join(module_record_name("promotion-record", module_id))
+                        .is_file();
+                    if promotion_exists {
+                        assert_record_graph(root, Some(module_id), &module_artifact, false);
+                    } else {
+                        assert_fix_architecture_gate(root, module_id, &module_artifact);
+                        if merge_exists {
+                            assert_fix_effectiveness_gate(root, module_id);
+                            assert_fix_merge_gate(root, module_id);
+                        } else if effectiveness_exists {
+                            assert_fix_effectiveness_gate(root, module_id);
+                        }
+                    }
+                } else {
+                    assert_record_graph(root, Some(module_id), &module_artifact, true);
+                }
             }
         }
     }
@@ -4265,7 +5013,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.2", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.3", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "governance": {
@@ -4279,7 +5027,7 @@ fn write_project_scaffold(root: &Path) {
     "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
     "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
     "runtime_forbidden_roots": ["playground/**", "generated/**"],
-    "record_contracts": ["contracts/records/evidence-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
     "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true
@@ -4298,7 +5046,7 @@ fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
         ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.2","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.3","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -4602,7 +5350,7 @@ fn pin_lock(root: &Path, binary: &Path) {
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("version") => println!("appsdk 0.1.2 (rust)"),
+        Some("version") => println!("appsdk 0.1.3 (rust)"),
         Some("verify") => {
             let first = args.next().unwrap_or_else(|| ".".into());
             if first == "--admission" {

@@ -7,7 +7,7 @@ AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实�
 ## 第一阶段治理流程
 
 ```text
-Goal clarification -> claim -> Playground source -> review PASS -> mainline merge -> compile library
+Goal clarification -> clean worktree -> reproduce -> fix candidate -> architecture PASS -> effectiveness replay -> verified mainline merge -> compile library
                   -> Active lib -> Protected source/contracts -> lock -> close
 ```
 

@@ -11,6 +11,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
+      - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
+      - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
       - run: cargo test --manifest-path rust/Cargo.toml
       - run: cargo build --release --manifest-path rust/Cargo.toml
@@ -26,6 +28,11 @@ jobs:
           test -f "$tmp/project/.appsdk/sdk-resources.json"
           test -f "$tmp/project/.appsdk/contracts/project.schema.json"
           test -f "$tmp/project/.appsdk/docs/design/appsdk-project-integration.md"
+          test -f "$tmp/project/.appsdk/docs/design/fix-lifecycle-v2.md"
+          test -f "$tmp/project/.appsdk/maps/module-registry.json"
+          test -f "$tmp/project/.appsdk/contracts/records/worktree-record.schema.json"
+          test -f "$tmp/project/.appsdk/contracts/records/effectiveness-record.schema.json"
+          test -f "$tmp/project/.appsdk/contracts/records/merge-record.schema.json"
           test -f "$tmp/project/.appsdk/rules/appsdk-project-governance.md"
           test -f "$tmp/project/.appsdk/skills/appsdk-project-governance/SKILL.md"
           ! find "$tmp/project" -type f \( -name '*.mjs' -o -name '*.rs' \) | grep .

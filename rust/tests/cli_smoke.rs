@@ -117,9 +117,14 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         ".appsdk/sdk.lock",
         ".appsdk/sdk-resources.json",
         ".appsdk/docs/design/appsdk-project-integration.md",
+        ".appsdk/docs/design/fix-lifecycle-v2.md",
         ".appsdk/rules/appsdk-project-governance.md",
         ".appsdk/skills/appsdk-project-governance/SKILL.md",
         ".appsdk/maps/resource-map.json",
+        ".appsdk/maps/module-registry.json",
+        ".appsdk/contracts/records/worktree-record.schema.json",
+        ".appsdk/contracts/records/effectiveness-record.schema.json",
+        ".appsdk/contracts/records/merge-record.schema.json",
         "playground/experiments",
         "active/lib",
         "protected/source",
@@ -156,6 +161,37 @@ fn verify_rejects_tampered_installed_sdk_resource() {
     let result = run(&["verify", root_text]);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_RESOURCE_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_requires_the_project_pinned_sdk_binary_version() {
+    let root = temp_root("sdk-version-pin");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    assert!(run(&["init", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["sdk"]["version"] = Value::String("0.1.2".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let lock_file = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
+    lock["version"] = Value::String("0.1.2".into());
+    fs::write(
+        &lock_file,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run(&["verify", root_text]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("PROJECT_SDK_VERSION_PIN_MISMATCH:0.1.2:required_binary=appsdk-0.1.2"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -441,29 +477,214 @@ fn digest(value: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn git_test_value(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn file_digest(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(fs::read(path).unwrap());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_freeze: bool) {
     let records = root.join(".appsdk/records");
     fs::create_dir_all(&records).unwrap();
+    let evidence_dir = records.join("evidence").join(module_id);
+    fs::create_dir_all(&evidence_dir).unwrap();
+    let commit = git_test_value(root, &["rev-parse", "HEAD"]);
+    let tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
+    let map_root = root.join(".appsdk/maps");
+    let evidence = |id: &str, phase: &str, kind: &str, created_at: &str| {
+        serde_json::json!({
+            "evidence_id": id,
+            "issue_id": "issue-1",
+            "experiment_id": "experiment-1",
+            "phase": phase,
+            "kind": kind,
+            "source_commit": commit,
+            "artifact_hash": artifact_hash,
+            "scope": {"module_id": module_id},
+            "producer": {"adapter":"test","identity":"test"},
+            "result":"pass",
+            "created_at": created_at,
+            "expires_at":"2099-01-01T00:00:00Z",
+            "input_hashes":["input-1"],
+            "scope_hash":"scope-1"
+        })
+    };
+    for (id, phase, kind, created_at) in [
+        (
+            "baseline-1",
+            "baseline_reproduction",
+            "sample_replay",
+            "2026-01-01T00:01:00Z",
+        ),
+        (
+            "candidate-evidence-1",
+            "fix_candidate",
+            "build",
+            "2026-01-01T00:03:00Z",
+        ),
+        (
+            "positive-1",
+            "positive_intervention",
+            "positive_test",
+            "2026-01-01T00:03:00Z",
+        ),
+        (
+            "negative-1",
+            "negative_intervention",
+            "negative_test",
+            "2026-01-01T00:03:00Z",
+        ),
+        (
+            "effective-1",
+            "post_architecture_effectiveness",
+            "sample_replay",
+            "2026-01-01T00:05:00Z",
+        ),
+        (
+            "post-positive-1",
+            "positive_intervention",
+            "positive_test",
+            "2026-01-01T00:05:00Z",
+        ),
+        (
+            "post-negative-1",
+            "negative_intervention",
+            "negative_test",
+            "2026-01-01T00:05:00Z",
+        ),
+    ] {
+        fs::write(
+            evidence_dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&evidence(id, phase, kind, created_at)).unwrap() + "\n",
+        )
+        .unwrap();
+    }
     fs::write(
         records.join(format!("evidence-record-{module_id}.json")),
-        format!(
-            r#"{{"evidence_id":"evidence-1","issue_id":"issue-1","experiment_id":"experiment-1","kind":"build","source_commit":"commit-1","artifact_hash":"{}","scope":{{"module_id":"{}"}},"producer":{{"adapter":"test","identity":"test"}},"result":"pass","created_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","input_hashes":["input-1"],"scope_hash":"scope-1"}}"#,
-            artifact_hash, module_id
-        ),
+        serde_json::to_string_pretty(&evidence(
+            "candidate-evidence-1",
+            "fix_candidate",
+            "build",
+            "2026-01-01T00:03:00Z",
+        ))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("worktree-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "worktree_id":"worktree-1","issue_id":"issue-1","module_id":module_id,
+            "base_ref":"HEAD","base_commit":commit,"branch":"test-fix","head_commit":commit,
+            "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
+            "scope_hash":"scope-1","created_at":"2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("reproduction-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "reproduction_id":"reproduction-1","issue_id":"issue-1","module_id":module_id,
+            "worktree_id":"worktree-1","base_commit":commit,"input_hashes":["input-1"],
+            "baseline_evidence_id":"baseline-1","first_divergence":"test-owner",
+            "result":"reproduced","created_at":"2026-01-01T00:01:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("fix-candidate-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "fix_candidate_id":"candidate-1","issue_id":"issue-1","module_id":module_id,
+            "worktree_id":"worktree-1","base_commit":commit,"head_commit":commit,
+            "tree_hash":tree,"diff_hash":"sha256:test-diff","design_id":"design-1",
+            "owner":"app-core","scope_hash":"scope-1","changed_paths":[],
+            "verification_evidence_ids":["candidate-evidence-1","positive-1","negative-1"],
+            "created_at":"2026-01-01T00:03:00Z"
+        }))
+        .unwrap()
+            + "\n",
     )
     .unwrap();
     fs::write(
         records.join(format!("review-record-{module_id}.json")),
-        format!(
-            r#"{{"review_id":"review-1","issue_id":"issue-1","promotion_id":"promotion-1","reviewer":{{"adapter":"test","identity":"test"}},"verdict":"pass","evidence_ids":["evidence-1"],"reviewed_commit":"commit-1","reviewed_artifact_hash":"{}","reviewed_scope_hash":"scope-1","ai_confidence":1.0,"confidence_rationale":"blackbox evidence","created_at":"2026-01-01T00:00:00Z"}}"#,
-            artifact_hash
-        ),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "review_id":"review-1","issue_id":"issue-1","promotion_id":"promotion-1",
+            "review_kind":"architecture","fix_candidate_id":"candidate-1",
+            "reviewer":{"adapter":"test","identity":"test"},"verdict":"pass",
+            "evidence_ids":["candidate-evidence-1","positive-1","negative-1"],"reviewed_commit":commit,
+            "reviewed_tree_hash":tree,"reviewed_diff_hash":"sha256:test-diff",
+            "reviewed_artifact_hash":artifact_hash,"reviewed_scope_hash":"scope-1",
+            "resource_map_hash":file_digest(&map_root.join("resource-map.json")),
+            "function_map_hash":file_digest(&map_root.join("function-map.json")),
+            "mainline_call_map_hash":file_digest(&map_root.join("mainline-call-map.json")),
+            "verification_map_hash":file_digest(&map_root.join("verification-map.json")),
+            "ai_confidence":1.0,"confidence_rationale":"architecture and boundary evidence",
+            "created_at":"2026-01-01T00:04:00Z"
+        }))
+        .unwrap()
+            + "\n",
     )
     .unwrap();
-    let promotion = format!(
-        r#"{{"promotion_id":"promotion-1","issue_id":"issue-1","experiment_id":"experiment-1","module_id":"{}","base_commit":"base-1","source_commit":"commit-1","previous_active_version":null,"new_active_version":"active-v1","artifact_hash":"{}","scope_hash":"scope-1","public_api_hash":"api-1","review_id":"review-1","evidence_ids":["evidence-1"],"required_gate_results":[{{"gate_id":"blackbox","result":"pass","producer":"test"}}],"change_set_id":"change-1","compatibility_level":"compatible","root_cause":"test root cause","design_id":"design-1","change_reason_comment":"test reason","playground_cleanup_record_id":"cleanup-1","created_at":"2026-01-01T00:00:00Z"}}"#,
-        module_id, artifact_hash
-    );
+    fs::write(
+        records.join(format!("effectiveness-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "effectiveness_id":"effectiveness-1","issue_id":"issue-1","module_id":module_id,
+            "fix_candidate_id":"candidate-1","architecture_review_id":"review-1",
+            "reviewed_commit":commit,"reviewed_tree_hash":tree,
+            "reproduction_input_hashes":["input-1"],"baseline_evidence_id":"baseline-1",
+            "fixed_replay_evidence_id":"effective-1","positive_evidence_ids":["post-positive-1"],
+            "negative_evidence_ids":["post-negative-1"],"blackbox_evidence_ids":["effective-1"],
+            "source_unchanged_since_review":true,"result":"pass","created_at":"2026-01-01T00:05:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("merge-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "merge_id":"merge-1","issue_id":"issue-1","module_id":module_id,
+            "fix_candidate_id":"candidate-1","effectiveness_id":"effectiveness-1",
+            "mainline_ref":"HEAD","candidate_commit":commit,"merge_commit":commit,
+            "candidate_tree_hash":tree,"merged_tree_hash":tree,"change_identity":"exact",
+            "result":"pass","created_at":"2026-01-01T00:06:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let promotion_value = serde_json::json!({
+        "promotion_id":"promotion-1","issue_id":"issue-1","experiment_id":"experiment-1",
+        "module_id":module_id,"base_commit":commit,"source_commit":commit,
+        "candidate_commit":commit,"merged_commit":commit,
+        "worktree_record_id":"worktree-1","reproduction_record_id":"reproduction-1",
+        "fix_candidate_id":"candidate-1","architecture_review_id":"review-1",
+        "effectiveness_record_id":"effectiveness-1","merge_record_id":"merge-1",
+        "previous_active_version":null,"new_active_version":"active-v1",
+        "artifact_hash":artifact_hash,"scope_hash":"scope-1","public_api_hash":"api-1",
+        "review_id":"review-1","evidence_ids":["candidate-evidence-1","effective-1"],
+        "required_gate_results":[{"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"}],
+        "change_set_id":"change-1","compatibility_level":"compatible","root_cause":"test root cause",
+        "design_id":"design-1","change_reason_comment":"test reason",
+        "playground_cleanup_record_id":"cleanup-1","created_at":"2026-01-01T00:07:00Z"
+    });
+    let promotion = serde_json::to_string_pretty(&promotion_value).unwrap() + "\n";
     fs::write(
         records.join(format!("promotion-record-{module_id}.json")),
         &promotion,
@@ -475,13 +696,12 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     )
     .unwrap();
     if include_freeze {
-        let promotion_value: Value = serde_json::from_str(&promotion).unwrap();
         let promotion_hash = digest(&canonical(&promotion_value));
         fs::write(
             records.join(format!("freeze-record-{module_id}.json")),
             format!(
-                r#"{{"freeze_id":"freeze-1","issue_id":"issue-1","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"evidence-1","source_commit_or_tag":"commit-1","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"base-1","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:00:00Z"}}"#,
-                module_id, promotion_hash, artifact_hash
+                r#"{{"freeze_id":"freeze-1","issue_id":"issue-1","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"candidate-evidence-1","source_commit_or_tag":"{}","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"{}","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:08:00Z"}}"#,
+                module_id, promotion_hash, commit, artifact_hash, commit
             ),
         )
         .unwrap();
@@ -489,10 +709,18 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
 }
 
 fn write_regression_report(root: &PathBuf, module_id: &str, artifact_hash: &str) -> String {
+    let promotion: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join(format!(".appsdk/records/promotion-record-{module_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let commit = promotion["source_commit"].as_str().unwrap();
     let report = serde_json::json!({
         "regression_report_id": "regression-app-core-v1",
         "module_id": module_id,
-        "source_commit": "commit-1",
+        "source_commit": commit,
         "artifact_hash": artifact_hash,
         "public_api_hash": "api-1",
         "scope_hash": "scope-1",
@@ -530,38 +758,49 @@ fn write_regression_report(root: &PathBuf, module_id: &str, artifact_hash: &str)
 }
 
 fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash: &str) {
+    let root = root.to_path_buf();
+    write_records(&root, module_id, artifact_hash, true);
     let records = root.join(".appsdk/records");
-    let promotion = serde_json::json!({
-        "promotion_id": "promotion-2",
-        "issue_id": "issue-1",
-        "experiment_id": "experiment-2",
-        "module_id": module_id,
-        "base_commit": "commit-1",
-        "source_commit": "commit-1",
-        "previous_active_version": "active-v1",
-        "new_active_version": "active-v2",
-        "base_artifact_hash": base_hash,
-        "artifact_hash": artifact_hash,
-        "scope_hash": "scope-2",
-        "public_api_hash": "api-2",
-        "review_id": "review-2",
-        "evidence_ids": ["evidence-2"],
-        "required_gate_results": [{"gate_id":"blackbox","result":"pass","producer":"test"}],
-        "change_set_id": "change-2",
-        "compatibility_level": "compatible",
-        "root_cause": "versioned test change",
-        "design_id": "design-2",
-        "change_reason_comment": "publish a reviewed second active version",
-        "playground_cleanup_record_id": "cleanup-2",
-        "created_at": "2026-01-01T00:00:00Z"
-    });
+    let project: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
+            .unwrap();
+    let base_commit = project["modules"][0]["version_base"]["base_source_commit"]
+        .as_str()
+        .unwrap();
+    for kind in [
+        "worktree-record",
+        "reproduction-record",
+        "fix-candidate-record",
+    ] {
+        let file = records.join(format!("{kind}-{module_id}.json"));
+        let mut record: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        record["base_commit"] = Value::String(base_commit.into());
+        if kind == "worktree-record" {
+            record["base_ref"] = Value::String(base_commit.into());
+        }
+        fs::write(&file, serde_json::to_string_pretty(&record).unwrap() + "\n").unwrap();
+    }
+    let promotion_file = records.join(format!("promotion-record-{module_id}.json"));
+    let mut promotion: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion_file).unwrap()).unwrap();
+    promotion["previous_active_version"] = Value::String("active-v1".into());
+    promotion["new_active_version"] = Value::String("active-v2".into());
+    promotion["base_commit"] = Value::String(base_commit.into());
+    promotion["base_artifact_hash"] = Value::String(base_hash.into());
+    promotion["public_api_hash"] = Value::String("api-2".into());
+    fs::write(
+        &promotion_file,
+        serde_json::to_string_pretty(&promotion).unwrap() + "\n",
+    )
+    .unwrap();
+    let commit = git_test_value(&root, &["rev-parse", "HEAD"]);
     let regression = serde_json::json!({
         "regression_report_id": "regression-app-core-v2",
         "module_id": module_id,
-        "source_commit": "commit-1",
+        "source_commit": commit,
         "artifact_hash": artifact_hash,
         "public_api_hash": "api-2",
-        "scope_hash": "scope-2",
+        "scope_hash": "scope-1",
         "input_hash": artifact_hash,
         "suite_id": "app-core-regression",
         "command": {"program":"cargo","args":["test","--test","app-core"],"working_directory":"."},
@@ -575,23 +814,6 @@ fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash
         "test_characteristics": {"whitebox":true,"blackbox":true}
     });
     fs::write(
-        records.join(format!("evidence-record-{module_id}.json")),
-        format!(r#"{{"evidence_id":"evidence-2","issue_id":"issue-1","experiment_id":"experiment-2","kind":"build","source_commit":"commit-1","artifact_hash":"{}","scope":{{"module_id":"{}"}},"producer":{{"adapter":"test","identity":"test"}},"result":"pass","created_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","input_hashes":["input-2"],"scope_hash":"scope-2"}}"#, artifact_hash, module_id),
-    ).unwrap();
-    fs::write(
-        records.join(format!("review-record-{module_id}.json")),
-        format!(r#"{{"review_id":"review-2","issue_id":"issue-1","promotion_id":"promotion-2","reviewer":{{"adapter":"test","identity":"test"}},"verdict":"pass","evidence_ids":["evidence-2"],"reviewed_commit":"commit-1","reviewed_artifact_hash":"{}","reviewed_scope_hash":"scope-2","ai_confidence":1.0,"confidence_rationale":"versioned blackbox evidence","created_at":"2026-01-01T00:00:00Z"}}"#, artifact_hash),
-    ).unwrap();
-    fs::write(
-        records.join(format!("promotion-record-{module_id}.json")),
-        serde_json::to_string_pretty(&promotion).unwrap() + "\n",
-    )
-    .unwrap();
-    fs::write(
-        records.join("playground-cleanup-cleanup-2.json"),
-        r#"{"cleanup_id":"cleanup-2","disposition":"archive_then_remove","removed_paths":["playground/experiments/app-core-v2"],"created_at":"2026-01-01T00:00:00Z"}"#,
-    ).unwrap();
-    fs::write(
         records.join(format!("regression-report-{module_id}.json")),
         serde_json::to_string_pretty(&regression).unwrap() + "\n",
     )
@@ -600,20 +822,20 @@ fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash
         "freeze_id": "freeze-2",
         "issue_id": "issue-1",
         "module_id": module_id,
-        "promotion_id": "promotion-2",
+        "promotion_id": "promotion-1",
         "promotion_record_hash": digest(&canonical(&promotion)),
-        "artifact_record_id": "evidence-2",
+        "artifact_record_id": "candidate-evidence-1",
         "regression_report_id": "regression-app-core-v2",
         "regression_report_hash": digest(&canonical(&regression)),
-        "source_commit_or_tag": "commit-1",
+        "source_commit_or_tag": commit,
         "active_version": "active-v2",
         "previous_active_version": "active-v1",
         "library_hash": artifact_hash,
         "public_api_hash": "api-2",
-        "review_id": "review-2",
+        "review_id": "review-1",
         "previous_active_immutable": true,
         "git_clean": true,
-        "clean_scope": {"base_commit":"commit-1","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"},
+        "clean_scope": {"base_commit":commit,"changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"},
         "owners": {"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"},
         "created_at": "2026-01-01T00:00:00Z"
     });
@@ -694,15 +916,15 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
     let goal_file = root.join(".appsdk/goal.json");
     fs::write(&goal_file, r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#).unwrap();
-    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.0","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
+    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.3","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
 "#, "a".repeat(64), "b".repeat(64))).unwrap();
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0"},
+  "sdk": {"name": "appsdk", "version": "0.1.3"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths":[".appsdk/**"]},
-  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/evidence-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
+  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
   "lifecycles": {"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},
     "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
@@ -756,8 +978,12 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
         "architecture_stable",
     ]);
     assert!(!module.status.success());
-    assert!(String::from_utf8_lossy(&module.stderr)
-        .contains("MISSING_RECORD:evidence-record-app-core.json"));
+    assert!(
+        String::from_utf8_lossy(&module.stderr)
+            .contains("MISSING_RECORD:worktree-record-app-core.json"),
+        "{}",
+        String::from_utf8_lossy(&module.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -870,6 +1096,59 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         .unwrap()
         .to_string();
     write_records(&root, "app-core", &architecture_hash, false);
+    let review_file = root.join(".appsdk/records/review-record-app-core.json");
+    let mut stale_review: Value =
+        serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+    stale_review["resource_map_hash"] = Value::String("sha256:stale".into());
+    fs::write(
+        &review_file,
+        serde_json::to_string_pretty(&stale_review).unwrap() + "\n",
+    )
+    .unwrap();
+    let stale_architecture = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!stale_architecture.status.success());
+    assert!(String::from_utf8_lossy(&stale_architecture.stderr)
+        .contains("ARCHITECTURE_REVIEW_MAP_STALE"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let mut missing_review_evidence: Value =
+        serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+    missing_review_evidence["evidence_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::String("missing-review-evidence".into()));
+    fs::write(
+        &review_file,
+        serde_json::to_string_pretty(&missing_review_evidence).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_review_result = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!missing_review_result.status.success());
+    assert!(String::from_utf8_lossy(&missing_review_result.stderr)
+        .contains("MISSING_EVIDENCE_RECORD:missing-review-evidence"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    for relative in [
+        ".appsdk/records/effectiveness-record-app-core.json",
+        ".appsdk/records/merge-record-app-core.json",
+        ".appsdk/records/promotion-record-app-core.json",
+        ".appsdk/records/playground-cleanup-cleanup-1.json",
+        ".appsdk/records/evidence/app-core/effective-1.json",
+    ] {
+        fs::remove_file(root.join(relative)).unwrap();
+    }
     let architecture = run(&[
         "promote-module",
         root_text,
@@ -886,6 +1165,58 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!run(&["freeze", root_text, "--module", "app-core"])
         .status
         .success());
+    write_records(&root, "app-core", &architecture_hash, false);
+    for relative in [
+        ".appsdk/records/merge-record-app-core.json",
+        ".appsdk/records/promotion-record-app-core.json",
+        ".appsdk/records/playground-cleanup-cleanup-1.json",
+    ] {
+        fs::remove_file(root.join(relative)).unwrap();
+    }
+    let effectiveness_only = run(&["verify", root_text]);
+    assert!(
+        effectiveness_only.status.success(),
+        "{}",
+        String::from_utf8_lossy(&effectiveness_only.stderr)
+    );
+    write_records(&root, "app-core", &architecture_hash, true);
+    let effectiveness_file = root.join(".appsdk/records/effectiveness-record-app-core.json");
+    let mut stale_effectiveness: Value =
+        serde_json::from_str(&fs::read_to_string(&effectiveness_file).unwrap()).unwrap();
+    stale_effectiveness["source_unchanged_since_review"] = Value::Bool(false);
+    fs::write(
+        &effectiveness_file,
+        serde_json::to_string_pretty(&stale_effectiveness).unwrap() + "\n",
+    )
+    .unwrap();
+    let stale_replay = run(&["verify", root_text]);
+    assert!(!stale_replay.status.success());
+    assert!(String::from_utf8_lossy(&stale_replay.stderr)
+        .contains("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, true);
+    let merge_file = root.join(".appsdk/records/merge-record-app-core.json");
+    let promotion_file = root.join(".appsdk/records/promotion-record-app-core.json");
+    let mut invalid_merge: Value =
+        serde_json::from_str(&fs::read_to_string(&merge_file).unwrap()).unwrap();
+    invalid_merge["merge_commit"] = Value::String("missing-merge-commit".into());
+    fs::write(
+        &merge_file,
+        serde_json::to_string_pretty(&invalid_merge).unwrap() + "\n",
+    )
+    .unwrap();
+    let mut invalid_promotion: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion_file).unwrap()).unwrap();
+    invalid_promotion["merged_commit"] = Value::String("missing-merge-commit".into());
+    invalid_promotion["source_commit"] = Value::String("missing-merge-commit".into());
+    fs::write(
+        &promotion_file,
+        serde_json::to_string_pretty(&invalid_promotion).unwrap() + "\n",
+    )
+    .unwrap();
+    let invalid_merge_result = run(&["verify", root_text]);
+    assert!(!invalid_merge_result.status.success());
+    assert!(String::from_utf8_lossy(&invalid_merge_result.stderr)
+        .contains("MAINLINE_MERGE_COMMIT_MISSING"));
     write_records(&root, "app-core", &architecture_hash, true);
     assert!(Command::new("git")
         .args(["-C", root_text, "add", "."])
@@ -1363,6 +1694,10 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
     let project: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
             .unwrap();
+    let v1_promotion: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/promotion-record-app-core.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(project["modules"][0]["stage"], "source_implemented");
     assert_eq!(
         project["modules"][0]["version_base"],
@@ -1370,7 +1705,7 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
             "previous_active_version": "active-v1",
             "new_active_version": "active-v2",
             "base_artifact_hash": v1_hash,
-            "base_source_commit": "commit-1"
+            "base_source_commit": v1_promotion["source_commit"]
         })
     );
     assert_eq!(fs::read_to_string(&active_v1).unwrap(), active_v1_text);
@@ -1454,16 +1789,19 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
         .status()
         .unwrap()
         .success());
-    assert!(run(&[
+    let frozen_v2 = run(&[
         "promote-module",
         root_text,
         "--module",
         "app-core",
         "--to",
         "frozen",
-    ])
-    .status
-    .success());
+    ]);
+    assert!(
+        frozen_v2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&frozen_v2.stderr)
+    );
     let published = run(&[
         "publish-active",
         root_text,

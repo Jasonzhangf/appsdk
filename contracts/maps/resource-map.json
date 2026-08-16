@@ -3,6 +3,12 @@
   "resources": [
     {"resource_id":"project_contract","owner":"appsdk::project_contract","truth_store":".appsdk/project.json","allowed_operations":["read","validate","write"]},
     {"resource_id":"lifecycle_records","owner":"appsdk::record_graph","truth_store":".appsdk/records/**","allowed_operations":["read","validate","write"]},
-    {"resource_id":"compiled_artifact","owner":"appsdk::compiler","truth_store":"generated/project.compiled.json","allowed_operations":["read","write"]}
+    {"resource_id":"compiled_artifact","owner":"appsdk::compiler","truth_store":"generated/project.compiled.json","allowed_operations":["read","write"]},
+    {"resource_id":"fix_worktree","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/worktree-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"fix_evidence_set","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/evidence/<module>/<evidence_id>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"fix_candidate","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/fix-candidate-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"architecture_review","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/review-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"fix_effectiveness","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/effectiveness-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"mainline_merge","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/merge-record-<module>.json","allowed_operations":["read","validate","write"]}
   ]
 }

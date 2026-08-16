@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://appsdk.local/contracts/records/evidence-record.schema.json",
   "type": "object",
-  "required": ["evidence_id", "issue_id", "experiment_id", "kind", "source_commit", "scope", "producer", "result", "created_at", "expires_at", "input_hashes", "scope_hash"],
+  "required": ["evidence_id", "issue_id", "experiment_id", "phase", "kind", "source_commit", "scope", "producer", "result", "created_at", "expires_at", "input_hashes", "scope_hash"],
   "properties": {
     "evidence_id": {"type": "string"},
     "issue_id": {"type": "string"},
     "experiment_id": {"type": "string"},
+    "phase": {"enum": ["baseline_reproduction", "fix_candidate", "positive_intervention", "negative_intervention", "post_architecture_effectiveness", "regression", "artifact"]},
     "kind": {"enum": ["red_test", "positive_test", "negative_test", "sample_replay", "build", "artifact", "runtime", "gate"]},
     "source_commit": {"type": "string"},
     "artifact_hash": {"type": "string"},

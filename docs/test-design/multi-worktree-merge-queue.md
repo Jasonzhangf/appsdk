@@ -20,6 +20,9 @@
 - Reject shared/non-exclusive worktree or semantic claim.
 - Reject queue/candidate/effectiveness identity mismatch.
 - Reject conflict resolution in the merge queue.
+- Reject a collaboration record that does not declare one independently verifiable milestone per worktree.
+- Reject milestone identity drift between collaboration, queue, integration, receipt, and merge records.
+- Reject a later milestone that lacks a predecessor remote receipt, reuses the predecessor worktree, or starts before the predecessor remote commit is in its base history.
 - Reject failed integration gates or integration tree drift.
 - Reject candidate not reachable from integration.
 - Reject integration absent from local or recorded remote main.

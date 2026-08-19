@@ -12,6 +12,7 @@
     "queue_entry_id": {"type": "string"},
     "integration_id": {"type": "string"},
     "mainline_receipt_id": {"type": "string"},
+    "milestone_id": {"type": "string"},
     "mainline_ref": {"type": "string"},
     "candidate_commit": {"type": "string"},
     "integration_commit": {"type": "string"},

@@ -3277,9 +3277,90 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     let queue_id = record_str(&queue, "/queue_entry_id", &queue_name);
     let integration_id = record_str(&integration, "/integration_id", &integration_name);
     let receipt_id = record_str(&receipt, "/receipt_id", &receipt_name);
+    let milestone_id = record_str(&collaboration, "/milestone_id", &collaboration_name);
+    let parent_task_id = record_str(&collaboration, "/parent_task_id", &collaboration_name);
+    let milestone_sequence = collaboration
+        .get("milestone_sequence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let integration_commit = record_str(&integration, "/integration_commit", &integration_name);
     let integration_tree = record_str(&integration, "/integration_tree_hash", &integration_name);
     let main_base_commit = record_str(&queue, "/main_base_commit", &queue_name);
+
+    if milestone_id.is_empty()
+        || parent_task_id.is_empty()
+        || milestone_sequence == 0
+        || record_str(&collaboration, "/milestone_scope", &collaboration_name).is_empty()
+        || collaboration.get("independently_verifiable") != Some(&Value::Bool(true))
+        || collaboration.get("one_milestone_per_worktree") != Some(&Value::Bool(true))
+        || record_str(&worktree, "/milestone_id", &worktree_name) != milestone_id
+    {
+        fail("INCREMENTAL_MILESTONE_CONTRACT_REQUIRED");
+    }
+    let predecessor_collaboration_id = record_str(
+        &collaboration,
+        "/predecessor_collaboration_id",
+        &collaboration_name,
+    );
+    let predecessor_receipt_id = record_str(
+        &collaboration,
+        "/predecessor_receipt_id",
+        &collaboration_name,
+    );
+    if milestone_sequence == 1 {
+        if predecessor_collaboration_id != "none" || predecessor_receipt_id != "none" {
+            fail("FIRST_MILESTONE_PREDECESSOR_INVALID");
+        }
+    } else {
+        if predecessor_collaboration_id == "none" || predecessor_receipt_id == "none" {
+            fail("MILESTONE_PREDECESSOR_RECEIPT_REQUIRED");
+        }
+        let predecessor_collaboration_name =
+            format!("collaboration-record-{}.json", predecessor_collaboration_id);
+        let predecessor_receipt_name =
+            format!("mainline-receipt-record-{}.json", predecessor_receipt_id);
+        let predecessor_collaboration = read_record(root, &predecessor_collaboration_name);
+        let predecessor_receipt = read_record(root, &predecessor_receipt_name);
+        if record_str(
+            &predecessor_collaboration,
+            "/parent_task_id",
+            &predecessor_collaboration_name,
+        ) != parent_task_id
+            || predecessor_collaboration
+                .get("milestone_sequence")
+                .and_then(Value::as_u64)
+                != Some(milestone_sequence - 1)
+            || record_str(
+                &predecessor_collaboration,
+                "/worktree_id",
+                &predecessor_collaboration_name,
+            ) == record_str(&collaboration, "/worktree_id", &collaboration_name)
+            || predecessor_receipt.get("remote_verified") != Some(&Value::Bool(true))
+            || predecessor_receipt.get("result").and_then(Value::as_str) != Some("pass")
+        {
+            fail("MILESTONE_PREDECESSOR_MISMATCH");
+        }
+        let predecessor_remote_commit = record_str(
+            &predecessor_receipt,
+            "/remote_main_commit",
+            &predecessor_receipt_name,
+        );
+        let current_base = record_str(&worktree, "/base_commit", &worktree_name);
+        let inherited = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                predecessor_remote_commit,
+                current_base,
+            ])
+            .status()
+            .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+        if !inherited.success() {
+            fail("NEXT_MILESTONE_BASE_PRECEDES_REMOTE_RECEIPT");
+        }
+    }
 
     for (record, name) in [
         (&collaboration, collaboration_name.as_str()),
@@ -3320,18 +3401,23 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     let mut claim_ids = std::collections::HashSet::new();
     let mut worker_ids = std::collections::HashSet::new();
     let mut worktree_ids = std::collections::HashSet::new();
+    let mut milestone_ids = std::collections::HashSet::new();
     let mut current_claim_found = false;
     for claim in active_claims {
         let semantic_id = record_str(claim, "/semantic_claim_id", "collaboration-index.json");
         let worker_id = record_str(claim, "/worker_id", "collaboration-index.json");
         let worktree_id = record_str(claim, "/worktree_id", "collaboration-index.json");
+        let indexed_milestone_id = record_str(claim, "/milestone_id", "collaboration-index.json");
         if !claim_ids.insert(semantic_id)
             || !worker_ids.insert(worker_id)
             || !worktree_ids.insert(worktree_id)
+            || !milestone_ids.insert(indexed_milestone_id)
         {
             fail("COLLABORATION_INDEX_NOT_EXCLUSIVE");
         }
-        if record_str(claim, "/collaboration_id", "collaboration-index.json") == collaboration_id {
+        if record_str(claim, "/collaboration_id", "collaboration-index.json") == collaboration_id
+            && indexed_milestone_id == milestone_id
+        {
             current_claim_found = true;
         }
     }
@@ -3339,6 +3425,8 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
         fail("COLLABORATION_NOT_ACTIVE");
     }
     if record_str(&queue, "/collaboration_id", &queue_name) != collaboration_id
+        || record_str(&queue, "/milestone_id", &queue_name) != milestone_id
+        || queue.get("delivery_mode").and_then(Value::as_str) != Some("commit_merge_each_milestone")
         || record_str(&queue, "/fix_candidate_id", &queue_name) != candidate_id
         || record_str(&queue, "/effectiveness_id", &queue_name) != effectiveness_id
         || record_str(&queue, "/candidate_commit", &queue_name) != candidate_commit
@@ -3428,6 +3516,7 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
             .iter()
             .any(|gate| !expected_gates.contains(gate))
         || record_str(&integration, "/queue_entry_id", &integration_name) != queue_id
+        || record_str(&integration, "/milestone_id", &integration_name) != milestone_id
         || record_str(&integration, "/candidate_commit", &integration_name) != candidate_commit
         || record_str(&integration, "/main_base_commit", &integration_name) != main_base_commit
         || integration.get("conflict_status").and_then(Value::as_str) != Some("clean")
@@ -3475,6 +3564,7 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     let remote_main_commit = git_ls_remote(root, remote_name, remote_ref);
     if record_str(&receipt, "/integration_id", &receipt_name) != integration_id
         || record_str(&receipt, "/queue_entry_id", &receipt_name) != queue_id
+        || record_str(&receipt, "/milestone_id", &receipt_name) != milestone_id
         || record_str(&receipt, "/integration_commit", &receipt_name) != integration_commit
         || record_str(&receipt, "/local_main_commit", &receipt_name) != local_main_commit
         || record_str(&receipt, "/remote_main_commit", &receipt_name) != remote_main_commit
@@ -3506,6 +3596,7 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     if record_str(&merge, "/queue_entry_id", &merge_name) != queue_id
         || record_str(&merge, "/integration_id", &merge_name) != integration_id
         || record_str(&merge, "/mainline_receipt_id", &merge_name) != receipt_id
+        || record_str(&merge, "/milestone_id", &merge_name) != milestone_id
         || record_str(&merge, "/fix_candidate_id", &merge_name) != candidate_id
         || record_str(&merge, "/effectiveness_id", &merge_name) != effectiveness_id
         || record_str(&merge, "/mainline_ref", &merge_name) != local_main_ref

@@ -124,7 +124,9 @@ goal clarification
   -> committed fix candidate + positive/negative evidence
   -> architecture ReviewRecord PASS
   -> unchanged-source effectiveness replay PASS
-  -> serial merge queue + tested integration when parallel scenarios are enabled
+  -> one independently verifiable milestone per clean worktree
+  -> commit + serial merge queue + tested integration for every milestone
+  -> start the next milestone only after the predecessor remote-main receipt
   -> verified local and remote mainline receipt
   -> PromotionRecord
   -> Active library

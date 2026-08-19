@@ -274,13 +274,31 @@ fn parallel_development_requires_tested_integration_and_remote_main_receipt() {
             "MULTI_WORKER_EXCLUSIVE_WORKTREE_REQUIRED",
         ),
         (
+            "collaboration-record-collaboration-1.json",
+            "/independently_verifiable",
+            Value::Bool(false),
+            "INCREMENTAL_MILESTONE_CONTRACT_REQUIRED",
+        ),
+        (
+            "collaboration-record-collaboration-1.json",
+            "/milestone_sequence",
+            Value::Number(2.into()),
+            "MILESTONE_PREDECESSOR_RECEIPT_REQUIRED",
+        ),
+        (
             "collaboration-index.json",
             "/active_claims",
             serde_json::json!([
-                {"collaboration_id":"collaboration-1","semantic_claim_id":"claim-1","worker_id":"worker-1","worktree_id":"worktree-1"},
-                {"collaboration_id":"collaboration-2","semantic_claim_id":"claim-2","worker_id":"worker-2","worktree_id":"worktree-1"}
+                {"collaboration_id":"collaboration-1","semantic_claim_id":"claim-1","worker_id":"worker-1","worktree_id":"worktree-1","milestone_id":"milestone-1"},
+                {"collaboration_id":"collaboration-2","semantic_claim_id":"claim-2","worker_id":"worker-2","worktree_id":"worktree-1","milestone_id":"milestone-2"}
             ]),
             "COLLABORATION_INDEX_NOT_EXCLUSIVE",
+        ),
+        (
+            "merge-queue-record-queue-1.json",
+            "/milestone_id",
+            Value::String("wrong-milestone".into()),
+            "MERGE_QUEUE_ADMISSION_MISMATCH",
         ),
         (
             "merge-queue-record-queue-1.json",
@@ -887,6 +905,15 @@ fn write_parallel_records(
 ) {
     write_records(root, module_id, artifact_hash, include_freeze);
     let records = root.join(".appsdk/records");
+    let worktree_file = records.join(format!("worktree-record-{module_id}.json"));
+    let mut worktree: Value =
+        serde_json::from_str(&fs::read_to_string(&worktree_file).unwrap()).unwrap();
+    worktree["milestone_id"] = Value::String("milestone-1".into());
+    fs::write(
+        &worktree_file,
+        serde_json::to_string_pretty(&worktree).unwrap() + "\n",
+    )
+    .unwrap();
     let candidate_commit = git_test_value(root, &["rev-parse", "HEAD"]);
     let candidate_tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
     let marker = root.join(".appsdk/integration-marker");
@@ -950,6 +977,10 @@ fn write_parallel_records(
             "scenario_ids":["multi_worker_collaboration","multi_worktree_merge_queue"],
             "run_id":"run-1","semantic_claim_id":"claim-1","worker_id":"worker-1",
             "worktree_id":"worktree-1","exclusive_worktree":true,"exclusive_claim":true,
+            "milestone_id":"milestone-1","parent_task_id":"parent-task-1","milestone_sequence":1,
+            "predecessor_collaboration_id":"none","predecessor_receipt_id":"none",
+            "milestone_scope":"one independently verifiable change","independently_verifiable":true,
+            "one_milestone_per_worktree":true,
             "status":"handoff_ready","created_at":"2026-01-01T00:05:30Z"
         }))
         .unwrap()
@@ -961,6 +992,7 @@ fn write_parallel_records(
         serde_json::to_string_pretty(&serde_json::json!({
             "queue_entry_id":"queue-1","issue_id":"issue-1","module_id":module_id,
             "collaboration_id":"collaboration-1","fix_candidate_id":"candidate-1",
+            "milestone_id":"milestone-1","delivery_mode":"commit_merge_each_milestone",
             "effectiveness_id":"effectiveness-1","candidate_commit":candidate_commit,
             "main_base_commit":candidate_commit,"queue_position":1,"merge_owner":"merge-owner-1",
             "strategy":"integration_merge_then_fast_forward","status":"admitted",
@@ -974,7 +1006,7 @@ fn write_parallel_records(
         records.join("integration-record-integration-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "integration_id":"integration-1","queue_entry_id":"queue-1","issue_id":"issue-1",
-            "module_id":module_id,"candidate_commit":candidate_commit,
+            "milestone_id":"milestone-1","module_id":module_id,"candidate_commit":candidate_commit,
             "main_base_commit":candidate_commit,"integration_commit":integration_commit,
             "integration_tree_hash":integration_tree,"conflict_status":"clean",
             "resolution_mode":"none","impact_status":"revalidated",
@@ -989,7 +1021,7 @@ fn write_parallel_records(
         records.join("mainline-receipt-record-receipt-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "receipt_id":"receipt-1","integration_id":"integration-1","queue_entry_id":"queue-1",
-            "issue_id":"issue-1","module_id":module_id,"local_main_ref":"refs/heads/test-mainline",
+            "milestone_id":"milestone-1","issue_id":"issue-1","module_id":module_id,"local_main_ref":"refs/heads/test-mainline",
             "remote_name":remote.to_str().unwrap(),"remote_ref":"refs/heads/main","integration_commit":integration_commit,
             "local_main_commit":integration_commit,"remote_main_commit":integration_commit,
             "integration_tree_hash":integration_tree,"candidate_reachable":true,
@@ -1005,7 +1037,7 @@ fn write_parallel_records(
         records.join("collaboration-index.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "active_claims":[{"collaboration_id":"collaboration-1","semantic_claim_id":"claim-1",
-            "worker_id":"worker-1","worktree_id":"worktree-1"}]
+            "worker_id":"worker-1","worktree_id":"worktree-1","milestone_id":"milestone-1"}]
         }))
         .unwrap()
             + "\n",
@@ -1025,6 +1057,7 @@ fn write_parallel_records(
     merge["queue_entry_id"] = Value::String("queue-1".into());
     merge["integration_id"] = Value::String("integration-1".into());
     merge["mainline_receipt_id"] = Value::String("receipt-1".into());
+    merge["milestone_id"] = Value::String("milestone-1".into());
     merge["mainline_ref"] = Value::String("refs/heads/test-mainline".into());
     merge["integration_commit"] = Value::String(integration_commit.clone());
     merge["merge_commit"] = Value::String(integration_commit.clone());

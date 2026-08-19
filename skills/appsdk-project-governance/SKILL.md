@@ -61,6 +61,8 @@ appsdk init <workspace> --project-root <relative-path>
 `multi_worker_collaboration` and `multi_worktree_merge_queue` are one atomic capability. Enable both or neither in `.appsdk/project.json`; one-sided activation is invalid.
 
 - Each worker owns one semantic claim, one branch, and one clean isolated worktree. A worker never edits main and never shares a worktree.
+- Decompose a parent task into small independently verifiable milestones. One milestone owns exactly one claim, branch, and clean worktree. Commit and queue it immediately after its gates pass; do not stack another milestone in the same worktree or leave a completed milestone only on a worker branch.
+- Start a dependent milestone only from a new clean worktree after the predecessor milestone has a live remote-main receipt. Bind the predecessor collaboration and receipt IDs; sequence 1 uses `none` for both.
 - After candidate verification, architecture PASS, and unchanged-source effectiveness PASS, the worker emits CollaborationRecord and enters the serial merge queue.
 - One merge owner admits one queue entry at a time. Conflict resolution is not allowed in the queue; return the issue to its owner worktree and invalidate stale candidate/review/effectiveness evidence.
 - Build an integration commit from the current main base and candidate. IntegrationRecord binds that exact commit/tree and the affected verification gates.

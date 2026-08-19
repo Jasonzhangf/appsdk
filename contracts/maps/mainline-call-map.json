@@ -1,24 +1,17 @@
 {
   "schema_version": 1,
-  "lifecycle_id":"appsdk-governance",
-  "nodes":["clarify","collaboration_claimed","worktree_ready","reproduced","fix_candidate","architecture_reviewed","effectiveness_verified","merge_queued","integration_built","integration_verified","mainline_merged","remote_verified","promotion","compile","active","protected","verify"],
-  "edges":[
-    {"from":"clarify","to":"collaboration_claimed","owner":"appsdk::collaboration"},
-    {"from":"collaboration_claimed","to":"worktree_ready","owner":"appsdk::collaboration"},
-    {"from":"worktree_ready","to":"reproduced","owner":"appsdk::fix_lifecycle"},
-    {"from":"reproduced","to":"fix_candidate","owner":"appsdk::fix_lifecycle"},
-    {"from":"fix_candidate","to":"architecture_reviewed","owner":"appsdk::fix_lifecycle"},
-    {"from":"architecture_reviewed","to":"effectiveness_verified","owner":"appsdk::fix_lifecycle"},
-    {"from":"effectiveness_verified","to":"merge_queued","owner":"appsdk::merge_queue"},
-    {"from":"merge_queued","to":"integration_built","owner":"appsdk::merge_queue"},
-    {"from":"integration_built","to":"integration_verified","owner":"appsdk::merge_queue"},
-    {"from":"integration_verified","to":"mainline_merged","owner":"appsdk::merge_queue"},
-    {"from":"mainline_merged","to":"remote_verified","owner":"appsdk::merge_queue"},
-    {"from":"remote_verified","to":"promotion","owner":"appsdk::lifecycle"},
-    {"from":"promotion","to":"compile","owner":"appsdk::compiler"},
-    {"from":"compile","to":"active","owner":"appsdk::publisher"},
-    {"from":"active","to":"protected","owner":"appsdk::freezer"},
-    {"from":"protected","to":"verify","owner":"appsdk::verifier"},
-    {"from":"verify","to":"collaboration_claimed","owner":"appsdk::workspace","return_path":true}
+  "lifecycle_id": "appsdk-governance",
+  "chains": [
+    {"chain_id":"single-worker-v1","scenario_condition":"parallel_pair_disabled","entry_symbol":"assert_fix_merge_gate","terminal_symbol":"assert_single_merge_gate"},
+    {"chain_id":"parallel-worktree-v1","scenario_condition":"parallel_pair_enabled","entry_symbol":"assert_fix_merge_gate","terminal_symbol":"assert_parallel_merge_gate"}
+  ],
+  "edges": [
+    {"chain_id":"single-worker-v1","from":"effectiveness_verified","to":"mainline_merged","owner":"appsdk::fix_lifecycle","caller":"assert_fix_merge_gate","callee":"assert_single_merge_gate","path":"rust/src/main.rs","input_resource_id":"fix_effectiveness","output_resource_id":"mainline_merge","error_resource_id":"lifecycle_error"},
+    {"chain_id":"parallel-worktree-v1","from":"scenario_selected","to":"collaboration_claimed","owner":"appsdk::development_scenarios","caller":"assert_fix_merge_gate","callee":"assert_parallel_merge_gate","path":"rust/src/main.rs","input_resource_id":"development_scenarios","output_resource_id":"worker_collaboration","error_resource_id":"lifecycle_error"},
+    {"chain_id":"parallel-worktree-v1","from":"collaboration_claimed","to":"merge_queued","owner":"appsdk::collaboration","caller":"assert_parallel_merge_gate","callee":"read_record","path":"rust/src/main.rs","input_resource_id":"collaboration_index","output_resource_id":"merge_queue","error_resource_id":"lifecycle_error"},
+    {"chain_id":"parallel-worktree-v1","from":"merge_queued","to":"integration_verified","owner":"appsdk::merge_queue","caller":"assert_parallel_merge_gate","callee":"git_value","path":"rust/src/main.rs","input_resource_id":"merge_queue_state","output_resource_id":"integration_candidate","error_resource_id":"lifecycle_error"},
+    {"chain_id":"parallel-worktree-v1","from":"integration_verified","to":"remote_verified","owner":"appsdk::host_vcs","caller":"assert_parallel_merge_gate","callee":"git_ls_remote","path":"rust/src/main.rs","input_resource_id":"integration_candidate","output_resource_id":"mainline_receipt","error_resource_id":"lifecycle_error"},
+    {"chain_id":"parallel-worktree-v1","from":"remote_verified","to":"mainline_merged","owner":"appsdk::merge_queue","caller":"assert_parallel_merge_gate","callee":"read_record","path":"rust/src/main.rs","input_resource_id":"mainline_receipt","output_resource_id":"mainline_merge","error_resource_id":"lifecycle_error"},
+    {"chain_id":"shared-promotion-v1","from":"mainline_merged","to":"promotion","owner":"appsdk::lifecycle","caller":"assert_fix_lifecycle_graph","callee":"assert_fix_merge_gate","path":"rust/src/main.rs","input_resource_id":"mainline_merge","output_resource_id":"lifecycle_records","error_resource_id":"lifecycle_error"}
   ]
 }

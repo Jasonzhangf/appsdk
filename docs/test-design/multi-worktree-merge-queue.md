@@ -27,4 +27,4 @@
 
 ## Boundary
 
-The host adapter fetches the remote ref and writes the receipt. AppSDK validates the recorded ref against local Git object/reachability truth; it does not perform network access during `verify`.
+The host adapter writes the receipt, including remote name/ref, observed commit, producer, and observation time. AppSDK executes `git ls-remote` against that named remote/ref during `verify`; a mutable local tracking ref or self-declared boolean is not remote truth.

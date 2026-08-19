@@ -266,18 +266,82 @@ fn parallel_development_requires_tested_integration_and_remote_main_receipt() {
         "{}",
         String::from_utf8_lossy(&promoted.stderr)
     );
-    let receipt_file = root.join(".appsdk/records/mainline-receipt-record-app-core.json");
-    let mut receipt: Value =
-        serde_json::from_str(&fs::read_to_string(&receipt_file).unwrap()).unwrap();
-    receipt["remote_verified"] = Value::Bool(false);
-    fs::write(
-        &receipt_file,
-        serde_json::to_string_pretty(&receipt).unwrap() + "\n",
-    )
-    .unwrap();
-    let rejected = run(&["verify", root_text]);
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("MAINLINE_RECEIPT_MISMATCH"));
+    for (file, pointer, invalid, expected) in [
+        (
+            "collaboration-record-collaboration-1.json",
+            "/exclusive_worktree",
+            Value::Bool(false),
+            "MULTI_WORKER_EXCLUSIVE_WORKTREE_REQUIRED",
+        ),
+        (
+            "collaboration-index.json",
+            "/active_claims",
+            serde_json::json!([
+                {"collaboration_id":"collaboration-1","semantic_claim_id":"claim-1","worker_id":"worker-1","worktree_id":"worktree-1"},
+                {"collaboration_id":"collaboration-2","semantic_claim_id":"claim-2","worker_id":"worker-2","worktree_id":"worktree-1"}
+            ]),
+            "COLLABORATION_INDEX_NOT_EXCLUSIVE",
+        ),
+        (
+            "merge-queue-record-queue-1.json",
+            "/candidate_commit",
+            Value::String("wrong-candidate".into()),
+            "MERGE_QUEUE_ADMISSION_MISMATCH",
+        ),
+        (
+            "integration-record-integration-1.json",
+            "/conflict_status",
+            Value::String("conflict".into()),
+            "INTEGRATION_RECORD_MISMATCH",
+        ),
+        (
+            "integration-record-integration-1.json",
+            "/required_gate_results/0/gate_id",
+            Value::String("unknown-gate".into()),
+            "INTEGRATION_RECORD_MISMATCH",
+        ),
+        (
+            "integration-record-integration-1.json",
+            "/integration_tree_hash",
+            Value::String("wrong-tree".into()),
+            "INTEGRATION_GATE_BINDING_MISMATCH",
+        ),
+        (
+            "merge-record-app-core.json",
+            "/fix_candidate_id",
+            Value::String("wrong-candidate".into()),
+            "PARALLEL_MAINLINE_MERGE_MISMATCH",
+        ),
+        (
+            "merge-record-app-core.json",
+            "/mainline_ref",
+            Value::String("refs/heads/wrong".into()),
+            "PARALLEL_MAINLINE_MERGE_MISMATCH",
+        ),
+        (
+            "mainline-receipt-record-receipt-1.json",
+            "/remote_verified",
+            Value::Bool(false),
+            "MAINLINE_RECEIPT_MISMATCH",
+        ),
+    ] {
+        let path = root.join(".appsdk/records").join(file);
+        let original = fs::read_to_string(&path).unwrap();
+        let mut record: Value = serde_json::from_str(&original).unwrap();
+        *record.pointer_mut(pointer).unwrap() = invalid;
+        fs::write(&path, serde_json::to_string_pretty(&record).unwrap() + "\n").unwrap();
+        let rejected = run(&["verify", root_text]);
+        assert!(
+            !rejected.status.success(),
+            "accepted invalid {file}:{pointer}"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(expected),
+            "{file}:{pointer}: {}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        fs::write(&path, original).unwrap();
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -851,21 +915,36 @@ fn write_parallel_records(
     let integration_commit = git_test_value(root, &["rev-parse", "HEAD"]);
     let integration_tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
     assert_ne!(candidate_tree, integration_tree);
-    for reference in ["refs/heads/test-mainline", "refs/remotes/origin/main"] {
-        assert!(Command::new("git")
-            .args([
-                "-C",
-                root.to_str().unwrap(),
-                "update-ref",
-                reference,
-                &integration_commit,
-            ])
-            .status()
-            .unwrap()
-            .success());
-    }
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "update-ref",
+            "refs/heads/test-mainline",
+            &integration_commit,
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let remote = root.join(".appsdk-control/test-remote.git");
+    assert!(Command::new("git")
+        .args(["init", "--bare", remote.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "push",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/main",
+        ])
+        .status()
+        .unwrap()
+        .success());
     fs::write(
-        records.join(format!("collaboration-record-{module_id}.json")),
+        records.join("collaboration-record-collaboration-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "collaboration_id":"collaboration-1","issue_id":"issue-1","module_id":module_id,
             "scenario_ids":["multi_worker_collaboration","multi_worktree_merge_queue"],
@@ -878,7 +957,7 @@ fn write_parallel_records(
     )
     .unwrap();
     fs::write(
-        records.join(format!("merge-queue-record-{module_id}.json")),
+        records.join("merge-queue-record-queue-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "queue_entry_id":"queue-1","issue_id":"issue-1","module_id":module_id,
             "collaboration_id":"collaboration-1","fix_candidate_id":"candidate-1",
@@ -892,14 +971,14 @@ fn write_parallel_records(
     )
     .unwrap();
     fs::write(
-        records.join(format!("integration-record-{module_id}.json")),
+        records.join("integration-record-integration-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "integration_id":"integration-1","queue_entry_id":"queue-1","issue_id":"issue-1",
             "module_id":module_id,"candidate_commit":candidate_commit,
             "main_base_commit":candidate_commit,"integration_commit":integration_commit,
             "integration_tree_hash":integration_tree,"conflict_status":"clean",
             "resolution_mode":"none","impact_status":"revalidated",
-            "required_gate_results":[{"gate_id":"affected-verification","result":"pass","producer":"test"}],
+            "required_gate_results":[{"gate_id":"integration_affected_verification","result":"pass","producer":"appsdk::verifier","source_commit":integration_commit,"tree_hash":integration_tree}],
             "result":"pass","created_at":"2026-01-01T00:06:10Z"
         }))
         .unwrap()
@@ -907,15 +986,35 @@ fn write_parallel_records(
     )
     .unwrap();
     fs::write(
-        records.join(format!("mainline-receipt-record-{module_id}.json")),
+        records.join("mainline-receipt-record-receipt-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "receipt_id":"receipt-1","integration_id":"integration-1","queue_entry_id":"queue-1",
             "issue_id":"issue-1","module_id":module_id,"local_main_ref":"refs/heads/test-mainline",
-            "remote_main_ref":"refs/remotes/origin/main","integration_commit":integration_commit,
+            "remote_name":remote.to_str().unwrap(),"remote_ref":"refs/heads/main","integration_commit":integration_commit,
             "local_main_commit":integration_commit,"remote_main_commit":integration_commit,
             "integration_tree_hash":integration_tree,"candidate_reachable":true,
             "integration_local_reachable":true,"integration_remote_reachable":true,
-            "remote_verified":true,"result":"pass","created_at":"2026-01-01T00:06:20Z"
+            "remote_verified":true,"producer":"test-host-vcs-adapter","observed_at":"2026-01-01T00:06:20Z",
+            "result":"pass","created_at":"2026-01-01T00:06:20Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join("collaboration-index.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "active_claims":[{"collaboration_id":"collaboration-1","semantic_claim_id":"claim-1",
+            "worker_id":"worker-1","worktree_id":"worktree-1"}]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join("merge-queue-state.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "merge_owner":"merge-owner-1","ordered_entry_ids":["queue-1"],"active_entry_id":"queue-1"
         }))
         .unwrap()
             + "\n",
@@ -942,6 +1041,7 @@ fn write_parallel_records(
     let mut promotion: Value =
         serde_json::from_str(&fs::read_to_string(&promotion_file).unwrap()).unwrap();
     promotion["merge_queue_record_id"] = Value::String("queue-1".into());
+    promotion["collaboration_record_id"] = Value::String("collaboration-1".into());
     promotion["integration_record_id"] = Value::String("integration-1".into());
     promotion["mainline_receipt_record_id"] = Value::String("receipt-1".into());
     promotion["merged_commit"] = Value::String(integration_commit.clone());
@@ -1170,7 +1270,7 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
   "lifecycle": {"stage": "draft"},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},
-  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/collaboration-record.schema.json","contracts/records/merge-queue-record.schema.json","contracts/records/integration-record.schema.json","contracts/records/mainline-receipt-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
+  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/collaboration-record.schema.json","contracts/records/collaboration-index.schema.json","contracts/records/merge-queue-record.schema.json","contracts/records/merge-queue-state.schema.json","contracts/records/integration-record.schema.json","contracts/records/mainline-receipt-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
   "lifecycles": {"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},
     "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }

@@ -15,7 +15,7 @@
     "conflict_status": {"const": "clean"},
     "resolution_mode": {"const": "none"},
     "impact_status": {"enum": ["unchanged", "revalidated"]},
-    "required_gate_results": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["gate_id", "result", "producer"], "properties": {"gate_id": {"type": "string"}, "result": {"const": "pass"}, "producer": {"type": "string"}}}},
+    "required_gate_results": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["gate_id", "result", "producer", "source_commit", "tree_hash"], "properties": {"gate_id": {"type": "string"}, "result": {"const": "pass"}, "producer": {"type": "string"}, "source_commit": {"type": "string"}, "tree_hash": {"type": "string"}}}},
     "result": {"const": "pass"},
     "created_at": {"type": "string"}
   }

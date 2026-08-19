@@ -64,7 +64,7 @@ appsdk init <workspace> --project-root <relative-path>
 - After candidate verification, architecture PASS, and unchanged-source effectiveness PASS, the worker emits CollaborationRecord and enters the serial merge queue.
 - One merge owner admits one queue entry at a time. Conflict resolution is not allowed in the queue; return the issue to its owner worktree and invalidate stale candidate/review/effectiveness evidence.
 - Build an integration commit from the current main base and candidate. IntegrationRecord binds that exact commit/tree and the affected verification gates.
-- Merge only the tested integration commit. MainlineReceiptRecord must prove candidate ancestry, integration reachability from local main, and integration reachability from the recorded remote main ref.
+- Merge only the tested integration commit. MainlineReceiptRecord must bind the host VCS producer, remote name/ref, observed commit, and observation time. Verification checks local reachability and queries the remote with `git ls-remote`; local tracking refs and self-declared booleans are not remote truth.
 - PromotionRecord references queue, integration, and mainline receipt records. Cleanup and claim release are forbidden until remote receipt passes.
 
 For a frozen module change, run `appsdk begin-version <project> --module <id> --from <current> --to <new>` before formal source edits. The command must bind and preserve the current Active artifact, Protected archive, and record graph; direct edits to the old Active or Protected version are forbidden.

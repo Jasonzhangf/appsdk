@@ -77,9 +77,19 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/collaboration-record.schema.json"),
     ),
     (
+        "contracts/records/collaboration-index.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/collaboration-index.schema.json"),
+    ),
+    (
         "contracts/records/merge-queue-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/merge-queue-record.schema.json"),
+    ),
+    (
+        "contracts/records/merge-queue-state.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/merge-queue-state.schema.json"),
     ),
     (
         "contracts/records/integration-record.schema.json",
@@ -379,8 +389,16 @@ fn bootstrap_contracts(root: &Path) {
             include_str!("../../contracts/records/collaboration-record.schema.json"),
         ),
         (
+            "contracts/records/collaboration-index.schema.json",
+            include_str!("../../contracts/records/collaboration-index.schema.json"),
+        ),
+        (
             "contracts/records/merge-queue-record.schema.json",
             include_str!("../../contracts/records/merge-queue-record.schema.json"),
+        ),
+        (
+            "contracts/records/merge-queue-state.schema.json",
+            include_str!("../../contracts/records/merge-queue-state.schema.json"),
         ),
         (
             "contracts/records/integration-record.schema.json",
@@ -524,7 +542,9 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         "contracts/records/review-record.schema.json",
         "contracts/records/effectiveness-record.schema.json",
         "contracts/records/collaboration-record.schema.json",
+        "contracts/records/collaboration-index.schema.json",
         "contracts/records/merge-queue-record.schema.json",
+        "contracts/records/merge-queue-state.schema.json",
         "contracts/records/integration-record.schema.json",
         "contracts/records/mainline-receipt-record.schema.json",
         "contracts/records/merge-record.schema.json",
@@ -626,8 +646,14 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
             "contracts/records/collaboration-record.schema.json" => {
                 include_str!("../../contracts/records/collaboration-record.schema.json")
             }
+            "contracts/records/collaboration-index.schema.json" => {
+                include_str!("../../contracts/records/collaboration-index.schema.json")
+            }
             "contracts/records/merge-queue-record.schema.json" => {
                 include_str!("../../contracts/records/merge-queue-record.schema.json")
+            }
+            "contracts/records/merge-queue-state.schema.json" => {
+                include_str!("../../contracts/records/merge-queue-state.schema.json")
             }
             "contracts/records/integration-record.schema.json" => {
                 include_str!("../../contracts/records/integration-record.schema.json")
@@ -679,6 +705,19 @@ fn assert_governance_maps(root: &Path) {
                 .unwrap_or_else(|_| fail(format!("MISSING_GOVERNANCE_MAP:{}", name))),
         )
         .unwrap_or_else(|_| fail(format!("INVALID_GOVERNANCE_MAP:{}", name)));
+        let canonical_text = match name {
+            "resource-map.json" => include_str!("../../contracts/maps/resource-map.json"),
+            "module-registry.json" => include_str!("../../contracts/maps/module-registry.json"),
+            "function-map.json" => include_str!("../../contracts/maps/function-map.json"),
+            "mainline-call-map.json" => include_str!("../../contracts/maps/mainline-call-map.json"),
+            "verification-map.json" => include_str!("../../contracts/maps/verification-map.json"),
+            _ => fail("UNKNOWN_GOVERNANCE_MAP"),
+        };
+        let canonical: Value = serde_json::from_str(canonical_text)
+            .unwrap_or_else(|_| fail("INVALID_CANONICAL_GOVERNANCE_MAP"));
+        if name != "module-registry.json" && value != canonical {
+            fail(format!("GOVERNANCE_MAP_MISMATCH:{}", name));
+        }
         if value.get("schema_version").and_then(Value::as_u64) != Some(1)
             || value
                 .get(key)
@@ -687,6 +726,33 @@ fn assert_governance_maps(root: &Path) {
                 .unwrap_or(true)
         {
             fail(format!("INVALID_GOVERNANCE_MAP:{}", name));
+        }
+        if name == "mainline-call-map.json" {
+            let source = include_str!("main.rs");
+            for edge in record_array(&value, "/edges", name) {
+                for field in [
+                    "/chain_id",
+                    "/owner",
+                    "/caller",
+                    "/callee",
+                    "/path",
+                    "/input_resource_id",
+                    "/output_resource_id",
+                    "/error_resource_id",
+                ] {
+                    if record_str(edge, field, name).is_empty() {
+                        fail("UNBOUND_MAINLINE_EDGE");
+                    }
+                }
+                for symbol in [
+                    record_str(edge, "/caller", name),
+                    record_str(edge, "/callee", name),
+                ] {
+                    if !source.contains(&format!("fn {}", symbol)) {
+                        fail(format!("MAINLINE_SYMBOL_MISSING:{}", symbol));
+                    }
+                }
+            }
         }
     }
 }
@@ -2894,6 +2960,22 @@ fn git_value(root: &Path, args: &[&str], error: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn git_ls_remote(root: &Path, remote: &str, remote_ref: &str) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-remote", remote, remote_ref])
+        .output()
+        .unwrap_or_else(|_| fail("REMOTE_ADAPTER_UNAVAILABLE"));
+    if !output.status.success() {
+        fail("REMOTE_MAIN_QUERY_FAILED");
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .and_then(|value| value.split_whitespace().next().map(str::to_string))
+        .unwrap_or_else(|| fail("REMOTE_MAIN_REF_MISSING"))
+}
+
 fn record_time(record: &Value, name: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(record_str(record, "/created_at", name))
         .unwrap_or_else(|_| fail(format!("INVALID_RECORD_TIME:{}", name)))
@@ -3144,18 +3226,34 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     let worktree_name = module_record_name("worktree-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
-    let collaboration_name = module_record_name("collaboration-record", module_id);
-    let queue_name = module_record_name("merge-queue-record", module_id);
-    let integration_name = module_record_name("integration-record", module_id);
-    let receipt_name = module_record_name("mainline-receipt-record", module_id);
+    let promotion_name = module_record_name("promotion-record", module_id);
     let merge_name = module_record_name("merge-record", module_id);
     let worktree = read_record(root, &worktree_name);
     let candidate = read_record(root, &candidate_name);
     let effectiveness = read_record(root, &effectiveness_name);
+    let promotion = read_record(root, &promotion_name);
+    let collaboration_name = format!(
+        "collaboration-record-{}.json",
+        record_str(&promotion, "/collaboration_record_id", &promotion_name)
+    );
+    let queue_name = format!(
+        "merge-queue-record-{}.json",
+        record_str(&promotion, "/merge_queue_record_id", &promotion_name)
+    );
+    let integration_name = format!(
+        "integration-record-{}.json",
+        record_str(&promotion, "/integration_record_id", &promotion_name)
+    );
+    let receipt_name = format!(
+        "mainline-receipt-record-{}.json",
+        record_str(&promotion, "/mainline_receipt_record_id", &promotion_name)
+    );
     let collaboration = read_record(root, &collaboration_name);
     let queue = read_record(root, &queue_name);
     let integration = read_record(root, &integration_name);
     let receipt = read_record(root, &receipt_name);
+    let collaboration_index = read_record(root, "collaboration-index.json");
+    let queue_state = read_record(root, "merge-queue-state.json");
     let merge = read_record(root, &merge_name);
     let issue_id = record_str(&candidate, "/issue_id", &candidate_name);
     let candidate_id = record_str(&candidate, "/fix_candidate_id", &candidate_name);
@@ -3201,6 +3299,32 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
             fail("INVALID_COLLABORATION_IDENTITY");
         }
     }
+    let active_claims = record_array(
+        &collaboration_index,
+        "/active_claims",
+        "collaboration-index.json",
+    );
+    let mut claim_ids = std::collections::HashSet::new();
+    let mut worker_ids = std::collections::HashSet::new();
+    let mut worktree_ids = std::collections::HashSet::new();
+    let mut current_claim_found = false;
+    for claim in active_claims {
+        let semantic_id = record_str(claim, "/semantic_claim_id", "collaboration-index.json");
+        let worker_id = record_str(claim, "/worker_id", "collaboration-index.json");
+        let worktree_id = record_str(claim, "/worktree_id", "collaboration-index.json");
+        if !claim_ids.insert(semantic_id)
+            || !worker_ids.insert(worker_id)
+            || !worktree_ids.insert(worktree_id)
+        {
+            fail("COLLABORATION_INDEX_NOT_EXCLUSIVE");
+        }
+        if record_str(claim, "/collaboration_id", "collaboration-index.json") == collaboration_id {
+            current_claim_found = true;
+        }
+    }
+    if !current_claim_found {
+        fail("COLLABORATION_NOT_ACTIVE");
+    }
     if record_str(&queue, "/collaboration_id", &queue_name) != collaboration_id
         || record_str(&queue, "/fix_candidate_id", &queue_name) != candidate_id
         || record_str(&queue, "/effectiveness_id", &queue_name) != effectiveness_id
@@ -3217,23 +3341,79 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     {
         fail("MERGE_QUEUE_ADMISSION_MISMATCH");
     }
+    let ordered_entries =
+        record_array(&queue_state, "/ordered_entry_ids", "merge-queue-state.json");
+    let mut unique_entries = std::collections::HashSet::new();
+    if record_str(&queue_state, "/merge_owner", "merge-queue-state.json")
+        != record_str(&queue, "/merge_owner", &queue_name)
+        || record_str(&queue_state, "/active_entry_id", "merge-queue-state.json") != queue_id
+        || ordered_entries
+            .iter()
+            .any(|entry| !unique_entries.insert(entry.as_str().unwrap_or("")))
+        || ordered_entries
+            .get(
+                queue
+                    .get("queue_position")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize
+                    - 1,
+            )
+            .and_then(Value::as_str)
+            != Some(queue_id)
+    {
+        fail("GLOBAL_MERGE_QUEUE_STATE_MISMATCH");
+    }
     let gate_results = integration
         .get("required_gate_results")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INTEGRATION_GATES_MISSING"));
-    if gate_results.is_empty()
-        || gate_results.iter().any(|gate| {
-            gate.get("gate_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .is_none()
-                || gate
-                    .get("producer")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .is_none()
-                || gate.get("result").and_then(Value::as_str) != Some("pass")
+    let verification_map: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/maps/verification-map.json"))
+            .unwrap_or_else(|_| fail("VERIFICATION_MAP_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_VERIFICATION_MAP"));
+    let expected_gates = record_array(&verification_map, "/gates", "verification-map.json")
+        .iter()
+        .filter(|gate| {
+            gate.get("required_for")
+                .and_then(Value::as_array)
+                .is_some_and(|uses| {
+                    uses.iter()
+                        .any(|value| value.as_str() == Some("integration_verification"))
+                })
         })
+        .map(|gate| {
+            (
+                record_str(gate, "/gate_id", "verification-map.json"),
+                record_str(gate, "/producer", "verification-map.json"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let actual_gates = gate_results
+        .iter()
+        .map(|gate| {
+            if gate.get("result").and_then(Value::as_str) != Some("pass")
+                || record_str(gate, "/source_commit", &integration_name) != integration_commit
+                || record_str(gate, "/tree_hash", &integration_name) != integration_tree
+            {
+                fail("INTEGRATION_GATE_BINDING_MISMATCH");
+            }
+            (
+                record_str(gate, "/gate_id", &integration_name),
+                record_str(gate, "/producer", &integration_name),
+            )
+        })
+        .collect::<Vec<_>>();
+    if expected_gates.is_empty()
+        || actual_gates.len() != expected_gates.len()
+        || actual_gates
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != actual_gates.len()
+        || actual_gates
+            .iter()
+            .any(|gate| !expected_gates.contains(gate))
         || record_str(&integration, "/queue_entry_id", &integration_name) != queue_id
         || record_str(&integration, "/candidate_commit", &integration_name) != candidate_commit
         || record_str(&integration, "/main_base_commit", &integration_name) != main_base_commit
@@ -3272,17 +3452,14 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
         }
     }
     let local_main_ref = record_str(&receipt, "/local_main_ref", &receipt_name);
-    let remote_main_ref = record_str(&receipt, "/remote_main_ref", &receipt_name);
+    let remote_name = record_str(&receipt, "/remote_name", &receipt_name);
+    let remote_ref = record_str(&receipt, "/remote_ref", &receipt_name);
     let local_main_commit = git_value(
         root,
         &["rev-parse", local_main_ref],
         "LOCAL_MAIN_REF_MISSING",
     );
-    let remote_main_commit = git_value(
-        root,
-        &["rev-parse", remote_main_ref],
-        "REMOTE_MAIN_REF_MISSING",
-    );
+    let remote_main_commit = git_ls_remote(root, remote_name, remote_ref);
     if record_str(&receipt, "/integration_id", &receipt_name) != integration_id
         || record_str(&receipt, "/queue_entry_id", &receipt_name) != queue_id
         || record_str(&receipt, "/integration_commit", &receipt_name) != integration_commit
@@ -3316,6 +3493,9 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     if record_str(&merge, "/queue_entry_id", &merge_name) != queue_id
         || record_str(&merge, "/integration_id", &merge_name) != integration_id
         || record_str(&merge, "/mainline_receipt_id", &merge_name) != receipt_id
+        || record_str(&merge, "/fix_candidate_id", &merge_name) != candidate_id
+        || record_str(&merge, "/effectiveness_id", &merge_name) != effectiveness_id
+        || record_str(&merge, "/mainline_ref", &merge_name) != local_main_ref
         || record_str(&merge, "/candidate_commit", &merge_name) != candidate_commit
         || record_str(&merge, "/integration_commit", &merge_name) != integration_commit
         || record_str(&merge, "/merge_commit", &merge_name) != integration_commit
@@ -3337,12 +3517,7 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     }
 }
 
-fn assert_fix_merge_gate(root: &Path, module_id: &str) {
-    let project = read_project(root);
-    if assert_development_scenarios(root, &project) {
-        assert_parallel_merge_gate(root, module_id);
-        return;
-    }
+fn assert_single_merge_gate(root: &Path, module_id: &str) {
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
     let merge_name = module_record_name("merge-record", module_id);
@@ -3411,6 +3586,15 @@ fn assert_fix_merge_gate(root: &Path, module_id: &str) {
         .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
     if !merge_on_mainline.success() {
         fail("RECORDED_MERGE_NOT_ON_MAINLINE");
+    }
+}
+
+fn assert_fix_merge_gate(root: &Path, module_id: &str) {
+    let project = read_project(root);
+    if assert_development_scenarios(root, &project) {
+        assert_parallel_merge_gate(root, module_id);
+    } else {
+        assert_single_merge_gate(root, module_id);
     }
 }
 
@@ -3628,9 +3812,22 @@ fn assert_fix_lifecycle_graph(
         fail("PROMOTION_FIX_LIFECYCLE_REFERENCE_MISMATCH");
     }
     if parallel_development {
-        let queue_name = module_record_name("merge-queue-record", module_id);
-        let integration_name = module_record_name("integration-record", module_id);
-        let receipt_name = module_record_name("mainline-receipt-record", module_id);
+        let queue_name = format!(
+            "merge-queue-record-{}.json",
+            record_str(promotion, "/merge_queue_record_id", "promotion-record.json")
+        );
+        let integration_name = format!(
+            "integration-record-{}.json",
+            record_str(promotion, "/integration_record_id", "promotion-record.json")
+        );
+        let receipt_name = format!(
+            "mainline-receipt-record-{}.json",
+            record_str(
+                promotion,
+                "/mainline_receipt_record_id",
+                "promotion-record.json",
+            )
+        );
         let queue = read_record(root, &queue_name);
         let integration = read_record(root, &integration_name);
         let receipt = read_record(root, &receipt_name);
@@ -5308,7 +5505,7 @@ fn write_project_scaffold(root: &Path) {
     "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
     "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
     "runtime_forbidden_roots": ["playground/**", "generated/**"],
-    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/collaboration-index.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/merge-queue-state.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
     "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true

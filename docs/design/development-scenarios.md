@@ -19,7 +19,7 @@ CollaborationRecord
   -> Promotion / Freeze / Cleanup
 ```
 
-The candidate tree is not required to equal the final main tree. Other accepted work may advance main. The exact tested integration tree must equal the merged integration commit tree, and that integration commit must be reachable from both local and recorded remote main refs.
+The candidate tree is not required to equal the final main tree. Other accepted work may advance main. The exact tested integration tree must equal the merged integration commit tree. Local reachability is checked from the declared local main ref; remote reachability is checked with `git ls-remote` against the receipt's named remote/ref.
 
 Conflict resolution never occurs inside the merge queue. A conflict returns the task to its owning worker and worktree, producing a new candidate and new review/effectiveness evidence.
 

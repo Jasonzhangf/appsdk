@@ -1,23 +1,15 @@
 {
   "schema_version": 1,
   "modules": [
-    {
-      "module_id": "appsdk-fix-lifecycle",
-      "status": "active",
-      "owner": "appsdk::fix_lifecycle",
-      "owned_paths": [
-        "contracts/records/**",
-        "contracts/maps/**",
-        "contracts/development-scenarios.manifest.json",
-        "docs/design/fix-lifecycle-v2.md",
-        "docs/design/development-scenarios.md",
-        "docs/test-design/fix-lifecycle-v2.md",
-        "docs/test-design/multi-worktree-merge-queue.md",
-        "rust/src/main.rs",
-        "rust/tests/cli_smoke.rs"
-      ],
-      "forbidden_paths": ["active/lib/**", "protected/**"],
-      "verification_gates": ["architecture_review_pass", "fix_lifecycle_graph", "scenario_pair_activation", "tested_integration_identity", "remote_main_receipt"]
-    }
+    {"module_id":"architecture-registry","status":"active","owner":"appsdk::architecture","owned_paths":["contracts/maps/**"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["contract_valid"]},
+    {"module_id":"runtime-core","status":"active","owner":"appsdk::runtime","owned_paths":["rust/src/main.rs"],"symbol_owners":{"assert_development_scenarios":"appsdk::development_scenarios","assert_parallel_merge_gate":"appsdk::merge_queue","git_ls_remote":"appsdk::host_vcs","assert_single_merge_gate":"appsdk::fix_lifecycle","assert_fix_lifecycle_graph":"appsdk::fix_lifecycle"},"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["contract_valid","scenario_pair_activation","exclusive_worker_worktree","serial_merge_queue","integration_affected_verification","tested_integration_identity","remote_main_receipt","mainline_merge_identity","fix_lifecycle_graph"]},
+    {"module_id":"development-scenarios","status":"active","owner":"appsdk::development_scenarios","owned_paths":["contracts/development-scenarios.manifest.json","docs/design/development-scenarios.md"],"entry_symbols":["assert_development_scenarios"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["scenario_pair_activation"]},
+    {"module_id":"collaboration-contracts","status":"active","owner":"appsdk::collaboration","owned_paths":["contracts/records/collaboration-record.schema.json","contracts/records/collaboration-index.schema.json"],"entry_symbols":["assert_parallel_merge_gate"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["exclusive_worker_worktree"]},
+    {"module_id":"parallel-merge-contracts","status":"active","owner":"appsdk::merge_queue","owned_paths":["contracts/records/merge-queue-record.schema.json","contracts/records/merge-queue-state.schema.json","contracts/records/integration-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/record-graph.contract.json"],"entry_symbols":["assert_parallel_merge_gate"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["serial_merge_queue","integration_affected_verification","tested_integration_identity","mainline_merge_identity","fix_lifecycle_graph"]},
+    {"module_id":"host-vcs-receipt","status":"active","owner":"appsdk::host_vcs","owned_paths":["contracts/records/mainline-receipt-record.schema.json"],"entry_symbols":["git_ls_remote"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["remote_main_receipt"]},
+    {"module_id":"fix-lifecycle-contracts","status":"active","owner":"appsdk::fix_lifecycle","owned_paths":["contracts/records/effectiveness-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/freeze-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/review-record.schema.json","contracts/records/worktree-record.schema.json"],"entry_symbols":["assert_single_merge_gate","assert_fix_lifecycle_graph"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["worktree_clean","baseline_reproduced","fix_candidate_verified","architecture_review_pass","post_architecture_effectiveness","mainline_merge_identity","fix_lifecycle_graph"]},
+    {"module_id":"lifecycle-contracts","status":"active","owner":"appsdk::lifecycle","owned_paths":["contracts/lifecycle-state-machines.manifest.json","contracts/project.schema.json","contracts/sdk-bundle.manifest.json","contracts/transitions/**"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["contract_valid","record_graph","fix_lifecycle_graph"]},
+    {"module_id":"verification-tests","status":"active","owner":"appsdk::verifier","owned_paths":["rust/tests/**","docs/test-design/**"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["contract_valid","integration_affected_verification","fix_lifecycle_graph"]},
+    {"module_id":"sdk-delivery","status":"active","owner":"appsdk::delivery","owned_paths":["rust/Cargo.toml","rust/Cargo.lock","templates/**",".github/workflows/**","README.md","skills/**","docs/design/appsdk-project-integration.md","docs/design/fix-lifecycle-v2.md"],"forbidden_paths":["active/lib/**","protected/**"],"verification_gates":["contract_valid","sdk_pinned","record_graph"]}
   ]
 }

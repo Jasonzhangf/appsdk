@@ -49,12 +49,23 @@ appsdk init <workspace> --project-root <relative-path>
 10. Commit the fix candidate and bind its commit, tree hash, diff hash, design ID, owner, scope, changed paths, and positive/negative verification evidence in FixCandidateRecord.
 11. Run architecture review against that exact candidate. ReviewRecord must be `review_kind: architecture`, contain explicit PASS, AI confidence/rationale, and hashes of the resource, function, mainline-call, and verification maps.
 12. After architecture PASS, rerun the original reproduction inputs plus positive, negative, and blackbox checks without changing candidate source. Record EffectivenessRecord. Source/tree/scope changes invalidate review and effectiveness.
-13. Merge only after effectiveness PASS. MergeRecord must prove the candidate commit is an ancestor of the recorded merge commit and that the merge commit remains on the declared mainline ref.
+13. Merge only after effectiveness PASS. For a single worker, MergeRecord proves the candidate commit is an ancestor of the recorded merge commit and that the merge commit remains on the declared mainline ref. For parallel development, follow the atomic scenario pair below.
 14. Promote only when the complete worktree → reproduction → candidate → architecture review → effectiveness → merge record graph is valid and evidence targets the exact module and candidate artifact.
 15. Before freeze, run the module's declared regression suite and create a RegressionReport bound to the exact merged source commit, artifact hash, public API hash, scope hash, and input hash. Regression and bug-reproduction evidence must combine whitebox and blackbox coverage; unit and focused tests may be whitebox only.
 16. Compile the merged source library, publish the immutable Active artifact, archive source/contracts to Protected, create FreezeRecord with the RegressionReport ID/hash, and verify.
 17. After freeze, ordinary full-regression execution for that unchanged module may be disabled to reduce CI load. Keep the suite and report. Any source, contract, public API, artifact, or dependency input change invalidates the report and requires regression re-enablement before a new freeze.
 18. Close every experiment with a PlaygroundCleanupRecord; archive evidence to Protected history, then remove the experiment directory under the declared retention policy.
+
+## Parallel development scenario pair
+
+`multi_worker_collaboration` and `multi_worktree_merge_queue` are one atomic capability. Enable both or neither in `.appsdk/project.json`; one-sided activation is invalid.
+
+- Each worker owns one semantic claim, one branch, and one clean isolated worktree. A worker never edits main and never shares a worktree.
+- After candidate verification, architecture PASS, and unchanged-source effectiveness PASS, the worker emits CollaborationRecord and enters the serial merge queue.
+- One merge owner admits one queue entry at a time. Conflict resolution is not allowed in the queue; return the issue to its owner worktree and invalidate stale candidate/review/effectiveness evidence.
+- Build an integration commit from the current main base and candidate. IntegrationRecord binds that exact commit/tree and the affected verification gates.
+- Merge only the tested integration commit. MainlineReceiptRecord must prove candidate ancestry, integration reachability from local main, and integration reachability from the recorded remote main ref.
+- PromotionRecord references queue, integration, and mainline receipt records. Cleanup and claim release are forbidden until remote receipt passes.
 
 For a frozen module change, run `appsdk begin-version <project> --module <id> --from <current> --to <new>` before formal source edits. The command must bind and preserve the current Active artifact, Protected archive, and record graph; direct edits to the old Active or Protected version are forbidden.
 
@@ -68,7 +79,7 @@ Clarify goal first. Then use evidence-first debugging: baseline, first divergenc
 - project tests and required gates
 - candidate artifact hash and public API hash
 - record graph references, freshness, scope, module, and version relations
-- clean isolated worktree identity, candidate Git tree identity, architecture map hashes, post-review unchanged-source effectiveness, and merge ancestry
+- clean isolated worktree identity, candidate Git tree identity, architecture map hashes, post-review unchanged-source effectiveness, merge ancestry, tested integration identity, and local/remote mainline receipt when parallel scenarios are enabled
 - RegressionReport whitebox + blackbox coverage, non-zero passing tests, exact input binding, and FreezeRecord report hash
 - Protected and Active immutability
 - final architecture review with explicit PASS

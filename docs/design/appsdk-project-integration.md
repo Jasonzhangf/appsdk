@@ -68,7 +68,7 @@ Ignore:
 ```json
 {
   "sdk": "appsdk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "digest": "sha256:replace-with-compiled-sdk-digest",
   "compiler_digest": "sha256:replace-with-compiler-digest",
   "bundle_digest": "sha256:replace-with-sdk-bundle-digest",
@@ -119,12 +119,13 @@ Then fill and confirm `.appsdk/goal.json`, bind project maps and module ownershi
 ```text
 goal clarification
   -> confirmed/admitted
-  -> clean isolated worktree
+  -> one semantic claim + one clean isolated worktree per worker
   -> baseline reproduction
   -> committed fix candidate + positive/negative evidence
   -> architecture ReviewRecord PASS
   -> unchanged-source effectiveness replay PASS
-  -> verified mainline merge
+  -> serial merge queue + tested integration when parallel scenarios are enabled
+  -> verified local and remote mainline receipt
   -> PromotionRecord
   -> Active library
   -> Protected source/contracts

@@ -10,8 +10,9 @@ goal admitted
   -> fix candidate verification
   -> architecture review PASS
   -> unchanged-candidate effectiveness replay PASS
-  -> mainline merge admission
-  -> merged change identity verification
+  -> merge queue admission when parallel development is enabled
+  -> tested integration identity verification
+  -> local and remote mainline receipt
   -> compile / Active / Protected / Freeze
 ```
 
@@ -21,7 +22,7 @@ Playground is the logical experiment lifecycle. The clean Git worktree is the ph
 
 - Source, tree, diff, scope, owner, design, or map change after architecture review invalidates the review and effectiveness evidence.
 - Effectiveness failure returns the lifecycle to `fix_candidate`.
-- Candidate commit missing from mainline, or the merged tree differing from the reviewed/effectiveness-tested candidate tree, blocks promotion. Rebase and repeat review/effectiveness when mainline moved; do not silently promote an expanded merge tree.
+- Candidate commit missing from the tested integration blocks promotion. In single-worker mode, the merged tree must equal the reviewed/effectiveness-tested candidate tree. In parallel mode, the final main tree may contain other accepted work, but the merged commit/tree must exactly equal IntegrationRecord and remain reachable from both local and recorded remote main refs.
 - Compile and publish never consume Playground or an unmerged candidate branch.
 
 ## Record graph
@@ -33,6 +34,10 @@ WorktreeRecord
   -> FixCandidateRecord
   -> Architecture ReviewRecord
   -> EffectivenessRecord
+  -> CollaborationRecord (parallel)
+  -> MergeQueueRecord (parallel)
+  -> IntegrationRecord (parallel)
+  -> MainlineReceiptRecord (parallel)
   -> MergeRecord
   -> PromotionRecord
   -> RegressionReport
@@ -43,4 +48,4 @@ Required evidence phases are `baseline_reproduction`, `fix_candidate`, `positive
 
 ## Compatibility
 
-Fix Lifecycle v2 is the v0.1.3 record graph and is intentionally fail-closed. The binary checks `.appsdk/project.json` and rejects a different SDK version with `PROJECT_SDK_VERSION_PIN_MISMATCH` before interpreting its records. A project frozen by v0.1.2 must execute the globally retained versioned binary (`~/.local/lib/appsdk/0.1.2/appsdk`) until a migration creates verifiable Worktree, Reproduction, FixCandidate, Architecture Review, Effectiveness, and Merge records from repository history and retained evidence. Do not synthesize PASS records when historical evidence is unavailable.
+Fix Lifecycle v2 began with the v0.1.3 single-worker graph. AppSDK v0.1.4 adds the atomic `multi_worker_collaboration` + `multi_worktree_merge_queue` scenario pair and keeps the graph fail-closed. The binary checks `.appsdk/project.json` and rejects a different SDK version with `PROJECT_SDK_VERSION_PIN_MISMATCH` before interpreting records. Older projects must use their retained versioned binary until an explicit migration creates verifiable records from repository history and retained evidence. Do not synthesize PASS records when historical evidence is unavailable.

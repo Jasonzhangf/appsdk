@@ -9,12 +9,17 @@
     "module_id": {"type": "string"},
     "fix_candidate_id": {"type": "string"},
     "effectiveness_id": {"type": "string"},
+    "queue_entry_id": {"type": "string"},
+    "integration_id": {"type": "string"},
+    "mainline_receipt_id": {"type": "string"},
     "mainline_ref": {"type": "string"},
     "candidate_commit": {"type": "string"},
+    "integration_commit": {"type": "string"},
     "merge_commit": {"type": "string"},
     "candidate_tree_hash": {"type": "string"},
+    "integration_tree_hash": {"type": "string"},
     "merged_tree_hash": {"type": "string"},
-    "change_identity": {"const": "exact"},
+    "change_identity": {"enum": ["exact", "tested_integration_exact"]},
     "result": {"const": "pass"},
     "created_at": {"type": "string"}
   }

@@ -1,20 +1,24 @@
 {
   "schema_version": 1,
   "lifecycle_id":"appsdk-governance",
-  "nodes":["clarify","worktree_ready","reproduced","fix_candidate","architecture_review","effectiveness_verified","merge_ready","merged","promotion","compile","active","protected","verify"],
+  "nodes":["clarify","collaboration_claimed","worktree_ready","reproduced","fix_candidate","architecture_reviewed","effectiveness_verified","merge_queued","integration_built","integration_verified","mainline_merged","remote_verified","promotion","compile","active","protected","verify"],
   "edges":[
-    {"from":"clarify","to":"worktree_ready","owner":"appsdk::fix_lifecycle"},
+    {"from":"clarify","to":"collaboration_claimed","owner":"appsdk::collaboration"},
+    {"from":"collaboration_claimed","to":"worktree_ready","owner":"appsdk::collaboration"},
     {"from":"worktree_ready","to":"reproduced","owner":"appsdk::fix_lifecycle"},
     {"from":"reproduced","to":"fix_candidate","owner":"appsdk::fix_lifecycle"},
-    {"from":"fix_candidate","to":"architecture_review","owner":"appsdk::fix_lifecycle"},
-    {"from":"architecture_review","to":"effectiveness_verified","owner":"appsdk::fix_lifecycle"},
-    {"from":"effectiveness_verified","to":"merge_ready","owner":"appsdk::fix_lifecycle"},
-    {"from":"merge_ready","to":"merged","owner":"appsdk::fix_lifecycle"},
-    {"from":"merged","to":"promotion","owner":"appsdk::lifecycle"},
+    {"from":"fix_candidate","to":"architecture_reviewed","owner":"appsdk::fix_lifecycle"},
+    {"from":"architecture_reviewed","to":"effectiveness_verified","owner":"appsdk::fix_lifecycle"},
+    {"from":"effectiveness_verified","to":"merge_queued","owner":"appsdk::merge_queue"},
+    {"from":"merge_queued","to":"integration_built","owner":"appsdk::merge_queue"},
+    {"from":"integration_built","to":"integration_verified","owner":"appsdk::merge_queue"},
+    {"from":"integration_verified","to":"mainline_merged","owner":"appsdk::merge_queue"},
+    {"from":"mainline_merged","to":"remote_verified","owner":"appsdk::merge_queue"},
+    {"from":"remote_verified","to":"promotion","owner":"appsdk::lifecycle"},
     {"from":"promotion","to":"compile","owner":"appsdk::compiler"},
     {"from":"compile","to":"active","owner":"appsdk::publisher"},
     {"from":"active","to":"protected","owner":"appsdk::freezer"},
     {"from":"protected","to":"verify","owner":"appsdk::verifier"},
-    {"from":"verify","to":"worktree_ready","owner":"appsdk::workspace","return_path":true}
+    {"from":"verify","to":"collaboration_claimed","owner":"appsdk::workspace","return_path":true}
   ]
 }

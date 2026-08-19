@@ -7,7 +7,7 @@ AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实�
 ## 第一阶段治理流程
 
 ```text
-Goal clarification -> clean worktree -> reproduce -> fix candidate -> architecture PASS -> effectiveness replay -> verified mainline merge -> compile library
+Goal clarification -> clean worktree -> reproduce -> fix candidate -> architecture PASS -> effectiveness replay -> tested integration -> local/remote mainline receipt -> compile library
                   -> Active lib -> Protected source/contracts -> lock -> close
 ```
 
@@ -38,6 +38,7 @@ appsdk publish-active ./my-app --module app-core --version active-v1
 - [Zone Transition Matrix](./docs/architecture/zone-transition-matrix.md)
 - [Goal Clarification Contract](./docs/design/goal-clarification-contract.md)
 - [AppSDK Project Integration](./docs/design/appsdk-project-integration.md)
+- [Development Scenario Contracts](./docs/design/development-scenarios.md)
 - [Rust Binary Delivery](./docs/design/rust-binary-delivery.md)
 
 目标提示词：收到一个新开发/debug目标时，先澄清并确认目标，再写 `docs/goals/<feature-name>-plan.md`，最后输出短 `/goal`。固定规范见 [`skills/appsdk-project-governance/references/goal-prompt.md`](./skills/appsdk-project-governance/references/goal-prompt.md)。
@@ -45,6 +46,8 @@ appsdk publish-active ./my-app --module app-core --version active-v1
 可复用 Skill：[`skills/appsdk-project-governance/SKILL.md`](./skills/appsdk-project-governance/SKILL.md)。它定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze。
 
 `goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 Active 必须有 Playground 证据、架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
+
+多 worker 场景必须同时启用 `multi_worker_collaboration` 与 `multi_worktree_merge_queue`。每个 worker 独占一个 semantic claim、branch 和 clean worktree；worker 不写 main。候选变更经单一 merge owner 串行入队，验证精确 integration commit/tree，并在本地与远端 main 都可达后才允许 promotion、cleanup 和 claim release。
 
 Playground 不是永久缓存：实验必须在 review/closeout 时归档并清理，默认 `archive_then_remove`；debug 正式合并必须在变更附近留下根因、设计批准 ID 和修改理由注释，并在 PromotionRecord 中留证。
 

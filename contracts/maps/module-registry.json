@@ -8,13 +8,16 @@
       "owned_paths": [
         "contracts/records/**",
         "contracts/maps/**",
+        "contracts/development-scenarios.manifest.json",
         "docs/design/fix-lifecycle-v2.md",
+        "docs/design/development-scenarios.md",
         "docs/test-design/fix-lifecycle-v2.md",
+        "docs/test-design/multi-worktree-merge-queue.md",
         "rust/src/main.rs",
         "rust/tests/cli_smoke.rs"
       ],
       "forbidden_paths": ["active/lib/**", "protected/**"],
-      "verification_gates": ["architecture_review_pass", "fix_lifecycle_graph", "mainline_merge_identity"]
+      "verification_gates": ["architecture_review_pass", "fix_lifecycle_graph", "scenario_pair_activation", "tested_integration_identity", "remote_main_receipt"]
     }
   ]
 }

@@ -196,6 +196,92 @@ fn verify_requires_the_project_pinned_sdk_binary_version() {
 }
 
 #[test]
+fn parallel_development_scenarios_require_atomic_activation() {
+    let root = temp_root("scenario-pair");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["development_scenarios"] = serde_json::json!({
+        "manifest": ".appsdk/contracts/development-scenarios.manifest.json",
+        "enabled": ["multi_worker_collaboration"]
+    });
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run(&["verify", root_text]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("DEVELOPMENT_SCENARIO_PAIR_REQUIRED"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn parallel_development_requires_tested_integration_and_remote_main_receipt() {
+    let root = temp_root("parallel-main-receipt");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    enable_parallel_development(&root);
+    init_git(&root);
+    fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-1","raw_request":"parallel change","understood_objective":"parallel change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#).unwrap();
+    pin_test_lock(root_text);
+    for stage in ["source_implemented", "contract_bound"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    assert!(run(&["compile", root_text]).status.success());
+    for stage in ["compiled", "controlled_verified"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage,
+        ])
+        .status
+        .success());
+    }
+    let module_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let architecture_hash = module_artifact["artifact_hash"].as_str().unwrap();
+    write_parallel_records(&root, "app-core", architecture_hash, false);
+    let promoted = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(
+        promoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+    let receipt_file = root.join(".appsdk/records/mainline-receipt-record-app-core.json");
+    let mut receipt: Value =
+        serde_json::from_str(&fs::read_to_string(&receipt_file).unwrap()).unwrap();
+    receipt["remote_verified"] = Value::Bool(false);
+    fs::write(
+        &receipt_file,
+        serde_json::to_string_pretty(&receipt).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("MAINLINE_RECEIPT_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verify_rejects_symlinked_sdk_resources_record() {
     let root = temp_root("sdk-resources-symlink");
     fs::create_dir_all(&root).unwrap();
@@ -365,9 +451,12 @@ fn pinned_global_binary_verifies_without_local_sdk_witness() {
     )
     .unwrap();
     pin_test_lock(root_text);
-    assert!(run(&["promote", root_text, "--to", "source_implemented"])
-        .status
-        .success());
+    let source_promote = run(&["promote", root_text, "--to", "source_implemented"]);
+    assert!(
+        source_promote.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source_promote.stderr)
+    );
     assert!(run(&["promote", root_text, "--to", "contract_bound"])
         .status
         .success());
@@ -416,9 +505,12 @@ fn verify_admission_skips_generated_artifact_requirement() {
     )
     .unwrap();
     pin_test_lock(root_text);
-    assert!(run(&["promote", root_text, "--to", "source_implemented"])
-        .status
-        .success());
+    let source_promote = run(&["promote", root_text, "--to", "source_implemented"]);
+    assert!(
+        source_promote.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source_promote.stderr)
+    );
     assert!(run(&["promote", root_text, "--to", "contract_bound"])
         .status
         .success());
@@ -708,6 +800,159 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     }
 }
 
+fn enable_parallel_development(root: &Path) {
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["development_scenarios"] = serde_json::json!({
+        "manifest": ".appsdk/contracts/development-scenarios.manifest.json",
+        "enabled": ["multi_worker_collaboration", "multi_worktree_merge_queue"]
+    });
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+fn write_parallel_records(
+    root: &PathBuf,
+    module_id: &str,
+    artifact_hash: &str,
+    include_freeze: bool,
+) {
+    write_records(root, module_id, artifact_hash, include_freeze);
+    let records = root.join(".appsdk/records");
+    let candidate_commit = git_test_value(root, &["rev-parse", "HEAD"]);
+    let candidate_tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
+    let marker = root.join(".appsdk/integration-marker");
+    fs::write(&marker, "tested integration\n").unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "add",
+            ".appsdk/integration-marker"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "commit",
+            "-m",
+            "tested integration",
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let integration_commit = git_test_value(root, &["rev-parse", "HEAD"]);
+    let integration_tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
+    assert_ne!(candidate_tree, integration_tree);
+    for reference in ["refs/heads/test-mainline", "refs/remotes/origin/main"] {
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap(),
+                "update-ref",
+                reference,
+                &integration_commit,
+            ])
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(
+        records.join(format!("collaboration-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "collaboration_id":"collaboration-1","issue_id":"issue-1","module_id":module_id,
+            "scenario_ids":["multi_worker_collaboration","multi_worktree_merge_queue"],
+            "run_id":"run-1","semantic_claim_id":"claim-1","worker_id":"worker-1",
+            "worktree_id":"worktree-1","exclusive_worktree":true,"exclusive_claim":true,
+            "status":"handoff_ready","created_at":"2026-01-01T00:05:30Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("merge-queue-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "queue_entry_id":"queue-1","issue_id":"issue-1","module_id":module_id,
+            "collaboration_id":"collaboration-1","fix_candidate_id":"candidate-1",
+            "effectiveness_id":"effectiveness-1","candidate_commit":candidate_commit,
+            "main_base_commit":candidate_commit,"queue_position":1,"merge_owner":"merge-owner-1",
+            "strategy":"integration_merge_then_fast_forward","status":"admitted",
+            "created_at":"2026-01-01T00:06:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("integration-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "integration_id":"integration-1","queue_entry_id":"queue-1","issue_id":"issue-1",
+            "module_id":module_id,"candidate_commit":candidate_commit,
+            "main_base_commit":candidate_commit,"integration_commit":integration_commit,
+            "integration_tree_hash":integration_tree,"conflict_status":"clean",
+            "resolution_mode":"none","impact_status":"revalidated",
+            "required_gate_results":[{"gate_id":"affected-verification","result":"pass","producer":"test"}],
+            "result":"pass","created_at":"2026-01-01T00:06:10Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join(format!("mainline-receipt-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "receipt_id":"receipt-1","integration_id":"integration-1","queue_entry_id":"queue-1",
+            "issue_id":"issue-1","module_id":module_id,"local_main_ref":"refs/heads/test-mainline",
+            "remote_main_ref":"refs/remotes/origin/main","integration_commit":integration_commit,
+            "local_main_commit":integration_commit,"remote_main_commit":integration_commit,
+            "integration_tree_hash":integration_tree,"candidate_reachable":true,
+            "integration_local_reachable":true,"integration_remote_reachable":true,
+            "remote_verified":true,"result":"pass","created_at":"2026-01-01T00:06:20Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let merge_file = records.join(format!("merge-record-{module_id}.json"));
+    let mut merge: Value = serde_json::from_str(&fs::read_to_string(&merge_file).unwrap()).unwrap();
+    merge["queue_entry_id"] = Value::String("queue-1".into());
+    merge["integration_id"] = Value::String("integration-1".into());
+    merge["mainline_receipt_id"] = Value::String("receipt-1".into());
+    merge["mainline_ref"] = Value::String("refs/heads/test-mainline".into());
+    merge["integration_commit"] = Value::String(integration_commit.clone());
+    merge["merge_commit"] = Value::String(integration_commit.clone());
+    merge["integration_tree_hash"] = Value::String(integration_tree.clone());
+    merge["merged_tree_hash"] = Value::String(integration_tree);
+    merge["change_identity"] = Value::String("tested_integration_exact".into());
+    merge["created_at"] = Value::String("2026-01-01T00:06:30Z".into());
+    fs::write(
+        &merge_file,
+        serde_json::to_string_pretty(&merge).unwrap() + "\n",
+    )
+    .unwrap();
+    let promotion_file = records.join(format!("promotion-record-{module_id}.json"));
+    let mut promotion: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion_file).unwrap()).unwrap();
+    promotion["merge_queue_record_id"] = Value::String("queue-1".into());
+    promotion["integration_record_id"] = Value::String("integration-1".into());
+    promotion["mainline_receipt_record_id"] = Value::String("receipt-1".into());
+    promotion["merged_commit"] = Value::String(integration_commit.clone());
+    promotion["source_commit"] = Value::String(integration_commit);
+    fs::write(
+        &promotion_file,
+        serde_json::to_string_pretty(&promotion).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
 fn write_regression_report(root: &PathBuf, module_id: &str, artifact_hash: &str) -> String {
     let promotion: Value = serde_json::from_str(
         &fs::read_to_string(
@@ -916,23 +1161,27 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
     let goal_file = root.join(".appsdk/goal.json");
     fs::write(&goal_file, r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#).unwrap();
-    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.3","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
+    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.4","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
 "#, "a".repeat(64), "b".repeat(64))).unwrap();
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.3"},
+  "sdk": {"name": "appsdk", "version": "0.1.4"},
   "lifecycle": {"stage": "draft"},
+  "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},
-  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
+  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/collaboration-record.schema.json","contracts/records/merge-queue-record.schema.json","contracts/records/integration-record.schema.json","contracts/records/mainline-receipt-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
   "lifecycles": {"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},
     "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
 "#).unwrap();
     pin_test_lock(root_text);
-    assert!(run(&["promote", root_text, "--to", "source_implemented"])
-        .status
-        .success());
+    let source_promote = run(&["promote", root_text, "--to", "source_implemented"]);
+    assert!(
+        source_promote.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source_promote.stderr)
+    );
     assert!(run(&["promote", root_text, "--to", "contract_bound"])
         .status
         .success());

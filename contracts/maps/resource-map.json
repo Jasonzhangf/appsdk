@@ -9,6 +9,11 @@
     {"resource_id":"fix_candidate","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/fix-candidate-record-<module>.json","allowed_operations":["read","validate","write"]},
     {"resource_id":"architecture_review","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/review-record-<module>.json","allowed_operations":["read","validate","write"]},
     {"resource_id":"fix_effectiveness","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/effectiveness-record-<module>.json","allowed_operations":["read","validate","write"]},
-    {"resource_id":"mainline_merge","owner":"appsdk::fix_lifecycle","truth_store":".appsdk/records/merge-record-<module>.json","allowed_operations":["read","validate","write"]}
+    {"resource_id":"development_scenarios","owner":"appsdk::development_scenarios","truth_store":".appsdk/contracts/development-scenarios.manifest.json","allowed_operations":["read","validate"]},
+    {"resource_id":"worker_collaboration","owner":"appsdk::collaboration","truth_store":".appsdk/records/collaboration-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"merge_queue","owner":"appsdk::merge_queue","truth_store":".appsdk/records/merge-queue-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"integration_candidate","owner":"appsdk::merge_queue","truth_store":".appsdk/records/integration-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"mainline_receipt","owner":"appsdk::merge_queue","truth_store":".appsdk/records/mainline-receipt-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"mainline_merge","owner":"appsdk::merge_queue","truth_store":".appsdk/records/merge-record-<module>.json","allowed_operations":["read","validate","write"]}
   ]
 }

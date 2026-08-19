@@ -22,6 +22,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/project.schema.json"),
     ),
     (
+        "contracts/development-scenarios.manifest.json",
+        "contracts",
+        include_str!("../../contracts/development-scenarios.manifest.json"),
+    ),
+    (
         "contracts/transitions/zone-transition.manifest.json",
         "contracts",
         include_str!("../../contracts/transitions/zone-transition.manifest.json"),
@@ -67,6 +72,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/effectiveness-record.schema.json"),
     ),
     (
+        "contracts/records/collaboration-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/collaboration-record.schema.json"),
+    ),
+    (
+        "contracts/records/merge-queue-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/merge-queue-record.schema.json"),
+    ),
+    (
+        "contracts/records/integration-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/integration-record.schema.json"),
+    ),
+    (
+        "contracts/records/mainline-receipt-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/mainline-receipt-record.schema.json"),
+    ),
+    (
         "contracts/records/merge-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/merge-record.schema.json"),
@@ -95,6 +120,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "docs/design/fix-lifecycle-v2.md",
         "docs",
         include_str!("../../docs/design/fix-lifecycle-v2.md"),
+    ),
+    (
+        "docs/design/development-scenarios.md",
+        "docs",
+        include_str!("../../docs/design/development-scenarios.md"),
     ),
     (
         "docs/architecture/appsdk-governance-architecture.md",
@@ -191,7 +221,7 @@ fn assert_bundle_manifest() {
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
         || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || manifest.get("version").and_then(Value::as_str) != Some("0.1.3")
+        || manifest.get("version").and_then(Value::as_str) != Some("0.1.4")
         || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
     {
         fail("INVALID_SDK_BUNDLE_MANIFEST");
@@ -228,7 +258,7 @@ fn install_bundle_resources(root: &Path) {
     let record = serde_json::json!({
         "schema_version": 1,
         "sdk": "appsdk",
-        "version": "0.1.3",
+        "version": "0.1.4",
         "bundle_digest": sdk_bundle_digest(),
         "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": installed
@@ -264,6 +294,11 @@ fn write_embedded_contract(root: &Path, relative: &str, content: &str) {
 }
 
 fn bootstrap_contracts(root: &Path) {
+    write_embedded_contract(
+        root,
+        ".appsdk/contracts/development-scenarios.manifest.json",
+        include_str!("../../contracts/development-scenarios.manifest.json"),
+    );
     write_embedded_contract(
         root,
         ".appsdk/maps/resource-map.json",
@@ -338,6 +373,22 @@ fn bootstrap_contracts(root: &Path) {
         (
             "contracts/records/effectiveness-record.schema.json",
             include_str!("../../contracts/records/effectiveness-record.schema.json"),
+        ),
+        (
+            "contracts/records/collaboration-record.schema.json",
+            include_str!("../../contracts/records/collaboration-record.schema.json"),
+        ),
+        (
+            "contracts/records/merge-queue-record.schema.json",
+            include_str!("../../contracts/records/merge-queue-record.schema.json"),
+        ),
+        (
+            "contracts/records/integration-record.schema.json",
+            include_str!("../../contracts/records/integration-record.schema.json"),
+        ),
+        (
+            "contracts/records/mainline-receipt-record.schema.json",
+            include_str!("../../contracts/records/mainline-receipt-record.schema.json"),
         ),
         (
             "contracts/records/merge-record.schema.json",
@@ -472,6 +523,10 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         "contracts/records/goal-clarification-record.schema.json",
         "contracts/records/review-record.schema.json",
         "contracts/records/effectiveness-record.schema.json",
+        "contracts/records/collaboration-record.schema.json",
+        "contracts/records/merge-queue-record.schema.json",
+        "contracts/records/integration-record.schema.json",
+        "contracts/records/mainline-receipt-record.schema.json",
         "contracts/records/merge-record.schema.json",
         "contracts/records/promotion-record.schema.json",
         "contracts/records/regression-report.schema.json",
@@ -567,6 +622,18 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
             }
             "contracts/records/effectiveness-record.schema.json" => {
                 include_str!("../../contracts/records/effectiveness-record.schema.json")
+            }
+            "contracts/records/collaboration-record.schema.json" => {
+                include_str!("../../contracts/records/collaboration-record.schema.json")
+            }
+            "contracts/records/merge-queue-record.schema.json" => {
+                include_str!("../../contracts/records/merge-queue-record.schema.json")
+            }
+            "contracts/records/integration-record.schema.json" => {
+                include_str!("../../contracts/records/integration-record.schema.json")
+            }
+            "contracts/records/mainline-receipt-record.schema.json" => {
+                include_str!("../../contracts/records/mainline-receipt-record.schema.json")
             }
             "contracts/records/merge-record.schema.json" => {
                 include_str!("../../contracts/records/merge-record.schema.json")
@@ -1743,6 +1810,52 @@ fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: O
     }
 }
 
+fn assert_development_scenarios(root: &Path, project: &Value) -> bool {
+    let manifest_path = project
+        .pointer("/development_scenarios/manifest")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/development_scenarios/manifest"));
+    if manifest_path != ".appsdk/contracts/development-scenarios.manifest.json" {
+        fail("NON_CANONICAL_DEVELOPMENT_SCENARIO_MANIFEST");
+    }
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(safe_owned_path(
+            root,
+            manifest_path,
+            "development_scenarios",
+        ))
+        .unwrap_or_else(|_| fail("DEVELOPMENT_SCENARIO_MANIFEST_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_DEVELOPMENT_SCENARIO_MANIFEST"));
+    let canonical_manifest: Value = serde_json::from_str(include_str!(
+        "../../contracts/development-scenarios.manifest.json"
+    ))
+    .unwrap();
+    if manifest != canonical_manifest {
+        fail("DEVELOPMENT_SCENARIO_MANIFEST_MISMATCH");
+    }
+    let enabled = project
+        .pointer("/development_scenarios/enabled")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/development_scenarios/enabled"));
+    let mut multi_worker = false;
+    let mut multi_worktree = false;
+    for scenario in enabled {
+        match scenario.as_str() {
+            Some("multi_worker_collaboration") if !multi_worker => multi_worker = true,
+            Some("multi_worktree_merge_queue") if !multi_worktree => multi_worktree = true,
+            Some("multi_worker_collaboration" | "multi_worktree_merge_queue") => {
+                fail("DUPLICATE_DEVELOPMENT_SCENARIO")
+            }
+            _ => fail("UNKNOWN_DEVELOPMENT_SCENARIO"),
+        }
+    }
+    if multi_worker != multi_worktree {
+        fail("DEVELOPMENT_SCENARIO_PAIR_REQUIRED");
+    }
+    multi_worker
+}
+
 fn assert_project_contract(root: &Path, project: &Value) {
     if project.get("schema_version").and_then(Value::as_u64) != Some(1)
         || project.get("project_id").and_then(Value::as_str).is_none()
@@ -1766,12 +1879,13 @@ fn assert_project_contract(root: &Path, project: &Value) {
         .pointer("/sdk/version")
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
-    if sdk_version != "0.1.3" {
+    if sdk_version != "0.1.4" {
         fail(format!(
             "PROJECT_SDK_VERSION_PIN_MISMATCH:{}:required_binary=appsdk-{}",
             sdk_version, sdk_version
         ));
     }
+    let _ = assert_development_scenarios(root, project);
     assert_identifier(
         project
             .get("project_id")
@@ -3026,7 +3140,209 @@ fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
     }
 }
 
+fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
+    let worktree_name = module_record_name("worktree-record", module_id);
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let effectiveness_name = module_record_name("effectiveness-record", module_id);
+    let collaboration_name = module_record_name("collaboration-record", module_id);
+    let queue_name = module_record_name("merge-queue-record", module_id);
+    let integration_name = module_record_name("integration-record", module_id);
+    let receipt_name = module_record_name("mainline-receipt-record", module_id);
+    let merge_name = module_record_name("merge-record", module_id);
+    let worktree = read_record(root, &worktree_name);
+    let candidate = read_record(root, &candidate_name);
+    let effectiveness = read_record(root, &effectiveness_name);
+    let collaboration = read_record(root, &collaboration_name);
+    let queue = read_record(root, &queue_name);
+    let integration = read_record(root, &integration_name);
+    let receipt = read_record(root, &receipt_name);
+    let merge = read_record(root, &merge_name);
+    let issue_id = record_str(&candidate, "/issue_id", &candidate_name);
+    let candidate_id = record_str(&candidate, "/fix_candidate_id", &candidate_name);
+    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
+    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    let effectiveness_id = record_str(&effectiveness, "/effectiveness_id", &effectiveness_name);
+    let collaboration_id = record_str(&collaboration, "/collaboration_id", &collaboration_name);
+    let queue_id = record_str(&queue, "/queue_entry_id", &queue_name);
+    let integration_id = record_str(&integration, "/integration_id", &integration_name);
+    let receipt_id = record_str(&receipt, "/receipt_id", &receipt_name);
+    let integration_commit = record_str(&integration, "/integration_commit", &integration_name);
+    let integration_tree = record_str(&integration, "/integration_tree_hash", &integration_name);
+    let main_base_commit = record_str(&queue, "/main_base_commit", &queue_name);
+
+    for (record, name) in [
+        (&collaboration, collaboration_name.as_str()),
+        (&queue, queue_name.as_str()),
+        (&integration, integration_name.as_str()),
+        (&receipt, receipt_name.as_str()),
+        (&merge, merge_name.as_str()),
+    ] {
+        if record_str(record, "/issue_id", name) != issue_id
+            || record_str(record, "/module_id", name) != module_id
+        {
+            fail("PARALLEL_DEVELOPMENT_SCOPE_MISMATCH");
+        }
+    }
+    if collaboration.get("scenario_ids")
+        != Some(&serde_json::json!([
+            "multi_worker_collaboration",
+            "multi_worktree_merge_queue"
+        ]))
+        || record_str(&collaboration, "/worktree_id", &collaboration_name)
+            != record_str(&worktree, "/worktree_id", &worktree_name)
+        || collaboration.get("exclusive_worktree") != Some(&Value::Bool(true))
+        || collaboration.get("exclusive_claim") != Some(&Value::Bool(true))
+        || collaboration.get("status").and_then(Value::as_str) != Some("handoff_ready")
+    {
+        fail("MULTI_WORKER_EXCLUSIVE_WORKTREE_REQUIRED");
+    }
+    for path in ["/run_id", "/semantic_claim_id", "/worker_id"] {
+        if record_str(&collaboration, path, &collaboration_name).is_empty() {
+            fail("INVALID_COLLABORATION_IDENTITY");
+        }
+    }
+    if record_str(&queue, "/collaboration_id", &queue_name) != collaboration_id
+        || record_str(&queue, "/fix_candidate_id", &queue_name) != candidate_id
+        || record_str(&queue, "/effectiveness_id", &queue_name) != effectiveness_id
+        || record_str(&queue, "/candidate_commit", &queue_name) != candidate_commit
+        || queue
+            .get("queue_position")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || record_str(&queue, "/merge_owner", &queue_name).is_empty()
+        || queue.get("strategy").and_then(Value::as_str)
+            != Some("integration_merge_then_fast_forward")
+        || queue.get("status").and_then(Value::as_str) != Some("admitted")
+    {
+        fail("MERGE_QUEUE_ADMISSION_MISMATCH");
+    }
+    let gate_results = integration
+        .get("required_gate_results")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INTEGRATION_GATES_MISSING"));
+    if gate_results.is_empty()
+        || gate_results.iter().any(|gate| {
+            gate.get("gate_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+                || gate
+                    .get("producer")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                || gate.get("result").and_then(Value::as_str) != Some("pass")
+        })
+        || record_str(&integration, "/queue_entry_id", &integration_name) != queue_id
+        || record_str(&integration, "/candidate_commit", &integration_name) != candidate_commit
+        || record_str(&integration, "/main_base_commit", &integration_name) != main_base_commit
+        || integration.get("conflict_status").and_then(Value::as_str) != Some("clean")
+        || integration.get("resolution_mode").and_then(Value::as_str) != Some("none")
+        || !matches!(
+            integration.get("impact_status").and_then(Value::as_str),
+            Some("unchanged" | "revalidated")
+        )
+        || integration.get("result").and_then(Value::as_str) != Some("pass")
+    {
+        fail("INTEGRATION_RECORD_MISMATCH");
+    }
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+        || git_value(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", integration_commit)],
+            "INTEGRATION_COMMIT_MISSING",
+        ) != integration_tree
+    {
+        fail("TESTED_INTEGRATION_TREE_MISMATCH");
+    }
+    for ancestor in [candidate_commit, main_base_commit] {
+        let reachable = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["merge-base", "--is-ancestor", ancestor, integration_commit])
+            .status()
+            .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+        if !reachable.success() {
+            fail("INTEGRATION_ANCESTRY_MISMATCH");
+        }
+    }
+    let local_main_ref = record_str(&receipt, "/local_main_ref", &receipt_name);
+    let remote_main_ref = record_str(&receipt, "/remote_main_ref", &receipt_name);
+    let local_main_commit = git_value(
+        root,
+        &["rev-parse", local_main_ref],
+        "LOCAL_MAIN_REF_MISSING",
+    );
+    let remote_main_commit = git_value(
+        root,
+        &["rev-parse", remote_main_ref],
+        "REMOTE_MAIN_REF_MISSING",
+    );
+    if record_str(&receipt, "/integration_id", &receipt_name) != integration_id
+        || record_str(&receipt, "/queue_entry_id", &receipt_name) != queue_id
+        || record_str(&receipt, "/integration_commit", &receipt_name) != integration_commit
+        || record_str(&receipt, "/local_main_commit", &receipt_name) != local_main_commit
+        || record_str(&receipt, "/remote_main_commit", &receipt_name) != remote_main_commit
+        || record_str(&receipt, "/integration_tree_hash", &receipt_name) != integration_tree
+        || receipt.get("candidate_reachable") != Some(&Value::Bool(true))
+        || receipt.get("integration_local_reachable") != Some(&Value::Bool(true))
+        || receipt.get("integration_remote_reachable") != Some(&Value::Bool(true))
+        || receipt.get("remote_verified") != Some(&Value::Bool(true))
+        || receipt.get("result").and_then(Value::as_str) != Some("pass")
+    {
+        fail("MAINLINE_RECEIPT_MISMATCH");
+    }
+    for main_commit in [&local_main_commit, &remote_main_commit] {
+        let reachable = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                integration_commit,
+                main_commit,
+            ])
+            .status()
+            .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+        if !reachable.success() {
+            fail("INTEGRATION_NOT_REACHABLE_FROM_MAIN");
+        }
+    }
+    if record_str(&merge, "/queue_entry_id", &merge_name) != queue_id
+        || record_str(&merge, "/integration_id", &merge_name) != integration_id
+        || record_str(&merge, "/mainline_receipt_id", &merge_name) != receipt_id
+        || record_str(&merge, "/candidate_commit", &merge_name) != candidate_commit
+        || record_str(&merge, "/integration_commit", &merge_name) != integration_commit
+        || record_str(&merge, "/merge_commit", &merge_name) != integration_commit
+        || record_str(&merge, "/candidate_tree_hash", &merge_name) != candidate_tree
+        || record_str(&merge, "/integration_tree_hash", &merge_name) != integration_tree
+        || record_str(&merge, "/merged_tree_hash", &merge_name) != integration_tree
+        || merge.get("change_identity").and_then(Value::as_str) != Some("tested_integration_exact")
+        || merge.get("result").and_then(Value::as_str) != Some("pass")
+    {
+        fail("PARALLEL_MAINLINE_MERGE_MISMATCH");
+    }
+    if !(record_time(&collaboration, &collaboration_name) <= record_time(&queue, &queue_name)
+        && record_time(&effectiveness, &effectiveness_name) <= record_time(&queue, &queue_name)
+        && record_time(&queue, &queue_name) <= record_time(&integration, &integration_name)
+        && record_time(&integration, &integration_name) <= record_time(&receipt, &receipt_name)
+        && record_time(&receipt, &receipt_name) <= record_time(&merge, &merge_name))
+    {
+        fail("PARALLEL_MERGE_ORDER_INVALID");
+    }
+}
+
 fn assert_fix_merge_gate(root: &Path, module_id: &str) {
+    let project = read_project(root);
+    if assert_development_scenarios(root, &project) {
+        assert_parallel_merge_gate(root, module_id);
+        return;
+    }
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
     let merge_name = module_record_name("merge-record", module_id);
@@ -3105,6 +3421,8 @@ fn assert_fix_lifecycle_graph(
     promotion: &Value,
     artifact: &Value,
 ) {
+    let project = read_project(root);
+    let parallel_development = assert_development_scenarios(root, &project);
     assert_fix_architecture_gate(root, module_id, artifact);
     assert_fix_effectiveness_gate(root, module_id);
     assert_fix_merge_gate(root, module_id);
@@ -3281,65 +3599,7 @@ fn assert_fix_lifecycle_graph(
             fail("ARCHITECTURE_REVIEW_USES_POST_REVIEW_EVIDENCE");
         }
     }
-    if record_str(&merge, "/fix_candidate_id", &merge_name)
-        != record_str(&candidate, "/fix_candidate_id", &candidate_name)
-        || record_str(&merge, "/effectiveness_id", &merge_name)
-            != record_str(&effectiveness, "/effectiveness_id", &effectiveness_name)
-        || record_str(&merge, "/candidate_commit", &merge_name) != candidate_commit
-        || record_str(&merge, "/candidate_tree_hash", &merge_name) != candidate_tree
-        || merge.get("change_identity").and_then(Value::as_str) != Some("exact")
-        || merge.get("result").and_then(Value::as_str) != Some("pass")
-    {
-        fail("MAINLINE_MERGE_RECORD_MISMATCH");
-    }
     let merge_commit = record_str(&merge, "/merge_commit", &merge_name);
-    if record_str(&merge, "/merged_tree_hash", &merge_name) != candidate_tree {
-        fail("MAINLINE_MERGE_TREE_DIFFERS_FROM_REVIEWED_CANDIDATE");
-    }
-    if git_value(
-        root,
-        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
-        "FIX_CANDIDATE_COMMIT_MISSING",
-    ) != candidate_tree
-        || git_value(
-            root,
-            &["rev-parse", &format!("{}^{{tree}}", merge_commit)],
-            "MAINLINE_MERGE_COMMIT_MISSING",
-        ) != record_str(&merge, "/merged_tree_hash", &merge_name)
-    {
-        fail("MAINLINE_MERGE_IDENTITY_MISMATCH");
-    }
-    let ancestor = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            candidate_commit,
-            merge_commit,
-        ])
-        .status()
-        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
-    if !ancestor.success() {
-        fail("FIX_CANDIDATE_NOT_MERGED");
-    }
-    let mainline_head = git_value(
-        root,
-        &[
-            "rev-parse",
-            record_str(&merge, "/mainline_ref", &merge_name),
-        ],
-        "MAINLINE_REF_MISSING",
-    );
-    let merge_on_mainline = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["merge-base", "--is-ancestor", merge_commit, &mainline_head])
-        .status()
-        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
-    if !merge_on_mainline.success() {
-        fail("RECORDED_MERGE_NOT_ON_MAINLINE");
-    }
     if record_str(promotion, "/worktree_record_id", "promotion-record.json")
         != record_str(&worktree, "/worktree_id", &worktree_name)
         || record_str(
@@ -3366,6 +3626,26 @@ fn assert_fix_lifecycle_graph(
         || record_str(promotion, "/source_commit", "promotion-record.json") != merge_commit
     {
         fail("PROMOTION_FIX_LIFECYCLE_REFERENCE_MISMATCH");
+    }
+    if parallel_development {
+        let queue_name = module_record_name("merge-queue-record", module_id);
+        let integration_name = module_record_name("integration-record", module_id);
+        let receipt_name = module_record_name("mainline-receipt-record", module_id);
+        let queue = read_record(root, &queue_name);
+        let integration = read_record(root, &integration_name);
+        let receipt = read_record(root, &receipt_name);
+        if record_str(promotion, "/merge_queue_record_id", "promotion-record.json")
+            != record_str(&queue, "/queue_entry_id", &queue_name)
+            || record_str(promotion, "/integration_record_id", "promotion-record.json")
+                != record_str(&integration, "/integration_id", &integration_name)
+            || record_str(
+                promotion,
+                "/mainline_receipt_record_id",
+                "promotion-record.json",
+            ) != record_str(&receipt, "/receipt_id", &receipt_name)
+        {
+            fail("PROMOTION_PARALLEL_MERGE_REFERENCE_MISMATCH");
+        }
     }
     if !(record_time(&worktree, &worktree_name) <= record_time(&reproduction, &reproduction_name)
         && record_time(&reproduction, &reproduction_name)
@@ -4396,7 +4676,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     assert_bundle_manifest();
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || record.get("version").and_then(Value::as_str) != Some("0.1.3")
+        || record.get("version").and_then(Value::as_str) != Some("0.1.4")
         || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
         || record.get("manifest_digest").and_then(Value::as_str)
             != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
@@ -5013,9 +5293,10 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.3", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.4", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
+  "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "governance": {
     "playground_root": "playground/experiments/**",
     "active_root": "active/lib/**",
@@ -5027,7 +5308,7 @@ fn write_project_scaffold(root: &Path) {
     "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
     "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
     "runtime_forbidden_roots": ["playground/**", "generated/**"],
-    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
     "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true
@@ -5046,7 +5327,7 @@ fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
         ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.3","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.4","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -5350,7 +5631,7 @@ fn pin_lock(root: &Path, binary: &Path) {
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("version") => println!("appsdk 0.1.3 (rust)"),
+        Some("version") => println!("appsdk 0.1.4 (rust)"),
         Some("verify") => {
             let first = args.next().unwrap_or_else(|| ".".into());
             if first == "--admission" {

@@ -3,6 +3,8 @@
   "functions": [
     {"function_id":"goal_clarification","owner":"appsdk::goal","entry_symbols":["clarify"],"required_gates":["goal_confirmed"]},
     {"function_id":"compile_artifact","owner":"appsdk::compiler","entry_symbols":["compile"],"required_gates":["contract_valid","sdk_pinned"]},
+    {"function_id":"development_scenario_composition","owner":"appsdk::development_scenarios","entry_symbols":["assert_development_scenarios"],"required_gates":["scenario_pair_activation"]},
+    {"function_id":"parallel_merge_queue","owner":"appsdk::merge_queue","entry_symbols":["assert_parallel_merge_gate"],"required_gates":["exclusive_worker_worktree","serial_merge_queue","tested_integration_identity","remote_main_receipt"]},
     {"function_id":"fix_lifecycle_graph","owner":"appsdk::fix_lifecycle","entry_symbols":["assert_fix_lifecycle_graph"],"required_gates":["worktree_clean","baseline_reproduced","fix_candidate_verified","architecture_review_pass","post_architecture_effectiveness","mainline_merge_identity"]},
     {"function_id":"promote_freeze_publish","owner":"appsdk::lifecycle","entry_symbols":["promote_module","freeze_module","publish_active"],"required_gates":["fix_lifecycle_graph","record_graph","artifact_hash","vcs_clean"]}
   ]

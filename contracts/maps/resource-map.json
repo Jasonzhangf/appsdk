@@ -17,6 +17,7 @@
     {"resource_id":"integration_candidate","owner":"appsdk::merge_queue","truth_store":".appsdk/records/integration-record-<integration_id>.json","allowed_operations":["read","validate","write"],"relations":{"must_reference":["merge_queue"]}},
     {"resource_id":"mainline_receipt","owner":"appsdk::host_vcs","truth_store":".appsdk/records/mainline-receipt-record-<receipt_id>.json","allowed_operations":["read","validate","write"],"relations":{"must_reference":["integration_candidate","remote_repository"]}},
     {"resource_id":"remote_repository","owner":"appsdk::host_vcs","truth_store":"git ls-remote <remote> <ref>","allowed_operations":["observe"]},
-    {"resource_id":"mainline_merge","owner":"appsdk::merge_queue","truth_store":".appsdk/records/merge-record-<module>.json","allowed_operations":["read","validate","write"]}
+    {"resource_id":"mainline_merge","owner":"appsdk::merge_queue","truth_store":".appsdk/records/merge-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"lifecycle_error","owner":"appsdk::record_graph","truth_store":"process error chain","allowed_operations":["emit"]}
   ]
 }

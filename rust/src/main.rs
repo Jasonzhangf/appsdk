@@ -752,6 +752,19 @@ fn assert_governance_maps(root: &Path) {
                         fail(format!("MAINLINE_SYMBOL_MISSING:{}", symbol));
                     }
                 }
+                let caller = record_str(edge, "/caller", name);
+                let callee = record_str(edge, "/callee", name);
+                let caller_start = source
+                    .find(&format!("fn {}(", caller))
+                    .unwrap_or_else(|| fail(format!("MAINLINE_CALLER_MISSING:{}", caller)));
+                let caller_source = &source[caller_start..];
+                let caller_end = caller_source.find("\nfn ").unwrap_or(caller_source.len());
+                if !caller_source[..caller_end].contains(&format!("{}(", callee)) {
+                    fail(format!(
+                        "MAINLINE_EDGE_NOT_IMPLEMENTED:{}->{}",
+                        caller, callee
+                    ));
+                }
             }
         }
     }

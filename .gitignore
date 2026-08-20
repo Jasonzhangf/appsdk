@@ -3,4 +3,6 @@ dist/
 .DS_Store
 .agent-collab/
 .appsdk-control/
+/playground/
+/appsdk-*-macos-*
 rust/target/

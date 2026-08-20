@@ -7,10 +7,13 @@
     "evidence_id": {"type": "string"},
     "issue_id": {"type": "string"},
     "experiment_id": {"type": "string"},
-    "phase": {"enum": ["baseline_reproduction", "fix_candidate", "positive_intervention", "negative_intervention", "post_architecture_effectiveness", "regression", "artifact"]},
-    "kind": {"enum": ["red_test", "positive_test", "negative_test", "sample_replay", "build", "artifact", "runtime", "gate"]},
+    "phase": {"enum": ["baseline_reproduction", "fix_candidate", "positive_intervention", "negative_intervention", "development_whitebox", "deployment_install", "deployment_restart", "deployed_blackbox", "post_architecture_effectiveness", "regression", "artifact"]},
+    "kind": {"enum": ["red_test", "positive_test", "negative_test", "sample_replay", "build", "install", "restart", "artifact", "runtime", "gate"]},
     "source_commit": {"type": "string"},
     "artifact_hash": {"type": "string"},
+    "execution_surface": {"enum": ["development_whitebox", "deployed_blackbox"]},
+    "environment_id": {"type": "string"},
+    "entrypoint": {"type": "string"},
     "scope": {"type": "object", "required": ["module_id"], "properties": {"module_id": {"type": "string"}, "feature_id": {"type": "string"}, "entrypoint": {"type": "string"}}},
     "producer": {"type": "object", "required": ["adapter", "identity"], "properties": {"adapter": {"type": "string"}, "identity": {"type": "string"}}},
     "result": {"enum": ["pass", "fail"]},
@@ -20,5 +23,36 @@
     "expires_at": {"type": "string"},
     "input_hashes": {"type": "array", "items": {"type": "string"}},
     "scope_hash": {"type": "string"}
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"phase": {"const": "development_whitebox"}}, "required": ["phase"]},
+      "then": {"required": ["execution_surface"], "properties": {"execution_surface": {"const": "development_whitebox"}}}
+    },
+    {
+      "if": {"properties": {"phase": {"const": "deployed_blackbox"}}, "required": ["phase"]},
+      "then": {
+        "required": ["artifact_hash", "execution_surface", "environment_id", "entrypoint"],
+        "properties": {
+          "artifact_hash": {"type": "string", "minLength": 1},
+          "execution_surface": {"const": "deployed_blackbox"},
+          "environment_id": {"type": "string", "minLength": 1},
+          "entrypoint": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["runtime", "sample_replay"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"phase": {"enum": ["deployment_install", "deployment_restart"]}}, "required": ["phase"]},
+      "then": {
+        "required": ["artifact_hash", "execution_surface", "environment_id", "entrypoint"],
+        "properties": {
+          "artifact_hash": {"type": "string", "minLength": 1},
+          "execution_surface": {"const": "deployed_blackbox"},
+          "environment_id": {"type": "string", "minLength": 1},
+          "entrypoint": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ]
 }

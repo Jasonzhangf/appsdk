@@ -746,6 +746,68 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
         .unwrap();
     }
     fs::write(
+        evidence_dir.join("whitebox-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_id":"whitebox-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "phase":"development_whitebox","kind":"gate","source_commit":commit,
+            "artifact_hash":artifact_hash,"execution_surface":"development_whitebox",
+            "scope":{"module_id":module_id},"producer":{"adapter":"test","identity":"whitebox-runner"},
+            "result":"pass","created_at":"2026-01-01T00:03:10Z","expires_at":"2099-01-01T00:00:00Z",
+            "input_hashes":["input-1"],"scope_hash":"scope-1"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        evidence_dir.join("install-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_id":"install-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "phase":"deployment_install","kind":"install","source_commit":commit,
+            "artifact_hash":artifact_hash,"execution_surface":"deployed_blackbox",
+            "environment_id":"test-deployment","entrypoint":"test://installed-app",
+            "scope":{"module_id":module_id,"entrypoint":"test://installed-app"},
+            "producer":{"adapter":"test","identity":"test-deployment-adapter"},"result":"pass",
+            "created_at":"2026-01-01T00:03:15Z","expires_at":"2099-01-01T00:00:00Z",
+            "input_hashes":["input-1"],"scope_hash":"scope-1"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        evidence_dir.join("restart-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_id":"restart-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "phase":"deployment_restart","kind":"restart","source_commit":commit,
+            "artifact_hash":artifact_hash,"execution_surface":"deployed_blackbox",
+            "environment_id":"test-deployment","entrypoint":"test://installed-app",
+            "scope":{"module_id":module_id,"entrypoint":"test://installed-app"},
+            "producer":{"adapter":"test","identity":"test-deployment-adapter"},"result":"pass",
+            "created_at":"2026-01-01T00:03:20Z","expires_at":"2099-01-01T00:00:00Z",
+            "input_hashes":["input-1"],"scope_hash":"scope-1"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        evidence_dir.join("blackbox-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_id":"blackbox-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "phase":"deployed_blackbox","kind":"runtime","source_commit":commit,
+            "artifact_hash":artifact_hash,"execution_surface":"deployed_blackbox",
+            "environment_id":"test-deployment","entrypoint":"test://installed-app",
+            "scope":{"module_id":module_id,"entrypoint":"test://installed-app"},
+            "producer":{"adapter":"test","identity":"test-deployment-adapter"},"result":"pass",
+            "created_at":"2026-01-01T00:03:30Z","expires_at":"2099-01-01T00:00:00Z",
+            "input_hashes":["input-1"],"scope_hash":"scope-1"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
         records.join(format!("evidence-record-{module_id}.json")),
         serde_json::to_string_pretty(&evidence(
             "candidate-evidence-1",
@@ -796,10 +858,28 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     )
     .unwrap();
     fs::write(
+        records.join(format!("pre-review-validation-record-{module_id}.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "validation_id":"pre-review-validation-1","issue_id":"issue-1","module_id":module_id,
+            "fix_candidate_id":"candidate-1","candidate_commit":commit,"candidate_tree_hash":tree,
+            "artifact_hash":artifact_hash,"whitebox_producer":{"adapter":"test","identity":"whitebox-runner"},
+            "whitebox_evidence_ids":["whitebox-1"],
+            "blackbox_evidence_ids":["blackbox-1"],"deployment":{"environment_id":"test-deployment",
+            "install_receipt_id":"install-1","restart_receipt_id":"restart-1",
+            "entrypoint":"test://installed-app","producer":{"adapter":"test","identity":"test-deployment-adapter"},
+            "observed_at":"2026-01-01T00:03:30Z"},"source_unchanged":true,
+            "result":"pass","created_at":"2026-01-01T00:03:45Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
         records.join(format!("review-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
             "review_id":"review-1","issue_id":"issue-1","promotion_id":"promotion-1",
             "review_kind":"architecture","fix_candidate_id":"candidate-1",
+            "pre_review_validation_id":"pre-review-validation-1",
             "reviewer":{"adapter":"test","identity":"test"},"verdict":"pass",
             "evidence_ids":["candidate-evidence-1","positive-1","negative-1"],"reviewed_commit":commit,
             "reviewed_tree_hash":tree,"reviewed_diff_hash":"sha256:test-diff",
@@ -1294,16 +1374,16 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
     let goal_file = root.join(".appsdk/goal.json");
     fs::write(&goal_file, r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#).unwrap();
-    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.4","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
+    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.5","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
 "#, "a".repeat(64), "b".repeat(64))).unwrap();
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.4"},
+  "sdk": {"name": "appsdk", "version": "0.1.5"},
   "lifecycle": {"stage": "draft"},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},
-  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/collaboration-record.schema.json","contracts/records/collaboration-index.schema.json","contracts/records/merge-queue-record.schema.json","contracts/records/merge-queue-state.schema.json","contracts/records/integration-record.schema.json","contracts/records/mainline-receipt-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
+  "governance": {"playground_root":"playground/**","active_root":"active/**","protected_root":"protected/**","generated_root":"generated/**","active_kind":"immutable_consumable_library","protected_kinds":["source"],"generated_kinds":["compiler_output"],"freeze_requirements":["git_clean"],"promotion_requires":["evidence"],"runtime_forbidden_roots":["playground/**"],"record_contracts":["contracts/records/worktree-record.schema.json","contracts/records/reproduction-record.schema.json","contracts/records/evidence-record.schema.json","contracts/records/fix-candidate-record.schema.json","contracts/records/goal-clarification-record.schema.json","contracts/records/review-record.schema.json","contracts/records/effectiveness-record.schema.json","contracts/records/pre-review-validation-record.schema.json","contracts/records/collaboration-record.schema.json","contracts/records/collaboration-index.schema.json","contracts/records/merge-queue-record.schema.json","contracts/records/merge-queue-state.schema.json","contracts/records/integration-record.schema.json","contracts/records/mainline-receipt-record.schema.json","contracts/records/merge-record.schema.json","contracts/records/promotion-record.schema.json","contracts/records/regression-report.schema.json","contracts/records/freeze-record.schema.json","contracts/records/record-graph.contract.json"],"zone_transition_contract":"contracts/transitions/zone-transition-manifest.json","playground_retention":"archive_then_remove","debug_merge_comment_required":true},
   "lifecycles": {"issue":"open","library":"draft","source_snapshot":"mutable","artifact":"generated"},
     "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
@@ -1479,6 +1559,239 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         .to_string();
     write_records(&root, "app-core", &architecture_hash, false);
     let review_file = root.join(".appsdk/records/review-record-app-core.json");
+    fs::remove_file(&review_file).unwrap();
+    let review_admission = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        review_admission.status.success(),
+        "{}",
+        String::from_utf8_lossy(&review_admission.stderr)
+    );
+    let source_drift_file = root.join("playground/experiments/review-admission-drift.txt");
+    fs::write(&source_drift_file, "drift\n").unwrap();
+    let source_drift = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!source_drift.status.success());
+    assert!(
+        String::from_utf8_lossy(&source_drift.stderr).contains("CANDIDATE_CONTROLLED_SOURCE_DRIFT")
+    );
+    fs::remove_file(&source_drift_file).unwrap();
+    let artifact_file = root.join("generated/modules/app-core/lib/app-core.placeholder");
+    let artifact_content = fs::read(&artifact_file).unwrap();
+    fs::write(&artifact_file, "stale artifact\n").unwrap();
+    let stale_artifact = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!stale_artifact.status.success());
+    assert!(String::from_utf8_lossy(&stale_artifact.stderr)
+        .contains("REVIEW_ADMISSION_ARTIFACT_SOURCE_DRIFT"));
+    fs::write(&artifact_file, artifact_content).unwrap();
+    let candidate_file = root.join(".appsdk/records/fix-candidate-record-app-core.json");
+    let mut wrong_candidate_tree: Value =
+        serde_json::from_str(&fs::read_to_string(&candidate_file).unwrap()).unwrap();
+    wrong_candidate_tree["tree_hash"] =
+        Value::String("0000000000000000000000000000000000000000".into());
+    fs::write(
+        &candidate_file,
+        serde_json::to_string_pretty(&wrong_candidate_tree).unwrap() + "\n",
+    )
+    .unwrap();
+    let wrong_tree = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!wrong_tree.status.success());
+    assert!(String::from_utf8_lossy(&wrong_tree.stderr).contains("FIX_CANDIDATE_TREE_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let restart_receipt_file = root.join(".appsdk/records/evidence/app-core/restart-1.json");
+    let mut wrong_restart_producer: Value =
+        serde_json::from_str(&fs::read_to_string(&restart_receipt_file).unwrap()).unwrap();
+    wrong_restart_producer["producer"]["adapter"] = Value::String("forged-adapter".into());
+    fs::write(
+        &restart_receipt_file,
+        serde_json::to_string_pretty(&wrong_restart_producer).unwrap() + "\n",
+    )
+    .unwrap();
+    let forged_restart_receipt = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!forged_restart_receipt.status.success());
+    assert!(String::from_utf8_lossy(&forged_restart_receipt.stderr)
+        .contains("DEPLOYMENT_RECEIPT_EVIDENCE_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let whitebox_file = root.join(".appsdk/records/evidence/app-core/whitebox-1.json");
+    let mut forged_whitebox_producer: Value =
+        serde_json::from_str(&fs::read_to_string(&whitebox_file).unwrap()).unwrap();
+    forged_whitebox_producer["producer"]["adapter"] = Value::String("forged-adapter".into());
+    fs::write(
+        &whitebox_file,
+        serde_json::to_string_pretty(&forged_whitebox_producer).unwrap() + "\n",
+    )
+    .unwrap();
+    let forged_whitebox = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!forged_whitebox.status.success());
+    assert!(String::from_utf8_lossy(&forged_whitebox.stderr)
+        .contains("DEVELOPMENT_WHITEBOX_EVIDENCE_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    fs::remove_file(&restart_receipt_file).unwrap();
+    let missing_restart_receipt = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!missing_restart_receipt.status.success());
+    assert!(String::from_utf8_lossy(&missing_restart_receipt.stderr)
+        .contains("MISSING_EVIDENCE_RECORD:restart-1"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let mut late_restart_receipt: Value =
+        serde_json::from_str(&fs::read_to_string(&restart_receipt_file).unwrap()).unwrap();
+    late_restart_receipt["created_at"] = Value::String("2026-01-01T00:03:35Z".into());
+    fs::write(
+        &restart_receipt_file,
+        serde_json::to_string_pretty(&late_restart_receipt).unwrap() + "\n",
+    )
+    .unwrap();
+    let invalid_causal_order = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!invalid_causal_order.status.success());
+    assert!(String::from_utf8_lossy(&invalid_causal_order.stderr)
+        .contains("PRE_REVIEW_CAUSAL_ORDER_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let blackbox_file = root.join(".appsdk/records/evidence/app-core/blackbox-1.json");
+    let mut expired_blackbox: Value =
+        serde_json::from_str(&fs::read_to_string(&blackbox_file).unwrap()).unwrap();
+    expired_blackbox["expires_at"] = Value::String("2026-01-02T00:00:00Z".into());
+    fs::write(
+        &blackbox_file,
+        serde_json::to_string_pretty(&expired_blackbox).unwrap() + "\n",
+    )
+    .unwrap();
+    let expired_evidence = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!expired_evidence.status.success());
+    assert!(String::from_utf8_lossy(&expired_evidence.stderr)
+        .contains("EXPIRED_EVIDENCE_RECORD:blackbox-1"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    fs::remove_file(&blackbox_file).unwrap();
+    let missing_deployed_blackbox = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!missing_deployed_blackbox.status.success());
+    assert!(!String::from_utf8_lossy(&missing_deployed_blackbox.stdout).contains("\"ok\":true"));
+    assert!(String::from_utf8_lossy(&missing_deployed_blackbox.stderr)
+        .contains("MISSING_EVIDENCE_RECORD:blackbox-1"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let validation_file = root.join(".appsdk/records/pre-review-validation-record-app-core.json");
+    fs::remove_file(&validation_file).unwrap();
+    let missing_blackbox_gate = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!missing_blackbox_gate.status.success());
+    assert!(String::from_utf8_lossy(&missing_blackbox_gate.stderr)
+        .contains("MISSING_RECORD:pre-review-validation-record-app-core.json"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let mut relabeled_blackbox: Value =
+        serde_json::from_str(&fs::read_to_string(&blackbox_file).unwrap()).unwrap();
+    relabeled_blackbox["execution_surface"] = Value::String("development_whitebox".into());
+    fs::write(
+        &blackbox_file,
+        serde_json::to_string_pretty(&relabeled_blackbox).unwrap() + "\n",
+    )
+    .unwrap();
+    let relabeled_blackbox_gate = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!relabeled_blackbox_gate.status.success());
+    assert!(String::from_utf8_lossy(&relabeled_blackbox_gate.stderr)
+        .contains("PRE_REVIEW_EVIDENCE_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    let mut wrong_artifact_blackbox: Value =
+        serde_json::from_str(&fs::read_to_string(&blackbox_file).unwrap()).unwrap();
+    wrong_artifact_blackbox["artifact_hash"] = Value::String("sha256:wrong-artifact".into());
+    fs::write(
+        &blackbox_file,
+        serde_json::to_string_pretty(&wrong_artifact_blackbox).unwrap() + "\n",
+    )
+    .unwrap();
+    let wrong_artifact_gate = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!wrong_artifact_gate.status.success());
+    assert!(String::from_utf8_lossy(&wrong_artifact_gate.stderr)
+        .contains("DEPLOYED_BLACKBOX_EVIDENCE_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false);
+    fs::write(&source_drift_file, "drift after admission\n").unwrap();
+    let promotion_source_drift = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!promotion_source_drift.status.success());
+    assert!(String::from_utf8_lossy(&promotion_source_drift.stderr)
+        .contains("CANDIDATE_CONTROLLED_SOURCE_DRIFT"));
+    fs::remove_file(&source_drift_file).unwrap();
+    write_records(&root, "app-core", &architecture_hash, false);
     let mut stale_review: Value =
         serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
     stale_review["resource_map_hash"] = Value::String("sha256:stale".into());

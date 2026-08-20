@@ -23,6 +23,7 @@ Rust binary
 version
 new
 verify
+verify --review-admission
 compile
 begin-version
 promote
@@ -42,6 +43,8 @@ appsdk verify ./my-app
 `compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；本地会生成忽略且不可作为执行入口的 `.appsdk/sdk.bin` 见证副本。后续 `verify`、`compile`、promotion、freeze 只执行当前全局 `appsdk`，并校验当前运行 binary、Bundle 和锁定摘要；干净 checkout 不依赖本地见证副本。
 
 `compile`、promotion、module promotion、freeze、record graph 和 Active publish 均由 Rust 执行。
+
+`verify --review-admission <project> --module <id>` 是 review 与 delivery commit 前的独立门禁。它要求开发白盒和部署黑盒是两组不重叠的 PASS 证据，并把部署黑盒绑定到准确的 artifact hash、environment、安装/重启 receipt 和公开 entrypoint；源码级调用、mock 或把白盒改标签不能通过。
 
 `begin-version` 是 frozen module 的唯一重新开发入口。它验证并保留旧 Active/Protected/record graph，建立 previous/new version 绑定，再仅重开目标 module。
 

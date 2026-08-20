@@ -2,6 +2,7 @@
   "schema_version": 1,
   "gates":[
     {"gate_id":"contract_valid","command":"appsdk verify <project>","required_for":["compile","promotion","freeze"]},
+    {"gate_id":"sdk_source_registry","command":"appsdk verify-sdk-source-registry <sdk-repo>","required_for":["build","release"]},
     {"gate_id":"sdk_pinned","command":"appsdk pin-lock <project> --binary <sdk>","required_for":["compile","promotion","freeze"]},
     {"gate_id":"record_graph","command":"appsdk verify <project>","required_for":["architecture_stable","freeze","publish"]},
     {"gate_id":"vcs_clean","command":"appsdk verify <project>","required_for":["freeze"]},
@@ -9,6 +10,10 @@
     {"gate_id":"worktree_clean","command":"appsdk verify <project>","required_for":["reproduction","fix_candidate"]},
     {"gate_id":"baseline_reproduced","command":"appsdk verify <project>","required_for":["fix_candidate"]},
     {"gate_id":"fix_candidate_verified","command":"appsdk verify <project>","required_for":["architecture_review"]},
+    {"gate_id":"development_whitebox","producer":"project::whitebox_adapter","command":"appsdk verify --review-admission <project> --module <id>","human_contract":"project adapter executes whitebox and writes development_whitebox EvidenceRecord before admission","required_for":["pre_review_validation"]},
+    {"gate_id":"deployment_receipts","producer":"project::deployment_adapter","command":"appsdk verify --review-admission <project> --module <id>","human_contract":"project adapter installs and restarts exact artifact and writes deployment receipt EvidenceRecords before admission","required_for":["deployed_blackbox_effectiveness","pre_review_validation"]},
+    {"gate_id":"deployed_blackbox_effectiveness","producer":"project::blackbox_adapter","command":"appsdk verify --review-admission <project> --module <id>","human_contract":"project adapter executes deployed public-entrypoint blackbox and writes deployed_blackbox EvidenceRecord before admission","required_for":["pre_review_validation"]},
+    {"gate_id":"pre_review_validation","command":"appsdk verify --review-admission <project> --module <id>","required_for":["architecture_review","commit","merge_admission"]},
     {"gate_id":"architecture_review_pass","command":"appsdk verify <project>","required_for":["architecture_stable","effectiveness"]},
     {"gate_id":"post_architecture_effectiveness","command":"appsdk verify <project>","required_for":["merge_admission"]},
     {"gate_id":"scenario_pair_activation","command":"appsdk verify <project>","required_for":["multi_worker_collaboration","multi_worktree_merge_queue"]},

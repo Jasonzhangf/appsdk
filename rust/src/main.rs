@@ -72,6 +72,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/effectiveness-record.schema.json"),
     ),
     (
+        "contracts/records/pre-review-validation-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/pre-review-validation-record.schema.json"),
+    ),
+    (
         "contracts/records/collaboration-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/collaboration-record.schema.json"),
@@ -231,7 +236,7 @@ fn assert_bundle_manifest() {
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
         || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || manifest.get("version").and_then(Value::as_str) != Some("0.1.4")
+        || manifest.get("version").and_then(Value::as_str) != Some("0.1.5")
         || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
     {
         fail("INVALID_SDK_BUNDLE_MANIFEST");
@@ -268,7 +273,7 @@ fn install_bundle_resources(root: &Path) {
     let record = serde_json::json!({
         "schema_version": 1,
         "sdk": "appsdk",
-        "version": "0.1.4",
+        "version": "0.1.5",
         "bundle_digest": sdk_bundle_digest(),
         "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": installed
@@ -383,6 +388,10 @@ fn bootstrap_contracts(root: &Path) {
         (
             "contracts/records/effectiveness-record.schema.json",
             include_str!("../../contracts/records/effectiveness-record.schema.json"),
+        ),
+        (
+            "contracts/records/pre-review-validation-record.schema.json",
+            include_str!("../../contracts/records/pre-review-validation-record.schema.json"),
         ),
         (
             "contracts/records/collaboration-record.schema.json",
@@ -541,6 +550,7 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         "contracts/records/goal-clarification-record.schema.json",
         "contracts/records/review-record.schema.json",
         "contracts/records/effectiveness-record.schema.json",
+        "contracts/records/pre-review-validation-record.schema.json",
         "contracts/records/collaboration-record.schema.json",
         "contracts/records/collaboration-index.schema.json",
         "contracts/records/merge-queue-record.schema.json",
@@ -642,6 +652,9 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
             }
             "contracts/records/effectiveness-record.schema.json" => {
                 include_str!("../../contracts/records/effectiveness-record.schema.json")
+            }
+            "contracts/records/pre-review-validation-record.schema.json" => {
+                include_str!("../../contracts/records/pre-review-validation-record.schema.json")
             }
             "contracts/records/collaboration-record.schema.json" => {
                 include_str!("../../contracts/records/collaboration-record.schema.json")
@@ -768,6 +781,80 @@ fn assert_governance_maps(root: &Path) {
             }
         }
     }
+}
+
+fn registry_path_matches(pattern: &str, path: &str) -> bool {
+    pattern
+        .strip_suffix("/**")
+        .map(|prefix| path == prefix || path.starts_with(&format!("{}/", prefix)))
+        .unwrap_or(pattern == path)
+}
+
+fn assert_sdk_source_registry(root: &Path) {
+    assert_project_root_safe(root);
+    let registry: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("contracts/maps/module-registry.json"))
+            .unwrap_or_else(|_| fail("MISSING_SDK_MODULE_REGISTRY")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_MODULE_REGISTRY"));
+    let modules = record_array(&registry, "/modules", "module-registry.json");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("SDK_SOURCE_REGISTRY_GIT_UNAVAILABLE"));
+    if !output.status.success() {
+        fail("SDK_SOURCE_REGISTRY_GIT_FAILED");
+    }
+    for bytes in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|v| !v.is_empty())
+    {
+        let path = std::str::from_utf8(bytes).unwrap_or_else(|_| fail("INVALID_SDK_SOURCE_PATH"));
+        let mut owners = Vec::new();
+        for module in modules {
+            let module_id = record_str(module, "/module_id", "module-registry.json");
+            if module.get("status").and_then(Value::as_str) != Some("active") {
+                continue;
+            }
+            if record_array(module, "/owned_paths", module_id)
+                .iter()
+                .any(|pattern| {
+                    pattern
+                        .as_str()
+                        .is_some_and(|pattern| registry_path_matches(pattern, path))
+                })
+            {
+                owners.push(module_id);
+            }
+            if record_array(module, "/forbidden_paths", module_id)
+                .iter()
+                .any(|pattern| {
+                    pattern
+                        .as_str()
+                        .is_some_and(|pattern| registry_path_matches(pattern, path))
+                })
+            {
+                fail(format!("SDK_SOURCE_FORBIDDEN_PATH:{}:{}", module_id, path));
+            }
+        }
+        if owners.len() != 1 {
+            fail(format!(
+                "SDK_SOURCE_OWNER_CARDINALITY:{}:{}",
+                path,
+                owners.join(",")
+            ));
+        }
+    }
+    println!("{}", r#"{"ok":true,"gate":"sdk_source_registry"}"#);
 }
 
 fn required_str<'a>(value: &'a Value, path: &str, error: &str) -> &'a str {
@@ -1958,7 +2045,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
         .pointer("/sdk/version")
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
-    if sdk_version != "0.1.4" {
+    if sdk_version != "0.1.5" {
         fail(format!(
             "PROJECT_SDK_VERSION_PIN_MISMATCH:{}:required_binary=appsdk-{}",
             sdk_version, sdk_version
@@ -2705,16 +2792,7 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
             record_str(record, &format!("/{}", field), name);
         }
     }
-    for path in [
-        "/kind",
-        "/source_commit",
-        "/result",
-        "/created_at",
-        "/expires_at",
-        "/scope_hash",
-    ] {
-        record_str(evidence, path, "evidence-record.json");
-    }
+    assert_evidence_record(evidence, "evidence-record.json", Utc::now());
     for path in [
         "/reviewer/adapter",
         "/reviewer/identity",
@@ -2746,57 +2824,6 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
         Some("compatible" | "migration_required" | "breaking")
     ) {
         fail("INVALID_PROMOTION_RECORD");
-    }
-    if !matches!(
-        evidence.get("kind").and_then(Value::as_str),
-        Some(
-            "red_test"
-                | "positive_test"
-                | "negative_test"
-                | "sample_replay"
-                | "build"
-                | "artifact"
-                | "runtime"
-                | "gate"
-        )
-    ) || evidence.get("result").and_then(Value::as_str).is_none()
-        || evidence.get("result").and_then(Value::as_str) == Some("fail")
-    {
-        fail("INVALID_EVIDENCE_RECORD");
-    }
-    let scope = evidence
-        .get("scope")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| fail("INVALID_EVIDENCE_RECORD"));
-    if scope
-        .get("module_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        fail("INVALID_EVIDENCE_RECORD");
-    }
-    let producer = evidence
-        .get("producer")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| fail("INVALID_EVIDENCE_RECORD"));
-    for key in ["adapter", "identity"] {
-        if producer
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .is_none()
-        {
-            fail("INVALID_EVIDENCE_RECORD");
-        }
-    }
-    if evidence
-        .get("input_hashes")
-        .and_then(Value::as_array)
-        .map(|values| values.iter().any(|value| value.as_str().is_none()))
-        .unwrap_or(true)
-    {
-        fail("INVALID_EVIDENCE_RECORD");
     }
     let reviewer = review
         .get("reviewer")
@@ -2973,6 +3000,39 @@ fn git_value(root: &Path, args: &[&str], error: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn assert_candidate_source_identity(root: &Path, module: &Value, candidate_commit: &str) {
+    let mut controlled_paths = Vec::new();
+    for key in ["owned_paths", "contract_paths"] {
+        for value in record_array(module, &format!("/{}", key), "module") {
+            controlled_paths.push(
+                value
+                    .as_str()
+                    .unwrap_or_else(|| fail("INVALID_MODULE_CONTROLLED_PATH")),
+            );
+        }
+    }
+    let diff_status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--quiet", candidate_commit, "--"])
+        .args(&controlled_paths)
+        .status()
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    if !diff_status.success() {
+        fail("CANDIDATE_CONTROLLED_SOURCE_DRIFT");
+    }
+    let untracked = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--others", "--exclude-standard", "--"])
+        .args(&controlled_paths)
+        .output()
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    if !untracked.status.success() || !untracked.stdout.is_empty() {
+        fail("CANDIDATE_CONTROLLED_SOURCE_DRIFT");
+    }
+}
+
 fn git_ls_remote(root: &Path, remote: &str, remote_ref: &str) -> String {
     let output = Command::new("git")
         .arg("-C")
@@ -2995,6 +3055,60 @@ fn record_time(record: &Value, name: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+fn record_datetime(record: &Value, path: &str, name: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(record_str(record, path, name))
+        .unwrap_or_else(|_| fail(format!("INVALID_RECORD_TIME:{}:{}", name, path)))
+        .with_timezone(&Utc)
+}
+
+fn assert_evidence_record(evidence: &Value, name: &str, admission_time: DateTime<Utc>) {
+    for path in [
+        "/evidence_id",
+        "/issue_id",
+        "/experiment_id",
+        "/phase",
+        "/kind",
+        "/source_commit",
+        "/result",
+        "/created_at",
+        "/expires_at",
+        "/scope_hash",
+        "/scope/module_id",
+        "/producer/adapter",
+        "/producer/identity",
+    ] {
+        record_str(evidence, path, name);
+    }
+    if !matches!(
+        evidence.get("kind").and_then(Value::as_str),
+        Some(
+            "red_test"
+                | "positive_test"
+                | "negative_test"
+                | "sample_replay"
+                | "build"
+                | "install"
+                | "restart"
+                | "artifact"
+                | "runtime"
+                | "gate"
+        )
+    ) || evidence.get("result").and_then(Value::as_str) != Some("pass")
+        || evidence
+            .get("input_hashes")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().any(|value| value.as_str().is_none()))
+            .unwrap_or(true)
+    {
+        fail(format!("INVALID_EVIDENCE_RECORD:{}", name));
+    }
+    let created_at = record_time(evidence, name);
+    let expires_at = record_datetime(evidence, "/expires_at", name);
+    if created_at > expires_at || admission_time > expires_at {
+        fail(format!("EXPIRED_EVIDENCE_RECORD:{}", name));
+    }
+}
+
 fn evidence_by_id(root: &Path, module_id: &str, evidence_id: &str) -> Value {
     assert_identifier(evidence_id, "INVALID_EVIDENCE_ID");
     let relative = format!(
@@ -3009,6 +3123,281 @@ fn evidence_by_id(root: &Path, module_id: &str, evidence_id: &str) -> Value {
     .unwrap_or_else(|_| fail(format!("INVALID_EVIDENCE_RECORD:{}", evidence_id)))
 }
 
+fn deployment_receipt_time(
+    root: &Path,
+    module_id: &str,
+    evidence_id: &str,
+    expected_phase: &str,
+    expected_kind: &str,
+    issue_id: &str,
+    scope_hash: &str,
+    candidate_commit: &str,
+    artifact_hash: &str,
+    environment_id: &str,
+    entrypoint: &str,
+    producer: &Value,
+) -> DateTime<Utc> {
+    let evidence = evidence_by_id(root, module_id, evidence_id);
+    assert_evidence_record(&evidence, evidence_id, Utc::now());
+    if record_str(&evidence, "/issue_id", evidence_id) != issue_id
+        || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+        || record_str(&evidence, "/scope_hash", evidence_id) != scope_hash
+        || record_str(&evidence, "/source_commit", evidence_id) != candidate_commit
+        || record_str(&evidence, "/artifact_hash", evidence_id) != artifact_hash
+        || record_str(&evidence, "/phase", evidence_id) != expected_phase
+        || record_str(&evidence, "/kind", evidence_id) != expected_kind
+        || record_str(&evidence, "/execution_surface", evidence_id) != "deployed_blackbox"
+        || record_str(&evidence, "/environment_id", evidence_id) != environment_id
+        || record_str(&evidence, "/entrypoint", evidence_id) != entrypoint
+        || evidence.get("producer") != Some(producer)
+    {
+        fail("DEPLOYMENT_RECEIPT_EVIDENCE_MISMATCH");
+    }
+    record_time(&evidence, evidence_id)
+}
+
+fn assert_pre_review_validation_gate(root: &Path, module_id: &str, artifact: &Value) {
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let validation_name = module_record_name("pre-review-validation-record", module_id);
+    let candidate = read_record(root, &candidate_name);
+    let validation = read_record(root, &validation_name);
+    let issue_id = record_str(&candidate, "/issue_id", &candidate_name);
+    let scope_hash = record_str(&candidate, "/scope_hash", &candidate_name);
+    let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
+    let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    let artifact_hash = record_str(artifact, "/artifact_hash", "artifact");
+    let project = read_project(root);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("UNKNOWN_MODULE:{}", module_id)));
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+    {
+        fail("FIX_CANDIDATE_TREE_MISMATCH");
+    }
+    assert_candidate_source_identity(root, module, candidate_commit);
+    let rebuilt_artifact = build_module_artifact(root, &project, module, module_id);
+    if record_str(&rebuilt_artifact, "/artifact_hash", "rebuilt-artifact") != artifact_hash {
+        fail("REVIEW_ADMISSION_ARTIFACT_SOURCE_DRIFT");
+    }
+    if record_str(&validation, "/issue_id", &validation_name) != issue_id
+        || record_str(&validation, "/module_id", &validation_name) != module_id
+        || record_str(&validation, "/fix_candidate_id", &validation_name)
+            != record_str(&candidate, "/fix_candidate_id", &candidate_name)
+        || record_str(&validation, "/candidate_commit", &validation_name) != candidate_commit
+        || record_str(&validation, "/candidate_tree_hash", &validation_name) != candidate_tree
+        || record_str(&validation, "/artifact_hash", &validation_name) != artifact_hash
+        || validation.get("source_unchanged") != Some(&Value::Bool(true))
+        || validation.get("result").and_then(Value::as_str) != Some("pass")
+    {
+        fail("PRE_REVIEW_VALIDATION_MISMATCH");
+    }
+    let environment_id = record_str(&validation, "/deployment/environment_id", &validation_name);
+    let entrypoint = record_str(&validation, "/deployment/entrypoint", &validation_name);
+    let producer = validation
+        .pointer("/deployment/producer")
+        .and_then(Value::as_object)
+        .filter(|value| {
+            ["adapter", "identity"].iter().all(|key| {
+                value
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry| !entry.is_empty())
+            })
+        })
+        .map(|_| validation.pointer("/deployment/producer").unwrap())
+        .unwrap_or_else(|| fail("DEPLOYMENT_BLACKBOX_RECEIPT_MISSING"));
+    let whitebox_producer = validation
+        .get("whitebox_producer")
+        .and_then(Value::as_object)
+        .filter(|value| {
+            ["adapter", "identity"].iter().all(|key| {
+                value
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry| !entry.is_empty())
+            })
+        })
+        .map(|_| validation.get("whitebox_producer").unwrap())
+        .unwrap_or_else(|| fail("DEVELOPMENT_WHITEBOX_PRODUCER_MISSING"));
+    for path in [
+        "/deployment/install_receipt_id",
+        "/deployment/restart_receipt_id",
+        "/deployment/observed_at",
+    ] {
+        if record_str(&validation, path, &validation_name).is_empty() {
+            fail("DEPLOYMENT_BLACKBOX_RECEIPT_MISSING");
+        }
+    }
+    if environment_id.is_empty() || entrypoint.is_empty() {
+        fail("DEPLOYMENT_BLACKBOX_RECEIPT_MISSING");
+    }
+    let install_receipt_id = record_str(
+        &validation,
+        "/deployment/install_receipt_id",
+        &validation_name,
+    );
+    let restart_receipt_id = record_str(
+        &validation,
+        "/deployment/restart_receipt_id",
+        &validation_name,
+    );
+    let install_time = deployment_receipt_time(
+        root,
+        module_id,
+        install_receipt_id,
+        "deployment_install",
+        "install",
+        issue_id,
+        scope_hash,
+        candidate_commit,
+        artifact_hash,
+        environment_id,
+        entrypoint,
+        producer,
+    );
+    let restart_time = deployment_receipt_time(
+        root,
+        module_id,
+        restart_receipt_id,
+        "deployment_restart",
+        "restart",
+        issue_id,
+        scope_hash,
+        candidate_commit,
+        artifact_hash,
+        environment_id,
+        entrypoint,
+        producer,
+    );
+    let mut all_ids = std::collections::HashSet::new();
+    if !all_ids.insert(install_receipt_id) || !all_ids.insert(restart_receipt_id) {
+        fail("PRE_REVIEW_EVIDENCE_NOT_DISJOINT");
+    }
+    let mut latest_whitebox = None;
+    let mut earliest_whitebox = None;
+    let mut earliest_blackbox = None;
+    let mut latest_blackbox = None;
+    for (path, phase, surface) in [
+        (
+            "/whitebox_evidence_ids",
+            "development_whitebox",
+            "development_whitebox",
+        ),
+        (
+            "/blackbox_evidence_ids",
+            "deployed_blackbox",
+            "deployed_blackbox",
+        ),
+    ] {
+        for value in record_array(&validation, path, &validation_name) {
+            let id = value
+                .as_str()
+                .unwrap_or_else(|| fail("INVALID_PRE_REVIEW_EVIDENCE_ID"));
+            if !all_ids.insert(id) {
+                fail("PRE_REVIEW_EVIDENCE_NOT_DISJOINT");
+            }
+            let evidence = evidence_by_id(root, module_id, id);
+            assert_evidence_record(&evidence, id, Utc::now());
+            if record_str(&evidence, "/issue_id", id) != issue_id
+                || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+                || record_str(&evidence, "/scope_hash", id) != scope_hash
+                || record_str(&evidence, "/source_commit", id) != candidate_commit
+                || record_str(&evidence, "/phase", id) != phase
+                || record_str(&evidence, "/execution_surface", id) != surface
+                || evidence.get("result").and_then(Value::as_str) != Some("pass")
+                || record_time(&evidence, id) > record_time(&validation, &validation_name)
+            {
+                fail("PRE_REVIEW_EVIDENCE_MISMATCH");
+            }
+            if surface == "deployed_blackbox"
+                && (record_str(&evidence, "/artifact_hash", id) != artifact_hash
+                    || record_str(&evidence, "/environment_id", id) != environment_id
+                    || record_str(&evidence, "/entrypoint", id) != entrypoint
+                    || evidence.get("producer") != Some(producer)
+                    || !matches!(
+                        evidence.get("kind").and_then(Value::as_str),
+                        Some("runtime" | "sample_replay")
+                    ))
+            {
+                fail("DEPLOYED_BLACKBOX_EVIDENCE_MISMATCH");
+            }
+            if surface == "development_whitebox"
+                && (record_str(&evidence, "/artifact_hash", id) != artifact_hash
+                    || evidence.get("producer") != Some(whitebox_producer))
+            {
+                fail("DEVELOPMENT_WHITEBOX_EVIDENCE_MISMATCH");
+            }
+            let evidence_time = record_time(&evidence, id);
+            if surface == "development_whitebox" {
+                earliest_whitebox = Some(match earliest_whitebox {
+                    Some(current) if current < evidence_time => current,
+                    _ => evidence_time,
+                });
+                latest_whitebox = Some(match latest_whitebox {
+                    Some(current) if current > evidence_time => current,
+                    _ => evidence_time,
+                });
+            } else {
+                earliest_blackbox = Some(match earliest_blackbox {
+                    Some(current) if current < evidence_time => current,
+                    _ => evidence_time,
+                });
+                latest_blackbox = Some(match latest_blackbox {
+                    Some(current) if current > evidence_time => current,
+                    _ => evidence_time,
+                });
+            }
+        }
+    }
+    let observed_at = record_datetime(&validation, "/deployment/observed_at", &validation_name);
+    if record_time(&candidate, &candidate_name)
+        > earliest_whitebox.unwrap_or_else(|| fail("MISSING_DEVELOPMENT_WHITEBOX_EVIDENCE"))
+        || latest_whitebox.unwrap_or_else(|| fail("MISSING_DEVELOPMENT_WHITEBOX_EVIDENCE"))
+            > install_time
+        || install_time > restart_time
+        || restart_time
+            > earliest_blackbox.unwrap_or_else(|| fail("MISSING_DEPLOYED_BLACKBOX_EVIDENCE"))
+        || latest_blackbox.unwrap_or_else(|| fail("MISSING_DEPLOYED_BLACKBOX_EVIDENCE"))
+            > observed_at
+        || observed_at > record_time(&validation, &validation_name)
+    {
+        fail("PRE_REVIEW_CAUSAL_ORDER_MISMATCH");
+    }
+}
+
+fn verify_review_admission(root: &Path, module_id: &str) {
+    assert_project_root_safe(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("UNKNOWN_MODULE:{}", module_id)));
+    let artifact = read_module_artifact(root, &project, module_id);
+    module_artifact_matches_project(module, &artifact);
+    assert_pre_review_validation_gate(root, module_id, &artifact);
+    verify_internal(root, true, false);
+    println!(
+        "{{\"ok\":true,\"gate\":\"review_admission\",\"module_id\":\"{}\"}}",
+        module_id
+    );
+}
+
 fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) {
     let worktree_name = module_record_name("worktree-record", module_id);
     let reproduction_name = module_record_name("reproduction-record", module_id);
@@ -3018,6 +3407,15 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     let reproduction = read_record(root, &reproduction_name);
     let candidate = read_record(root, &candidate_name);
     let review = read_record(root, &review_name);
+    assert_pre_review_validation_gate(root, module_id, artifact);
+    let validation_name = module_record_name("pre-review-validation-record", module_id);
+    let validation = read_record(root, &validation_name);
+    if record_str(&review, "/pre_review_validation_id", &review_name)
+        != record_str(&validation, "/validation_id", &validation_name)
+        || record_time(&validation, &validation_name) > record_time(&review, &review_name)
+    {
+        fail("PRE_REVIEW_VALIDATION_MISMATCH");
+    }
     let issue_id = record_str(&worktree, "/issue_id", &worktree_name);
     let scope_hash = record_str(&worktree, "/scope_hash", &worktree_name);
     let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
@@ -3088,6 +3486,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     }
     let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
     let baseline = evidence_by_id(root, module_id, baseline_id);
+    assert_evidence_record(&baseline, baseline_id, Utc::now());
     if record_str(&baseline, "/phase", baseline_id) != "baseline_reproduction"
         || baseline.get("result").and_then(Value::as_str) != Some("pass")
         || baseline.get("input_hashes") != reproduction.get("input_hashes")
@@ -3100,6 +3499,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
             .as_str()
             .unwrap_or_else(|| fail("INVALID_CANDIDATE_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
+        assert_evidence_record(&evidence, id, Utc::now());
         if record_str(&evidence, "/issue_id", id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", id) != scope_hash
@@ -3125,6 +3525,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
             .as_str()
             .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
+        assert_evidence_record(&evidence, id, Utc::now());
         if record_str(&evidence, "/issue_id", id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", id) != scope_hash
@@ -3213,6 +3614,7 @@ fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
     let mut phases = Vec::new();
     for id in ids {
         let evidence = evidence_by_id(root, module_id, &id);
+        assert_evidence_record(&evidence, &id, Utc::now());
         if record_str(&evidence, "/issue_id", &id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", &id) != scope_hash
@@ -3855,6 +4257,7 @@ fn assert_fix_lifecycle_graph(
     let mut phases = Vec::new();
     for id in &required_evidence {
         let evidence = evidence_by_id(root, module_id, id);
+        assert_evidence_record(&evidence, id, Utc::now());
         if record_str(&evidence, "/evidence_id", id) != id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/issue_id", id) != issue_id
@@ -3881,6 +4284,7 @@ fn assert_fix_lifecycle_graph(
             .as_str()
             .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
+        assert_evidence_record(&evidence, id, Utc::now());
         if record_str(&evidence, "/phase", id) == "post_architecture_effectiveness"
             || record_time(&evidence, id) > record_time(review, "review-record.json")
         {
@@ -4977,7 +5381,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     assert_bundle_manifest();
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || record.get("version").and_then(Value::as_str) != Some("0.1.4")
+        || record.get("version").and_then(Value::as_str) != Some("0.1.5")
         || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
         || record.get("manifest_digest").and_then(Value::as_str)
             != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
@@ -5029,7 +5433,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     }
 }
 
-fn verify(root: &Path, admission: bool) {
+fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     assert_project_root_safe(root);
     let project = read_project(root);
     assert_governance_maps(root);
@@ -5504,11 +5908,17 @@ fn verify(root: &Path, admission: bool) {
             }
         }
     }
-    println!(
-        "{{\"ok\":true,\"project_id\":\"{}\",\"stage\":\"{}\"}}",
-        required_str(&project, "/project_id", "INVALID_PROJECT_ID"),
-        required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT")
-    );
+    if emit_result {
+        println!(
+            "{{\"ok\":true,\"project_id\":\"{}\",\"stage\":\"{}\"}}",
+            required_str(&project, "/project_id", "INVALID_PROJECT_ID"),
+            required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT")
+        );
+    }
+}
+
+fn verify(root: &Path, admission: bool) {
+    verify_internal(root, admission, true);
 }
 
 const APPSDK_GITIGNORE_BEGIN: &str = "# BEGIN APPSDK MANAGED";
@@ -5594,7 +6004,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.4", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.5", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
@@ -5609,7 +6019,7 @@ fn write_project_scaffold(root: &Path) {
     "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
     "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
     "runtime_forbidden_roots": ["playground/**", "generated/**"],
-    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/collaboration-index.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/merge-queue-state.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/pre-review-validation-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/collaboration-index.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/merge-queue-state.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
     "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true
@@ -5628,7 +6038,7 @@ fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
         ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.4","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.5","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -5932,7 +6342,10 @@ fn pin_lock(root: &Path, binary: &Path) {
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("version") => println!("appsdk 0.1.4 (rust)"),
+        Some("version") => println!("appsdk 0.1.5 (rust)"),
+        Some("verify-sdk-source-registry") => assert_sdk_source_registry(Path::new(
+            &args.next().unwrap_or_else(|| ".".into()),
+        )),
         Some("verify") => {
             let first = args.next().unwrap_or_else(|| ".".into());
             if first == "--admission" {
@@ -5940,6 +6353,20 @@ fn main() {
                     .next()
                     .unwrap_or_else(|| fail("USAGE: appsdk verify [--admission] <dir>"));
                 verify(Path::new(&root), true);
+            } else if first == "--review-admission" {
+                let root = args.next().unwrap_or_else(|| {
+                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>")
+                });
+                if args.next().as_deref() != Some("--module") {
+                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>");
+                }
+                let module_id = args.next().unwrap_or_else(|| {
+                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>")
+                });
+                if args.next().is_some() {
+                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>");
+                }
+                verify_review_admission(Path::new(&root), &module_id);
             } else {
                 verify(Path::new(&first), false);
             }

@@ -68,7 +68,7 @@ Ignore:
 ```json
 {
   "sdk": "appsdk",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "digest": "sha256:replace-with-compiled-sdk-digest",
   "compiler_digest": "sha256:replace-with-compiler-digest",
   "bundle_digest": "sha256:replace-with-sdk-bundle-digest",
@@ -122,6 +122,10 @@ goal clarification
   -> one semantic claim + one clean isolated worktree per worker
   -> baseline reproduction
   -> committed fix candidate + positive/negative evidence
+  -> development whitebox PASS
+  -> build + install + restart
+  -> deployed public-entrypoint blackbox PASS
+  -> PreReviewValidationRecord + `appsdk verify --review-admission` PASS
   -> architecture ReviewRecord PASS
   -> unchanged-source effectiveness replay PASS
   -> one independently verifiable milestone per clean worktree

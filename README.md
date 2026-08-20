@@ -7,7 +7,7 @@ AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实�
 ## 第一阶段治理流程
 
 ```text
-Goal clarification -> clean worktree -> reproduce -> fix candidate -> architecture PASS -> effectiveness replay -> tested integration -> local/remote mainline receipt -> compile library
+Goal clarification -> clean worktree -> reproduce -> fix candidate -> development whitebox PASS -> build/install/restart -> deployed blackbox PASS -> review admission -> architecture PASS -> effectiveness replay -> tested integration -> local/remote mainline receipt -> compile library
                   -> Active lib -> Protected source/contracts -> lock -> close
 ```
 
@@ -21,6 +21,7 @@ appsdk pin-lock ./my-app --binary /path/to/appsdk
 appsdk compile ./my-app
 appsdk begin-version ./my-app --module app-core --from active-v1 --to active-v2
 appsdk verify ./my-app
+appsdk verify --review-admission ./my-app --module app-core
 appsdk promote ./my-app --to source_implemented
 appsdk promote-module ./my-app --module app-core --to architecture_stable
 appsdk freeze ./my-app --module app-core
@@ -45,7 +46,7 @@ appsdk publish-active ./my-app --module app-core --version active-v1
 
 可复用 Skill：[`skills/appsdk-project-governance/SKILL.md`](./skills/appsdk-project-governance/SKILL.md)。它定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze。
 
-`goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 Active 必须有 Playground 证据、架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
+`goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 review 前必须同时有开发白盒 PASS、部署后的公开入口黑盒 PASS，以及绑定候选 commit/tree、artifact、environment 和 entrypoint 的 PreReviewValidationRecord；`appsdk verify --review-admission` 是强制 admission 命令，宿主 CI/pre-commit 需要调用它才能物理阻断 Git commit。进入 Active 还必须有架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
 
 多 worker 场景必须同时启用 `multi_worker_collaboration` 与 `multi_worktree_merge_queue`。每个 worker 独占一个 semantic claim、branch 和 clean worktree；worker 不写 main。候选变更经单一 merge owner 串行入队，验证精确 integration commit/tree，并在本地与远端 main 都可达后才允许 promotion、cleanup 和 claim release。
 

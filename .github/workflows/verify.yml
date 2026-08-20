@@ -16,6 +16,7 @@ jobs:
       - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
       - run: cargo test --manifest-path rust/Cargo.toml
       - run: cargo build --release --manifest-path rust/Cargo.toml
+      - run: rust/target/release/appsdk verify-sdk-source-registry .
       - run: |
           tmp="$(mktemp -d)"
           rust/target/release/appsdk new "$tmp/project"
@@ -33,6 +34,7 @@ jobs:
           test -f "$tmp/project/.appsdk/maps/module-registry.json"
           test -f "$tmp/project/.appsdk/contracts/records/worktree-record.schema.json"
           test -f "$tmp/project/.appsdk/contracts/records/effectiveness-record.schema.json"
+          test -f "$tmp/project/.appsdk/contracts/records/pre-review-validation-record.schema.json"
           test -f "$tmp/project/.appsdk/contracts/records/merge-record.schema.json"
           test -f "$tmp/project/.appsdk/contracts/development-scenarios.manifest.json"
           test -f "$tmp/project/.appsdk/contracts/records/collaboration-record.schema.json"

@@ -8,6 +8,10 @@ goal admitted
   -> baseline reproduction
   -> formal fix in the unique owner
   -> fix candidate verification
+  -> development whitebox PASS
+  -> build / install / restart
+  -> deployed public-entrypoint blackbox PASS
+  -> pre-review validation PASS
   -> architecture review PASS
   -> unchanged-candidate effectiveness replay PASS
   -> merge queue admission when parallel development is enabled
@@ -32,6 +36,7 @@ WorktreeRecord
   -> ReproductionRecord
   -> EvidenceRecord[]
   -> FixCandidateRecord
+  -> PreReviewValidationRecord (whitebox + evidence-backed install/restart + deployed blackbox)
   -> Architecture ReviewRecord
   -> EffectivenessRecord
   -> CollaborationRecord (parallel)
@@ -46,6 +51,8 @@ WorktreeRecord
 
 Required evidence phases are `baseline_reproduction`, `fix_candidate`, `positive_intervention`, `negative_intervention`, and `post_architecture_effectiveness`. Every referenced evidence ID must resolve to a distinct record.
 
+The pre-review gate additionally requires `development_whitebox`, `deployment_install`, `deployment_restart`, and `deployed_blackbox` EvidenceRecords for the exact candidate. It enforces whitebox ≤ install ≤ restart ≤ deployed blackbox ≤ validation time. Issue lifecycle states such as `pre_review_validated` are derived projections of validated records; they are not module promotion stages.
+
 ## Compatibility
 
-Fix Lifecycle v2 began with the v0.1.3 single-worker graph. AppSDK v0.1.4 adds the atomic `multi_worker_collaboration` + `multi_worktree_merge_queue` scenario pair and keeps the graph fail-closed. The binary checks `.appsdk/project.json` and rejects a different SDK version with `PROJECT_SDK_VERSION_PIN_MISMATCH` before interpreting records. Older projects must use their retained versioned binary until an explicit migration creates verifiable records from repository history and retained evidence. Do not synthesize PASS records when historical evidence is unavailable.
+Fix Lifecycle v2 began with the v0.1.3 single-worker graph. AppSDK v0.1.4 adds the atomic `multi_worker_collaboration` + `multi_worktree_merge_queue` scenario pair and keeps the graph fail-closed. AppSDK v0.1.5 adds pre-review whitebox/deployed-blackbox validation and evidence-backed install/restart receipts. A project already at `architecture_stable` must keep its retained binary until an explicit 0.1.5 migration can produce genuine PreReviewValidationRecord evidence bound to the historical deployed artifact, environment, receipts, and entrypoint. The binary checks `.appsdk/project.json` and rejects a different SDK version with `PROJECT_SDK_VERSION_PIN_MISMATCH` before interpreting records. Do not synthesize PASS records when historical evidence is unavailable.

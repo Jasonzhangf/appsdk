@@ -3,7 +3,7 @@
   "project_id": "change-me",
   "sdk": {
     "name": "appsdk",
-    "version": "0.1.4"
+    "version": "0.1.5"
   },
   "lifecycle": {
     "stage": "draft"
@@ -54,6 +54,7 @@
       "contracts/records/goal-clarification-record.schema.json",
       "contracts/records/review-record.schema.json",
       "contracts/records/effectiveness-record.schema.json",
+      "contracts/records/pre-review-validation-record.schema.json",
       "contracts/records/collaboration-record.schema.json",
       "contracts/records/collaboration-index.schema.json",
       "contracts/records/merge-queue-record.schema.json",

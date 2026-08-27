@@ -427,6 +427,24 @@ fn verify_rejects_tampered_lock_bundle_resources() {
 }
 
 #[test]
+fn restore_active_fails_closed_when_protected_version_history_is_missing() {
+    let root = temp_root("restore-active-missing-history");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let result = run(&[
+        "restore-active",
+        root_text,
+        "--module",
+        "app-core",
+        "--version",
+        "active-v1",
+    ]);
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).trim().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_rejects_symlinked_control_parent() {
     let root = temp_root("init-symlink-parent");
     fs::create_dir_all(&root).unwrap();

@@ -2561,6 +2561,89 @@ fn begin_version(root: &Path, module_id: &str, from: &str, to: &str) {
     );
 }
 
+fn restore_active(root: &Path, module_id: &str, version: &str) {
+    assert_project_root_safe(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    assert_version(version, "INVALID_ACTIVE_VERSION");
+    let project = read_project(root);
+    assert_project_contract(root, &project);
+    assert_declared_contracts(root, &project, true);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|m| m.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    let protected_root = contract_root(root, &project, "/governance/protected_root");
+    let version_history = protected_root
+        .join("history-versions")
+        .join(module_id)
+        .join(version);
+    let archive_history = protected_root.join("history").join(module_id);
+    assert_no_symlink_components(root, &version_history, "protected_version_history");
+    assert_no_symlink_components(root, &archive_history, "protected_archive");
+    let history = if version_history.is_dir() {
+        version_history
+    } else {
+        let freeze = read_record(root, &freeze_record_name(module_id));
+        if freeze.get("active_version").and_then(Value::as_str) != Some(version)
+            || !archive_history.is_dir()
+        {
+            fail("PROTECTED_VERSION_HISTORY_MISSING");
+        }
+        archive_history
+    };
+    let artifact_file = history.join("module-artifact.json");
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(&artifact_file)
+            .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+    previous_active_matches_module(module, &artifact);
+    let library = module
+        .get("artifact_paths")
+        .and_then(Value::as_array)
+        .and_then(|paths| paths.first())
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+    let source_library = history.join("library").join(library);
+    if !source_library.is_file() {
+        fail("PROTECTED_LIBRARY_MISSING");
+    }
+    let active_dir = contract_root(root, &project, "/governance/active_root")
+        .join(module_id)
+        .join(version);
+    if active_dir.exists() {
+        fail(format!("ACTIVE_VERSION_EXISTS:{}", version));
+    }
+    fs::create_dir_all(active_dir.join("lib")).unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+    fs::copy(&source_library, active_dir.join("lib").join(library))
+        .unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+    atomic_write_json(
+        &active_dir.join("artifact.json"),
+        &artifact,
+        "ACTIVE_RESTORE_FAILED",
+    );
+    write_module_artifact_value(root, &project, module_id, &artifact);
+    let current = serde_json::json!({
+        "module_id": module_id,
+        "version": version,
+        "artifact_hash": record_str(&artifact, "/artifact_hash", "module-artifact")
+    });
+    let module_active = active_dir
+        .parent()
+        .unwrap_or_else(|| fail("ACTIVE_RESTORE_FAILED"));
+    atomic_write_json(
+        &module_active.join("current.json"),
+        &current,
+        "ACTIVE_RESTORE_FAILED",
+    );
+    println!("{}", serde_json::to_string_pretty(&current).unwrap());
+}
+
 fn freeze_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
     root.join(".appsdk")
         .join("transactions")
@@ -6394,6 +6477,15 @@ fn main() {
             if args.next().is_some() { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
             begin_version(&root, &module_id, &from, &to);
         }
+        Some("restore-active") => {
+            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>")));
+            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"); }
+            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"));
+            if args.next().as_deref() != Some("--version") { fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"); }
+            let version = args.next().unwrap_or_else(|| fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"));
+            if args.next().is_some() { fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"); }
+            restore_active(&root, &module_id, &version);
+        }
         Some("promote") => {
             let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk promote <dir> --to <stage>")));
             if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk promote <dir> --to <stage>"); }
@@ -6466,7 +6558,7 @@ fn main() {
             }
             prepare_project(Path::new(&workspace));
         }
-        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | restore-active <dir> --module <id> --version <version> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

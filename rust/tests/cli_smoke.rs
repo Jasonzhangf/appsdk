@@ -427,24 +427,6 @@ fn verify_rejects_tampered_lock_bundle_resources() {
 }
 
 #[test]
-fn restore_active_fails_closed_when_protected_version_history_is_missing() {
-    let root = temp_root("restore-active-missing-history");
-    let root_text = root.to_str().unwrap();
-    assert!(run(&["new", root_text]).status.success());
-    let result = run(&[
-        "restore-active",
-        root_text,
-        "--module",
-        "app-core",
-        "--version",
-        "active-v1",
-    ]);
-    assert!(!result.status.success());
-    assert!(!String::from_utf8_lossy(&result.stderr).trim().is_empty());
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn init_rejects_symlinked_control_parent() {
     let root = temp_root("init-symlink-parent");
     fs::create_dir_all(&root).unwrap();
@@ -537,6 +519,167 @@ fn pin_test_lock(root: &str) {
             .status
             .success()
     );
+}
+
+fn install_legacy_governance_maps(root: &Path) {
+    for (name, content) in [
+        (
+            "resource-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
+        ),
+        (
+            "function-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/function-map.json"),
+        ),
+        (
+            "mainline-call-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"),
+        ),
+        (
+            "verification-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/verification-map.json"),
+        ),
+    ] {
+        fs::write(root.join(".appsdk/maps").join(name), content).unwrap();
+    }
+}
+
+#[test]
+fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
+    let root = temp_root("pin-lock-version-migration");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
+    let lock_file = root.join(".appsdk/sdk.lock");
+    let original_lock = fs::read_to_string(&lock_file).unwrap();
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+
+    project["sdk"]["version"] = Value::String("0.1.4".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let unsupported = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!unsupported.status.success());
+    assert!(String::from_utf8_lossy(&unsupported.stderr)
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.4:0.1.6"));
+    assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
+
+    project["sdk"]["version"] = Value::String("0.1.5".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let wrong_binary = root.join("wrong-appsdk");
+    fs::write(&wrong_binary, "not the running AppSDK Bundle\n").unwrap();
+    let mismatched = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        wrong_binary.to_str().unwrap(),
+    ]);
+    assert!(!mismatched.status.success());
+    assert!(String::from_utf8_lossy(&mismatched.stderr).contains("SDK_PIN_BINARY_BUNDLE_MISMATCH"));
+    assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
+    fs::remove_file(wrong_binary).unwrap();
+
+    install_legacy_governance_maps(&root);
+
+    let migrated = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let migrated_project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    let migrated_lock: Value =
+        serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
+    assert_eq!(migrated_project["sdk"]["version"], "0.1.6");
+    assert_eq!(migrated_lock["version"], "0.1.6");
+    assert!(run(&["verify", root_text]).status.success());
+
+    let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
+    let migration_record = migration_root.join("record.json");
+    assert!(migration_record.is_file());
+    for name in [
+        "resource-map.json",
+        "function-map.json",
+        "mainline-call-map.json",
+        "verification-map.json",
+    ] {
+        assert_eq!(
+            fs::read_to_string(migration_root.join("maps").join(name)).unwrap(),
+            fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../contracts/migrations/0.1.5/governance-maps")
+                    .join(name)
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".appsdk/maps").join(name)).unwrap(),
+            fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../contracts/maps")
+                    .join(name)
+            )
+            .unwrap()
+        );
+    }
+    let snapshot = migration_root.join("maps/resource-map.json");
+    let source_map = fs::read_to_string(&snapshot).unwrap();
+    fs::write(&snapshot, "{}\n").unwrap();
+    let snapshot_rejected = run(&["verify", root_text]);
+    assert!(!snapshot_rejected.status.success());
+    assert!(String::from_utf8_lossy(&snapshot_rejected.stderr)
+        .contains("SDK_MIGRATION_SNAPSHOT_MISMATCH:resource-map.json"));
+    fs::write(&snapshot, source_map).unwrap();
+    assert!(run(&["verify", root_text]).status.success());
+
+    let resumed = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(resumed.status.success());
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+
+    let partial = temp_root("pin-lock-partial-0.1.6-map-migration");
+    let partial_text = partial.to_str().unwrap();
+    assert!(run(&["new", partial_text]).status.success());
+    install_legacy_governance_maps(&partial);
+    let repaired = run(&[
+        "pin-lock",
+        partial_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    assert!(partial
+        .join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")
+        .is_file());
+    assert!(run(&["verify", partial_text]).status.success());
+    fs::remove_dir_all(partial).unwrap();
 }
 
 #[test]
@@ -1392,12 +1535,12 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
     let goal_file = root.join(".appsdk/goal.json");
     fs::write(&goal_file, r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#).unwrap();
-    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.5","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
+    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.6","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
 "#, "a".repeat(64), "b".repeat(64))).unwrap();
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.5"},
+  "sdk": {"name": "appsdk", "version": "0.1.6"},
   "lifecycle": {"stage": "draft"},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},
@@ -2278,7 +2421,7 @@ fn frozen_module_keeps_other_modules_mutable() {
 }
 
 #[test]
-fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
+fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     let root = temp_root("begin-version");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
@@ -2375,6 +2518,272 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
     .success());
     let active_v1 = root.join("active/lib/app-core/active-v1/artifact.json");
     let active_v1_text = fs::read_to_string(&active_v1).unwrap();
+
+    install_legacy_governance_maps(&root);
+    let review_file = root.join(".appsdk/records/review-record-app-core.json");
+    let mut review: Value =
+        serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+    review["resource_map_hash"] = Value::String(format!("sha256:{}", "0".repeat(64)));
+    review["function_map_hash"] = Value::String(
+        "sha256:69f16dfe5d056634f6164cd325dbdbdf134588890b69f101c0d9045e6a01d776".into(),
+    );
+    review["mainline_call_map_hash"] = Value::String(
+        "sha256:c36e4f9d5cff527d7f98b339772a53c87f420db58bb2215b6b68210e01124673".into(),
+    );
+    review["verification_map_hash"] = Value::String(
+        "sha256:8dcc1e9444f62f7e407fa1e37a6c8d004de55587950f8e600dc5f3c711981230".into(),
+    );
+    fs::write(
+        &review_file,
+        serde_json::to_string_pretty(&review).unwrap() + "\n",
+    )
+    .unwrap();
+    let project_file = root.join(".appsdk/project.json");
+    let mut legacy_project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    legacy_project["sdk"]["version"] = Value::String("0.1.5".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&legacy_project).unwrap() + "\n",
+    )
+    .unwrap();
+    let lock_file = root.join(".appsdk/sdk.lock");
+    let mut legacy_lock: Value =
+        serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
+    legacy_lock["version"] = Value::String("0.1.5".into());
+    fs::write(
+        &lock_file,
+        serde_json::to_string_pretty(&legacy_lock).unwrap() + "\n",
+    )
+    .unwrap();
+    let review_mismatch = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!review_mismatch.status.success());
+    assert!(String::from_utf8_lossy(&review_mismatch.stderr)
+        .contains("SDK_MIGRATION_FROZEN_REVIEW_MAP_MISMATCH:app-core:resource-map.json"));
+    assert!(!root.join(".appsdk/migrations/0.1.5-to-0.1.6").exists());
+    review["resource_map_hash"] = Value::String(
+        "sha256:67f189bf15330e542bc82349b78a1d7e29ec050b112ecffa165173b078d9204e".into(),
+    );
+    fs::write(
+        &review_file,
+        serde_json::to_string_pretty(&review).unwrap() + "\n",
+    )
+    .unwrap();
+    let migrated = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let historical_review_verified = run(&["verify", root_text]);
+    assert!(
+        historical_review_verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&historical_review_verified.stderr)
+    );
+    let frozen_commit = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["-C", root_text, "rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    let merge_file = root.join(".appsdk/records/merge-record-app-core.json");
+    let mut merge: Value = serde_json::from_str(&fs::read_to_string(&merge_file).unwrap()).unwrap();
+    merge["mainline_ref"] = Value::String("release/frozen-v1".into());
+    fs::write(
+        &merge_file,
+        serde_json::to_string_pretty(&merge).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "update-ref",
+            "refs/remotes/origin/release/frozen-v1",
+            &frozen_commit,
+        ])
+        .status()
+        .unwrap()
+        .success());
+
+    fs::remove_dir_all(root.join("generated")).unwrap();
+    fs::remove_dir_all(root.join("active")).unwrap();
+    fs::remove_dir_all(root.join("protected/history")).unwrap();
+    let blocked = run(&[
+        "begin-version",
+        root_text,
+        "--module",
+        "app-core",
+        "--from",
+        "active-v1",
+        "--to",
+        "active-v2",
+    ]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("ACTIVE_INDEX_MISSING"));
+
+    let gitignore = root.join(".gitignore");
+    let original_gitignore = fs::read_to_string(&gitignore).unwrap();
+    fs::write(&gitignore, format!("{}protected/\n", original_gitignore)).unwrap();
+    let ignored = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(!ignored.status.success());
+    assert!(String::from_utf8_lossy(&ignored.stderr).contains("PROTECTED_ARCHIVE_IGNORED"));
+    assert!(!root.join("generated/modules/app-core").exists());
+    fs::write(&gitignore, original_gitignore).unwrap();
+
+    let drift = root.join("playground/experiments/rehydrate-drift.txt");
+    fs::write(&drift, "committed source drift\n").unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "source drift"])
+        .status()
+        .unwrap()
+        .success());
+    let rejected = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("FROZEN_REHYDRATE_ARTIFACT_HASH_MISMATCH"));
+    assert!(!root.join("protected/history/app-core").exists());
+    assert!(!root.join("active/lib/app-core").exists());
+
+    fs::remove_file(drift).unwrap();
+    fs::remove_dir_all(root.join("generated")).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "restore frozen source"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "update-ref",
+            "refs/remotes/backup/release/frozen-v1",
+            &frozen_commit,
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let ambiguous = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(!ambiguous.status.success());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("MAINLINE_REF_AMBIGUOUS"));
+    assert!(!root.join("protected/history/app-core").exists());
+    assert!(!root.join("active/lib/app-core").exists());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "update-ref",
+            "-d",
+            "refs/remotes/backup/release/frozen-v1",
+        ])
+        .status()
+        .unwrap()
+        .success());
+
+    let unowned_active = root.join("active/lib/app-core/active-v1");
+    fs::create_dir_all(&unowned_active).unwrap();
+    fs::write(unowned_active.join("artifact.json"), "{}\n").unwrap();
+    let unowned = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(!unowned.status.success());
+    assert!(String::from_utf8_lossy(&unowned.stderr)
+        .contains("FROZEN_REHYDRATE_UNOWNED_PARTIAL_PROJECTION"));
+    fs::remove_dir_all(root.join("active")).unwrap();
+
+    let restored = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(fs::read_to_string(&active_v1).unwrap(), active_v1_text);
+    assert!(root
+        .join("protected/history/app-core/module-artifact.json")
+        .is_file());
+    assert!(root
+        .join("generated/modules/app-core/module.compiled.json")
+        .is_file());
+    let rehydrated_verify = run(&["verify", root_text]);
+    assert!(
+        rehydrated_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rehydrated_verify.stderr)
+    );
+    let transaction = root.join(".appsdk/transactions/rehydrate-app-core");
+    assert!(!transaction.exists());
+    fs::create_dir_all(&transaction).unwrap();
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "module_id": "app-core",
+            "version": "active-v1",
+            "artifact_hash": v1_hash,
+            "phase": "active_published",
+            "created_at": "2026-01-02T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let resumed = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(!transaction.exists());
+
+    fs::create_dir_all(&transaction).unwrap();
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "module_id": "app-core",
+            "version": "active-v1",
+            "artifact_hash": format!("sha256:{}", "0".repeat(64)),
+            "phase": "active_published",
+            "created_at": "2026-01-02T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let mismatched_transaction = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(!mismatched_transaction.status.success());
+    assert!(String::from_utf8_lossy(&mismatched_transaction.stderr)
+        .contains("FROZEN_REHYDRATE_TRANSACTION_MISMATCH"));
+    fs::remove_dir_all(&transaction).unwrap();
+
+    let duplicate = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(
+        duplicate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&duplicate.stderr)
+    );
 
     let wrong_from = run(&[
         "begin-version",
@@ -2541,6 +2950,25 @@ fn begin_version_preserves_v1_and_opens_a_version_bound_source_stage() {
         verified.status.success(),
         "{}",
         String::from_utf8_lossy(&verified.stderr)
+    );
+    let active_v2 = root.join("active/lib/app-core/active-v2/artifact.json");
+    let active_v2_text = fs::read_to_string(&active_v2).unwrap();
+    fs::remove_dir_all(root.join("generated")).unwrap();
+    fs::remove_dir_all(root.join("active")).unwrap();
+    fs::remove_dir_all(root.join("protected/history")).unwrap();
+    let restored_v2 = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(
+        restored_v2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored_v2.stderr)
+    );
+    assert_eq!(fs::read_to_string(&active_v1).unwrap(), active_v1_text);
+    assert_eq!(fs::read_to_string(&active_v2).unwrap(), active_v2_text);
+    let restored_v2_verify = run(&["verify", root_text]);
+    assert!(
+        restored_v2_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored_v2_verify.stderr)
     );
     fs::remove_dir_all(root).unwrap();
 }

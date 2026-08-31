@@ -50,6 +50,14 @@ appsdk begin-version <project> --module <id> --from <current-version> --to <new-
 
 The command verifies the current Active index, frozen record, previous artifact hash, and Protected history; moves the old Protected archive and record graph into versioned history; records `version_base`; and reopens only that module at `source_implemented`. It never edits or deletes the previous Active library.
 
+For a clean checkout whose ignored generated and Active projections are absent, use:
+
+```bash
+appsdk rehydrate-frozen <project> --module <id>
+```
+
+The version is FreezeRecord-owned and cannot be supplied by the caller. Rehydrate runs the declared deterministic build, requires the artifact hash to match FreezeRecord and PromotionRecord, and completes record/map preflight before publication. It then records an exact module/version/artifact transaction under `.appsdk/transactions/rehydrate-<module>/`, recreates the current Protected archive and Active library, performs full verification, and removes the marker only after success. A later invocation may continue only when the marker and every existing projection match the same immutable hash; an already complete exact projection set is idempotently verified. Unowned partial Active state, source drift, an ignored archive, a missing required previous-version archive, or any hash mismatch fails closed without overwrite. Copying projections from another worktree and hand-writing artifact records remain forbidden.
+
 ### Protected source and contracts
 
 Protected contains source and contracts after a successful promotion. It is the historical source of the Active library. Git must record the source commit/tag, artifact hash, public API hash, review PASS, and previous Active version. Protected + Git support audit, detection, and recovery; they do not prevent a same-repository shell agent from reading the source.

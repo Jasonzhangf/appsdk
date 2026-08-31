@@ -19,6 +19,7 @@ appsdk init ./existing-workspace --project-root new-code
 appsdk new ./my-app
 appsdk pin-lock ./my-app --binary /path/to/appsdk
 appsdk compile ./my-app
+appsdk rehydrate-frozen ./my-app --module app-core
 appsdk begin-version ./my-app --module app-core --from active-v1 --to active-v2
 appsdk verify ./my-app
 appsdk verify --review-admission ./my-app --module app-core

@@ -10,6 +10,14 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
+const SDK_MAP_MIGRATION_MANIFEST: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
+const GOVERNANCE_MAP_NAMES: [&str; 4] = [
+    "resource-map.json",
+    "function-map.json",
+    "mainline-call-map.json",
+    "verification-map.json",
+];
 const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "contracts/sdk-bundle.manifest.json",
@@ -25,6 +33,51 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/development-scenarios.manifest.json",
         "contracts",
         include_str!("../../contracts/development-scenarios.manifest.json"),
+    ),
+    (
+        "contracts/maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/maps/resource-map.json"),
+    ),
+    (
+        "contracts/maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/maps/function-map.json"),
+    ),
+    (
+        "contracts/maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/maps/verification-map.json"),
+    ),
+    (
+        "contracts/migrations/sdk-0.1.5-to-0.1.6.json",
+        "contracts",
+        include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
+    ),
+    (
+        "contracts/migrations/0.1.5/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.5/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.5/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.5/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.5/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.5/governance-maps/verification-map.json"),
     ),
     (
         "contracts/transitions/zone-transition.manifest.json",
@@ -158,6 +211,74 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+fn canonical_governance_map(name: &str) -> &'static str {
+    match name {
+        "resource-map.json" => include_str!("../../contracts/maps/resource-map.json"),
+        "function-map.json" => include_str!("../../contracts/maps/function-map.json"),
+        "mainline-call-map.json" => include_str!("../../contracts/maps/mainline-call-map.json"),
+        "verification-map.json" => include_str!("../../contracts/maps/verification-map.json"),
+        _ => fail("UNKNOWN_GOVERNANCE_MAP"),
+    }
+}
+
+fn historical_governance_map(name: &str) -> &'static str {
+    match name {
+        "resource-map.json" => {
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json")
+        }
+        "function-map.json" => {
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/function-map.json")
+        }
+        "mainline-call-map.json" => {
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json")
+        }
+        "verification-map.json" => {
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/verification-map.json")
+        }
+        _ => fail("UNKNOWN_GOVERNANCE_MAP"),
+    }
+}
+
+fn sdk_map_migration_manifest() -> Value {
+    let manifest: Value = serde_json::from_str(SDK_MAP_MIGRATION_MANIFEST)
+        .unwrap_or_else(|_| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"));
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || manifest.get("migration_id").and_then(Value::as_str) != Some("appsdk-0.1.5-to-0.1.6")
+        || manifest.get("source_version").and_then(Value::as_str) != Some("0.1.5")
+        || manifest.get("target_version").and_then(Value::as_str) != Some("0.1.6")
+        || manifest.get("snapshot_root").and_then(Value::as_str)
+            != Some(".appsdk/migrations/0.1.5-to-0.1.6/maps")
+        || manifest.get("record_path").and_then(Value::as_str)
+            != Some(".appsdk/migrations/0.1.5-to-0.1.6/record.json")
+    {
+        fail("INVALID_SDK_MAP_MIGRATION_MANIFEST");
+    }
+    let maps = manifest
+        .get("maps")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"));
+    if maps.len() != GOVERNANCE_MAP_NAMES.len() {
+        fail("INVALID_SDK_MAP_MIGRATION_MANIFEST");
+    }
+    for name in GOVERNANCE_MAP_NAMES {
+        let entry = maps
+            .iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"));
+        if entry.get("source_digest").and_then(Value::as_str)
+            != Some(digest_bytes(historical_governance_map(name).as_bytes()).as_str())
+            || entry.get("target_digest").and_then(Value::as_str)
+                != Some(digest_bytes(canonical_governance_map(name).as_bytes()).as_str())
+        {
+            fail(format!(
+                "SDK_MAP_MIGRATION_MANIFEST_DIGEST_MISMATCH:{}",
+                name
+            ));
+        }
+    }
+    manifest
+}
+
 fn sdk_bundle_manifest_resources() -> Value {
     serde_json::from_str::<Value>(SDK_BUNDLE_MANIFEST)
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"))
@@ -236,7 +357,7 @@ fn assert_bundle_manifest() {
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
         || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || manifest.get("version").and_then(Value::as_str) != Some("0.1.5")
+        || manifest.get("version").and_then(Value::as_str) != Some("0.1.6")
         || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
     {
         fail("INVALID_SDK_BUNDLE_MANIFEST");
@@ -262,7 +383,7 @@ fn install_bundle_resources(root: &Path) {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).unwrap_or_else(|_| fail("SDK_RESOURCE_WRITE_FAILED"));
         }
-        fs::write(&target, content).unwrap_or_else(|_| fail("SDK_RESOURCE_WRITE_FAILED"));
+        atomic_write_bytes(&target, content.as_bytes(), "SDK_RESOURCE_WRITE_FAILED");
         installed.push(serde_json::json!({
             "source": source,
             "class": class,
@@ -273,17 +394,13 @@ fn install_bundle_resources(root: &Path) {
     let record = serde_json::json!({
         "schema_version": 1,
         "sdk": "appsdk",
-        "version": "0.1.5",
+        "version": "0.1.6",
         "bundle_digest": sdk_bundle_digest(),
         "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": installed
     });
     let record_path = root.join(".appsdk/sdk-resources.json");
-    fs::write(
-        record_path,
-        serde_json::to_string_pretty(&record).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail("SDK_RESOURCE_RECORD_WRITE_FAILED"));
+    atomic_write_json(&record_path, &record, "SDK_RESOURCE_RECORD_WRITE_FAILED");
 }
 
 fn fail(message: impl AsRef<str>) -> ! {
@@ -718,13 +835,10 @@ fn assert_governance_maps(root: &Path) {
                 .unwrap_or_else(|_| fail(format!("MISSING_GOVERNANCE_MAP:{}", name))),
         )
         .unwrap_or_else(|_| fail(format!("INVALID_GOVERNANCE_MAP:{}", name)));
-        let canonical_text = match name {
-            "resource-map.json" => include_str!("../../contracts/maps/resource-map.json"),
-            "module-registry.json" => include_str!("../../contracts/maps/module-registry.json"),
-            "function-map.json" => include_str!("../../contracts/maps/function-map.json"),
-            "mainline-call-map.json" => include_str!("../../contracts/maps/mainline-call-map.json"),
-            "verification-map.json" => include_str!("../../contracts/maps/verification-map.json"),
-            _ => fail("UNKNOWN_GOVERNANCE_MAP"),
+        let canonical_text = if name == "module-registry.json" {
+            include_str!("../../contracts/maps/module-registry.json")
+        } else {
+            canonical_governance_map(name)
         };
         let canonical: Value = serde_json::from_str(canonical_text)
             .unwrap_or_else(|_| fail("INVALID_CANONICAL_GOVERNANCE_MAP"));
@@ -1318,6 +1432,29 @@ fn assert_vcs_clean(root: &Path, project: &Value, module_id: &str) {
                 fail("GIT_SCOPE_NOT_CLEAN");
             }
         }
+    }
+}
+
+fn assert_protected_not_ignored(root: &Path, archive: &Path) {
+    let relative = archive
+        .strip_prefix(root)
+        .unwrap_or_else(|_| fail("GOVERNANCE_PATH_ESCAPE:protected_archive"));
+    let status = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "check-ignore",
+            "--no-index",
+            "--quiet",
+            "--",
+        ])
+        .arg(relative)
+        .status()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    match status.code() {
+        Some(1) => {}
+        Some(0) => fail("PROTECTED_ARCHIVE_IGNORED"),
+        _ => fail("VCS_ADAPTER_FAILED"),
     }
 }
 
@@ -2045,7 +2182,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
         .pointer("/sdk/version")
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
-    if sdk_version != "0.1.5" {
+    if sdk_version != "0.1.6" {
         fail(format!(
             "PROJECT_SDK_VERSION_PIN_MISMATCH:{}:required_binary=appsdk-{}",
             sdk_version, sdk_version
@@ -2561,87 +2698,639 @@ fn begin_version(root: &Path, module_id: &str, from: &str, to: &str) {
     );
 }
 
-fn restore_active(root: &Path, module_id: &str, version: &str) {
+fn stage_protected_archive(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+    artifact: &Value,
+    freeze: &Value,
+    staging_archive: &Path,
+) {
+    assert_no_symlink_components(root, staging_archive, "protected_archive_staging");
+    if staging_archive.exists() {
+        fail(format!("PROTECTED_ARCHIVE_STAGING_EXISTS:{}", module_id));
+    }
+    for path in module
+        .get("owned_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
+    {
+        let relative = path
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+        let source = safe_owned_path(root, relative, "owned_path");
+        if !source.exists() {
+            fail("PROTECTED_ARCHIVE_SOURCE_MISSING");
+        }
+    }
+    for path in module
+        .get("contract_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
+    {
+        let relative = path
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+        let source = safe_owned_path(root, relative, "contract_path");
+        if !source.exists() {
+            fail("PROTECTED_ARCHIVE_CONTRACT_MISSING");
+        }
+    }
+    for entry in artifact
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+    {
+        let relative = record_str(entry, "/path", "module-artifact-entry");
+        let expected = record_str(entry, "/hash", "module-artifact-entry");
+        if file_sha256(
+            &safe_module_artifact_path(root, project, module_id, relative),
+            "protected_library_source",
+        ) != expected
+        {
+            fail("PROTECTED_ARCHIVE_LIBRARY_HASH_MISMATCH");
+        }
+    }
+
+    fs::create_dir_all(staging_archive).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+    atomic_write_json(
+        &staging_archive.join("freeze-artifact.json"),
+        artifact,
+        "PROTECTED_ARCHIVE_FAILED",
+    );
+    atomic_write_json(
+        &staging_archive.join("module-artifact.json"),
+        artifact,
+        "PROTECTED_ARCHIVE_FAILED",
+    );
+    atomic_write_json(
+        &staging_archive.join("module-contract.json"),
+        module,
+        "PROTECTED_ARCHIVE_FAILED",
+    );
+    for path in module
+        .get("owned_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
+    {
+        let relative = path
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+        let source = safe_owned_path(root, relative, "owned_path");
+        let target = staging_archive
+            .join("source")
+            .join(relative.trim_end_matches("/**").trim_end_matches('/'));
+        if relative.ends_with("/**") {
+            copy_tree(&source, &target);
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+            }
+            fs::copy(&source, target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+        }
+    }
+    for path in module
+        .get("contract_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
+    {
+        let relative = path
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
+        let source = safe_owned_path(root, relative, "contract_path");
+        let archive_relative = relative
+            .trim_start_matches("contracts/")
+            .trim_start_matches("contracts")
+            .trim_start_matches('/');
+        let target = staging_archive.join("contracts").join(
+            archive_relative
+                .trim_end_matches("/**")
+                .trim_end_matches('/'),
+        );
+        if relative.ends_with("/**") {
+            copy_tree(&source, &target);
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+            }
+            fs::copy(&source, target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+        }
+    }
+    for entry in artifact
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+    {
+        let relative = record_str(entry, "/path", "module-artifact-entry");
+        let source = safe_module_artifact_path(root, project, module_id, relative);
+        let target = staging_archive.join("library").join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+        }
+        fs::copy(&source, target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+    }
+    atomic_write_json(
+        &staging_archive.join("source-snapshot.json"),
+        &serde_json::json!({
+            "module_id": module_id,
+            "source_commit_or_tag": record_str(
+                freeze,
+                "/source_commit_or_tag",
+                &freeze_record_name(module_id),
+            )
+        }),
+        "PROTECTED_ARCHIVE_FAILED",
+    );
+}
+
+fn assert_protected_archive_matches(root: &Path, module: &Value, artifact: &Value, archive: &Path) {
+    assert_no_symlink_components(root, archive, "protected_archive");
+    let archived: Value = serde_json::from_str(
+        &fs::read_to_string(archive.join("module-artifact.json"))
+            .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+    previous_active_matches_module(module, &archived);
+    if record_str(&archived, "/artifact_hash", "module-artifact")
+        != record_str(artifact, "/artifact_hash", "module-artifact")
+    {
+        fail("PROTECTED_ARCHIVE_ARTIFACT_HASH_MISMATCH");
+    }
+    for entry in archived
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+    {
+        let relative = record_str(entry, "/path", "module-artifact-entry");
+        let expected = record_str(entry, "/hash", "module-artifact-entry");
+        let library_root = archive.join("library");
+        let source = safe_owned_path(&library_root, relative, "protected_library");
+        if file_sha256(&source, "protected_library") != expected {
+            fail("PROTECTED_ARCHIVE_LIBRARY_HASH_MISMATCH");
+        }
+    }
+}
+
+fn restore_active_from_archive(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+    version: &str,
+    archive: &Path,
+) {
+    assert_version(version, "INVALID_ACTIVE_VERSION");
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(archive.join("module-artifact.json"))
+            .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+    previous_active_matches_module(module, &artifact);
+    let active_root = contract_root(root, project, "/governance/active_root");
+    let active = active_root.join(module_id).join(version);
+    let index = active_root.join(module_id).join("current.json");
+    if active.exists() {
+        fail(format!("ACTIVE_VERSION_EXISTS:{}", version));
+    }
+    let staging = generated_root(root, project)
+        .join("active-restore")
+        .join(format!("{}.{}", module_id, std::process::id()));
+    assert_no_symlink_components(root, &staging, "active_restore_staging");
+    if staging.exists() {
+        fail("ACTIVE_RESTORE_STAGING_EXISTS");
+    }
+    for entry in artifact
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+    {
+        let relative = record_str(entry, "/path", "module-artifact-entry");
+        let expected = record_str(entry, "/hash", "module-artifact-entry");
+        let library_root = archive.join("library");
+        let source = safe_owned_path(&library_root, relative, "protected_library");
+        if file_sha256(&source, "protected_library") != expected {
+            fail("PROTECTED_ARCHIVE_LIBRARY_HASH_MISMATCH");
+        }
+    }
+    fs::create_dir_all(staging.join("lib")).unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+    atomic_write_json(
+        &staging.join("artifact.json"),
+        &artifact,
+        "ACTIVE_RESTORE_FAILED",
+    );
+    for entry in artifact
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+    {
+        let relative = record_str(entry, "/path", "module-artifact-entry");
+        let library_root = archive.join("library");
+        let source = safe_owned_path(&library_root, relative, "protected_library");
+        let target = staging.join("lib").join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+        }
+        fs::copy(source, target).unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+    }
+    fs::create_dir_all(
+        active
+            .parent()
+            .unwrap_or_else(|| fail("ACTIVE_RESTORE_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+    fs::rename(&staging, &active).unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
+    atomic_write_json(
+        &index,
+        &serde_json::json!({
+            "module_id": module_id,
+            "version": version,
+            "artifact_hash": record_str(&artifact, "/artifact_hash", "module-artifact")
+        }),
+        "ACTIVE_RESTORE_FAILED",
+    );
+}
+
+fn rehydrate_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
+    root.join(".appsdk")
+        .join("transactions")
+        .join(format!("rehydrate-{}", module_id))
+}
+
+fn read_rehydrate_transaction(
+    root: &Path,
+    module_id: &str,
+    version: &str,
+    artifact_hash: &str,
+) -> Option<Value> {
+    let transaction = rehydrate_transaction_dir(root, module_id);
+    if !transaction.exists() {
+        return None;
+    }
+    assert_no_symlink_components(root, &transaction, "rehydrate_transaction");
+    let marker: Value = serde_json::from_str(
+        &fs::read_to_string(transaction.join("marker.json"))
+            .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_TRANSACTION_MARKER_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_FROZEN_REHYDRATE_TRANSACTION"));
+    if marker.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || marker.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || marker.get("version").and_then(Value::as_str) != Some(version)
+        || marker.get("artifact_hash").and_then(Value::as_str) != Some(artifact_hash)
+        || !matches!(
+            marker.get("phase").and_then(Value::as_str),
+            Some(
+                "prepared"
+                    | "previous_active_restored"
+                    | "protected_ready"
+                    | "active_published"
+                    | "verified"
+            )
+        )
+        || DateTime::parse_from_rfc3339(record_str(&marker, "/created_at", "rehydrate-transaction"))
+            .is_err()
+    {
+        fail("FROZEN_REHYDRATE_TRANSACTION_MISMATCH");
+    }
+    Some(marker)
+}
+
+fn write_rehydrate_transaction(
+    root: &Path,
+    module_id: &str,
+    version: &str,
+    artifact_hash: &str,
+    phase: &str,
+) {
+    if !matches!(
+        phase,
+        "prepared"
+            | "previous_active_restored"
+            | "protected_ready"
+            | "active_published"
+            | "verified"
+    ) {
+        fail("INVALID_FROZEN_REHYDRATE_TRANSACTION_PHASE");
+    }
+    let transaction = rehydrate_transaction_dir(root, module_id);
+    assert_no_symlink_components(root, &transaction, "rehydrate_transaction");
+    let existing = read_rehydrate_transaction(root, module_id, version, artifact_hash);
+    fs::create_dir_all(&transaction)
+        .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_TRANSACTION_WRITE_FAILED"));
+    let created_at = existing
+        .and_then(|marker| marker.get("created_at").cloned())
+        .unwrap_or_else(|| Value::String(Utc::now().to_rfc3339()));
+    atomic_write_json(
+        &transaction.join("marker.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "module_id": module_id,
+            "version": version,
+            "artifact_hash": artifact_hash,
+            "phase": phase,
+            "created_at": created_at
+        }),
+        "FROZEN_REHYDRATE_TRANSACTION_WRITE_FAILED",
+    );
+}
+
+fn active_version_projection_matches(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    version: &str,
+    artifact: &Value,
+) -> bool {
+    let active = contract_root(root, project, "/governance/active_root")
+        .join(module_id)
+        .join(version);
+    assert_no_symlink_components(root, &active, "active_projection");
+    if !active.is_dir() {
+        return false;
+    }
+    let active_artifact: Value = match fs::read_to_string(active.join("artifact.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+    {
+        Some(value) => value,
+        None => return false,
+    };
+    if active_artifact != *artifact {
+        return false;
+    }
+    artifact
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().all(|entry| {
+                let relative = record_str(entry, "/path", "module-artifact-entry");
+                let expected = record_str(entry, "/hash", "module-artifact-entry");
+                let target = active.join("lib").join(relative);
+                target.is_file() && file_sha256(&target, "active_projection") == expected
+            })
+        })
+}
+
+fn assert_previous_active_projection_matches(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+    version: &str,
+    archive: &Path,
+) {
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(archive.join("module-artifact.json"))
+            .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+    previous_active_matches_module(module, &artifact);
+    if !active_version_projection_matches(root, project, module_id, version, &artifact) {
+        fail("FROZEN_REHYDRATE_PREVIOUS_ACTIVE_MISMATCH");
+    }
+}
+
+fn assert_active_projection_matches(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    version: &str,
+    artifact: &Value,
+) {
+    if !active_version_projection_matches(root, project, module_id, version, artifact) {
+        fail("FROZEN_REHYDRATE_ACTIVE_PROJECTION_MISMATCH");
+    }
+    let index = contract_root(root, project, "/governance/active_root")
+        .join(module_id)
+        .join("current.json");
+    assert_no_symlink_components(root, &index, "active_index");
+    let current: Value = serde_json::from_str(
+        &fs::read_to_string(index).unwrap_or_else(|_| fail("ACTIVE_INDEX_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_ACTIVE_INDEX"));
+    if current.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || current.get("version").and_then(Value::as_str) != Some(version)
+        || current.get("artifact_hash").and_then(Value::as_str)
+            != artifact.get("artifact_hash").and_then(Value::as_str)
+    {
+        fail("FROZEN_REHYDRATE_ACTIVE_PROJECTION_MISMATCH");
+    }
+}
+
+fn finish_rehydrate_transaction(root: &Path, module_id: &str) {
+    let transaction = rehydrate_transaction_dir(root, module_id);
+    let marker: Value = serde_json::from_str(
+        &fs::read_to_string(transaction.join("marker.json"))
+            .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_TRANSACTION_MARKER_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_FROZEN_REHYDRATE_TRANSACTION"));
+    if marker.get("phase").and_then(Value::as_str) != Some("verified") {
+        fail("INVALID_FROZEN_REHYDRATE_TRANSACTION_PHASE");
+    }
+    fs::remove_dir_all(transaction)
+        .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_TRANSACTION_CLEANUP_FAILED"));
+}
+
+fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
-    assert_version(version, "INVALID_ACTIVE_VERSION");
     let project = read_project(root);
     assert_project_contract(root, &project);
     assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    assert_sdk_lock(root, &project, true);
     let module = project
         .get("modules")
         .and_then(Value::as_array)
         .and_then(|modules| {
             modules
                 .iter()
-                .find(|m| m.get("module_id").and_then(Value::as_str) == Some(module_id))
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
         })
         .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    if module.get("stage").and_then(Value::as_str) != Some("frozen") {
+        fail(format!("FROZEN_REHYDRATE_REQUIRES_FROZEN:{}", module_id));
+    }
+    let freeze_name = freeze_record_name(module_id);
+    let freeze = read_record(root, &freeze_name);
+    let version = record_str(&freeze, "/active_version", &freeze_name);
+    assert_version(version, "INVALID_ACTIVE_VERSION");
+    let promotion = read_record(root, &module_record_name("promotion-record", module_id));
     let protected_root = contract_root(root, &project, "/governance/protected_root");
-    let version_history = protected_root
-        .join("history-versions")
-        .join(module_id)
-        .join(version);
-    let archive_history = protected_root.join("history").join(module_id);
-    assert_no_symlink_components(root, &version_history, "protected_version_history");
-    assert_no_symlink_components(root, &archive_history, "protected_archive");
-    let history = if version_history.is_dir() {
-        version_history
+    let archive = protected_root.join("history").join(module_id);
+    assert_no_symlink_components(root, &archive, "protected_archive");
+    assert_protected_not_ignored(root, &archive);
+    let active_root = contract_root(root, &project, "/governance/active_root");
+
+    run_module_build(root, module, module_id);
+    let artifact = build_module_artifact(root, &project, module, module_id);
+    let artifact_hash = record_str(&artifact, "/artifact_hash", "module-artifact");
+    if artifact_hash != record_str(&freeze, "/library_hash", &freeze_name)
+        || artifact_hash != record_str(&promotion, "/artifact_hash", "promotion-record.json")
+    {
+        fail("FROZEN_REHYDRATE_ARTIFACT_HASH_MISMATCH");
+    }
+    let transaction = read_rehydrate_transaction(root, module_id, version, artifact_hash);
+    let previous_version = freeze
+        .get("previous_active_version")
+        .and_then(Value::as_str);
+    let current_active = active_root.join(module_id).join(version);
+    let current_index = active_root.join(module_id).join("current.json");
+    let index_version = if current_index.exists() {
+        let index: Value = serde_json::from_str(
+            &fs::read_to_string(&current_index).unwrap_or_else(|_| fail("INVALID_ACTIVE_INDEX")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_ACTIVE_INDEX"));
+        if index.get("module_id").and_then(Value::as_str) != Some(module_id) {
+            fail("INVALID_ACTIVE_INDEX");
+        }
+        Some(record_str(&index, "/version", "active-index").to_string())
     } else {
-        let freeze = read_record(root, &freeze_record_name(module_id));
-        if freeze.get("active_version").and_then(Value::as_str) != Some(version)
-            || !archive_history.is_dir()
-        {
+        None
+    };
+    if index_version.as_deref().is_some_and(|index_version| {
+        index_version != version && previous_version != Some(index_version)
+    }) {
+        if transaction.is_some() {
+            fail("FROZEN_REHYDRATE_TRANSACTION_PROJECTION_MISMATCH");
+        }
+        fail("FROZEN_REHYDRATE_UNOWNED_PARTIAL_PROJECTION");
+    }
+    let index_targets_current = index_version.as_deref() == Some(version);
+    let current_projection_present = current_active.exists() || index_targets_current;
+    let current_projection_complete = archive.is_dir()
+        && current_active.is_dir()
+        && index_targets_current
+        && active_version_projection_matches(root, &project, module_id, version, &artifact);
+    if transaction.is_none() && current_projection_present && !current_projection_complete {
+        fail("FROZEN_REHYDRATE_UNOWNED_PARTIAL_PROJECTION");
+    }
+    if transaction.is_some() && current_projection_present && !current_projection_complete {
+        fail("FROZEN_REHYDRATE_TRANSACTION_PROJECTION_MISMATCH");
+    }
+
+    if transaction.is_none() && current_projection_complete {
+        write_module_artifact_value(root, &project, module_id, &artifact);
+        write_artifact(root, &project);
+        assert_record_graph(root, Some(module_id), &artifact, true);
+        assert_protected_archive_matches(root, module, &artifact, &archive);
+        assert_active_projection_matches(root, &project, module_id, version, &artifact);
+        if let Some(previous) = previous_version {
+            let previous_archive = protected_root
+                .join("history-versions")
+                .join(module_id)
+                .join(previous);
+            if !previous_archive.is_dir() {
+                fail("PROTECTED_VERSION_HISTORY_MISSING");
+            }
+            assert_previous_active_projection_matches(
+                root,
+                &project,
+                module,
+                module_id,
+                previous,
+                &previous_archive,
+            );
+        }
+        verify_internal(root, false, false);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "module_id": module_id,
+                "version": version,
+                "artifact_hash": artifact_hash,
+                "rehydrated": true,
+                "already_complete": true
+            }))
+            .unwrap()
+        );
+        return;
+    }
+    if previous_version.is_none() {
+        write_module_artifact_value(root, &project, module_id, &artifact);
+        write_artifact(root, &project);
+        assert_record_graph(root, Some(module_id), &artifact, true);
+    }
+    if transaction.is_none() {
+        write_rehydrate_transaction(root, module_id, version, artifact_hash, "prepared");
+    }
+
+    if let Some(previous) = previous_version {
+        let previous_active = active_root.join(module_id).join(previous);
+        let previous_archive = protected_root
+            .join("history-versions")
+            .join(module_id)
+            .join(previous);
+        if !previous_archive.is_dir() {
             fail("PROTECTED_VERSION_HISTORY_MISSING");
         }
-        archive_history
-    };
-    let artifact_file = history.join("module-artifact.json");
-    let artifact: Value = serde_json::from_str(
-        &fs::read_to_string(&artifact_file)
-            .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
-    previous_active_matches_module(module, &artifact);
-    let library = module
-        .get("artifact_paths")
-        .and_then(Value::as_array)
-        .and_then(|paths| paths.first())
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
-    let source_library = history.join("library").join(library);
-    if !source_library.is_file() {
-        fail("PROTECTED_LIBRARY_MISSING");
+        if previous_active.is_dir() {
+            assert_previous_active_projection_matches(
+                root,
+                &project,
+                module,
+                module_id,
+                previous,
+                &previous_archive,
+            );
+        } else {
+            if current_active.exists() {
+                fail("FROZEN_REHYDRATE_TRANSACTION_PROJECTION_MISMATCH");
+            }
+            restore_active_from_archive(
+                root,
+                &project,
+                module,
+                module_id,
+                previous,
+                &previous_archive,
+            );
+        }
+        write_rehydrate_transaction(
+            root,
+            module_id,
+            version,
+            artifact_hash,
+            "previous_active_restored",
+        );
     }
-    let active_dir = contract_root(root, &project, "/governance/active_root")
-        .join(module_id)
-        .join(version);
-    if active_dir.exists() {
-        fail(format!("ACTIVE_VERSION_EXISTS:{}", version));
+
+    if previous_version.is_some() {
+        write_module_artifact_value(root, &project, module_id, &artifact);
+        write_artifact(root, &project);
+        assert_record_graph(root, Some(module_id), &artifact, true);
     }
-    fs::create_dir_all(active_dir.join("lib")).unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
-    fs::copy(&source_library, active_dir.join("lib").join(library))
-        .unwrap_or_else(|_| fail("ACTIVE_RESTORE_FAILED"));
-    atomic_write_json(
-        &active_dir.join("artifact.json"),
-        &artifact,
-        "ACTIVE_RESTORE_FAILED",
+
+    if archive.exists() {
+        assert_protected_archive_matches(root, module, &artifact, &archive);
+    } else {
+        let staging =
+            archive.with_file_name(format!(".{}.rehydrate.{}", module_id, std::process::id()));
+        stage_protected_archive(
+            root, &project, module, module_id, &artifact, &freeze, &staging,
+        );
+        fs::rename(&staging, &archive).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
+    }
+    write_rehydrate_transaction(root, module_id, version, artifact_hash, "protected_ready");
+    if current_active.exists() {
+        assert_active_projection_matches(root, &project, module_id, version, &artifact);
+    } else {
+        publish_active(root, module_id, version);
+    }
+    write_rehydrate_transaction(root, module_id, version, artifact_hash, "active_published");
+    verify_internal(root, false, false);
+    write_rehydrate_transaction(root, module_id, version, artifact_hash, "verified");
+    finish_rehydrate_transaction(root, module_id);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "module_id": module_id,
+            "version": version,
+            "artifact_hash": artifact_hash,
+            "rehydrated": true
+        }))
+        .unwrap()
     );
-    write_module_artifact_value(root, &project, module_id, &artifact);
-    let current = serde_json::json!({
-        "module_id": module_id,
-        "version": version,
-        "artifact_hash": record_str(&artifact, "/artifact_hash", "module-artifact")
-    });
-    let module_active = active_dir
-        .parent()
-        .unwrap_or_else(|| fail("ACTIVE_RESTORE_FAILED"));
-    atomic_write_json(
-        &module_active.join("current.json"),
-        &current,
-        "ACTIVE_RESTORE_FAILED",
-    );
-    println!("{}", serde_json::to_string_pretty(&current).unwrap());
 }
 
 fn freeze_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
@@ -2739,24 +3428,28 @@ fn recover_freeze_transaction(root: &Path, project: &Value, module_id: &str) -> 
     fail("INVALID_FREEZE_TRANSACTION_PHASE");
 }
 
-fn atomic_write_json(target: &Path, value: &Value, error: &str) {
+fn atomic_write_bytes(target: &Path, bytes: &[u8], error: &str) {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
         .as_nanos();
-    let staging = target.with_extension(format!("json.staging.{}.{}", std::process::id(), nonce));
+    let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
     if fs::symlink_metadata(&staging)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
         fail("GOVERNANCE_PATH_SYMLINK:staging");
     }
-    fs::write(
-        &staging,
-        serde_json::to_string_pretty(value).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail(error));
+    fs::write(&staging, bytes).unwrap_or_else(|_| fail(error));
     fs::rename(&staging, target).unwrap_or_else(|_| fail(error));
+}
+
+fn atomic_write_json(target: &Path, value: &Value, error: &str) {
+    atomic_write_bytes(
+        target,
+        (serde_json::to_string_pretty(value).unwrap() + "\n").as_bytes(),
+        error,
+    );
 }
 
 fn read_record(root: &Path, name: &str) -> Value {
@@ -3481,6 +4174,61 @@ fn verify_review_admission(root: &Path, module_id: &str) {
     );
 }
 
+fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, review_name: &str) {
+    let manifest = sdk_map_migration_manifest();
+    let bindings = [
+        ("resource-map.json", "/resource_map_hash"),
+        ("function-map.json", "/function_map_hash"),
+        ("mainline-call-map.json", "/mainline_call_map_hash"),
+        ("verification-map.json", "/verification_map_hash"),
+    ];
+    if bindings.iter().all(|(map, path)| {
+        record_str(review, path, review_name)
+            == file_sha256(&root.join(".appsdk/maps").join(map), map)
+    }) {
+        return;
+    }
+    let project = read_project(root);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    if !matches!(
+        module.get("stage").and_then(Value::as_str),
+        Some("frozen" | "retired")
+    ) {
+        fail("ARCHITECTURE_REVIEW_MAP_STALE");
+    }
+    let migration =
+        assert_sdk_migration_record(root).unwrap_or_else(|| fail("ARCHITECTURE_REVIEW_MAP_STALE"));
+    let review_id = record_str(review, "/review_id", review_name);
+    if record_time(review, review_name) > record_time(&migration, "sdk-migration-record")
+        || !migration
+            .get("frozen_reviews")
+            .and_then(Value::as_array)
+            .is_some_and(|reviews| {
+                reviews.iter().any(|entry| {
+                    entry.get("module_id").and_then(Value::as_str) == Some(module_id)
+                        && entry.get("review_id").and_then(Value::as_str) == Some(review_id)
+                })
+            })
+    {
+        fail("ARCHITECTURE_REVIEW_MAP_STALE");
+    }
+    for (map, path) in bindings {
+        let expected = record_str(review, path, review_name);
+        let migration_entry = sdk_map_migration_entry(&manifest, map);
+        if expected != record_str(migration_entry, "/source_digest", "sdk-map-migration") {
+            fail("ARCHITECTURE_REVIEW_MAP_STALE");
+        }
+    }
+}
+
 fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) {
     let worktree_name = module_record_name("worktree-record", module_id);
     let reproduction_name = module_record_name("reproduction-record", module_id);
@@ -3546,18 +4294,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
     }
-    for (path, map) in [
-        ("/resource_map_hash", "resource-map.json"),
-        ("/function_map_hash", "function-map.json"),
-        ("/mainline_call_map_hash", "mainline-call-map.json"),
-        ("/verification_map_hash", "verification-map.json"),
-    ] {
-        if record_str(&review, path, &review_name)
-            != file_sha256(&root.join(".appsdk/maps").join(map), map)
-        {
-            fail("ARCHITECTURE_REVIEW_MAP_STALE");
-        }
-    }
+    assert_review_map_bindings(root, module_id, &review, &review_name);
     let confidence = review
         .get("ai_confidence")
         .and_then(Value::as_f64)
@@ -4106,6 +4843,62 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     }
 }
 
+fn resolve_recorded_mainline_commit(root: &Path, mainline_ref: &str) -> String {
+    let exact = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", mainline_ref),
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if exact.status.success() {
+        let commit = String::from_utf8_lossy(&exact.stdout).trim().to_string();
+        if commit.is_empty() {
+            fail("MAINLINE_REF_MISSING");
+        }
+        return commit;
+    }
+
+    let branch = mainline_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(mainline_ref);
+    let valid = Command::new("git")
+        .args(["check-ref-format", "--branch", branch])
+        .output()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !valid.status.success() {
+        fail("MAINLINE_REF_MISSING");
+    }
+    let refs = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
+        .output()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if !refs.status.success() {
+        fail("VCS_ADAPTER_FAILED");
+    }
+    let suffix = format!("/{}", branch);
+    let refs_text = String::from_utf8_lossy(&refs.stdout);
+    let matches = refs_text
+        .lines()
+        .filter(|reference| reference.ends_with(&suffix))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [reference] => git_value(
+            root,
+            &["rev-parse", &format!("{}^{{commit}}", reference)],
+            "MAINLINE_REF_MISSING",
+        ),
+        [] => fail("MAINLINE_REF_MISSING"),
+        _ => fail("MAINLINE_REF_AMBIGUOUS"),
+    }
+}
+
 fn assert_single_merge_gate(root: &Path, module_id: &str) {
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
@@ -4159,14 +4952,8 @@ fn assert_single_merge_gate(root: &Path, module_id: &str) {
     if !candidate_merged.success() {
         fail("FIX_CANDIDATE_NOT_MERGED");
     }
-    let mainline_head = git_value(
-        root,
-        &[
-            "rev-parse",
-            record_str(&merge, "/mainline_ref", &merge_name),
-        ],
-        "MAINLINE_REF_MISSING",
-    );
+    let mainline_head =
+        resolve_recorded_mainline_commit(root, record_str(&merge, "/mainline_ref", &merge_name));
     let merge_on_mainline = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -4269,18 +5056,7 @@ fn assert_fix_lifecycle_graph(
     {
         fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
     }
-    for (path, map) in [
-        ("/resource_map_hash", "resource-map.json"),
-        ("/function_map_hash", "function-map.json"),
-        ("/mainline_call_map_hash", "mainline-call-map.json"),
-        ("/verification_map_hash", "verification-map.json"),
-    ] {
-        if record_str(review, path, "review-record.json")
-            != file_sha256(&root.join(".appsdk/maps").join(map), map)
-        {
-            fail("ARCHITECTURE_REVIEW_MAP_STALE");
-        }
-    }
+    assert_review_map_bindings(root, module_id, review, "review-record.json");
     if record_str(&effectiveness, "/fix_candidate_id", &effectiveness_name)
         != record_str(&candidate, "/fix_candidate_id", &candidate_name)
         || record_str(
@@ -5054,121 +5830,16 @@ fn freeze_module(root: &Path, module_id: &str) {
         .into(),
     );
     freeze["regression_report_hash"] = Value::String(regression_hash);
-    for path in candidate["modules"][index]
-        .get("owned_paths")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
-    {
-        let relative = path
-            .as_str()
-            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
-        if !safe_owned_path(root, relative, "owned_path").exists() {
-            fail("PROTECTED_ARCHIVE_SOURCE_MISSING");
-        }
-    }
-    fs::create_dir_all(&staging_archive).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-    fs::write(
-        staging_archive.join("freeze-artifact.json"),
-        serde_json::to_string_pretty(&artifact).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-    fs::write(
-        staging_archive.join("module-artifact.json"),
-        serde_json::to_string_pretty(&artifact).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-    fs::write(
-        staging_archive.join("module-contract.json"),
-        serde_json::to_string_pretty(&candidate["modules"][index]).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-    for path in candidate["modules"][index]
-        .get("owned_paths")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
-    {
-        let relative = path
-            .as_str()
-            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
-        let source = safe_owned_path(root, relative, "owned_path");
-        let target = staging_archive
-            .join("source")
-            .join(relative.trim_end_matches("/**").trim_end_matches('/'));
-        if relative.ends_with("/**") {
-            if !source.exists() {
-                fail("PROTECTED_ARCHIVE_SOURCE_MISSING");
-            }
-            copy_tree(&source, &target);
-        } else if source.exists() && source.is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-            }
-            fs::copy(&source, target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-        } else {
-            fail("PROTECTED_ARCHIVE_SOURCE_MISSING");
-        }
-    }
-    for path in candidate["modules"][index]
-        .get("contract_paths")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
-    {
-        let relative = path
-            .as_str()
-            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
-        let source = safe_owned_path(root, relative, "contract_path");
-        let archive_relative = relative
-            .trim_start_matches("contracts/")
-            .trim_start_matches("contracts")
-            .trim_start_matches('/');
-        let target = staging_archive.join("contracts").join(
-            archive_relative
-                .trim_end_matches("/**")
-                .trim_end_matches('/'),
-        );
-        if relative.ends_with("/**") {
-            if !source.exists() {
-                fail("PROTECTED_ARCHIVE_CONTRACT_MISSING");
-            }
-            copy_tree(&source, &target);
-        } else if source.exists() && source.is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-            }
-            fs::copy(&source, target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-        } else {
-            fail("PROTECTED_ARCHIVE_CONTRACT_MISSING");
-        }
-    }
-    for artifact_path in candidate["modules"][index]
-        .get("artifact_paths")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"))
-    {
-        let relative = artifact_path
-            .as_str()
-            .unwrap_or_else(|| fail("INVALID_MODULE_SURFACES"));
-        let source = safe_module_artifact_path(root, &project, module_id, relative);
-        let target = staging_archive.join("library").join(relative);
-        if !source.is_file() {
-            fail("PROTECTED_ARCHIVE_LIBRARY_MISSING");
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-        }
-        fs::copy(&source, &target).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
-    }
-    let mut source_snapshot = serde_json::Map::new();
-    source_snapshot.insert("module_id".into(), Value::String(module_id.into()));
-    source_snapshot.insert(
-        "source_commit_or_tag".into(),
-        Value::String(record_str(&freeze, "/source_commit_or_tag", &freeze_name).into()),
+    assert_protected_not_ignored(root, &archive);
+    stage_protected_archive(
+        root,
+        &project,
+        &candidate["modules"][index],
+        module_id,
+        &artifact,
+        &freeze,
+        &staging_archive,
     );
-    fs::write(
-        staging_archive.join("source-snapshot.json"),
-        serde_json::to_string_pretty(&Value::Object(source_snapshot)).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_FAILED"));
     let transaction = freeze_transaction_dir(root, module_id);
     let backup = transaction.join("backup");
     fs::create_dir_all(&backup).unwrap_or_else(|_| fail("FREEZE_TRANSACTION_FAILED"));
@@ -5464,7 +6135,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     assert_bundle_manifest();
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || record.get("version").and_then(Value::as_str) != Some("0.1.5")
+        || record.get("version").and_then(Value::as_str) != Some("0.1.6")
         || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
         || record.get("manifest_digest").and_then(Value::as_str)
             != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
@@ -5520,6 +6191,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     assert_project_root_safe(root);
     let project = read_project(root);
     assert_governance_maps(root);
+    let _ = assert_sdk_migration_record(root);
     assert_declared_contracts(root, &project, true);
     assert_project_contract(root, &project);
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
@@ -5905,6 +6577,19 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
                 module_artifact_matches_project(module, &active_value);
                 let generated_module = read_module_artifact(root, &project, id);
                 module_artifact_matches_project(module, &generated_module);
+                let protected_archive = contract_root(root, &project, "/governance/protected_root")
+                    .join("history")
+                    .join(id);
+                if !protected_archive.is_dir() {
+                    fail("PROTECTED_HISTORY_MISSING");
+                }
+                assert_protected_not_ignored(root, &protected_archive);
+                assert_protected_archive_matches(
+                    root,
+                    module,
+                    &generated_module,
+                    &protected_archive,
+                );
                 if record_str(&active_value, "/artifact_hash", "active_artifact")
                     != record_str(&generated_module, "/artifact_hash", "module-artifact")
                     || record_str(&active_value, "/artifact_hash", "active_artifact")
@@ -6087,7 +6772,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.5", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.6", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
@@ -6121,7 +6806,7 @@ fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
         ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.5","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.6","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -6360,21 +7045,278 @@ fn new_project(root: &Path) {
     println!("created {}", root.display());
 }
 
+fn sdk_map_migration_root(root: &Path) -> PathBuf {
+    root.join(".appsdk")
+        .join("migrations")
+        .join("0.1.5-to-0.1.6")
+}
+
+fn sdk_map_migration_entry<'a>(manifest: &'a Value, name: &str) -> &'a Value {
+    manifest
+        .get("maps")
+        .and_then(Value::as_array)
+        .and_then(|maps| {
+            maps.iter()
+                .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+        })
+        .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"))
+}
+
+fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
+    let migration_root = sdk_map_migration_root(root);
+    let record_path = migration_root.join("record.json");
+    if !record_path.exists() {
+        if migration_root.exists() {
+            fail("SDK_MIGRATION_RECORD_MISSING");
+        }
+        return None;
+    }
+    assert_no_symlink_components(root, &migration_root, "sdk_migration");
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(&record_path).unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+    if record.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || record.get("migration_id").and_then(Value::as_str) != Some("appsdk-0.1.5-to-0.1.6")
+        || record.get("source_version").and_then(Value::as_str) != Some("0.1.5")
+        || record.get("target_version").and_then(Value::as_str) != Some("0.1.6")
+        || record.get("bundle_digest").and_then(Value::as_str) != Some(sdk_bundle_digest().as_str())
+        || DateTime::parse_from_rfc3339(record_str(&record, "/created_at", "sdk-migration-record"))
+            .is_err()
+    {
+        fail("INVALID_SDK_MIGRATION_RECORD");
+    }
+    let manifest = sdk_map_migration_manifest();
+    let maps = record
+        .get("maps")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+    if maps.len() != GOVERNANCE_MAP_NAMES.len() {
+        fail("INVALID_SDK_MIGRATION_RECORD");
+    }
+    for name in GOVERNANCE_MAP_NAMES {
+        let declared = sdk_map_migration_entry(&manifest, name);
+        let entry = maps
+            .iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let expected_snapshot = format!(".appsdk/migrations/0.1.5-to-0.1.6/maps/{}", name);
+        if entry.get("source_digest") != declared.get("source_digest")
+            || entry.get("target_digest") != declared.get("target_digest")
+            || entry.get("snapshot_path").and_then(Value::as_str)
+                != Some(expected_snapshot.as_str())
+        {
+            fail("INVALID_SDK_MIGRATION_RECORD");
+        }
+        let snapshot = root.join(&expected_snapshot);
+        if !snapshot.is_file()
+            || file_sha256(&snapshot, "sdk_migration_snapshot")
+                != record_str(entry, "/source_digest", "sdk-migration-map")
+        {
+            fail(format!("SDK_MIGRATION_SNAPSHOT_MISMATCH:{}", name));
+        }
+    }
+    let reviews = record
+        .get("frozen_reviews")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+    let mut modules = std::collections::HashSet::new();
+    for review in reviews {
+        let module_id = record_str(review, "/module_id", "sdk-migration-review");
+        assert_identifier(module_id, "INVALID_SDK_MIGRATION_RECORD");
+        if !modules.insert(module_id)
+            || record_str(review, "/review_id", "sdk-migration-review").is_empty()
+        {
+            fail("INVALID_SDK_MIGRATION_RECORD");
+        }
+    }
+    Some(record)
+}
+
+fn install_current_governance_maps(root: &Path) {
+    let maps_root = root.join(".appsdk/maps");
+    assert_no_symlink_components(root, &maps_root, "governance_maps");
+    fs::create_dir_all(&maps_root).unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
+    let manifest = sdk_map_migration_manifest();
+    for name in GOVERNANCE_MAP_NAMES {
+        let target = maps_root.join(name);
+        atomic_write_bytes(
+            &target,
+            canonical_governance_map(name).as_bytes(),
+            "SDK_MAP_MIGRATION_WRITE_FAILED",
+        );
+        if file_sha256(&target, "governance_map")
+            != record_str(
+                sdk_map_migration_entry(&manifest, name),
+                "/target_digest",
+                "sdk-map-migration",
+            )
+        {
+            fail(format!("SDK_MAP_MIGRATION_TARGET_MISMATCH:{}", name));
+        }
+    }
+}
+
+fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) {
+    let migration_root = sdk_map_migration_root(root);
+    if assert_sdk_migration_record(root).is_some() {
+        install_current_governance_maps(root);
+        return;
+    }
+    let manifest = sdk_map_migration_manifest();
+    let mut source_matches = true;
+    let mut target_matches = true;
+    for name in GOVERNANCE_MAP_NAMES {
+        let live = root.join(".appsdk/maps").join(name);
+        if !live.is_file() {
+            fail(format!("MISSING_GOVERNANCE_MAP:{}", name));
+        }
+        let actual = file_sha256(&live, "governance_map");
+        let entry = sdk_map_migration_entry(&manifest, name);
+        source_matches &= actual == record_str(entry, "/source_digest", "sdk-map-migration");
+        target_matches &= actual == record_str(entry, "/target_digest", "sdk-map-migration");
+    }
+    if project_version == "0.1.6" && target_matches {
+        return;
+    }
+    if !source_matches {
+        for name in GOVERNANCE_MAP_NAMES {
+            let actual = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+            if actual
+                != record_str(
+                    sdk_map_migration_entry(&manifest, name),
+                    "/source_digest",
+                    "sdk-map-migration",
+                )
+            {
+                fail(format!("SDK_MIGRATION_SOURCE_MAP_MISMATCH:{}", name));
+            }
+        }
+        fail("SDK_MIGRATION_SOURCE_MAP_SET_MISMATCH");
+    }
+
+    let mut frozen_reviews = Vec::new();
+    for module in project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
+    {
+        let module_id = record_str(module, "/module_id", "module");
+        let review_name = module_record_name("review-record", module_id);
+        let review_path = root.join(".appsdk/records").join(&review_name);
+        if !review_path.exists() {
+            continue;
+        }
+        if !matches!(
+            module.get("stage").and_then(Value::as_str),
+            Some("frozen" | "retired")
+        ) {
+            fail(format!("SDK_MIGRATION_OPEN_REVIEW:{}", module_id));
+        }
+        let review = read_record(root, &review_name);
+        for name in GOVERNANCE_MAP_NAMES {
+            let entry = sdk_map_migration_entry(&manifest, name);
+            let field = record_str(entry, "/review_hash_field", "sdk-map-migration");
+            if review.get(field).and_then(Value::as_str)
+                != entry.get("source_digest").and_then(Value::as_str)
+            {
+                fail(format!(
+                    "SDK_MIGRATION_FROZEN_REVIEW_MAP_MISMATCH:{}:{}",
+                    module_id, name
+                ));
+            }
+        }
+        frozen_reviews.push(serde_json::json!({
+            "module_id": module_id,
+            "review_id": record_str(&review, "/review_id", &review_name)
+        }));
+    }
+
+    let migrations = root.join(".appsdk/migrations");
+    fs::create_dir_all(&migrations).unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
+    let staging = migrations.join(".0.1.5-to-0.1.6.staging");
+    if staging.exists() {
+        assert_no_symlink_components(root, &staging, "sdk_map_migration_staging");
+        fs::remove_dir_all(&staging)
+            .unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_STAGING_CLEANUP_FAILED"));
+    }
+    fs::create_dir_all(staging.join("maps"))
+        .unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
+    let mut map_records = Vec::new();
+    for name in GOVERNANCE_MAP_NAMES {
+        let entry = sdk_map_migration_entry(&manifest, name);
+        let snapshot = staging.join("maps").join(name);
+        atomic_write_bytes(
+            &snapshot,
+            &fs::read(root.join(".appsdk/maps").join(name))
+                .unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_SOURCE_READ_FAILED")),
+            "SDK_MAP_MIGRATION_WRITE_FAILED",
+        );
+        if file_sha256(&snapshot, "sdk_migration_snapshot")
+            != record_str(entry, "/source_digest", "sdk-map-migration")
+        {
+            fail(format!("SDK_MIGRATION_SNAPSHOT_MISMATCH:{}", name));
+        }
+        map_records.push(serde_json::json!({
+            "name": name,
+            "source_digest": entry["source_digest"].clone(),
+            "target_digest": entry["target_digest"].clone(),
+            "snapshot_path": format!(
+                ".appsdk/migrations/0.1.5-to-0.1.6/maps/{}",
+                name
+            )
+        }));
+    }
+    atomic_write_json(
+        &staging.join("record.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "migration_id": "appsdk-0.1.5-to-0.1.6",
+            "source_version": "0.1.5",
+            "target_version": "0.1.6",
+            "bundle_digest": sdk_bundle_digest(),
+            "maps": map_records,
+            "frozen_reviews": frozen_reviews,
+            "created_at": Utc::now().to_rfc3339()
+        }),
+        "SDK_MAP_MIGRATION_WRITE_FAILED",
+    );
+    if migration_root.exists() {
+        fail("SDK_MIGRATION_RECORD_EXISTS");
+    }
+    fs::rename(&staging, &migration_root)
+        .unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
+    let _ = assert_sdk_migration_record(root);
+    install_current_governance_maps(root);
+}
+
 fn pin_lock(root: &Path, binary: &Path) {
     assert_project_root_safe(root);
     assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control");
-    let project = read_project(root);
+    let mut project = read_project(root);
+    let project_version = required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT");
+    if !matches!(project_version, "0.1.5" | "0.1.6") {
+        fail(format!(
+            "UNSUPPORTED_SDK_MIGRATION:{}:0.1.6",
+            project_version
+        ));
+    }
     let binary = binary
         .canonicalize()
         .unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
     let bytes = fs::read(&binary).unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
     let digest = digest_bytes(&bytes);
+    let running_binary = env::current_exe().unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
+    if digest_bytes(&fs::read(running_binary).unwrap_or_else(|_| fail("SDK_BINARY_MISSING")))
+        != digest
+    {
+        fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
+    }
+    migrate_governance_maps(root, &project, project_version);
+    project["sdk"]["version"] = Value::String("0.1.6".into());
     let mut lock = serde_json::Map::new();
     lock.insert("sdk".into(), Value::String("appsdk".into()));
-    lock.insert(
-        "version".into(),
-        Value::String(required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT").into()),
-    );
+    lock.insert("version".into(), Value::String("0.1.6".into()));
     lock.insert("digest".into(), Value::String(digest.clone()));
     lock.insert("compiler_digest".into(), Value::String(digest));
     lock.insert("bundle_digest".into(), Value::String(sdk_bundle_digest()));
@@ -6397,7 +7339,7 @@ fn pin_lock(root: &Path, binary: &Path) {
     {
         fail("GOVERNANCE_PATH_SYMLINK:sdk_binary");
     }
-    fs::copy(&binary, &pinned_binary).unwrap_or_else(|_| fail("SDK_BINARY_WRITE_FAILED"));
+    atomic_write_bytes(&pinned_binary, &bytes, "SDK_BINARY_WRITE_FAILED");
     install_bundle_resources(root);
     lock.insert("binary_ref".into(), Value::String("project-sdk".into()));
     lock.insert(
@@ -6414,18 +7356,15 @@ fn pin_lock(root: &Path, binary: &Path) {
     {
         fail("GOVERNANCE_PATH_SYMLINK:sdk_lock");
     }
-    fs::write(
-        lock_path,
-        serde_json::to_string_pretty(&Value::Object(lock)).unwrap() + "\n",
-    )
-    .unwrap_or_else(|_| fail("SDK_LOCK_WRITE_FAILED"));
+    atomic_write_json(&lock_path, &Value::Object(lock), "SDK_LOCK_WRITE_FAILED");
+    write_project(root, &project);
     println!("pinned {}", binary.display());
 }
 
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("version") => println!("appsdk 0.1.5 (rust)"),
+        Some("version") => println!("appsdk 0.1.6 (rust)"),
         Some("verify-sdk-source-registry") => assert_sdk_source_registry(Path::new(
             &args.next().unwrap_or_else(|| ".".into()),
         )),
@@ -6477,14 +7416,12 @@ fn main() {
             if args.next().is_some() { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
             begin_version(&root, &module_id, &from, &to);
         }
-        Some("restore-active") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"); }
-            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"));
-            if args.next().as_deref() != Some("--version") { fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"); }
-            let version = args.next().unwrap_or_else(|| fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"));
-            if args.next().is_some() { fail("USAGE: appsdk restore-active <dir> --module <id> --version <version>"); }
-            restore_active(&root, &module_id, &version);
+        Some("rehydrate-frozen") => {
+            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>")));
+            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>"); }
+            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>"));
+            if args.next().is_some() { fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>"); }
+            rehydrate_frozen(&root, &module_id);
         }
         Some("promote") => {
             let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk promote <dir> --to <stage>")));
@@ -6558,7 +7495,7 @@ fn main() {
             }
             prepare_project(Path::new(&workspace));
         }
-        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | restore-active <dir> --module <id> --version <version> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | rehydrate-frozen <dir> --module <id> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

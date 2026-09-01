@@ -2561,6 +2561,10 @@ fn compile(root: &Path) {
         .get("modules")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"));
+    // Publish the deterministic project projection before per-module builds.
+    // A later module failure must not leave verification bound to an older
+    // lifecycle snapshot; the projection itself contains no build output.
+    write_artifact(root, &project);
     for module in modules {
         let module_id = record_str(module, "/module_id", "module");
         if module.get("stage").and_then(Value::as_str) != Some("frozen") {
@@ -3379,10 +3383,24 @@ fn recover_freeze_transaction(root: &Path, project: &Value, module_id: &str) -> 
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_FREEZE_TRANSACTION_MARKER"));
     let protected_root = contract_root(root, project, "/governance/protected_root");
-    let archive = protected_root.join("history").join(module_id);
-    let staging = protected_root.join("history").join(format!(
+    let history_root = protected_root.join("history").join(module_id);
+    let freeze_name = freeze_record_name(module_id);
+    let freeze = read_record(root, &freeze_name);
+    let active_version = record_str(&freeze, "/active_version", &freeze_name);
+    let archive = if history_root.exists() {
+        protected_root
+            .join("history-versions")
+            .join(module_id)
+            .join(active_version)
+    } else {
+        history_root
+    };
+    let staging_parent = archive
+        .parent()
+        .unwrap_or_else(|| fail("FREEZE_TRANSACTION_RECOVERY_FAILED"));
+    let staging = staging_parent.join(format!(
         ".{}.staging.{}",
-        module_id,
+        active_version,
         marker["pid"].as_u64().unwrap_or(0)
     ));
     if phase == "commit_ready"
@@ -5938,16 +5956,34 @@ fn freeze_module(root: &Path, module_id: &str) {
     let mut staged_module_artifact = module_artifact.clone();
     staged_module_artifact["stage"] = Value::String("frozen".into());
     let module_artifact = staged_module_artifact.clone();
-    let archive = contract_root(root, &project, "/governance/protected_root")
-        .join("history")
-        .join(module_id);
-    let staging_archive = contract_root(root, &project, "/governance/protected_root")
-        .join("history")
-        .join(format!(".{}.staging.{}", module_id, std::process::id()));
+    let freeze_name = freeze_record_name(module_id);
+    let mut freeze = read_record(root, &freeze_name);
+    let active_version = record_str(&freeze, "/active_version", &freeze_name);
+    let protected_root = contract_root(root, &project, "/governance/protected_root");
+    let history_root = protected_root.join("history").join(module_id);
+    let archive = if history_root.exists() {
+        protected_root
+            .join("history-versions")
+            .join(module_id)
+            .join(active_version)
+    } else {
+        history_root
+    };
+    let staging_archive = archive
+        .parent()
+        .unwrap_or_else(|| fail("PROTECTED_ARCHIVE_FAILED"))
+        .join(format!(
+            ".{}.staging.{}",
+            active_version,
+            std::process::id()
+        ));
     assert_no_symlink_components(root, &archive, "protected_archive");
     assert_no_symlink_components(root, &staging_archive, "protected_archive_staging");
     if archive.exists() {
-        fail(format!("PROTECTED_HISTORY_IMMUTABLE:{}", module_id));
+        fail(format!(
+            "PROTECTED_HISTORY_IMMUTABLE:{}:{}",
+            module_id, active_version
+        ));
     }
     if staging_archive.exists() {
         fail(format!("PROTECTED_ARCHIVE_STAGING_EXISTS:{}", module_id));
@@ -5963,8 +5999,6 @@ fn freeze_module(root: &Path, module_id: &str) {
         &promotion,
         &module_artifact,
     );
-    let freeze_name = freeze_record_name(module_id);
-    let mut freeze = read_record(root, &freeze_name);
     let artifact = module_artifact.clone();
     let reviewed_hash = record_str(&artifact, "/artifact_hash", "module-artifact");
     if record_str(&review, "/reviewed_artifact_hash", "review-record.json") != reviewed_hash

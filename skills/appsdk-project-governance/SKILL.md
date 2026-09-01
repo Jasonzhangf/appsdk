@@ -267,6 +267,14 @@ When the project is pinned to AppSDK 0.1.5, execute the target 0.1.6 binary itse
 
 A clean worktree may no longer contain the local issue branch named by an immutable MergeRecord. AppSDK resolves that recorded name only when the exact ref exists or exactly one remote-tracking ref has the same branch name. Missing or ambiguous matches fail closed; never create a local branch or choose a remote to make verification pass.
 
+For older supported locks, `pin-lock` performs the official ordered chain
+`0.1.3 -> 0.1.5 -> 0.1.6` or `0.1.4 -> 0.1.5 -> 0.1.6`. Each intermediate
+step snapshots the project's actual maps and is idempotent; never rewrite the
+lock by hand or retry after `retry_allowed: false`. Verify the target binary
+after installation by path and SHA-256 at every global entrypoint before using
+it on a project. A path or hash mismatch is a binary-preflight blocker, not a
+project migration failure.
+
 ## Debug flow
 
 Clarify goal first. Debug evidence must retain the reasoning chain: active

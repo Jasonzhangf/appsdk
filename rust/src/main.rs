@@ -7366,9 +7366,9 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
     Some(record)
 }
 
-fn install_current_governance_maps(root: &Path) {
+fn install_current_governance_maps(root: &Path, force: bool) {
     let record_path = sdk_map_migration_root(root).join("record.json");
-    if record_path.is_file() {
+    if !force && record_path.is_file() {
         let record: Value = serde_json::from_str(
             &fs::read_to_string(&record_path)
                 .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
@@ -7404,7 +7404,46 @@ fn install_current_governance_maps(root: &Path) {
 fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) {
     let migration_root = sdk_map_migration_root(root);
     if migration_root.join("record.json").is_file() {
-        install_current_governance_maps(root);
+        let manifest = sdk_map_migration_manifest();
+        let source_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                == record_str(
+                    sdk_map_migration_entry(&manifest, name),
+                    "/source_digest",
+                    "sdk-map-migration",
+                )
+        });
+        if source_maps {
+            for module in project
+                .get("modules")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
+            {
+                let module_id = record_str(module, "/module_id", "module");
+                let stage = module
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}", module_id)));
+                if !matches!(stage, "frozen" | "retired") {
+                    continue;
+                }
+                let review_name = module_record_name("review-record", module_id);
+                let current_review = read_record(root, &review_name);
+                for name in GOVERNANCE_MAP_NAMES {
+                    let entry = sdk_map_migration_entry(&manifest, name);
+                    let field = record_str(entry, "/review_hash_field", "sdk-map-migration");
+                    if record_str(&current_review, &format!("/{}", field), &review_name)
+                        != record_str(entry, "/source_digest", "sdk-map-migration")
+                    {
+                        fail(format!(
+                            "SDK_MIGRATION_FROZEN_REVIEW_MAP_MISMATCH:{}:{}",
+                            module_id, name
+                        ));
+                    }
+                }
+            }
+        }
+        install_current_governance_maps(root, source_maps);
         assert_sdk_migration_record(root);
         return;
     }
@@ -7532,9 +7571,66 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
     }
     fs::rename(&staging, &migration_root)
         .unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
-    install_current_governance_maps(root);
+    install_current_governance_maps(root, false);
     let _ = assert_sdk_migration_record(root);
     assert_governance_maps(root);
+}
+
+fn write_legacy_migration_step(root: &Path, source_version: &str) {
+    let migration_root = root
+        .join(".appsdk")
+        .join("migrations")
+        .join(format!("{}-to-0.1.5", source_version));
+    let record = migration_root.join("record.json");
+    if record.is_file() {
+        return;
+    }
+    if migration_root.exists() {
+        fail("SDK_LEGACY_MIGRATION_RECORD_MISSING");
+    }
+    let staging = root
+        .join(".appsdk")
+        .join("migrations")
+        .join(format!(".{}-to-0.1.5.staging", source_version));
+    if staging.exists() {
+        fail("SDK_LEGACY_MIGRATION_STAGING_EXISTS");
+    }
+    fs::create_dir_all(staging.join("maps"))
+        .unwrap_or_else(|_| fail("SDK_LEGACY_MIGRATION_WRITE_FAILED"));
+    let mut maps = Vec::new();
+    for name in GOVERNANCE_MAP_NAMES {
+        let source = root.join(".appsdk/maps").join(name);
+        if !source.is_file() {
+            fail(format!("MISSING_GOVERNANCE_MAP:{}", name));
+        }
+        atomic_write_bytes(
+            &staging.join("maps").join(name),
+            &fs::read(&source).unwrap_or_else(|_| fail("SDK_LEGACY_MIGRATION_READ_FAILED")),
+            "SDK_LEGACY_MIGRATION_WRITE_FAILED",
+        );
+        let digest = file_sha256(&source, "legacy_governance_map");
+        maps.push(serde_json::json!({
+            "name": name,
+            "source_digest": digest,
+            "target_digest": digest,
+            "snapshot_path": format!(".appsdk/migrations/{}-to-0.1.5/maps/{}", source_version, name)
+        }));
+    }
+    atomic_write_json(
+        &staging.join("record.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "migration_id": format!("appsdk-{}-to-0.1.5", source_version),
+            "source_version": source_version,
+            "target_version": "0.1.5",
+            "maps": maps,
+            "preserved_project_maps": true,
+            "created_at": Utc::now().to_rfc3339()
+        }),
+        "SDK_LEGACY_MIGRATION_WRITE_FAILED",
+    );
+    fs::rename(&staging, &migration_root)
+        .unwrap_or_else(|_| fail("SDK_LEGACY_MIGRATION_WRITE_FAILED"));
 }
 
 fn pin_lock(root: &Path, binary: &Path) {
@@ -7543,7 +7639,7 @@ fn pin_lock(root: &Path, binary: &Path) {
     assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control");
     let mut project = read_project(root);
     let project_version = required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT");
-    if !matches!(project_version, "0.1.5" | "0.1.6") {
+    if !matches!(project_version, "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6") {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:0.1.6",
             project_version
@@ -7560,7 +7656,14 @@ fn pin_lock(root: &Path, binary: &Path) {
     {
         fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
     }
-    migrate_governance_maps(root, &project, project_version);
+    if matches!(project_version, "0.1.3" | "0.1.4") {
+        write_legacy_migration_step(root, project_version);
+        project["sdk"]["version"] = Value::String("0.1.5".into());
+        write_project(root, &project);
+    }
+    let migrated_project = read_project(root);
+    migrate_governance_maps(root, &migrated_project, "0.1.5");
+    project = migrated_project;
     project["sdk"]["version"] = Value::String("0.1.6".into());
     let mut lock = serde_json::Map::new();
     lock.insert("sdk".into(), Value::String("appsdk".into()));

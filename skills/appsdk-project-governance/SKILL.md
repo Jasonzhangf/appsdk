@@ -255,6 +255,8 @@ For a frozen module change, run `appsdk begin-version <project> --module <id> --
 
 When migrating a 0.1.5 project to AppSDK 0.1.6, run the 0.1.6 binary's `pin-lock` once. SDK canonical maps and project governance maps are separate resources: only maps that exactly match the 0.1.5 SDK canonical source are migrated to the 0.1.6 canonical target. Custom project maps are snapshotted, bound, and preserved in place; `pin-lock` must never overwrite them. Do not copy new maps or edit ReviewRecord hashes. Frozen ReviewRecord hashes resolve through the immutable migration snapshot. If an earlier 0.1.6 pin stopped after updating project/lock, rerun the same command; exact source maps or the existing migration record are required, and mixed/drifted state fails closed.
 
+The ReviewRecord schema's canonical PASS value is lowercase `pass`. A historical migration record may retain the bundle digest used at migration time; the current `sdk.lock` owns the current bundle digest, while migration snapshots and map target hashes remain exact. Older 0.1.6 records that duplicated one source-stage review in both review lists may be accepted only when module, review ID, stage, snapshots, and map hashes all validate; new records must keep source-stage reviews only in `legacy_reconciled_reviews` and frozen/retired reviews only in `frozen_reviews`.
+
 `rehydrate-frozen` is transactionally resumable. Never delete its partial generated/Protected/Active outputs by hand. Rerun the command: it resumes only an exact marker-owned module/version/artifact projection, or idempotently verifies a fully complete exact projection. Unowned partial Active state and any hash mismatch remain hard failures.
 
 The canonical module build runner injects a Rust `--remap-path-prefix` for the current project root. This keeps compiler metadata independent of the absolute worktree path, so `compile` and `rehydrate-frozen` can reproduce the frozen artifact from different clean checkouts. The runner preserves caller `RUSTFLAGS` and appends the remap; it must not modify the artifact hash, copy another checkout's artifact, or strip business data. A path-dependent artifact remains a hard failure.
@@ -299,6 +301,10 @@ gates is forbidden.
 - final review with explicit PASS from Jason's selected review tool, or the default route when no tool was specified
 
 Do not claim lifecycle completion from unit tests alone. A missing external adapter, review verdict, installation, restart, or online evidence is an explicit remaining gap.
+
+Every refusal must expose the first failing gate, current project/module/lifecycle state,
+retry permission, preserved state, owner, and exactly one actionable next transition.
+Never emit only a generic blocked message.
 
 ## Admission failures and upgrade recovery
 

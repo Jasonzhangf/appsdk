@@ -7273,7 +7273,11 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         || record.get("migration_id").and_then(Value::as_str) != Some("appsdk-0.1.5-to-0.1.6")
         || record.get("source_version").and_then(Value::as_str) != Some("0.1.5")
         || record.get("target_version").and_then(Value::as_str) != Some("0.1.6")
-        || record.get("bundle_digest").and_then(Value::as_str) != Some(sdk_bundle_digest().as_str())
+        || record
+            .get("bundle_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| digest.starts_with("sha256:"))
+            .is_none()
         || DateTime::parse_from_rfc3339(record_str(&record, "/created_at", "sdk-migration-record"))
             .is_err()
     {
@@ -7331,14 +7335,15 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
     let mut modules = std::collections::HashSet::new();
+    let mut frozen_review_ids = std::collections::HashMap::new();
     for review in reviews {
         let module_id = record_str(review, "/module_id", "sdk-migration-review");
         assert_identifier(module_id, "INVALID_SDK_MIGRATION_RECORD");
-        if !modules.insert(module_id)
-            || record_str(review, "/review_id", "sdk-migration-review").is_empty()
-        {
+        let review_id = record_str(review, "/review_id", "sdk-migration-review");
+        if !modules.insert(module_id) || review_id.is_empty() {
             fail("INVALID_SDK_MIGRATION_RECORD");
         }
+        frozen_review_ids.insert(module_id, review_id);
     }
     if let Some(legacy_reviews) = record.get("legacy_reconciled_reviews") {
         let legacy_reviews = legacy_reviews
@@ -7347,9 +7352,11 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         for review in legacy_reviews {
             let module_id = record_str(review, "/module_id", "sdk-migration-review");
             assert_identifier(module_id, "INVALID_SDK_MIGRATION_RECORD");
-            if record_str(review, "/review_id", "sdk-migration-review").is_empty()
+            let review_id = record_str(review, "/review_id", "sdk-migration-review");
+            if review_id.is_empty()
                 || record_str(review, "/stage", "sdk-migration-review") != "source_implemented"
-                || modules.contains(module_id)
+                || (modules.contains(module_id)
+                    && frozen_review_ids.get(module_id) != Some(&review_id))
             {
                 fail("INVALID_SDK_MIGRATION_RECORD");
             }
@@ -7464,10 +7471,12 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
                 ));
             }
         }
-        frozen_reviews.push(serde_json::json!({
-            "module_id": module_id,
-            "review_id": record_str(&review, "/review_id", &review_name)
-        }));
+        if matches!(stage, "frozen" | "retired") {
+            frozen_reviews.push(serde_json::json!({
+                "module_id": module_id,
+                "review_id": record_str(&review, "/review_id", &review_name)
+            }));
+        }
     }
 
     let migrations = root.join(".appsdk/migrations");

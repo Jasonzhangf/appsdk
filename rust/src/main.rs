@@ -1622,9 +1622,18 @@ fn run_module_build(root: &Path, module: &Value, module_id: &str) {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id)));
     let working = safe_owned_path(root, working_directory, "module_build_working_directory");
-    let output = Command::new(program)
-        .args(&args)
-        .current_dir(&working)
+    let remap_root = root
+        .canonicalize()
+        .unwrap_or_else(|_| fail(format!("MODULE_BUILD_FAILED:{}", module_id)));
+    let remap_flag = format!("--remap-path-prefix={}={}", remap_root.display(), ".");
+    let mut command = Command::new(program);
+    command.args(&args).current_dir(&working);
+    let rustflags = match std::env::var("RUSTFLAGS") {
+        Ok(existing) if !existing.trim().is_empty() => format!("{} {}", existing, remap_flag),
+        _ => remap_flag,
+    };
+    command.env("RUSTFLAGS", rustflags);
+    let output = command
         .output()
         .unwrap_or_else(|_| fail(format!("MODULE_BUILD_FAILED:{}", module_id)));
     if !output.status.success() {

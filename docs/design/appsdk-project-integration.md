@@ -14,6 +14,24 @@ external AppSDK installation
 
 The business project must not copy AppSDK source, compiler, or harness into its own source tree.
 
+## Collaboration operating contract
+
+Lifecycle mutations run only from a clean named branch in a worktree below the
+main worktree's `playground/` directory. The main worktree is an inspection
+surface, never a development or lifecycle-write surface. The worker fetches
+latest `origin/main`, creates the worktree, reproduces, modifies, builds,
+commits, pushes, integrates the exact candidate with latest main, verifies the
+integration, fast-forwards remote main, validates it with `git ls-remote`, and
+then cleans only the merged worktree and branch. AppSDK rejects mutation
+commands on branch `main`; `verify` remains read-only.
+
+Existing projects retain valid historical governance. Version migration
+preserves old records and artifacts, snapshots old canonical maps, and applies
+new rules incrementally to changed lifecycle nodes. Historical constraints
+that are stricter than the target version are warnings during transition, not
+new blockers. Integrity, ownership, isolation, hash, Protected/Active
+immutability, and remote-main receipt failures remain forbidden.
+
 ## Project layout
 
 ```text

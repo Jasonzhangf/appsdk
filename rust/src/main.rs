@@ -1938,6 +1938,7 @@ fn previous_active_matches_module(module: &Value, artifact: &Value) {
 
 fn compile_module(root: &Path, module_id: &str) -> Value {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     assert_declared_contracts(root, &project, true);
@@ -2531,6 +2532,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
 
 fn compile(root: &Path) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     let project = read_project(root);
     assert_compile_preconditions(root, &project, None);
     assert_declared_contracts(root, &project, true);
@@ -2562,6 +2564,7 @@ fn write_project(root: &Path, project: &Value) {
 
 fn begin_version(root: &Path, module_id: &str, from: &str, to: &str) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     assert_version(from, "INVALID_ACTIVE_VERSION");
     assert_version(to, "INVALID_ACTIVE_VERSION");
@@ -3133,6 +3136,7 @@ fn finish_rehydrate_transaction(root: &Path, module_id: &str) {
 
 fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     assert_project_contract(root, &project);
@@ -3774,6 +3778,23 @@ fn git_value(root: &Path, args: &[&str], error: &str) -> String {
         fail(error);
     }
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn assert_mutation_worktree(root: &Path) {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("VCS_ADAPTER_UNAVAILABLE"));
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "main" {
+        fail("MAIN_WORKTREE_MUTATION_FORBIDDEN");
+    }
 }
 
 fn assert_candidate_source_identity(root: &Path, module: &Value, candidate_commit: &str) {
@@ -5607,6 +5628,7 @@ fn assert_record_graph(
 
 fn promote(root: &Path, target: &str) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     let project = read_project(root);
     assert_project_contract(root, &project);
     assert_goal_confirmed(root);
@@ -5645,6 +5667,7 @@ fn promote(root: &Path, target: &str) {
 
 fn promote_module(root: &Path, module_id: &str, target: &str) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     if target == "frozen" && recover_freeze_transaction(root, &project, module_id) {
@@ -5729,6 +5752,7 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
 
 fn freeze_module(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     if recover_freeze_transaction(root, &project, module_id) {
@@ -5904,6 +5928,7 @@ fn freeze_module(root: &Path, module_id: &str) {
 
 fn publish_active(root: &Path, module_id: &str, version: &str) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     assert_version(version, "INVALID_ACTIVE_VERSION");
     let project = read_project(root);
@@ -7292,6 +7317,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
 
 fn pin_lock(root: &Path, binary: &Path) {
     assert_project_root_safe(root);
+    assert_mutation_worktree(root);
     assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control");
     let mut project = read_project(root);
     let project_version = required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT");

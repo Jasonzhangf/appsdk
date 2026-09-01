@@ -19,6 +19,82 @@ Use the external AppSDK implementation as the governance engine. Keep only proje
 
 Never copy the AppSDK source, compiler, or harness into the business project. Never put committed project maps or lifecycle records in `.appsdk-control/`.
 
+## Collab lifecycle and main protection
+
+AppSDK adopts Collab's independent-peer lifecycle. There is no master/worker
+role and no central dispatcher. A worker owns one issue, one semantic claim,
+one branch, and one clean worktree under the main worktree's
+`playground/<issue-or-task>` directory. The main worktree is read-only for
+development and lifecycle writes.
+
+Required sequence for every debug or change:
+
+```text
+fetch latest origin/main
+  -> create clean playground worktree and branch
+  -> reproduce and record first divergence
+  -> modify only in that worktree
+  -> build and run whitebox checks
+  -> commit and push candidate
+  -> rebase/merge latest main into a fresh integration worktree
+  -> verify the exact integration commit
+  -> merge fast-forward to remote main
+  -> verify remote main with git ls-remote
+  -> close records, release claim, remove only the merged clean worktree/branch
+```
+
+Never edit, build generated state, pin, promote, freeze, publish, or migrate
+from a checkout whose current branch is `main`; the CLI rejects lifecycle
+mutations with `MAIN_WORKTREE_MUTATION_FORBIDDEN`. A detached or unnamed
+checkout is also rejected for mutations. `verify` remains read-only and may
+inspect main. Do not use `git reset`, `git checkout`, `git restore`, or `git
+stash` to make a dirty main usable. Preserve unrelated dirty files and return
+the task to its owner worktree when a conflict exists.
+
+## Forbidden versus warning
+
+The following are hard forbidden gates: direct mutation of main; dirty or
+shared candidate worktrees; missing owner/claim; source or record hash drift;
+payload/control mixing; Protected/Active mutation; missing candidate or
+integration identity; failed required tests; missing deployment/restart proof
+when the project declares that gate; and cleanup before a verified remote-main
+receipt. These fail closed.
+
+The following are warnings during transition and must not block an otherwise
+valid incremental change: legacy 0.1.5 records that were valid under their
+original contract; retained historical strict gates not touched by the
+change; missing optional progress/ACK/reporting metadata; an unneeded
+parallel-collaboration scenario in a single-worker project; and ordinary
+regression work that is not required by the changed module's map. Warnings are
+recorded in the run evidence and must not be projected as PASS or used to
+silently bypass a forbidden gate.
+
+## Existing-version migration
+
+An existing governed project is accepted at its recorded version and state.
+Do not re-run or rewrite completed 0.1.5 evidence merely to satisfy 0.1.6
+rules. For a 0.1.5 -> 0.1.6 transition, use the 0.1.6 binary itself:
+
+```text
+inspect source version and record graph
+  -> preserve old Active/Protected/artifact/review bindings
+  -> run 0.1.6 pin-lock once
+  -> snapshot old canonical maps through the migration record
+  -> install 0.1.6 bundle and live maps
+  -> rehydrate frozen projections if required
+  -> apply 0.1.6 rules only to changed/new lifecycle nodes
+  -> verify incrementally, then continue from the current valid state
+```
+
+Run `appsdk pin-lock <project> --binary <0.1.6-binary>` before interpreting
+new records. Never hand-edit version, hash, ReviewRecord, migration, Active,
+Protected, mailbox, or identity files. If pin-lock stopped after a partial
+write, rerun the same command; do not delete staging or recreate the project.
+If old evidence is absent, mark the historical gate as a warning only when
+the module is unchanged; a changed module must produce the new evidence before
+promotion. Unsupported versions, byte-mismatched binaries, source/map drift,
+hash mismatch, or ambiguous migration state remain forbidden.
+
 ## Existing project bootstrap
 
 For an existing project, begin with a preparation record instead of manually creating governance directories:

@@ -16,6 +16,11 @@
 
 ## Negative
 
+- Reject lifecycle mutation commands from the `main` branch with
+  `MAIN_WORKTREE_MUTATION_FORBIDDEN`; read-only `verify` remains allowed.
+- Accept unchanged legacy 0.1.5 records as migration warnings while rejecting
+  hash, ownership, isolation, and Protected/Active integrity violations.
+
 - Reject one-sided scenario activation.
 - Reject shared/non-exclusive worktree or semantic claim.
 - Reject queue/candidate/effectiveness identity mismatch.

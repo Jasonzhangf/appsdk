@@ -59,6 +59,11 @@ fn init_git(root: &PathBuf) {
         .status()
         .unwrap()
         .success());
+    assert!(Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "branch", "-M", "codex/test"])
+        .status()
+        .unwrap()
+        .success());
 }
 
 fn run(args: &[&str]) -> std::process::Output {
@@ -1508,6 +1513,27 @@ fn new_project_rejects_unconfirmed_compile_and_promote() {
     let promote = run(&["promote", root_text, "--to", "source_implemented"]);
     assert!(!promote.status.success());
     assert!(String::from_utf8_lossy(&promote.stderr).contains("GOAL_NOT_CONFIRMED:received"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_mutation_rejects_main_branch() {
+    let root = temp_root("main-mutation");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "branch", "-M", "main"])
+        .status()
+        .unwrap()
+        .success());
+
+    let compile = run(&["compile", root_text]);
+    assert!(!compile.status.success());
+    assert!(String::from_utf8_lossy(&compile.stderr).contains("MAIN_WORKTREE_MUTATION_FORBIDDEN"));
+
+    let verify = run(&["verify", root_text]);
+    assert!(verify.status.success(), "verify should remain read-only");
     fs::remove_dir_all(root).unwrap();
 }
 

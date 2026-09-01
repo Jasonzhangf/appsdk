@@ -298,6 +298,36 @@ gates is forbidden.
 
 Do not claim lifecycle completion from unit tests alone. A missing external adapter, review verdict, installation, restart, or online evidence is an explicit remaining gap.
 
+## Admission failures and upgrade recovery
+
+`verify --review-admission` is intentionally fail-closed and read-only. On a
+missing lifecycle record it emits `REVIEW_ADMISSION_BLOCKED` with `missing`,
+`present`, `producer`, `next`, `retry_allowed: false`, and forbidden actions.
+Treat that object as the current state contract. Do not retry, poll, hand-write,
+copy, relabel, or hash-edit records. Re-run only after the named project
+adapter has produced the real external evidence.
+
+The complete adapter-owned flow is:
+
+```text
+candidate -> lifecycle adapter
+whitebox -> whitebox adapter
+install/restart -> deployment adapter
+deployed public-entrypoint test -> blackbox adapter
+bind validation -> lifecycle adapter
+AppSDK review-admission verify
+```
+
+Adapters are idempotent for an unchanged candidate and preserve existing PASS
+records. Any candidate/tree/artifact/environment/entrypoint/input change
+invalidates the set and requires a new set. For an old-version project, first
+run idempotent prepare/init, inspect and snapshot every legacy governance root,
+obtain explicit object-level transfer authorization, then run the exact target
+SDK migration/pin-lock. Do not delete historical evidence or merge roots. The
+target binary must provide or enable the project adapter contract before the
+migration can enter review admission; a missing adapter is a real blocker with
+one next action, not a reason to weaken the gate.
+
 ## Review tool selection
 
 Review is a required lifecycle gate, but the tool is not hardcoded. Honor

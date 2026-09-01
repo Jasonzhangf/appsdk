@@ -188,6 +188,43 @@ Then fill and confirm `.appsdk/goal.json`, bind project maps and module ownershi
 
 Review 是必需生命周期门禁，但工具不固定。若 Jason 指定 review 工具，且该工具提供只读、可观测、结构化 verdict，则必须使用指定工具；未指定时使用配置的默认 review 路由。记录工具、exact commit、scope、verdict 和 evidence。指定工具不可用时不得静默替换。
 
+### Admission adapter contract and deterministic recovery
+
+Admission is a read-only gate. It never manufactures a lifecycle record from a
+missing file. When a required record is absent, the command emits a structured
+`REVIEW_ADMISSION_BLOCKED` object containing the module, every missing and
+present producer input, the single next action, `retry_allowed: false`, and the
+forbidden shortcuts. Repeating the command before that external state changes
+is idempotent and must produce the same blocked state; agents must not poll or
+retry it.
+
+The project owns adapters that observe reality; AppSDK owns record schema,
+identity binding, causal ordering, and final admission. The supported sequence
+is:
+
+```text
+clean owner worktree + candidate commit
+  -> lifecycle adapter binds FixCandidateRecord
+  -> whitebox adapter runs and records the actual whitebox result
+  -> deployment adapter installs and restarts the exact artifact, recording both receipts
+  -> blackbox adapter exercises the deployed public entrypoint
+  -> lifecycle adapter binds PreReviewValidationRecord
+  -> appsdk verify --review-admission <project> --module <id>
+```
+
+Each adapter is rerunnable for the same candidate without changing a PASS
+record. A changed candidate, artifact, environment, entrypoint, or input starts
+a new evidence set and invalidates the old one. No adapter may accept a
+hand-entered hash, relabel whitebox output as blackbox output, or use an
+artifact from another worktree/project/version.
+
+For an upgrade, run `appsdk prepare`/`init` idempotently, inspect and snapshot
+the old project and legacy roots, obtain explicit ownership-transfer approval,
+run the pinned target binary's migration command, then execute the adapter
+sequence above. Only after admission passes may review, merge, install,
+restart, promotion, and freeze proceed. A blocked adapter is an actionable
+external capability gap, not permission to edit records manually.
+
 ## Lifecycle
 
 新 feature 和新项目在进入代码实现前必须完成闭环设计：

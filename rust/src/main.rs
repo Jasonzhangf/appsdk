@@ -4187,12 +4187,117 @@ fn verify_review_admission(root: &Path, module_id: &str) {
         .unwrap_or_else(|| fail(format!("UNKNOWN_MODULE:{}", module_id)));
     let artifact = read_module_artifact(root, &project, module_id);
     module_artifact_matches_project(module, &artifact);
+    explain_review_admission_preflight(root, module_id);
     assert_pre_review_validation_gate(root, module_id, &artifact);
     verify_internal(root, true, false);
     println!(
         "{{\"ok\":true,\"gate\":\"review_admission\",\"module_id\":\"{}\"}}",
         module_id
     );
+}
+
+fn explain_review_admission_preflight(root: &Path, module_id: &str) {
+    let records_root = root.join(".appsdk").join("records");
+    let evidence_root = records_root.join("evidence").join(module_id);
+    let required = [
+        (
+            "fix_candidate",
+            module_record_name("fix-candidate-record", module_id),
+            "project::lifecycle_adapter",
+            "produce from the clean owner worktree and candidate commit",
+        ),
+        (
+            "development_whitebox",
+            "evidence/<module>/whitebox-1.json".to_string(),
+            "project::whitebox_adapter",
+            "run the declared development whitebox and persist its actual result",
+        ),
+        (
+            "deployment_install",
+            "evidence/<module>/install-1.json".to_string(),
+            "project::deployment_adapter",
+            "install the exact candidate artifact and persist the real receipt",
+        ),
+        (
+            "deployment_restart",
+            "evidence/<module>/restart-1.json".to_string(),
+            "project::deployment_adapter",
+            "restart the exact installed artifact and persist the real receipt",
+        ),
+        (
+            "deployed_blackbox",
+            "evidence/<module>/blackbox-1.json".to_string(),
+            "project::blackbox_adapter",
+            "exercise the deployed public entrypoint and persist the actual result",
+        ),
+        (
+            "pre_review_validation",
+            module_record_name("pre-review-validation-record", module_id),
+            "project::lifecycle_adapter",
+            "bind the disjoint evidence IDs and causal timestamps after all gates pass",
+        ),
+    ];
+    let missing: Vec<Value> = required
+        .iter()
+        .filter(|(_, relative, _, _)| {
+            let path = if relative.starts_with("evidence/") {
+                evidence_root.join(relative.strip_prefix("evidence/<module>/").unwrap())
+            } else {
+                records_root.join(relative)
+            };
+            !path.is_file()
+        })
+        .map(|(kind, relative, producer, next)| {
+            serde_json::json!({
+                "kind": kind,
+                "path": relative,
+                "producer": producer,
+                "next": next
+            })
+        })
+        .collect();
+    if missing.is_empty()
+        || !missing.iter().any(|entry| {
+            matches!(
+                entry.get("kind").and_then(Value::as_str),
+                Some("fix_candidate" | "pre_review_validation")
+            )
+        })
+    {
+        return;
+    }
+    let present: Vec<String> = required
+        .iter()
+        .filter_map(|(_, relative, _, _)| {
+            let path = if relative.starts_with("evidence/") {
+                evidence_root.join(relative.strip_prefix("evidence/<module>/").unwrap())
+            } else {
+                records_root.join(relative)
+            };
+            path.is_file().then(|| relative.clone())
+        })
+        .collect();
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "error": "REVIEW_ADMISSION_BLOCKED",
+            "module_id": module_id,
+            "admission": "blocked",
+            "missing": missing,
+            "present": present,
+            "retry_allowed": false,
+            "idempotent": true,
+            "next": "enable or run the declared project adapters; let each adapter persist real evidence; rerun the same admission command",
+            "forbidden": [
+                "do not hand-create lifecycle records",
+                "do not copy records from another project or version",
+                "do not invent hashes, receipts, timestamps, or producer identities",
+                "do not retry this command until the listed external state changes"
+            ]
+        }))
+        .unwrap()
+    );
+    std::process::exit(1);
 }
 
 fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, review_name: &str) {

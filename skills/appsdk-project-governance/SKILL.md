@@ -19,6 +19,37 @@ Use the external AppSDK implementation as the governance engine. Keep only proje
 
 Never copy the AppSDK source, compiler, or harness into the business project. Never put committed project maps or lifecycle records in `.appsdk-control/`.
 
+## Governance is part of the work
+
+AppSDK governance is an execution responsibility, not an external
+prerequisite. Missing governance, an unconfirmed goal, absent maps or records,
+an invalid SDK lock, a dirty/shared worktree, an unavailable required adapter,
+or any failed preflight is a project-management defect owned by the current
+worker. Do not attribute it to an outside factor, skip the gate, weaken the
+contract, or start business-code debugging around it.
+
+When a preflight fails, stop code work, classify the first failing governance
+node, repair the governance/management state through its canonical owner,
+re-run the preflight, and only then reproduce or modify business code. The
+closeout must record the failure, ownership, repair, and verification. A
+missing governance record is not evidence that the business code is broken;
+it is evidence that the lifecycle is incomplete.
+
+Required order:
+
+```text
+governance preflight
+  -> repair project-management gap
+  -> verify preflight again
+  -> reproduce/debug business code
+```
+
+This rule includes migration, worktree declaration, resource claims, maps,
+evidence, review admission, build/install/restart, merge, and cleanup. A
+tool/network/adapter failure may explain the symptom, but it does not remove
+the worker's responsibility to manage the project state and resolve the
+failure before code debugging continues.
+
 ## Collab lifecycle and main protection
 
 AppSDK adopts Collab's independent-peer lifecycle. There is no master/worker
@@ -72,29 +103,65 @@ silently bypass a forbidden gate.
 
 ## Existing-version migration
 
-An existing governed project is accepted at its recorded version and state.
-Do not re-run or rewrite completed 0.1.5 evidence merely to satisfy 0.1.6
-rules. For a 0.1.5 -> 0.1.6 transition, use the 0.1.6 binary itself:
+An existing project may retain a valid old governance baseline, but upgrading
+the control plane is an explicit, user-authorized transfer of ownership. The
+old AppSDK governance state and each dispersed Collab initialization are two
+independent historical truths. Never copy, concatenate, or infer one from the
+other. First inspect both planes, freeze their mutations, and write immutable
+snapshots with counts and hashes. Then request Jason's authorization to take
+control of the exact project, task, resource, claim, worktree, daemon, and
+staging objects named by the migration. No authorization means no takeover,
+deletion, merge, or state reset.
+
+Use this sequence for a 0.1.5 AppSDK project with dispersed Collab state:
 
 ```text
-inspect source version and record graph
-  -> preserve old Active/Protected/artifact/review bindings
-  -> run 0.1.6 pin-lock once
-  -> snapshot old canonical maps through the migration record
-  -> install 0.1.6 bundle and live maps
-  -> rehydrate frozen projections if required
-  -> apply 0.1.6 rules only to changed/new lifecycle nodes
-  -> verify incrementally, then continue from the current valid state
+inspect AppSDK version/maps/records/Active/Protected/sdk.lock
+  -> inspect every Collab root, identity, task/resource/claim, daemon and staging state
+  -> freeze both control planes and snapshot each independently
+  -> obtain explicit object-level ownership-transfer authorization
+  -> build an explicit AppSDK <-> Collab mapping
+  -> classify exact matches, AppSDK-only, Collab-only, and conflicts
+  -> design the complete compliant reconciliation route
+  -> request approval only for the explicit ownership-transfer or destructive step
+  -> execute the approved route; keep only unapproved destructive steps frozen
+  -> clean only authorized, proven-stale recoverable staging/runtime state
+  -> install/pin the new AppSDK bundle and migrate Collab through its official v1 path
+  -> verify one owner and one truth for every retained object
+  -> reset only authorized runtime/temporary state to a clean initial state
+  -> apply new rules to every new/changed node, then resume normal lifecycle
 ```
 
-Run `appsdk pin-lock <project> --binary <0.1.6-binary>` before interpreting
-new records. Never hand-edit version, hash, ReviewRecord, migration, Active,
-Protected, mailbox, or identity files. If pin-lock stopped after a partial
-write, rerun the same command; do not delete staging or recreate the project.
-If old evidence is absent, mark the historical gate as a warning only when
-the module is unchanged; a changed module must produce the new evidence before
-promotion. Unsupported versions, byte-mismatched binaries, source/map drift,
-hash mismatch, or ambiguous migration state remain forbidden.
+The mapping must preserve the source identity, object identity, owner,
+references, and snapshot hash on both sides. Exact matches may be adopted;
+AppSDK-only state receives a Collab binding; Collab-only state gets a proposed
+legacy disposition with an explicit owner and mapping plan. Conflicts are not
+merged and do not receive an invented owner: the worker must construct the
+complete compliant reconciliation route, including the target truth, precise
+object actions, collision handling, rollback boundary, and verification gates,
+then request Jason's approval for the exact ownership transfer or destructive
+step. This is an approval gate for execution, not a reason to merely report
+and wait. Historical records and
+immutable Active/Protected artifacts remain audit evidence. "清理历史包袱"
+means removing only authorized stale staging, abandoned runtime leases,
+duplicate queues, and other disposable control projections—not deleting
+history to make `verify` green. After unified governance, the allowed reset is
+an explicit zeroing of runtime/temporary state, not deletion of history or
+referenced immutable artifacts.
+
+For the AppSDK portion, execute the target 0.1.6 binary itself and pass that
+exact file to `appsdk pin-lock` after authorization and snapshotting. Do not
+hand-edit version, hash, ReviewRecord, migration, Active, Protected, mailbox,
+identity, task, or claim files. A partial pin may resume only through its exact
+migration record or exact source maps. Do not delete partial outputs by hand;
+if cleanup is authorized, execute it through the canonical owner and retain
+the cleanup receipt.
+If old evidence is absent, a historical gate is a warning only when the module
+is unchanged; changed/new modules must produce new evidence. Unsupported
+versions, byte/source/map drift, hash mismatch, duplicate writers, ambiguous
+mapping, or unauthorized cleanup/reset remain forbidden. The old valid state
+is accepted as evidence until the authorized migration completes; it is not
+silently reinterpreted under the new rules.
 
 ## Existing project bootstrap
 

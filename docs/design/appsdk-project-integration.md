@@ -14,6 +14,16 @@ external AppSDK installation
 
 The business project must not copy AppSDK source, compiler, or harness into its own source tree.
 
+## Governance preflight ownership
+
+Governance readiness is part of the implementation task. Missing contracts,
+maps, records, SDK locks, clean worktrees, claims, adapters, or required
+evidence are owned project-management defects. The worker stops business-code
+debugging, repairs the first failing governance node through its canonical
+owner, and reruns preflight before continuing. External tooling or network
+failures may describe the immediate symptom, but never justify skipping,
+weakening, or bypassing the governance lifecycle.
+
 ## Collaboration operating contract
 
 Lifecycle mutations run only from a clean named branch in a worktree below the
@@ -26,11 +36,41 @@ then cleans only the merged worktree and branch. AppSDK rejects mutation
 commands on branch `main`; `verify` remains read-only.
 
 Existing projects retain valid historical governance. Version migration
-preserves old records and artifacts, snapshots old canonical maps, and applies
-new rules incrementally to changed lifecycle nodes. Historical constraints
-that are stricter than the target version are warnings during transition, not
-new blockers. Integrity, ownership, isolation, hash, Protected/Active
-immutability, and remote-main receipt failures remain forbidden.
+preserves immutable historical evidence, but unified AppSDK + dispersed Collab
+upgrade is an authorized ownership-transfer operation. The two control planes
+are inspected and snapshotted independently, mapped explicitly, and reconciled
+only after Jason authorizes control of the named objects. Authorized cleanup
+may remove proven-stale staging and disposable runtime projections; it must not
+delete audit history or referenced immutable artifacts. After reconciliation,
+only authorized runtime/temporary state is reset to zero and the new unified
+truth is verified from a clean initial state. Historical constraints that are
+stricter than the target version are warnings during transition; integrity,
+ownership, isolation, hash, Protected/Active immutability, ambiguous mapping,
+duplicate writers, unauthorized cleanup, and remote-main receipt failures
+remain forbidden.
+
+The migration contract is:
+
+```text
+inspect AppSDK truth + every Collab initialization root
+  -> freeze and independently snapshot both planes
+  -> obtain object-level ownership-transfer authorization
+  -> map exact matches, one-sided legacy state, and conflicts
+  -> design the complete compliant reconciliation route
+  -> request approval for the exact ownership-transfer/destructive step
+  -> execute the approved route; keep unapproved destructive steps frozen
+  -> clean only authorized stale disposable state
+  -> install/pin new AppSDK and run official Collab v1 migration
+  -> verify one owner/one truth, then zero runtime state
+```
+
+Do not directly merge `.agent-collab` directories or hand-edit task, claim,
+mailbox, identity, migration, hash, Active, or Protected records. A Collab-only
+object without an authorized owner receives a proposed disposition and mapping
+route; it is not automatically adopted or deleted. A conflict requires the
+worker to provide the target truth, exact object operations, rollback boundary,
+and verification gates before requesting approval. Approval is an execution
+gate, not a report-and-wait terminal state.
 
 ## Project layout
 

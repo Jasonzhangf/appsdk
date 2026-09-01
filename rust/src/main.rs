@@ -7354,7 +7354,7 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
             assert_identifier(module_id, "INVALID_SDK_MIGRATION_RECORD");
             let review_id = record_str(review, "/review_id", "sdk-migration-review");
             if review_id.is_empty()
-                || record_str(review, "/stage", "sdk-migration-review") != "source_implemented"
+                || record_str(review, "/stage", "sdk-migration-review") == "draft"
                 || (modules.contains(module_id)
                     && frozen_review_ids.get(module_id) != Some(&review_id))
             {
@@ -7486,9 +7486,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
             .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}", module_id)));
         let review = read_record(root, &review_name);
         if !matches!(stage, "frozen" | "retired") {
-            if stage != "source_implemented"
-                || review.get("verdict").and_then(Value::as_str) != Some("pass")
-            {
+            if stage == "draft" || review.get("verdict").and_then(Value::as_str) != Some("pass") {
                 fail(format!("SDK_MIGRATION_OPEN_REVIEW:{}", module_id));
             }
             legacy_reconciled_reviews.push(serde_json::json!({

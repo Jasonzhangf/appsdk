@@ -275,6 +275,13 @@ after installation by path and SHA-256 at every global entrypoint before using
 it on a project. A path or hash mismatch is a binary-preflight blocker, not a
 project migration failure.
 
+During legacy reconciliation, a non-draft module with a passing historical
+ReviewRecord may be recorded in `legacy_reconciled_reviews` at its actual stage
+(for example `controlled_verified` or `architecture_stable`). Do not force the
+module through a guessed intermediate stage or rewrite the old record. Draft
+modules and records without a canonical passing verdict remain blocked until
+the project's real lifecycle owner resolves them.
+
 ## Debug flow
 
 Clarify goal first. Debug evidence must retain the reasoning chain: active

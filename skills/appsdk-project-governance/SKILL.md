@@ -195,6 +195,26 @@ appsdk init <workspace> --project-root <relative-path>
 
 `init` is idempotent. The workspace may contain legacy code; the configured relative path becomes the new AppSDK project root. It creates the four governance zones and `.appsdk-control/` under that root, fills only missing governance files, and appends one managed `.gitignore` block for local control state, compiled Active libraries, and generated outputs. It preserves existing project files and existing ignore rules. Absolute paths and `..` traversal are rejected. Use `appsdk new` only for an empty destination.
 
+## New feature and new project admission
+
+New feature work and new project work require a complete design contract before
+implementation:
+
+```text
+requirements and acceptance criteria
+  -> confirmed goal/scope/non-goals
+  -> top-down module/resource map
+  -> high-level design
+  -> detailed design and call/data-flow bindings
+  -> requirements/design/module/verification consistency check
+  -> clean worktree implementation
+```
+
+Every requirement must map to one owner module, every module to an allowed
+boundary and design, and every acceptance criterion to a verification gate.
+Missing or contradictory analysis/design is a worker-owned governance
+preflight defect; implementation is not admitted until the chain is closed.
+
 ## New project flow
 
 1. Install or reference a pinned external AppSDK.
@@ -245,7 +265,24 @@ A clean worktree may no longer contain the local issue branch named by an immuta
 
 ## Debug flow
 
-Clarify goal first. Then use evidence-first debugging: baseline, first divergence, positive intervention, negative intervention, and unique owner. The physical checkout is a clean isolated Git worktree; the logical mutable phase is Playground. Formal order is immutable: reproduce → fix candidate → development whitebox → build/install/restart → deployed-entrypoint blackbox → pre-review validation PASS → architecture review PASS → unchanged-source effectiveness replay → verified mainline merge → promotion/compile/freeze. Review or delivery-commit admission before both whitebox and deployed blackbox PASS is forbidden.
+Clarify goal first. Debug evidence must retain the reasoning chain: active
+hypothesis, confirmation/falsification signals, first divergence, error
+evidence, experiment conditions, intervention, observed result, and root-cause
+decision. Positive intervention and negative/reversal experiment are required
+when feasible; the final error is not automatically the root cause.
+
+Before merge, perform an architecture check against the resource/function/
+mainline maps, module registry, allowed/forbidden paths, payload/control
+separation, unique ownership, and duplicate-implementation rules. Recheck the
+integrated latest-main tree; stale or conflicting evidence invalidates delivery.
+The physical checkout is a clean isolated Git worktree; the logical mutable
+phase is Playground. Formal order is immutable: requirements/design admission
+→ reproduce → evidence-backed fix candidate → development whitebox →
+build/install/restart → deployed-entrypoint blackbox → architecture check →
+pre-review validation PASS → selected review tool PASS → unchanged-source
+effectiveness replay → verified mainline merge → promotion/compile/freeze.
+Review or delivery-commit admission before the architecture and verification
+gates is forbidden.
 
 ## Required checks
 

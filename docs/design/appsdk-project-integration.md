@@ -190,6 +190,26 @@ Review 是必需生命周期门禁，但工具不固定。若 Jason 指定 revie
 
 ## Lifecycle
 
+新 feature 和新项目在进入代码实现前必须完成闭环设计：
+
+```text
+需求与验收标准
+  -> goal/scope/non-goals 确认
+  -> 自上而下 module/resource map
+  -> 概要设计
+  -> 详细设计与调用/数据流绑定
+  -> requirements -> design -> module -> verification 一致性检查
+  -> 干净 worktree 开发
+```
+
+每个需求必须有唯一 owner module，每个设计元素必须落在允许边界内，
+每个验收标准必须有 verification gate。设计缺失或矛盾是 worker 自身的
+治理前置失败，不得先写业务代码。
+
+Debug 必须保存思维链、错误证据、实验条件与结果、根因判断；合并前必须
+对集成后的 tree 重新做 resource/function/mainline/module map、边界、
+payload/control 隔离、owner 唯一和重复实现架构检查。
+
 ```text
 goal clarification
   -> confirmed/admitted
@@ -200,7 +220,8 @@ goal clarification
   -> build + install + restart
   -> deployed public-entrypoint blackbox PASS
   -> PreReviewValidationRecord + `appsdk verify --review-admission` PASS
-  -> architecture ReviewRecord PASS
+  -> architecture boundary check
+  -> selected review tool ReviewRecord PASS
   -> unchanged-source effectiveness replay PASS
   -> one independently verifiable milestone per clean worktree
   -> commit + serial merge queue + tested integration for every milestone

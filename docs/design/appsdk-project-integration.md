@@ -225,6 +225,13 @@ sequence above. Only after admission passes may review, merge, install,
 restart, promotion, and freeze proceed. A blocked adapter is an actionable
 external capability gap, not permission to edit records manually.
 
+`init` intentionally leaves a project at `draft`. The required promotion before
+compilation is explicit: confirm the goal, promote the project to
+`source_implemented`, bind the module contract, promote the project to
+`contract_bound`, and only then run `compile`. If compilation is attempted
+early, AppSDK returns `COMPILE_BLOCKED` with this exact ordered continuation and
+`retry_allowed: false`; it does not create a partial module artifact.
+
 ## Lifecycle
 
 新 feature 和新项目在进入代码实现前必须完成闭环设计：

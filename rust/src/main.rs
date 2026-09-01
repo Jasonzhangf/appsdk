@@ -2094,7 +2094,29 @@ fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: O
         stage,
         "contract_bound" | "compiled" | "controlled_verified" | "architecture_stable"
     ) {
-        fail(format!("COMPILE_REQUIRES_CONTRACT_BOUND:{}", stage));
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "error": "COMPILE_BLOCKED",
+                "current_stage": stage,
+                "required_stage": "contract_bound",
+                "retry_allowed": false,
+                "idempotent": true,
+                "next": [
+                    "confirm .appsdk/goal.json through the user-approved goal clarification flow",
+                    "appsdk promote <project> --to source_implemented",
+                    "appsdk promote <project> --to contract_bound",
+                    "rerun appsdk compile <project> once the project is contract_bound"
+                ],
+                "forbidden": [
+                    "do not create generated/module artifacts by hand",
+                    "do not edit lifecycle stage directly",
+                    "do not retry compile before the stage changes"
+                ]
+            }))
+            .unwrap()
+        );
+        std::process::exit(1);
     }
     if changing_module.is_none()
         && project

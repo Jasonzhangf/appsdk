@@ -328,6 +328,14 @@ target binary must provide or enable the project adapter contract before the
 migration can enter review admission; a missing adapter is a real blocker with
 one next action, not a reason to weaken the gate.
 
+`init` is deliberately idempotent but does not admit compilation: it leaves the
+project in `draft`. The worker must confirm the goal, then execute the ordered
+transitions `source_implemented -> contract_bound` for the project (and bind the
+module contract) before `appsdk compile`. An early compile returns structured
+`COMPILE_BLOCKED` state with the ordered next commands, `retry_allowed: false`,
+and forbidden manual artifact/stage edits. Do not rerun it until the stage has
+changed.
+
 ## Review tool selection
 
 Review is a required lifecycle gate, but the tool is not hardcoded. Honor

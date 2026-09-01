@@ -7441,7 +7441,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
         let review = read_record(root, &review_name);
         if !matches!(stage, "frozen" | "retired") {
             if stage != "source_implemented"
-                || review.get("verdict").and_then(Value::as_str) != Some("PASS")
+                || review.get("verdict").and_then(Value::as_str) != Some("pass")
             {
                 fail(format!("SDK_MIGRATION_OPEN_REVIEW:{}", module_id));
             }

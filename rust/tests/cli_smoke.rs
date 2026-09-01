@@ -560,7 +560,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     let mut project: Value =
         serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
 
-    project["sdk"]["version"] = Value::String("0.1.4".into());
+    project["sdk"]["version"] = Value::String("0.1.2".into());
     fs::write(
         &project_file,
         serde_json::to_string_pretty(&project).unwrap() + "\n",
@@ -574,7 +574,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     ]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr)
-        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.4:0.1.6"));
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.6"));
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
 
     project["sdk"]["version"] = Value::String("0.1.5".into());
@@ -2454,8 +2454,9 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     enable_regression_contract(&root);
     init_git(&root);
     fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
-"#).unwrap();
+    "#).unwrap();
     pin_test_lock(root_text);
+    fs::remove_dir_all(root.join(".appsdk/migrations/0.1.5-to-0.1.6")).unwrap();
     assert!(run(&["promote", root_text, "--to", "source_implemented"])
         .status
         .success());

@@ -119,11 +119,10 @@ Use this sequence for a 0.1.5 AppSDK project with dispersed Collab state:
 inspect AppSDK version/maps/records/Active/Protected/sdk.lock
   -> inspect every Collab root, identity, task/resource/claim, daemon and staging state
   -> freeze both control planes and snapshot each independently
-  -> obtain explicit object-level ownership-transfer authorization
   -> build an explicit AppSDK <-> Collab mapping
   -> classify exact matches, AppSDK-only, Collab-only, and conflicts
   -> design the complete compliant reconciliation route
-  -> request approval only for the explicit ownership-transfer or destructive step
+  -> request approval for the explicit ownership-transfer or destructive step
   -> execute the approved route; keep only unapproved destructive steps frozen
   -> clean only authorized, proven-stale recoverable staging/runtime state
   -> install/pin the new AppSDK bundle and migrate Collab through its official v1 path
@@ -172,6 +171,23 @@ appsdk prepare <workspace>
 ```
 
 The AI must read `.appsdk-prepare.json`, ask the user about change kind, project root, legacy roots, new roots, Protected roots, allowed paths, forbidden paths, and payload/control separation, then update the record to `status: confirmed`. Do not initialize before confirmation.
+
+For an existing workspace, confirmed preparation must route through legacy
+migration before `init` or business-code debugging:
+
+```text
+confirmed preparation
+  -> inspect old AppSDK truth and every dispersed Collab root
+  -> freeze and independently snapshot both planes
+  -> design ownership-transfer/reconciliation route
+  -> request approval for exact takeover/cleanup/reset operations
+  -> execute approved migration and verify unified zero runtime state
+  -> appsdk init <workspace> --project-root <relative-path>
+```
+
+This migration preflight is part of initialization. A new empty project with
+no legacy roots skips only the legacy inspection branch; `init` must not hide
+unresolved old state or conflicts.
 
 ```bash
 appsdk init <workspace> --project-root <relative-path>
@@ -241,9 +257,18 @@ Clarify goal first. Then use evidence-first debugging: baseline, first divergenc
 - clean isolated worktree identity, candidate Git tree identity, architecture map hashes, post-review unchanged-source effectiveness, merge ancestry, tested integration identity, and local/remote mainline receipt when parallel scenarios are enabled
 - RegressionReport whitebox + blackbox coverage, non-zero passing tests, exact input binding, and FreezeRecord report hash
 - Protected and Active immutability
-- final architecture review with explicit PASS
+- final review with explicit PASS from Jason's selected review tool, or the default route when no tool was specified
 
 Do not claim lifecycle completion from unit tests alone. A missing external adapter, review verdict, installation, restart, or online evidence is an explicit remaining gap.
+
+## Review tool selection
+
+Review is a required lifecycle gate, but the tool is not hardcoded. Honor
+Jason's explicitly selected review tool when it supports a read-only,
+observable, structured verdict. If no tool is specified, use the configured
+default review route. Record the selected tool, exact commit, scope, verdict,
+and evidence. Do not silently substitute another reviewer when the requested
+tool is unavailable.
 
 Read `docs/design/appsdk-project-integration.md` for the repository layout and `docs/design/playground-active-promotion.md` for promotion semantics.
 

@@ -54,7 +54,6 @@ The migration contract is:
 ```text
 inspect AppSDK truth + every Collab initialization root
   -> freeze and independently snapshot both planes
-  -> obtain object-level ownership-transfer authorization
   -> map exact matches, one-sided legacy state, and conflicts
   -> design the complete compliant reconciliation route
   -> request approval for the exact ownership-transfer/destructive step
@@ -153,6 +152,21 @@ appsdk prepare ./existing-workspace
 
 AI 使用 `.appsdk-prepare.json` 模板向用户确认：这是新项目、模块重构、项目重构还是 debug；新项目根目录是什么；旧代码和 V3 等 legacy roots 是什么；新代码、Protected 和禁止修改边界是什么。用户确认后将 `status` 更新为 `confirmed`，然后才能执行 `init`。没有确认记录时，`init` 会 fail-fast。
 
+对已有工作区，confirmed preparation 后必须先进入旧状态迁移预检：
+
+```text
+confirmed preparation
+  -> inspect 旧 AppSDK truth + 每个分散 Collab 初始化根
+  -> 冻结并分别生成快照
+  -> 设计控制权转移/冲突消解路线
+  -> 请求精确接管、清理、清零动作的授权
+  -> 执行已批准迁移并验证统一运行态归零
+  -> appsdk init ./existing-workspace --project-root new-code
+```
+
+这是初始化流程的一部分，不是初始化后的可选升级。没有 legacy root
+的新空项目只跳过 legacy inspection 分支；已有项目不能用 `init` 隐藏未解决的旧状态或冲突。
+
 已有项目先执行：
 
 ```bash
@@ -171,6 +185,8 @@ appsdk verify ./my-app
 初始化会自动安装 `.appsdk/docs/`、`.appsdk/rules/` 和 `.appsdk/skills/`。这些是项目治理输入，不是 runtime capability；runtime 只消费编译后的 manifest 和 Active library。
 
 Then fill and confirm `.appsdk/goal.json`, bind project maps and module ownership, and follow the promotion contract. Template creation requires an empty, non-symlinked destination.
+
+Review 是必需生命周期门禁，但工具不固定。若 Jason 指定 review 工具，且该工具提供只读、可观测、结构化 verdict，则必须使用指定工具；未指定时使用配置的默认 review 路由。记录工具、exact commit、scope、verdict 和 evidence。指定工具不可用时不得静默替换。
 
 ## Lifecycle
 

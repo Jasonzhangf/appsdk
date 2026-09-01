@@ -46,8 +46,9 @@ fetch latest origin/main
 Never edit, build generated state, pin, promote, freeze, publish, or migrate
 from a checkout whose current branch is `main`; the CLI rejects lifecycle
 mutations with `MAIN_WORKTREE_MUTATION_FORBIDDEN`. A detached or unnamed
-checkout is also rejected for mutations. `verify` remains read-only and may
-inspect main. Do not use `git reset`, `git checkout`, `git restore`, or `git
+checkout is invalid for the required lifecycle worktree and must be replaced
+by a named feature branch worktree before mutation. `verify` remains read-only
+and may inspect main. Do not use `git reset`, `git checkout`, `git restore`, or `git
 stash` to make a dirty main usable. Preserve unrelated dirty files and return
 the task to its owner worktree when a conflict exists.
 

@@ -4344,18 +4344,16 @@ fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, revi
                 .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
         })
         .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
-    if !matches!(
-        module.get("stage").and_then(Value::as_str),
-        Some("frozen" | "retired")
-    ) {
-        fail("ARCHITECTURE_REVIEW_MAP_STALE");
-    }
+    let stage = module
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
     let migration =
         assert_sdk_migration_record(root).unwrap_or_else(|| fail("ARCHITECTURE_REVIEW_MAP_STALE"));
     let review_id = record_str(review, "/review_id", review_name);
-    if record_time(review, review_name) > record_time(&migration, "sdk-migration-record")
-        || !migration
-            .get("frozen_reviews")
+    let retained_review = |key: &str| {
+        migration
+            .get(key)
             .and_then(Value::as_array)
             .is_some_and(|reviews| {
                 reviews.iter().any(|entry| {
@@ -4363,6 +4361,10 @@ fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, revi
                         && entry.get("review_id").and_then(Value::as_str) == Some(review_id)
                 })
             })
+    };
+    if record_time(review, review_name) > record_time(&migration, "sdk-migration-record")
+        || (!retained_review("frozen_reviews") && !retained_review("legacy_reconciled_reviews"))
+        || (!matches!(stage, "frozen" | "retired") && !retained_review("legacy_reconciled_reviews"))
     {
         fail("ARCHITECTURE_REVIEW_MAP_STALE");
     }
@@ -7304,6 +7306,22 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
             fail("INVALID_SDK_MIGRATION_RECORD");
         }
     }
+    if let Some(legacy_reviews) = record.get("legacy_reconciled_reviews") {
+        let legacy_reviews = legacy_reviews
+            .as_array()
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        for review in legacy_reviews {
+            let module_id = record_str(review, "/module_id", "sdk-migration-review");
+            assert_identifier(module_id, "INVALID_SDK_MIGRATION_RECORD");
+            if record_str(review, "/review_id", "sdk-migration-review").is_empty()
+                || record_str(review, "/stage", "sdk-migration-review") != "source_implemented"
+                || modules.contains(module_id)
+            {
+                fail("INVALID_SDK_MIGRATION_RECORD");
+            }
+            modules.insert(module_id);
+        }
+    }
     Some(record)
 }
 
@@ -7370,6 +7388,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
     }
 
     let mut frozen_reviews = Vec::new();
+    let mut legacy_reconciled_reviews = Vec::new();
     for module in project
         .get("modules")
         .and_then(Value::as_array)
@@ -7381,13 +7400,23 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
         if !review_path.exists() {
             continue;
         }
-        if !matches!(
-            module.get("stage").and_then(Value::as_str),
-            Some("frozen" | "retired")
-        ) {
-            fail(format!("SDK_MIGRATION_OPEN_REVIEW:{}", module_id));
-        }
+        let stage = module
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail(format!("INVALID_MODULE_CONTRACT:{}", module_id)));
         let review = read_record(root, &review_name);
+        if !matches!(stage, "frozen" | "retired") {
+            if stage != "source_implemented"
+                || review.get("verdict").and_then(Value::as_str) != Some("PASS")
+            {
+                fail(format!("SDK_MIGRATION_OPEN_REVIEW:{}", module_id));
+            }
+            legacy_reconciled_reviews.push(serde_json::json!({
+                "module_id": module_id,
+                "review_id": record_str(&review, "/review_id", &review_name),
+                "stage": stage
+            }));
+        }
         for name in GOVERNANCE_MAP_NAMES {
             let entry = sdk_map_migration_entry(&manifest, name);
             let field = record_str(entry, "/review_hash_field", "sdk-map-migration");
@@ -7450,6 +7479,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
             "bundle_digest": sdk_bundle_digest(),
             "maps": map_records,
             "frozen_reviews": frozen_reviews,
+            "legacy_reconciled_reviews": legacy_reconciled_reviews,
             "created_at": Utc::now().to_rfc3339()
         }),
         "SDK_MAP_MIGRATION_WRITE_FAILED",

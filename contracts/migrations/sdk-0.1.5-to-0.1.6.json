@@ -28,7 +28,7 @@
       "source": "contracts/migrations/0.1.5/governance-maps/mainline-call-map.json",
       "source_digest": "sha256:c36e4f9d5cff527d7f98b339772a53c87f420db58bb2215b6b68210e01124673",
       "target": "contracts/maps/mainline-call-map.json",
-      "target_digest": "sha256:1650f58333fa49fcd80a24b0d6f0b50d1c7aa5825c68d0aaaee493f18c7275d9"
+      "target_digest": "sha256:ddc8937a00a841de964dbbc038c021aaf6a5ee1cd4b9d9800c08f12c30776bab"
     },
     {
       "name": "verification-map.json",

@@ -549,6 +549,293 @@ fn install_legacy_governance_maps(root: &Path) {
     }
 }
 
+fn install_current_governance_maps(root: &Path) {
+    for (name, content) in [
+        (
+            "resource-map.json",
+            include_str!("../../contracts/maps/resource-map.json"),
+        ),
+        (
+            "function-map.json",
+            include_str!("../../contracts/maps/function-map.json"),
+        ),
+        (
+            "mainline-call-map.json",
+            include_str!("../../contracts/maps/mainline-call-map.json"),
+        ),
+        (
+            "verification-map.json",
+            include_str!("../../contracts/maps/verification-map.json"),
+        ),
+    ] {
+        fs::write(root.join(".appsdk/maps").join(name), content).unwrap();
+    }
+}
+
+fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
+    let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
+    fs::create_dir_all(migration_root.join("maps")).unwrap();
+    let previous_bundle_digest = format!("sha256:{}", "1".repeat(64));
+    let previous_manifest_digest = format!("sha256:{}", "2".repeat(64));
+    let mut maps = Vec::new();
+    for (name, content) in [
+        (
+            "resource-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
+        ),
+        (
+            "function-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/function-map.json"),
+        ),
+        (
+            "mainline-call-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"),
+        ),
+        (
+            "verification-map.json",
+            include_str!("../../contracts/migrations/0.1.5/governance-maps/verification-map.json"),
+        ),
+    ] {
+        fs::write(migration_root.join("maps").join(name), content).unwrap();
+        maps.push(serde_json::json!({
+            "name": name,
+            "source_digest": digest(content),
+            "target_digest": format!("sha256:{}", "3".repeat(64)),
+            "snapshot_path": format!(".appsdk/migrations/0.1.5-to-0.1.6/maps/{}", name)
+        }));
+    }
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "migration_id": "appsdk-0.1.5-to-0.1.6",
+        "source_version": "0.1.5",
+        "target_version": "0.1.6",
+        "bundle_digest": previous_bundle_digest,
+        "maps": maps,
+        "frozen_reviews": [],
+        "legacy_reconciled_reviews": [],
+        "created_at": "2026-01-01T00:00:00Z"
+    });
+    fs::write(
+        migration_root.join("record.json"),
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["version"] = Value::String("0.1.6".into());
+    lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
+    lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
+    fs::write(
+        lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+    (
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+        previous_bundle_digest,
+    )
+}
+
+#[test]
+fn pin_lock_reconciles_previous_bundle_target_without_rewriting_migration_record() {
+    let root = temp_root("pin-lock-guidance-bundle-refresh");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
+
+    let migrated = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        original_record
+    );
+    let lock: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
+    assert_eq!(lock["previous_bundle_digest"], previous_bundle_digest);
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_unreconciled_live_map_without_overwrite() {
+    let root = temp_root("pin-lock-unreconciled-live-map");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, _) = install_previous_bundle_migration_record(&root);
+    let tampered_map = "{\"tampered\":true}\n";
+    let map_path = root.join(".appsdk/maps/resource-map.json");
+    fs::write(&map_path, tampered_map).unwrap();
+
+    let rejected = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:resource-map.json"));
+    assert_eq!(fs::read_to_string(map_path).unwrap(), tampered_map);
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        original_record
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_current_maps_without_previous_bundle_witness() {
+    let root = temp_root("pin-lock-current-map-without-witness");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, _) = install_previous_bundle_migration_record(&root);
+    install_current_governance_maps(&root);
+
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let resources: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk-resources.json")).unwrap())
+            .unwrap();
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["bundle_digest"] = resources["bundle_digest"].clone();
+    lock.as_object_mut()
+        .unwrap()
+        .remove("previous_bundle_digest");
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        original_record
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_custom_map_record_from_bundle_reconciliation() {
+    let root = temp_root("pin-lock-custom-map-record");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, _) = install_previous_bundle_migration_record(&root);
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let mut record: Value = serde_json::from_str(&original_record).unwrap();
+    record["maps"][0]["canonical_source_digest"] = Value::String(digest(include_str!(
+        "../../contracts/migrations/0.1.5/governance-maps/resource-map.json"
+    )));
+    record["maps"][0]["canonical_target_digest"] = Value::String(digest(include_str!(
+        "../../contracts/maps/resource-map.json"
+    )));
+    fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("SDK_MIGRATION_TARGET_MAP_MISMATCH:resource-map.json"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_reconciliation_is_idempotent_and_snapshot_remains_immutable() {
+    let root = temp_root("pin-lock-reconciliation-idempotent");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, _) = install_previous_bundle_migration_record(&root);
+
+    let first = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let first_lock = fs::read_to_string(&lock_path).unwrap();
+
+    let second = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        original_record
+    );
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), first_lock);
+
+    let snapshot_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/maps/resource-map.json");
+    let snapshot = fs::read_to_string(&snapshot_path).unwrap();
+    fs::write(&snapshot_path, "{}\n").unwrap();
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("SDK_MIGRATION_SNAPSHOT_MISMATCH:resource-map.json"));
+    fs::write(&snapshot_path, snapshot).unwrap();
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_malformed_previous_bundle_digest() {
+    let root = temp_root("invalid-previous-bundle-digest");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    pin_test_lock(root_text);
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["previous_bundle_digest"] = Value::String("sha256:not-a-digest".into());
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_BUNDLE_DIGEST"));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     let root = temp_root("pin-lock-version-migration");

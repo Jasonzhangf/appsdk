@@ -1290,6 +1290,15 @@ fn assert_sdk_lock(root: &Path, project: &Value, require_pinned: bool) {
             fail("INVALID_SDK_BUNDLE_DIGEST");
         }
     }
+    if let Some(previous) = lock.get("previous_bundle_digest") {
+        let digest = previous.as_str().unwrap_or("");
+        if digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            fail("INVALID_SDK_BUNDLE_DIGEST");
+        }
+    }
     if require_pinned {
         if lock.get("binary_ref").and_then(Value::as_str) != Some("project-sdk") {
             fail("INVALID_SDK_LOCK_BINARY_REF");
@@ -7412,6 +7421,39 @@ fn sdk_map_migration_entry<'a>(manifest: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"))
 }
 
+fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<String> {
+    let record_bundle = record
+        .get("bundle_digest")
+        .and_then(Value::as_str)
+        .filter(|digest| digest.starts_with("sha256:"))?;
+    let lock_path = root.join(".appsdk/sdk.lock");
+    if !lock_path.is_file() {
+        return None;
+    }
+    if fs::symlink_metadata(&lock_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:sdk_lock");
+    }
+    let lock: Value = serde_json::from_str(
+        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+    let lock_bundle = lock.get("bundle_digest").and_then(Value::as_str)?;
+    let current_bundle = sdk_bundle_digest();
+    if record_bundle == current_bundle {
+        return None;
+    }
+    if lock_bundle == record_bundle
+        || (lock_bundle == current_bundle
+            && lock.get("previous_bundle_digest").and_then(Value::as_str) == Some(record_bundle))
+    {
+        return Some(record_bundle.to_string());
+    }
+    None
+}
+
 fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
     let migration_root = sdk_map_migration_root(root);
     let record_path = migration_root.join("record.json");
@@ -7448,6 +7490,7 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
     if maps.len() != GOVERNANCE_MAP_NAMES.len() {
         fail("INVALID_SDK_MIGRATION_RECORD");
     }
+    let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
     for name in GOVERNANCE_MAP_NAMES {
         let declared = sdk_map_migration_entry(&manifest, name);
         let entry = maps
@@ -7481,9 +7524,18 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         {
             fail(format!("SDK_MIGRATION_SNAPSHOT_MISMATCH:{}", name));
         }
-        if file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
-            != record_str(entry, "/target_digest", "sdk-migration-map")
-        {
+        let live_digest = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+        let target_digest = record_str(entry, "/target_digest", "sdk-migration-map");
+        let current_target = record_str(declared, "/target_digest", "sdk-map-migration");
+        let current_target_is_authorized = bundle_transition
+            && entry
+                .get("canonical_source_digest")
+                .is_none_or(Value::is_null)
+            && entry
+                .get("canonical_target_digest")
+                .is_none_or(Value::is_null)
+            && live_digest == current_target;
+        if live_digest != target_digest && !current_target_is_authorized {
             fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
         }
     }
@@ -7561,6 +7613,11 @@ fn install_current_governance_maps(root: &Path, force: bool) {
 fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) {
     let migration_root = sdk_map_migration_root(root);
     if migration_root.join("record.json").is_file() {
+        let record: Value = serde_json::from_str(
+            &fs::read_to_string(migration_root.join("record.json"))
+                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
         let manifest = sdk_map_migration_manifest();
         let source_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
             file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
@@ -7570,6 +7627,66 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
                     "sdk-map-migration",
                 )
         });
+        let bundle_changed = record
+            .get("bundle_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| digest != sdk_bundle_digest());
+        let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
+        if bundle_changed && !bundle_transition {
+            fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
+        }
+        let has_custom_map_binding = record
+            .pointer("/maps/0/canonical_source_digest")
+            .is_some_and(Value::is_string);
+        if !source_maps && !has_custom_map_binding {
+            let current_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+                file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                    == record_str(
+                        sdk_map_migration_entry(&manifest, name),
+                        "/target_digest",
+                        "sdk-map-migration",
+                    )
+            });
+            let recorded_target_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+                let entry = record
+                    .get("maps")
+                    .and_then(Value::as_array)
+                    .and_then(|maps| {
+                        maps.iter()
+                            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+                    })
+                    .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+                file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                    == record_str(entry, "/target_digest", "sdk-migration-map")
+            });
+            if !current_maps && !recorded_target_maps {
+                let detail = GOVERNANCE_MAP_NAMES
+                    .iter()
+                    .find(|name| {
+                        let live =
+                            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+                        let current_target = record_str(
+                            sdk_map_migration_entry(&manifest, name),
+                            "/target_digest",
+                            "sdk-map-migration",
+                        );
+                        let entry = record
+                            .get("maps")
+                            .and_then(Value::as_array)
+                            .and_then(|maps| {
+                                maps.iter().find(|entry| {
+                                    entry.get("name").and_then(Value::as_str) == Some(name)
+                                })
+                            })
+                            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+                        live != current_target
+                            && live != record_str(entry, "/target_digest", "sdk-migration-map")
+                    })
+                    .copied()
+                    .unwrap_or("mixed");
+                fail(format!("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:{detail}"));
+            }
+        }
         if source_maps {
             for module in project
                 .get("modules")
@@ -7800,6 +7917,19 @@ fn pin_lock(root: &Path, binary: &Path) {
             project_version
         ));
     }
+    let previous_bundle_digest = {
+        let record_path = sdk_map_migration_root(root).join("record.json");
+        if !record_path.is_file() {
+            None
+        } else {
+            let record: Value = serde_json::from_str(
+                &fs::read_to_string(&record_path)
+                    .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+            )
+            .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+            migration_bundle_transition_digest(root, &record)
+        }
+    };
     let binary = binary
         .canonicalize()
         .unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
@@ -7838,6 +7968,12 @@ fn pin_lock(root: &Path, binary: &Path) {
             .cloned()
             .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE")),
     );
+    if let Some(previous_bundle_digest) = previous_bundle_digest {
+        lock.insert(
+            "previous_bundle_digest".into(),
+            Value::String(previous_bundle_digest),
+        );
+    }
     let pinned_binary = root.join(".appsdk/sdk.bin");
     if fs::symlink_metadata(&pinned_binary)
         .map(|metadata| metadata.file_type().is_symlink())

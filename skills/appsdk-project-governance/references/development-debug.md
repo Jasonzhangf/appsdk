@@ -12,16 +12,19 @@ Read the returned AGENTS and Skill sources, invoke the suggested Skills, and ask
 only unresolved questions. Do not implement until the following context is
 confirmed and submitted as a PlanProposal.
 
-Before implementation, close:
+Before implementation, bind the project context:
 
 ```text
 requirements + acceptance + non-goals
--> confirmed scope
--> top-down module/resource map
--> high-level design
--> detailed call/data/error design
--> requirements/design/module/verification consistency
+-> declared function owner + allowed/forbidden paths
+-> declared verification gates + prior records
+-> proportionate architecture and detailed design
 ```
+
+Architecture and detailed design are required for a new project or meaningful
+cross-module or semantic change. A local change may use the existing design and
+take the declared bypass edge after recording why it is sufficient. Never skip
+through an undeclared transition.
 
 Then:
 
@@ -40,6 +43,15 @@ latest origin/main
 Candidate commit binds tree/artifact/evidence. It is not a delivery commit and
 does not authorize merge.
 
+Before adding behavior, perform an ablation check: confirm that the behavior is
+necessary, no declared owner already provides it, and common semantics cannot
+reuse an existing shared function. Keep lifecycle skeletons fixed; add missing
+capability through declared operation configuration, registered hooks, or
+declared gates. Missing capability fails or skips explicitly with a recorded
+reason. Control/configuration truth belongs only in declared typed control
+resources, error chains, or project configuration sources, never business
+payloads, metadata, debug logs, or implicit context.
+
 ## Debug
 
 Start with:
@@ -54,19 +66,22 @@ contract before writing the debug PlanProposal.
 Use one hypothesis per round:
 
 ```text
-same-input reproduction
--> confirmation/falsification signals
--> first semantic divergence
--> forward intervention
--> reversal intervention when feasible
--> root-cause decision
--> unique-owner fix
--> old-input replay + regression
+read AGENTS + declared maps + prior notes/records
+-> append observations, one hypothesis, and evidence to run notes
+-> same-input reproduction when feasible
+-> confirmation/falsification signals + first semantic divergence
+-> forward and reversal intervention when feasible
+-> unique-owner fix + proportionate regression
+-> mapped gates + old-input replay when runtime-impacting
 ```
 
 Final error is not automatically root cause. Grep hit is not evidence. Do not
 patch output layers, add fallback, or modify multiple owners to make one test
 green.
 
-Before merge, check maps, module boundary, owner, payload/control separation,
-duplicate implementation, affected tests, and the latest-main integrated tree.
+Before merge, review maps, module boundary, owner, payload/control separation,
+configured operations, registered hooks, declared gates, ablation, shared
+function reuse, affected tests, and the latest-main integrated tree. A violation
+introduced or modified by the candidate blocks review. An untouched historical
+violation is a recommendation unless it affects the changed scope, safety,
+ownership, evidence truth, or required delivery.

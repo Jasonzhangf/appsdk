@@ -9,6 +9,8 @@
 - absolute, parent traversal, and symlink rule paths fail;
 - duplicate source, workflow, node, edge, or rule IDs fail;
 - advisory, warning, and forbidden severities validate.
+- bundled rules make changed-scope architecture violations forbidden while
+  untouched historical architecture debt remains advisory;
 
 ## Compatibility
 
@@ -73,3 +75,5 @@
 - pass advances one adjacent node; fail/blocked does not skip;
 - close reports workflow and AppSDK lifecycle completion separately;
 - close emits memory candidates but never edits durable memory/rule files.
+- feature/debug/review nodes require changed-scope architecture-conformance
+  evidence and describe historical findings as non-blocking recommendations.

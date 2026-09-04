@@ -17,6 +17,25 @@ candidate commit/tree/scope
 Review tool follows user choice; otherwise use configured default. Review is
 read-only and bound to exact candidate, scope, maps, artifact, and evidence.
 
+Changed-scope architecture review must verify:
+
+- control/configuration truth uses declared typed control resources, error
+  chains, or project configuration sources and never business payloads,
+  metadata, debug logs, or implicit context;
+- each semantic behavior has one owner and one implementation, with no fallback
+  or temporary bypass;
+- the lifecycle skeleton stays fixed while operations are configured, hooks are
+  registered, and gates are declared;
+- additions passed an ablation check and common semantics use one shared
+  function;
+- missing operators, hooks, or gates fail or skip explicitly and never mock
+  success.
+
+Violations introduced or modified by the candidate block review. Untouched
+historical violations are reported as recommendations and do not block unless
+they affect changed scope, safety, ownership, evidence truth, or required
+delivery.
+
 Any source, test, build config, environment, artifact, scope, owner, or required
 rule change invalidates affected evidence. Revise plan, rerun affected gates,
 then review again.
@@ -57,4 +76,3 @@ After remote receipt, promotion/freeze requirements, and retention record:
 3. remove only the owned merged worktree and branch;
 4. verify removal;
 5. release claim.
-

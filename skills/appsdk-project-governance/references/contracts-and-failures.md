@@ -19,6 +19,14 @@ Legacy optional metadata, historical strictness outside changed scope, missing
 release evidence during ordinary development, and absent parallel-worker data
 in a single-worker task are warnings or advisory.
 
+Architecture conformance is change-scoped. New or modified behavior that puts
+control truth in payload/metadata/log context, duplicates an owner or
+implementation, adds an inline orchestration branch instead of configuring an
+operation/hook/gate, skips ablation, duplicates shared semantics, or mocks a
+missing capability is forbidden. The same pattern in untouched historical code
+is advisory unless it affects safety, ownership, evidence truth, or the current
+delivery boundary.
+
 ## Compatibility
 
 Harness does not check binary SHA. Existing AppSDK version/contract compatibility

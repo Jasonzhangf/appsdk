@@ -31,6 +31,10 @@
     {"resource_id":"remote_repository","owner":"appsdk::host_vcs","truth_store":"git ls-remote <remote> <ref>","allowed_operations":["observe"]},
     {"resource_id":"remote_tracking_ref","owner":"appsdk::host_vcs","truth_store":"refs/remotes/<remote>/<recorded-mainline-ref>","allowed_operations":["read","validate"],"relations":{"must_reference":["mainline_merge"]}},
     {"resource_id":"mainline_merge","owner":"appsdk::merge_queue","truth_store":".appsdk/records/merge-record-<module>.json","allowed_operations":["read","validate","write"]},
+    {"resource_id":"guidance_rule_sources","owner":"appsdk::process_control","truth_store":"paths explicitly declared by .appsdk/project.json#/guidance/rule_sources","allowed_operations":["read","validate"],"forbidden_relations":["runtime_directory_scan","implicit_rule_source"]},
+    {"resource_id":"guidance_compiled_manifest","owner":"appsdk::process_control","truth_store":".appsdk/guidance/compiled.json","allowed_operations":["read","validate","write"],"relations":{"must_reference":["project_contract","guidance_rule_sources"]}},
+    {"resource_id":"guidance_active_plan","owner":"appsdk::process_control","truth_store":".appsdk-control/guidance/<task-id>/plan.json","allowed_operations":["read","validate","write"],"relations":{"must_reference":["project_contract","guidance_compiled_manifest"]}},
+    {"resource_id":"guidance_event_ledger","owner":"appsdk::process_control","truth_store":".appsdk-control/guidance/<task-id>/events.jsonl","allowed_operations":["read","validate","append"],"relations":{"must_reference":["guidance_active_plan"]},"forbidden_relations":["event_overwrite","event_delete"]},
     {"resource_id":"lifecycle_error","owner":"appsdk::record_graph","truth_store":"process error chain","allowed_operations":["emit"]}
   ]
 }

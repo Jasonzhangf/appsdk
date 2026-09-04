@@ -12,6 +12,10 @@
     {"function_id":"portable_mainline_ref_resolution","owner":"appsdk::host_vcs","entry_symbols":["resolve_recorded_mainline_commit","assert_single_merge_gate"],"required_gates":["portable_mainline_ref","mainline_merge_identity"]},
     {"function_id":"parallel_merge_queue","owner":"appsdk::merge_queue","entry_symbols":["assert_parallel_merge_gate"],"required_gates":["exclusive_worker_worktree","incremental_milestone_delivery","serial_merge_queue","integration_affected_verification","tested_integration_identity","remote_main_receipt","mainline_merge_identity"]},
     {"function_id":"fix_lifecycle_graph","owner":"appsdk::fix_lifecycle","entry_symbols":["assert_fix_lifecycle_graph"],"required_gates":["worktree_clean","baseline_reproduced","fix_candidate_verified","architecture_review_pass","post_architecture_effectiveness","mainline_merge_identity"]},
-    {"function_id":"promote_freeze_publish","owner":"appsdk::lifecycle","entry_symbols":["promote_module","freeze_module","publish_active"],"required_gates":["fix_lifecycle_graph","record_graph","artifact_hash","vcs_clean"]}
+    {"function_id":"promote_freeze_publish","owner":"appsdk::lifecycle","entry_symbols":["promote_module","freeze_module","publish_active"],"required_gates":["fix_lifecycle_graph","record_graph","artifact_hash","vcs_clean"]},
+    {"function_id":"development_process_rule_compile","owner":"appsdk::process_control","entry_symbols":["compile","validate_manifest","load_compiled"],"required_gates":["guidance_declared_sources","guidance_deterministic_compile"]},
+    {"function_id":"development_process_plan_control","owner":"appsdk::process_control","entry_symbols":["plan","rule_context","scope_allowed"],"required_gates":["guidance_plan_schema","guidance_adjacent_transition","guidance_context_binding"]},
+    {"function_id":"development_process_execution_ledger","owner":"appsdk::process_control","entry_symbols":["update","append_event"],"required_gates":["guidance_evidence_required","guidance_event_idempotency","guidance_context_binding"]},
+    {"function_id":"development_process_state_projection","owner":"appsdk::process_control","entry_symbols":["project_status","next_step","lifecycle_projection","close"],"required_gates":["guidance_module_binding","guidance_lifecycle_projection","guidance_close_boundary"]}
   ]
 }

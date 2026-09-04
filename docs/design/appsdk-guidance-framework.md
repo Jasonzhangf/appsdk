@@ -1,0 +1,197 @@
+# AppSDK Development Process Control Harness — Detailed Design
+
+## 1. Project contract
+
+Projects opt in through `.appsdk/project.json`:
+
+```json
+{
+  "guidance": {
+    "enforcement": "advisory",
+    "compiled_manifest": ".appsdk/guidance/compiled.json",
+    "rule_sources": [
+      {
+        "source_id": "project-agents",
+        "kind": "agents",
+        "path": "AGENTS.md",
+        "required": false,
+        "precedence": 100
+      },
+      {
+        "source_id": "appsdk-governance-skill",
+        "kind": "skill",
+        "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
+        "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
+        "required": true,
+        "precedence": 200
+      }
+    ]
+  }
+}
+```
+
+Paths are project-relative, normalized, non-symlinked, and explicitly listed.
+Duplicate source IDs, duplicate precedence, path escape, or duplicate workflow
+IDs are invalid.
+
+## 2. Rule compiler
+
+`appsdk guide compile <project>`:
+
+1. reads the project contract;
+2. reads only declared rule sources;
+3. validates each declared JSON guidance contract;
+4. orders sources by precedence then source ID;
+5. rejects duplicate domain, node, edge, and rule IDs;
+6. emits source digests, merged workflows/rules, and a deterministic manifest
+   hash to `.appsdk/guidance/compiled.json`.
+
+Compilation is deterministic: timestamps and absolute paths are excluded. The
+same source bytes and project contract produce identical output in every
+worktree.
+
+## 3. State projector and domain prompts
+
+Read-only commands:
+
+```text
+appsdk guide status <project> [--task <id>]
+appsdk guide <domain> <project> [--task <id>] [--module <id>]
+appsdk guide next <project> --task <id>
+appsdk guide close <project> --task <id>
+```
+
+Supported domains are `bootstrap`, `migration`, `governance-preflight`,
+`develop`, `debug`, `review`, `delivery`, `integration`, `promotion`, `freeze`,
+and `cleanup`.
+
+All projections include:
+
+```json
+{
+  "lifecycle": {"project_stage": "...", "module_stage": "..."},
+  "readiness": "ready|blocked|complete",
+  "reason_code": "...",
+  "first_failing_gate": null,
+  "next": {"node_id": "...", "instruction": "..."}
+}
+```
+
+The projector validates the selected module's declared `owned_paths` and
+`contract_paths` before rule compilation. `MODULE_PATH_MISSING` returns
+`module_binding` as the first failing gate and directs the module owner to bind
+the project contract to an existing project-owned path. Ordinary `verify`
+remains independent; compile-time source hashing retains its existing hard
+failure.
+
+`readiness` and `reason_code` explain lifecycle state; they are not lifecycle
+nodes. Prompt commands add declared rule paths, allowed evidence, and the plan
+proposal schema. They never choose technical implementation details.
+
+## 4. Plan controller
+
+The agent writes JSON and submits it with:
+
+```text
+appsdk guide plan <project> --task <id> --input <file>
+```
+
+Required proposal fields:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "develop",
+  "goal_id": "goal-1",
+  "task_id": "task-1",
+  "module_id": "app-core",
+  "objective": "bounded objective",
+  "scope_paths": ["src/**", "tests/**"],
+  "steps": [
+    {
+      "step_id": "step-1",
+      "node_id": "requirements",
+      "action": "analyze requirements",
+      "owner": "app-core",
+      "expected_evidence": ["requirements-record"]
+    }
+  ]
+}
+```
+
+The proposal must not contain `current_node`, `next_transition`, source hashes,
+or a rule-context hash. AppSDK derives them. Nodes must form one adjacent path
+from the selected domain entry. Owner must match the node's resolved canonical
+owner. Scope must remain inside the module's owned/contract paths.
+
+The persisted PlanRecord adds a RuleContextSnapshot and a canonical plan hash.
+The first release stores active plans in `.appsdk-control`; it does not make an
+unfinished plan part of the committed project truth.
+
+## 5. Plan revision ledger
+
+Submitting `guide plan` for an existing task requires `revision_reason`:
+
+```text
+new_evidence | new_blocker | hypothesis_rejected | scope_changed |
+owner_changed | source_drift | environment_changed |
+prior_solution_matched | rule_context_changed |
+guidance_manifest_changed | project_contract_changed |
+gate_contract_changed | dependency_input_changed
+```
+
+AppSDK appends a PlanRevisionRecord, retains the old PlanRecord and events, and
+replaces only the active projection. Existing history is never overwritten.
+Scope, owner, source, manifest, or forbidden-rule drift cannot be auto-admitted.
+
+## 6. Execution event ledger
+
+```text
+appsdk guide update <project> --task <id> --input <file>
+```
+
+Input:
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "event-1",
+  "step_id": "step-1",
+  "result": "pass",
+  "observations": ["what was observed"],
+  "evidence": ["evidence-id"]
+}
+```
+
+Only the projected next step may be updated. `pass` on a node requiring
+evidence needs at least one evidence ID. `fail` or `blocked` records evidence
+and keeps the workflow blocked. Scope or owner changes require a plan revision.
+
+Before append, AppSDK recomputes the rule context. Drift rejects the update and
+returns the required revision reason. Event append is atomic and idempotent.
+
+## 7. Lifecycle bridge
+
+Guidance maps domains to existing lifecycle capabilities and commands. It does
+not reimplement them. A step result records what the agent observed; AppSDK
+lifecycle commands and records remain authoritative for admission, review,
+delivery, integration, promotion, freeze, and cleanup.
+
+`guide close` distinguishes `workflow_complete` from
+`appsdk_lifecycle_complete`. A finished advisory plan cannot turn a draft or
+blocked AppSDK lifecycle into PASS.
+
+## 8. Closeout projector
+
+`guide close` emits workflow state, remaining AppSDK lifecycle gaps, evidence
+summary, cleanup requirement, and memory candidates. It never edits durable
+rules or memory. Applying those candidates is a separate reviewed workflow.
+
+## 9. Compatibility
+
+- Projects without `guidance` continue to use every existing command unchanged.
+- New projects receive advisory guidance declarations and the canonical Skill
+  contract.
+- Existing projects opt in by adding declared sources and compiling once.
+- Binary byte hashes are not a guidance prerequisite. Version and project
+  contract compatibility remain owned by existing AppSDK lifecycle commands.

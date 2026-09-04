@@ -4,6 +4,22 @@
 
 AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实现。新项目拥有业务语义；AppSDK 只提供机制。
 
+## Development Process Control Harness
+
+Harness 将项目声明的 `AGENTS.md`、Skill 和 JSON 流程合同编译为确定性规则上下文；Agent 生成 Plan，AppSDK 校验并持久化 Plan/Revision/Step event，投影当前状态和唯一相邻下一步。它不调用模型、不复制 lifecycle、不自动写 memory，且默认 advisory。
+
+```bash
+appsdk guide compile ./my-app
+appsdk guide status ./my-app --task task-id
+appsdk guide develop ./my-app --module app-core
+appsdk guide plan ./my-app --task task-id --input plan.json
+appsdk guide update ./my-app --task task-id --input result.json
+appsdk guide next ./my-app --task task-id
+appsdk guide close ./my-app --task task-id
+```
+
+功能边界见 [Development Process Control Harness](./docs/architecture/development-process-control-harness.md)，详细合同见 [Harness design](./docs/design/appsdk-guidance-framework.md)。
+
 ## 第一阶段治理流程
 
 ```text
@@ -41,6 +57,8 @@ appsdk publish-active ./my-app --module app-core --version active-v1
 - [Goal Clarification Contract](./docs/design/goal-clarification-contract.md)
 - [AppSDK Project Integration](./docs/design/appsdk-project-integration.md)
 - [Development Scenario Contracts](./docs/design/development-scenarios.md)
+- [Development Process Control Harness](./docs/architecture/development-process-control-harness.md)
+- [Harness Detailed Design](./docs/design/appsdk-guidance-framework.md)
 - [Rust Binary Delivery](./docs/design/rust-binary-delivery.md)
 
 目标提示词：收到一个新开发/debug目标时，先澄清并确认目标，再写 `docs/goals/<feature-name>-plan.md`，最后输出短 `/goal`。固定规范见 [`skills/appsdk-project-governance/references/goal-prompt.md`](./skills/appsdk-project-governance/references/goal-prompt.md)。

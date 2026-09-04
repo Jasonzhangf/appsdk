@@ -29,6 +29,16 @@
     {"gate_id":"tested_integration_identity","command":"appsdk verify <project>","required_for":["mainline_merge"]},
     {"gate_id":"remote_main_receipt","command":"appsdk verify <project>","required_for":["promotion","cleanup","freeze","publish"]},
     {"gate_id":"mainline_merge_identity","command":"appsdk verify <project>","required_for":["promotion","compile","freeze","publish"]},
-    {"gate_id":"fix_lifecycle_graph","command":"appsdk verify <project>","required_for":["promotion","freeze","publish"]}
+    {"gate_id":"fix_lifecycle_graph","command":"appsdk verify <project>","required_for":["promotion","freeze","publish"]},
+    {"gate_id":"guidance_declared_sources","command":"appsdk guide compile <project>","required_for":["guidance_compile"]},
+    {"gate_id":"guidance_deterministic_compile","command":"cargo test --test cli_smoke guidance_compile_is_deterministic_and_optional_for_existing_commands","required_for":["guidance_compile","release"]},
+    {"gate_id":"guidance_plan_schema","command":"cargo test --test cli_smoke guidance_rejects_undeclared_paths_and_non_adjacent_agent_plans","required_for":["guidance_plan"]},
+    {"gate_id":"guidance_adjacent_transition","command":"cargo test --test cli_smoke guidance_rejects_undeclared_paths_and_non_adjacent_agent_plans","required_for":["guidance_plan"]},
+    {"gate_id":"guidance_context_binding","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_plan","guidance_update"]},
+    {"gate_id":"guidance_evidence_required","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_update"]},
+    {"gate_id":"guidance_event_idempotency","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_update"]},
+    {"gate_id":"guidance_module_binding","command":"cargo test --test cli_smoke guidance_projects_missing_module_path_and_recovers_after_rebind","required_for":["guidance_status","governance_preflight","release"]},
+    {"gate_id":"guidance_lifecycle_projection","command":"cargo test --test cli_smoke guidance_compile_is_deterministic_and_optional_for_existing_commands","required_for":["guidance_status"]},
+    {"gate_id":"guidance_close_boundary","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_close"]}
   ]
 }

@@ -882,6 +882,13 @@ fn help() -> Value {
             "read project documents and present GuidanceSetupProposal for explicit user approval",
             "after approval update project rule sources, then run appsdk guide compile <project>"
         ],
+        "existing_project_upgrade": [
+            "appsdk init <project>",
+            "appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <id>",
+            "read current project rules before the installed standard template reference",
+            "present retained rules, recommended differences, and declined template items for explicit user approval",
+            "after approval apply only accepted differences, then compile and verify"
+        ],
         "start": [
             "appsdk guide status <project> --task <id>",
             "appsdk guide compile <project>",

@@ -33,6 +33,7 @@
     {"gate_id":"guidance_declared_sources","command":"appsdk guide compile <project>","required_for":["guidance_compile"]},
     {"gate_id":"guidance_deterministic_compile","command":"cargo test --test cli_smoke guidance_compile_is_deterministic_and_optional_for_existing_commands","required_for":["guidance_compile","release"]},
     {"gate_id":"guidance_setup_initialization","command":"cargo test --test cli_smoke existing_governance_without_guide_gets_read_only_setup_proposal","required_for":["guidance_setup","release"]},
+    {"gate_id":"guidance_template_upgrade_initialization","command":"cargo test --test cli_smoke repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal","required_for":["governance_init","guidance_upgrade","release"]},
     {"gate_id":"project_agent_contract_template","command":"cargo test --test cli_smoke project_agent_contract_is_created_for_new_projects_but_never_overwrites_project_rules","required_for":["new_project","governance_init","release"]},
     {"gate_id":"guidance_initialization","command":"cargo test --test cli_smoke guidance_init_projects_declared_context_and_commands","required_for":["guidance_intake","release"]},
     {"gate_id":"guidance_plan_schema","command":"cargo test --test cli_smoke guidance_rejects_undeclared_paths_and_non_adjacent_agent_plans","required_for":["guidance_plan"]},

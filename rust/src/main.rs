@@ -7157,6 +7157,33 @@ fn resolve_init_target(workspace: &Path, project_root: Option<&str>) -> PathBuf 
     workspace.join(relative)
 }
 
+fn existing_init_target(workspace: &Path, project_root: Option<&str>) -> Option<PathBuf> {
+    let relative = project_root.unwrap_or(".");
+    let relative_path = Path::new(relative);
+    if relative.is_empty()
+        || relative_path.is_absolute()
+        || (relative != "."
+            && relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            }))
+    {
+        fail("INVALID_PROJECT_ROOT");
+    }
+    let root = if relative == "." {
+        workspace.to_path_buf()
+    } else {
+        workspace.join(relative_path)
+    };
+    if !root.join(".appsdk/project.json").is_file() {
+        return None;
+    }
+    assert_no_symlink_components(workspace, &root, "existing_init_project");
+    Some(root)
+}
+
 fn preparation_file(workspace: &Path) -> PathBuf {
     workspace.join(".appsdk-prepare.json")
 }
@@ -7299,14 +7326,29 @@ fn init_project(root: &Path) {
         fail(format!("TARGET_SYMLINK:{}", root.display()));
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    let existing_project_needs_guidance = root.join(".appsdk/project.json").is_file()
+        && serde_json::from_str::<Value>(
+            &fs::read_to_string(root.join(".appsdk/project.json"))
+                .unwrap_or_else(|_| fail("INVALID_PROJECT")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_PROJECT"))
+        .get("guidance")
+        .is_none();
     ensure_governance_layout(root);
     write_project_scaffold(root);
     install_bundle_resources(root);
     println!("initialized {}", root.display());
-    println!("next appsdk guide compile <project>");
-    println!(
-        "then appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>"
-    );
+    if existing_project_needs_guidance {
+        println!(
+            "next appsdk guide init <project> --task guidance-setup --mode bootstrap --module <module-id>"
+        );
+        println!("then read project documents and present GuidanceSetupProposal for user approval");
+    } else {
+        println!("next appsdk guide compile <project>");
+        println!(
+            "then appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>"
+        );
+    }
 }
 
 fn new_project(root: &Path) {
@@ -7937,19 +7979,23 @@ fn main() {
                 fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]");
             }
             let workspace_path = Path::new(&workspace);
-            let (preparation, preparation_workspace) = read_init_preparation(workspace_path);
-            let prepared_root = preparation
-                .get("project_root")
-                .and_then(Value::as_str)
-                .unwrap_or_else(|| fail("PREPARATION_PROJECT_ROOT_MISSING"));
-            if let Some(explicit_root) = project_root.as_deref() {
-                let _ = resolve_init_target(&preparation_workspace, Some(explicit_root));
+            if let Some(root) = existing_init_target(workspace_path, project_root.as_deref()) {
+                init_project(&root);
+            } else {
+                let (preparation, preparation_workspace) = read_init_preparation(workspace_path);
+                let prepared_root = preparation
+                    .get("project_root")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| fail("PREPARATION_PROJECT_ROOT_MISSING"));
+                if let Some(explicit_root) = project_root.as_deref() {
+                    let _ = resolve_init_target(&preparation_workspace, Some(explicit_root));
+                }
+                if project_root.as_deref().is_some_and(|root| root != prepared_root) {
+                    fail("PREPARATION_PROJECT_ROOT_MISMATCH");
+                }
+                let root = resolve_init_target(&preparation_workspace, Some(prepared_root));
+                init_project(&root);
             }
-            if project_root.as_deref().is_some_and(|root| root != prepared_root) {
-                fail("PREPARATION_PROJECT_ROOT_MISMATCH");
-            }
-            let root = resolve_init_target(&preparation_workspace, Some(prepared_root));
-            init_project(&root);
         }
         Some("prepare") => {
             let workspace = args

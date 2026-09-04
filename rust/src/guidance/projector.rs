@@ -66,6 +66,22 @@ pub(super) fn project_status(
         .and_then(|guidance| guidance.get("enforcement"))
         .and_then(Value::as_str)
         .unwrap_or("advisory");
+    if guidance_contract(&project).is_none() {
+        let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
+        return serde_json::json!({
+            "harness": "appsdk-development-process-control",
+            "enforcement": enforcement,
+            "lifecycle": lifecycle,
+            "readiness": "needs_setup",
+            "reason_code": "GUIDANCE_SETUP_REQUIRED",
+            "first_failing_gate": null,
+            "guide_flow_required": true,
+            "next": {
+                "command": format!("appsdk guide init <project> --task guidance-setup --mode bootstrap --module {}", module_id),
+                "then": "read project documents, present GuidanceSetupProposal, and wait for explicit user approval before durable rule writes or compile"
+            }
+        });
+    }
     if let Some((surface, path)) = missing_module_path(root, selected_module) {
         let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
         let owner = required_string(

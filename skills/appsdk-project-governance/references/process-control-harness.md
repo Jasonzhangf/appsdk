@@ -18,10 +18,22 @@ or write memory automatically.
 
 ```bash
 appsdk guide status <project> --task <task-id>
-appsdk guide compile <project>
 appsdk guide init <project> --task <task-id> --mode develop --module <module-id>
 appsdk guide develop <project> --task <task-id> --module <module-id>
 ```
+
+If status returns `GUIDANCE_SETUP_REQUIRED`, do not call compile yet:
+
+```bash
+appsdk guide init <project> --task guidance-setup --mode bootstrap --module <module-id>
+```
+
+Read the returned candidate sources, produce the requested
+`GuidanceSetupProposal`, and obtain explicit user approval. The Agent then
+updates project-owned human and machine rule sources in a clean owner worktree,
+declares them in `.appsdk/project.json`, and runs `appsdk guide compile` plus
+`appsdk verify`. If status is only `GUIDANCE_NOT_COMPILED`, approved sources are
+already declared and compile is the next command.
 
 Use `--mode debug` for a bug, regression, or incident. Use another declared
 domain when appropriate. `guide init` is read-only and returns:
@@ -34,6 +46,10 @@ domain when appropriate. `guide init` is read-only and returns:
 Ask only questions still unresolved after reading the returned sources and the
 current user request. Then run the projected domain command and write the
 PlanProposal. `appsdk guide --help` lists the full command surface.
+
+`GuidanceSetupProposal` is project-level and user-approved. `PlanProposal` is
+task-level and stored in local control state. Never promote a task plan into a
+project Skill automatically.
 
 If status returns `MODULE_PATH_MISSING`, treat it as a project module-binding
 error. The named module owner updates that module's `owned_paths` or

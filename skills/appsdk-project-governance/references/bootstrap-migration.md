@@ -16,6 +16,37 @@ requirements + acceptance
 `init` is idempotent. It fills missing governance resources and preserves
 business files. Use `new` only for an empty destination.
 
+## Governance exists but Guide is missing
+
+Do not reset or migrate valid lifecycle truth merely to add Guide. Run
+idempotent initialization so the current AppSDK can install missing Guide
+resources while preserving the existing project contract, maps, records,
+Active, and Protected state.
+
+An already governed root containing `.appsdk/project.json` may rerun
+`appsdk init` directly; its existing project root is the authority, so a new
+preparation record is not required for this non-destructive resource refresh.
+Fresh or relocated initialization still requires confirmed preparation.
+
+```text
+appsdk init
+-> appsdk guide status
+-> GUIDANCE_SETUP_REQUIRED
+-> appsdk guide init --task guidance-setup --mode bootstrap
+-> Agent reads returned AGENTS and local Skill candidates
+-> Agent asks only unresolved questions
+-> Agent presents GuidanceSetupProposal
+-> explicit user approval
+-> clean owner worktree updates AGENTS/local Skill/machine contract/source declaration
+-> appsdk guide compile
+-> appsdk verify
+```
+
+Bootstrap intake is read-only. Candidate files are not compiled rule sources
+until the user approves them and `.appsdk/project.json` declares them. A
+task-level PlanProposal is not a substitute for this project-level setup and is
+never copied into a Skill automatically.
+
 ## Existing project
 
 Inventory AppSDK roots, maps, records, Active/Protected, local control state,
@@ -64,7 +95,8 @@ Do not force release/freeze evidence onto unfinished work.
 snapshot current source and task state
 -> initialize advisory governance
 -> bind current goal/module/owner/worktree
--> run guide init, read declared AGENTS/Skills, ask unresolved questions
+-> if Guide is missing, complete the user-approved setup proposal first
+-> run task guide init, read declared AGENTS/Skills, ask unresolved questions
 -> place workflow at the current real phase
 -> apply new rules to new/changed nodes
 -> continue development

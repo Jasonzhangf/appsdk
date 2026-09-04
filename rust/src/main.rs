@@ -14,6 +14,7 @@ mod guidance;
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_MAP_MIGRATION_MANIFEST: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
+const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const GOVERNANCE_MAP_NAMES: [&str; 4] = [
     "resource-map.json",
     "function-map.json",
@@ -7066,6 +7067,10 @@ fn write_if_missing(root: &Path, relative: &str, content: &str) {
     fs::write(target, content).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
 }
 
+fn write_project_agent_contract(root: &Path) {
+    write_if_missing(root, "AGENTS.md", PROJECT_AGENTS_TEMPLATE);
+}
+
 fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
@@ -7335,7 +7340,8 @@ fn init_project(root: &Path) {
         fail(format!("TARGET_SYMLINK:{}", root.display()));
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
-    let existing_project_needs_guidance = root.join(".appsdk/project.json").is_file()
+    let fresh_governance = !root.join(".appsdk/project.json").is_file();
+    let existing_project_needs_guidance = !fresh_governance
         && serde_json::from_str::<Value>(
             &fs::read_to_string(root.join(".appsdk/project.json"))
                 .unwrap_or_else(|_| fail("INVALID_PROJECT")),
@@ -7345,6 +7351,9 @@ fn init_project(root: &Path) {
         .is_none();
     ensure_governance_layout(root);
     write_project_scaffold(root);
+    if fresh_governance {
+        write_project_agent_contract(root);
+    }
     install_bundle_resources(root);
     println!("initialized {}", root.display());
     if existing_project_needs_guidance {
@@ -7396,6 +7405,7 @@ fn new_project(root: &Path) {
     }
     ensure_governance_layout(root);
     write_project_scaffold(root);
+    write_project_agent_contract(root);
     install_bundle_resources(root);
     println!("created {}", root.display());
     println!("next appsdk guide compile <project>");

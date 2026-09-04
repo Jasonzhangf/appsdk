@@ -116,6 +116,25 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
     assert!(gitignore.contains(".appsdk/sdk.bin"));
     assert!(gitignore.contains("/active/lib/"));
     assert!(gitignore.contains("/generated/"));
+    let project_agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+    for section in [
+        "## Project Truth",
+        "## Semantic Invariants",
+        "## Ownership",
+        "## Architecture Truth",
+        "## Development Process Control",
+        "## Git Protection",
+        "## Task Routing",
+        "## Evidence Boundary",
+    ] {
+        assert!(project_agents.contains(section), "missing {section}");
+    }
+    for project_specific in ["RouteCodex", "rccv3", "Provider", "/Users/", "/Volumes/"] {
+        assert!(
+            !project_agents.contains(project_specific),
+            "template leaked project-specific content: {project_specific}"
+        );
+    }
     for path in [
         ".appsdk/project.json",
         ".appsdk/goal.json",
@@ -143,6 +162,10 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
 
     let second = run(&["init", root_text]);
     assert!(second.status.success());
+    assert_eq!(
+        fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+        project_agents
+    );
     let gitignore_after = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert_eq!(gitignore_after.matches("# BEGIN APPSDK MANAGED").count(), 1);
     let verified = run(&["verify", root_text]);
@@ -152,6 +175,27 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         String::from_utf8_lossy(&verified.stderr)
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_agent_contract_is_created_for_new_projects_but_never_overwrites_project_rules() {
+    let created = temp_root("project-agent-contract-new");
+    let created_text = created.to_str().unwrap();
+    assert!(run(&["new", created_text]).status.success());
+    let template = fs::read_to_string(created.join("AGENTS.md")).unwrap();
+    assert!(template.contains("## Development Process Control"));
+
+    fs::write(created.join("AGENTS.md"), "# Existing project rules\n").unwrap();
+    assert!(run(&["init", created_text]).status.success());
+    assert_eq!(
+        fs::read_to_string(created.join("AGENTS.md")).unwrap(),
+        "# Existing project rules\n"
+    );
+
+    fs::remove_file(created.join("AGENTS.md")).unwrap();
+    assert!(run(&["init", created_text]).status.success());
+    assert!(!created.join("AGENTS.md").exists());
+    fs::remove_dir_all(created).unwrap();
 }
 
 #[test]
@@ -3520,6 +3564,132 @@ fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
 }
 
 #[test]
+fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
+    let root = temp_root("guidance-project-neutral-context");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let guidance: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    for (rule_id, severity) in [
+        ("changed-scope-control-truth", "forbidden"),
+        ("changed-scope-single-owner", "forbidden"),
+        ("changed-scope-configured-orchestration", "forbidden"),
+        ("changed-scope-ablation-and-sharing", "forbidden"),
+        ("historical-architecture-debt", "advisory"),
+        ("project-context-binding", "warning"),
+        ("debug-notes-required", "warning"),
+        ("map-gate-update", "advisory"),
+    ] {
+        assert!(guidance["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| { rule["rule_id"] == rule_id && rule["severity"] == severity }));
+    }
+    assert!(guidance["rules"].as_array().unwrap().iter().any(|rule| {
+        rule["rule_id"] == "adjacent-transition" && rule["severity"] == "forbidden"
+    }));
+
+    let workflows = guidance["workflows"].as_array().unwrap();
+    let develop = workflows
+        .iter()
+        .find(|workflow| workflow["domain"] == "develop")
+        .unwrap();
+    let develop_nodes = develop["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["node_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for node in [
+        "requirements",
+        "map_check",
+        "architecture",
+        "detailed_design",
+        "implementation",
+        "map_update",
+    ] {
+        assert!(develop_nodes.contains(&node), "missing develop node {node}");
+    }
+    for (from, to) in [
+        ("map_check", "architecture"),
+        ("map_check", "implementation"),
+        ("architecture", "detailed_design"),
+        ("architecture", "implementation"),
+        ("validation", "map_update"),
+        ("validation", "review"),
+    ] {
+        assert!(
+            develop["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| { edge["from"] == from && edge["to"] == to }),
+            "missing develop edge {from}->{to}"
+        );
+    }
+
+    let debug = workflows
+        .iter()
+        .find(|workflow| workflow["domain"] == "debug")
+        .unwrap();
+    let debug_nodes = debug["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["node_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        debug_nodes,
+        [
+            "orient",
+            "explore",
+            "resolve",
+            "candidate",
+            "validation",
+            "review",
+            "integration",
+            "cleanup"
+        ]
+    );
+
+    for domain in ["develop", "debug"] {
+        let workflow = workflows
+            .iter()
+            .find(|workflow| workflow["domain"] == domain)
+            .unwrap();
+        let review = workflow["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["node_id"] == "review")
+            .unwrap();
+        assert!(review["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|evidence| evidence == "architecture-conformance"));
+    }
+
+    let rendered = serde_json::to_string(&guidance).unwrap();
+    for project_specific in [
+        "RouteCodex",
+        "rccv3",
+        "v3-function-map",
+        "v3-verification-map",
+    ] {
+        assert!(!rendered.contains(project_specific));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_init_projects_declared_context_and_commands() {
     let root = temp_root("guidance-init");
     let root_text = root.to_str().unwrap();
@@ -3844,7 +4014,7 @@ fn guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe() {
             "scope_paths": ["playground/experiments/**"],
             "steps": [
                 {"step_id":"step-1","node_id":"requirements","action":"analyze","owner":"app-core","expected_evidence":["requirements"]},
-                {"step_id":"step-2","node_id":"architecture","action":"design","owner":"app-core","expected_evidence":["architecture-design"]}
+                {"step_id":"step-2","node_id":"map_check","action":"bind maps","owner":"app-core","expected_evidence":["function-map-binding","verification-map-binding"]}
             ]
         }))
         .unwrap()
@@ -3939,7 +4109,7 @@ fn guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe() {
     let next = run(&["guide", "next", root_text, "--task", "task-2"]);
     assert!(next.status.success());
     let next_json: Value = serde_json::from_slice(&next.stdout).unwrap();
-    assert_eq!(next_json["next"]["node_id"], "architecture");
+    assert_eq!(next_json["next"]["node_id"], "map_check");
 
     let goal_file = root.join(".appsdk/goal.json");
     let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
@@ -4005,6 +4175,7 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
 
     let agents_target = root.join("project-agents.md");
     fs::write(&agents_target, "# Project rules\n").unwrap();
+    fs::remove_file(root.join("AGENTS.md")).unwrap();
     symlink(&agents_target, root.join("AGENTS.md")).unwrap();
     let linked = run(&["guide", "compile", root_text]);
     assert!(!linked.status.success());
@@ -4032,7 +4203,7 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
             "module_id": "app-core",
             "objective": "reject redirected control state",
             "scope_paths": ["playground/experiments/**"],
-            "steps": [{"step_id":"debug-1","node_id":"reproduction","action":"reproduce","owner":"app-core","expected_evidence":["reproduction-record"]}]
+            "steps": [{"step_id":"debug-1","node_id":"orient","action":"bind project context","owner":"app-core","expected_evidence":["orientation-record","function-map-binding","verification-map-binding"]}]
         }))
         .unwrap()
             + "\n",
@@ -4063,7 +4234,7 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
             "module_id": "app-core",
             "objective": "detect declared rule drift",
             "scope_paths": ["playground/experiments/**"],
-            "steps": [{"step_id":"debug-1","node_id":"reproduction","action":"reproduce","owner":"app-core","expected_evidence":["reproduction-record"]}]
+            "steps": [{"step_id":"debug-1","node_id":"orient","action":"bind project context","owner":"app-core","expected_evidence":["orientation-record","function-map-binding","verification-map-binding"]}]
         }))
         .unwrap()
             + "\n",

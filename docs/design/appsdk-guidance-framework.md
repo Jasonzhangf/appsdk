@@ -222,6 +222,13 @@ not reimplement them. A step result records what the agent observed; AppSDK
 lifecycle commands and records remain authoritative for admission, review,
 delivery, integration, promotion, freeze, and cleanup.
 
+Feature and debug review are change-scoped. The candidate must bind evidence
+that new or modified behavior preserves typed control truth, one owner and one
+implementation, fixed lifecycle skeletons, configured operations, registered
+hooks, declared gates, ablation before addition, and shared-function reuse.
+Review reports untouched historical violations as advisory findings unless they
+affect changed scope, safety, ownership, evidence truth, or required delivery.
+
 `guide close` distinguishes `workflow_complete` from
 `appsdk_lifecycle_complete`. A finished advisory plan cannot turn a draft or
 blocked AppSDK lifecycle into PASS.

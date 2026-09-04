@@ -144,6 +144,13 @@ Default forbidden boundaries are narrow:
 - claiming review, delivery, promotion, freeze, or cleanup complete before the
   corresponding required lifecycle gate passes.
 
+Architecture rules are enforced against the candidate change set. New or
+modified behavior must preserve typed control truth, one semantic owner and
+implementation, a fixed lifecycle skeleton, configured operations, registered
+hooks, declared gates, ablation before addition, and shared-function reuse.
+Untouched historical violations are advisory findings unless they enter changed
+scope or affect safety, ownership, evidence truth, or required delivery.
+
 Before compiling or projecting a plan, the state projector checks that the
 selected module's declared source and contract surfaces exist. A missing path
 is a project module-binding problem: status names the module, surface, path,

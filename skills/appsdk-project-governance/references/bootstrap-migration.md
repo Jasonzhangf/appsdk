@@ -16,6 +16,14 @@ requirements + acceptance
 `init` is idempotent. It fills missing governance resources and preserves
 business files. Use `new` only for an empty destination.
 
+For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
+when none exists. It contains the Project Truth, Semantic Invariants,
+Ownership, Architecture Truth, Development Process Control, Git Protection,
+Task Routing, and Evidence Boundary sections used by Guide setup. Customize
+the bracketed project facts through the approved setup flow. Existing project
+rules are never overwritten, and rerunning `init` on an already governed root
+does not recreate a deliberately absent `AGENTS.md`.
+
 ## Governance exists but Guide is missing
 
 Do not reset or migrate valid lifecycle truth merely to add Guide. Run

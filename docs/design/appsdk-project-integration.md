@@ -156,7 +156,8 @@ live under ignored `.appsdk-control/guidance/<task-id>/`. Existing AppSDK record
 remain the lifecycle truth. Missing Harness state does not block ordinary
 `verify` or `compile`; projects opt in and default to advisory guidance.
 
-After `new` or `init`, follow the printed onboarding route:
+After `new`, or `init` on a project with an approved Guidance declaration,
+follow the printed onboarding route:
 
 ```bash
 appsdk guide compile <project>
@@ -169,6 +170,23 @@ guide commands. It never scans undeclared directories or writes an intake
 record. The Agent asks only unresolved questions and persists the confirmed
 technical plan through `appsdk guide plan`.
 
+If an existing governed project has no Guide declaration, rerun `appsdk init`
+idempotently. It preserves existing project/maps/records/Active/Protected truth,
+installs missing Guide resources, and prints:
+
+```bash
+appsdk guide init <project> --task guidance-setup --mode bootstrap --module <module-id>
+```
+
+The Agent reads the returned root AGENTS, bundled AppSDK Skill, and direct
+project-local Skill candidates, then proposes reusable workflows, project
+commands, evidence, severity, and source ownership. No durable rule is written
+or compiled before explicit user approval. After approval, update AGENTS, the
+project-local Skill and machine contract, and
+`.appsdk/project.json#/guidance/rule_sources` in a clean owner worktree; then run
+`appsdk guide compile` and `appsdk verify`. This setup proposal is project-level
+and must not be replaced by a task PlanProposal.
+
 Frozen artifacts must be reproducible across clean worktree locations. The canonical module build runner appends a Rust `--remap-path-prefix` from the current project root to a stable logical path while preserving existing `RUSTFLAGS`. This removes absolute checkout paths from compiler metadata without changing source, payload, or lifecycle hashes. `rehydrate-frozen` and normal module compilation use the same runner; a path-dependent artifact is rejected rather than reconciled by copying or editing a frozen hash.
 
 ## Bootstrap
@@ -180,6 +198,11 @@ appsdk prepare ./existing-workspace
 ```
 
 AI 使用 `.appsdk-prepare.json` 模板向用户确认：这是新项目、模块重构、项目重构还是 debug；新项目根目录是什么；旧代码和 V3 等 legacy roots 是什么；新代码、Protected 和禁止修改边界是什么。用户确认后将 `status` 更新为 `confirmed`，然后才能执行 `init`。没有确认记录时，`init` 会 fail-fast。
+
+已经存在 `.appsdk/project.json` 的治理根可以直接幂等重跑 `appsdk init`，用于补齐
+当前 SDK 的 Guide 等 bundle 资源。此路径以现有项目合同作为 root 真源，不要求重新
+创建 preparation record，也不覆盖项目合同或 lifecycle truth。新建、迁移到新 root、
+或通过 `--project-root` 创建尚不存在的治理根仍必须走 confirmed preparation。
 
 对已有工作区，confirmed preparation 后必须先进入旧状态迁移预检：
 

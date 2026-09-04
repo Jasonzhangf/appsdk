@@ -13,6 +13,8 @@
 ## Compatibility
 
 - existing `new -> verify` remains green without compiling guidance;
+- an already governed root can rerun idempotent `init` without creating a new
+  preparation record;
 - removing `guidance` from a project leaves `verify` and `compile` behavior
   unchanged;
 - no PlanRecord is required by ordinary `verify` or `compile`.
@@ -24,20 +26,34 @@
   module owner and contract repair action, and recovers after a real rebind;
 - every supported domain resolves through one engine;
 - an unknown domain fails without writing state;
-- missing compiled manifest returns `GUIDANCE_NOT_COMPILED` and the compile
-  action without retrying automatically.
+- a project without a Guidance declaration returns `GUIDANCE_SETUP_REQUIRED`
+  and the bootstrap intake command;
+- a configured project with a missing compiled manifest returns
+  `GUIDANCE_NOT_COMPILED` and the compile action without retrying automatically.
 
 ## Initialization intake
 
-- `new` and `init` print the `guide compile -> guide init` onboarding route;
+- `new` and configured `init` print the `guide compile -> guide init`
+  onboarding route;
+- an existing governance-only project preserves its project contract and
+  records, and `init` prints the bootstrap setup intake route;
 - `guide --help` exposes every command, including `guide init`;
 - uncompiled intake returns the missing compile/init commands without writing;
+- bootstrap intake works before compile, returns root AGENTS, bundled AppSDK
+  Skill, and direct project-local Skill candidates, and never scans nested or
+  unrelated directories;
+- bootstrap intake returns project/module state, user questions, a
+  `GuidanceSetupProposal` schema, and post-approval compile/verify commands;
+- bootstrap intake does not modify project.json, lifecycle records, Skills,
+  compiled guidance, or `.appsdk-control`;
 - compiled intake returns declared AGENTS/Skill sources, exact Skill commands,
   project/module/goal context, and the next guide commands;
 - develop intake asks requirements, architecture, and delivery questions;
 - debug intake asks failing-sample, causal-evidence, and replay questions;
 - intake never creates `.appsdk-control` task state; `guide plan` remains the
   first write.
+- task PlanProposal never mutates or replaces the project-level setup proposal
+  or durable project rules.
 
 ## Plan
 

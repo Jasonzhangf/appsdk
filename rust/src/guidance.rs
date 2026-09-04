@@ -876,6 +876,12 @@ fn help() -> Value {
             {"command": "close", "usage": "appsdk guide close <project> --task <id>", "writes_state": false}
         ],
         "domains": DOMAINS,
+        "existing_project_setup": [
+            "appsdk guide status <project>",
+            "appsdk guide init <project> --task guidance-setup --mode bootstrap --module <id>",
+            "read project documents and present GuidanceSetupProposal for explicit user approval",
+            "after approval update project rule sources, then run appsdk guide compile <project>"
+        ],
         "start": [
             "appsdk guide status <project> --task <id>",
             "appsdk guide compile <project>",

@@ -7,6 +7,296 @@ fn command(mode: &str, task: &str, module_id: &str) -> String {
     )
 }
 
+fn readable_project_file(root: &Path, relative: &Path) -> Option<Vec<u8>> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    fs::read(root.join(relative)).ok()
+}
+
+struct BootstrapSource<'a> {
+    source_id: &'a str,
+    kind: &'a str,
+    path: &'a str,
+    disposition: &'a str,
+    contract_path: Option<&'a str>,
+}
+
+fn push_bootstrap_source(
+    root: &Path,
+    sources: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+    candidate: BootstrapSource<'_>,
+) {
+    if !seen.insert(candidate.path.to_string()) {
+        return;
+    }
+    let relative = safe_relative(candidate.path, "GUIDANCE_BOOTSTRAP_SOURCE_PATH_ESCAPE");
+    let Some(bytes) = readable_project_file(root, &relative) else {
+        return;
+    };
+    let mut source = serde_json::json!({
+        "source_id": candidate.source_id,
+        "kind": candidate.kind,
+        "path": candidate.path,
+        "digest": digest_bytes(&bytes),
+        "disposition": candidate.disposition
+    });
+    if let Some(contract_path) = candidate.contract_path {
+        let relative = safe_relative(contract_path, "GUIDANCE_BOOTSTRAP_CONTRACT_PATH_ESCAPE");
+        if readable_project_file(root, &relative).is_some() {
+            source["contract_path"] = Value::String(contract_path.to_string());
+        }
+    }
+    sources.push(source);
+}
+
+fn local_skill_candidates(root: &Path) -> Vec<(String, String, Option<String>)> {
+    let mut candidates = Vec::new();
+    for base in ["skills", ".agents/skills", ".codex/skills"] {
+        let base_relative = Path::new(base);
+        let base_path = root.join(base_relative);
+        if fs::symlink_metadata(&base_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+            || !base_path.is_dir()
+        {
+            continue;
+        }
+        let mut entries = fs::read_dir(&base_path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let Some(skill_id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !valid_id(&skill_id) {
+                continue;
+            }
+            let skill_path = format!("{}/{}/SKILL.md", base, skill_id);
+            if readable_project_file(root, Path::new(&skill_path)).is_none() {
+                continue;
+            }
+            let contract_path = format!("{}/{}/appsdk-guidance.json", base, skill_id);
+            let contract_path = readable_project_file(root, Path::new(&contract_path))
+                .is_some()
+                .then_some(contract_path);
+            candidates.push((skill_id, skill_path, contract_path));
+        }
+    }
+    candidates
+}
+
+fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(declared) = guidance_contract(project)
+        .and_then(|guidance| guidance.get("rule_sources"))
+        .and_then(Value::as_array)
+    {
+        for source in declared {
+            let Some(path) = source.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            push_bootstrap_source(
+                root,
+                &mut sources,
+                &mut seen,
+                BootstrapSource {
+                    source_id: source
+                        .get("source_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("declared-source"),
+                    kind: source
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("skill"),
+                    path,
+                    disposition: "declared",
+                    contract_path: source.get("contract_path").and_then(Value::as_str),
+                },
+            );
+        }
+    }
+    push_bootstrap_source(
+        root,
+        &mut sources,
+        &mut seen,
+        BootstrapSource {
+            source_id: "project-agents",
+            kind: "agents",
+            path: "AGENTS.md",
+            disposition: "candidate",
+            contract_path: None,
+        },
+    );
+    push_bootstrap_source(
+        root,
+        &mut sources,
+        &mut seen,
+        BootstrapSource {
+            source_id: "appsdk-governance-skill",
+            kind: "skill",
+            path: ".appsdk/skills/appsdk-project-governance/SKILL.md",
+            disposition: "candidate",
+            contract_path: Some(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json"),
+        },
+    );
+    for (index, (skill_id, path, contract_path)) in
+        local_skill_candidates(root).into_iter().enumerate()
+    {
+        push_bootstrap_source(
+            root,
+            &mut sources,
+            &mut seen,
+            BootstrapSource {
+                source_id: &format!("candidate-local-skill-{}-{}", index + 1, skill_id),
+                kind: "skill",
+                path: &path,
+                disposition: "candidate",
+                contract_path: contract_path.as_deref(),
+            },
+        );
+    }
+    sources
+}
+
+fn bootstrap_skill_commands(sources: &[Value]) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    sources
+        .iter()
+        .filter(|source| source.get("kind").and_then(Value::as_str) == Some("skill"))
+        .filter_map(|source| {
+            let path = source.get("path").and_then(Value::as_str)?;
+            let skill_id = Path::new(path)
+                .parent()?
+                .file_name()?
+                .to_str()
+                .filter(|value| valid_id(value))?;
+            if !seen.insert(skill_id.to_string()) {
+                return None;
+            }
+            Some(serde_json::json!({
+                "skill_id": skill_id,
+                "command": format!("${}", skill_id),
+                "source_path": path,
+                "status": "candidate_until_user_approval"
+            }))
+        })
+        .collect()
+}
+
+fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: &str) -> Value {
+    let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
+    let sources = bootstrap_sources(root, project);
+    let skill_commands = bootstrap_skill_commands(&sources);
+    serde_json::json!({
+        "harness": "appsdk-development-process-control",
+        "guide_flow_required": true,
+        "task_id": task,
+        "mode": "bootstrap",
+        "project_id": project["project_id"],
+        "module": {
+            "module_id": module_id,
+            "owner": selected_module["source_owner"],
+            "stage": selected_module["stage"],
+            "owned_paths": selected_module["owned_paths"],
+            "contract_paths": selected_module["contract_paths"]
+        },
+        "readiness": "needs_user_approval",
+        "reason_code": "GUIDANCE_SETUP_PROPOSAL_REQUIRED",
+        "writes_state": false,
+        "existing_governance": {
+            "project_contract": ".appsdk/project.json",
+            "project_stage": project.pointer("/lifecycle/stage"),
+            "guidance_declared": guidance_contract(project).is_some(),
+            "guidance_compiled": root.join(compiled_relative(project)).is_file(),
+            "records_root": ".appsdk/records",
+            "maps_root": ".appsdk/maps",
+            "active_root": "active",
+            "protected_root": "protected",
+            "preserved": true
+        },
+        "read_first": sources,
+        "skill_commands": skill_commands,
+        "questions": [
+            {
+                "question_id": "standard_workflows",
+                "prompt": "After reading the project documents, confirm the reusable develop, debug, review, delivery, integration, promotion, freeze, and cleanup flows; ask only unresolved questions.",
+                "required": true
+            },
+            {
+                "question_id": "project_commands",
+                "prompt": "Confirm the project-owned test, build, install, restart, deployed-entrypoint replay, review, merge, and cleanup commands and the evidence each command produces.",
+                "required": true
+            },
+            {
+                "question_id": "rule_ownership",
+                "prompt": "Confirm which facts remain in AGENTS.md, which reusable procedures belong in project-local Skills, and which nodes, edges, gates, severities, commands, and evidence contracts belong in machine guidance.",
+                "required": true
+            },
+            {
+                "question_id": "approval_boundary",
+                "prompt": "Present the GuidanceSetupProposal and obtain explicit user approval before modifying durable project rule sources or compiling guidance.",
+                "required": true
+            }
+        ],
+        "proposal_schema": {
+            "schema_version": 1,
+            "proposal_type": "GuidanceSetupProposal",
+            "task_id": task,
+            "project_id": project["project_id"],
+            "module_id": module_id,
+            "objective": "Describe the reusable project development process to standardize.",
+            "rule_sources": [],
+            "workflows": [],
+            "project_commands": [],
+            "rule_classification": {
+                "advisory": [],
+                "warning": [],
+                "forbidden": []
+            },
+            "unresolved_questions": [],
+            "target_writes": {
+                "project_facts": "AGENTS.md",
+                "agent_procedures": ["<project-local-skill>/SKILL.md"],
+                "machine_contracts": ["<project-local-skill>/appsdk-guidance.json"],
+                "source_declaration": ".appsdk/project.json#/guidance"
+            }
+        },
+        "agent_instruction": "Read every read_first source and invoke relevant candidate Skills. Reconcile existing governance, project procedures, and current commands. Ask only unresolved questions, then present one GuidanceSetupProposal. Do not modify AGENTS.md, Skills, machine contracts, project.json, lifecycle records, or compiled guidance before explicit user approval.",
+        "after_user_approval": {
+            "actions": [
+                "Use a clean owner worktree from latest origin/main.",
+                "Update project facts in AGENTS.md, reusable agent procedure in project-local Skills, and nodes, edges, gates, severities, commands, and evidence contracts in machine guidance.",
+                "Declare only the approved sources in .appsdk/project.json#/guidance/rule_sources."
+            ],
+            "commands": [
+                "appsdk guide compile <project>",
+                "appsdk verify <project>",
+                format!("appsdk guide init <project> --task <task-id> --mode <develop|debug> --module {}", module_id)
+            ]
+        },
+        "next": {
+            "action": "agent_reads_context_and_presents_guidance_setup_proposal",
+            "requires": "explicit_user_approval",
+            "writes_state": false
+        }
+    })
+}
+
 fn questions(mode: &str, goal: &Value) -> Vec<Value> {
     let mut values = vec![
         serde_json::json!({
@@ -107,13 +397,12 @@ fn skill_commands(root: &Path, compiled: &Value) -> Vec<Value> {
                     })
                     .to_string()
             };
-            Some(serde_json::json!({
+            serde_json::json!({
                 "skill_id": skill_id,
                 "command": format!("${}", skill_id),
                 "source_path": source["path"]
-            }))
+            })
         })
-        .flatten()
         .collect()
 }
 
@@ -133,6 +422,12 @@ pub(super) fn initialize(
     let project = read_project(root);
     let selected_module = module(&project, requested_module);
     let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
+    if mode == "bootstrap"
+        && (guidance_contract(&project).is_none()
+            || !root.join(compiled_relative(&project)).is_file())
+    {
+        return bootstrap_setup(root, &project, selected_module, task);
+    }
     let base = project_status(root, Some(mode), Some(task), Some(module_id), false);
     if base.get("reason_code").and_then(Value::as_str) == Some("GUIDANCE_NOT_COMPILED") {
         return serde_json::json!({

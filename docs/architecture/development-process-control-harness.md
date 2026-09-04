@@ -58,6 +58,11 @@ not invent a parallel lifecycle enum.
 events, rule-context snapshot, and existing lifecycle state. It is never an
 agent-writable truth field.
 
+`GuidanceSetupProposal` and `PlanProposal` are separate. The former is a
+project-level, user-approved proposal for durable AGENTS, Skill,
+machine-contract, and source-declaration changes. The latter is task-local
+execution state and never becomes a durable project rule automatically.
+
 ## L3 Functional separation
 
 | Function | Input | Output | Does not own |
@@ -71,33 +76,41 @@ agent-writable truth field.
 
 ## L4 Full-domain routing
 
-One engine covers AppSDK as a whole:
+One engine covers AppSDK as a whole. Existing governance without Guide enters
+through a read-only setup proposal before rule compilation:
 
 ```text
-guide init -> bootstrap -> migration -> governance-preflight
-          -> develop/debug -> review -> delivery
-          -> integration -> promotion -> freeze -> cleanup
+guide status -> bootstrap setup proposal -> user approval -> guide compile
+             -> bootstrap -> migration -> governance-preflight
+             -> develop/debug -> review -> delivery
+             -> integration -> promotion -> freeze -> cleanup
 ```
 
 Domains select prompts and workflow contracts. They do not duplicate canonical
 commands such as `prepare`, `init`, `pin-lock`, `verify`, `compile`,
 `verify --review-admission`, `promote`, `publish-active`, or `freeze`.
 
-`guide init` is the read-only intake before a domain plan. It projects only
-explicitly declared AGENTS and local Skill sources, their precedence/digests,
-the selected project/module/goal context, standard unresolved questions, exact
-Skill invocation suggestions from declared Skill contracts/paths, and the next
-guide commands. AppSDK does not
-interpret prose, answer questions, call a model, or persist a second intake
-record. The confirmed result becomes the agent-authored PlanProposal and is
-persisted by `guide plan`.
+`guide init` is the read-only intake before a setup proposal or domain plan. If
+governance exists but Guide is absent or uncompiled, bootstrap mode discovers a
+bounded set of project-document candidates, projects existing project/module
+state, and asks the Agent to present a `GuidanceSetupProposal` for user approval.
+It does not write project or task state. After approval and compile, task intake
+projects only explicitly declared AGENTS and local Skill sources, their
+precedence/digests, project/module/goal context, unresolved questions, Skill
+invocation suggestions, and next commands. AppSDK does not interpret prose,
+answer questions, call a model, or persist a second intake truth.
 
 ## L5 Rule context
 
-The project explicitly declares every rule source in `.appsdk/project.json`.
-Runtime directory scanning is forbidden. Markdown sources are bound by path,
-precedence, and digest for the agent to read; AppSDK does not claim semantic
-verification of arbitrary prose. Machine contracts are JSON and are validated.
+The project explicitly declares every compiled rule source in
+`.appsdk/project.json`. Runtime directory scanning is forbidden. The only
+pre-declaration discovery is bootstrap intake over root `AGENTS.md`, the bundled
+AppSDK Skill, and one direct Skill child under each standard project-local Skill
+root. Discovery produces candidates, not active rules. User approval and an
+explicit project declaration are required before compile. Markdown sources are
+then bound by path, precedence, and digest for the agent to read; AppSDK does
+not claim semantic verification of arbitrary prose. Machine contracts are JSON
+and are validated.
 
 A PlanRecord binds:
 

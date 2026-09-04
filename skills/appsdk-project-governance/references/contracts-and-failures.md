@@ -26,6 +26,12 @@ belongs to canonical lifecycle commands. A mismatch must return either a
 supported migration route or an authorized reset/reinitialize route; it must
 not trap development behind repeated byte-identity checks.
 
+`GUIDANCE_SETUP_REQUIRED` is not a lifecycle failure. It means existing
+governance has no approved Guide declaration. Run the returned read-only
+bootstrap intake, present `GuidanceSetupProposal`, obtain explicit user
+approval, then update and compile project-owned rule sources. Do not report an
+external AppSDK blocker or retry compile against an undeclared rule set.
+
 ## Failure output
 
 Required fields:
@@ -49,4 +55,3 @@ Every claim binds one branch and owner worktree. Completion requires remote
 receipt when delivery is in scope, retention/cleanup record, worktree removal,
 removal verification, then claim release. An abandoned or foreign dirty
 worktree is preserved until its owner or explicit cleanup authorization exists.
-

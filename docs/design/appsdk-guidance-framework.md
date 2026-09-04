@@ -99,12 +99,39 @@ path, and mode-specific questions. Develop intake confirms requirements,
 architecture closure, and delivery depth. Debug intake confirms the failing
 sample, causal experiment, and old-sample replay.
 
-The command never scans undeclared Skill directories and never writes task
-state. If guidance has not been compiled, it returns the missing `guide compile`
-and repeatable `guide init` commands. `new` and `init` print this same onboarding
-sequence. After the Agent reads context and asks only unresolved questions, it
-runs the projected domain command and submits PlanProposal; `guide plan` is the
-first task-state write.
+Normal task intake never scans undeclared Skill directories and never writes
+task state. If approved guidance has not been compiled, it returns the missing
+`guide compile` and repeatable `guide init` commands. `new` and configured
+`init` print this onboarding sequence. After the Agent reads context and asks
+only unresolved questions, it runs the projected domain command and submits
+PlanProposal; `guide plan` is the first task-state write.
+
+When an existing `.appsdk/project.json` has no `guidance` member, `appsdk init`
+preserves that contract and all lifecycle truth, installs missing Guide bundle
+resources, and prints the bootstrap intake command instead of directing the
+user to compile an undeclared rule set. `guide status` returns
+`GUIDANCE_SETUP_REQUIRED`.
+
+Before initial compile, `guide init --mode bootstrap` is a special read-only
+project setup intake. It discovers only root `AGENTS.md`, the bundled AppSDK
+Skill, and direct Skill children under `skills/`, `.agents/skills/`, and
+`.codex/skills/`. Existing declared sources are included first. Symlinked,
+missing, nested, and unrelated files are not ingested. Every discovered path is
+a candidate until user approval and explicit declaration in the project
+contract.
+
+Bootstrap output includes existing project/module state, candidate source paths
+and digests, Skill invocation suggestions, unresolved workflow/command/rule
+ownership questions, a `GuidanceSetupProposal` schema, and the post-approval
+compile/verify commands. It writes neither durable rules nor
+`.appsdk-control`. The Agent reads the files, reconciles project commands and
+procedures, asks only unresolved questions, and presents the proposal. After
+explicit approval, the Agent edits project-owned AGENTS, local Skills, machine
+contracts, and the source declaration in a clean owner worktree; only then does
+`guide compile` create committed rule context.
+
+`GuidanceSetupProposal` is project-level. `PlanProposal` remains task-level and
+cannot automatically modify AGENTS, Skills, machine contracts, or memory.
 
 ## 4. Plan controller
 
@@ -210,6 +237,7 @@ rules or memory. Applying those candidates is a separate reviewed workflow.
 - Projects without `guidance` continue to use every existing command unchanged.
 - New projects receive advisory guidance declarations and the canonical Skill
   contract, and initialization prints the `guide compile -> guide init` route.
-- Existing projects opt in by adding declared sources and compiling once.
+- Existing governed projects without Guide run idempotent `init`, read the
+  bootstrap setup proposal, approve project-owned sources, and compile once.
 - Binary byte hashes are not a guidance prerequisite. Version and project
   contract compatibility remain owned by existing AppSDK lifecycle commands.

@@ -3001,6 +3001,192 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
 }
 
 #[test]
+fn existing_governance_without_guide_gets_read_only_setup_proposal() {
+    let root = temp_root("guidance-existing-bootstrap");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    fs::write(
+        root.join("AGENTS.md"),
+        "# Project rules\n\nUse the project build and deployed smoke commands.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("skills/local-development")).unwrap();
+    fs::write(
+        root.join("skills/local-development/SKILL.md"),
+        "---\nname: local-development\ndescription: Project-local development procedure.\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("protected/history/legacy.txt"),
+        "legacy protected truth\n",
+    )
+    .unwrap();
+    let legacy_protected = fs::read(root.join("protected/history/legacy.txt")).unwrap();
+    fs::create_dir_all(root.join("skills/nested/child")).unwrap();
+    fs::write(
+        root.join("skills/nested/child/SKILL.md"),
+        "---\nname: nested\ndescription: Must not be discovered recursively.\n---\n",
+    )
+    .unwrap();
+
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project.as_object_mut().unwrap().remove("guidance");
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let legacy_project = fs::read(&project_file).unwrap();
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let initialized_stdout = String::from_utf8_lossy(&initialized.stdout);
+    assert!(initialized_stdout.contains("appsdk guide init"));
+    assert!(initialized_stdout.contains("--mode bootstrap"));
+    assert!(!initialized_stdout.contains("next appsdk guide compile"));
+    assert_eq!(fs::read(&project_file).unwrap(), legacy_project);
+    assert_eq!(
+        fs::read(root.join("protected/history/legacy.txt")).unwrap(),
+        legacy_protected
+    );
+
+    let status = run(&["guide", "status", root_text]);
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["reason_code"], "GUIDANCE_SETUP_REQUIRED");
+    assert!(status_json["next"]["command"]
+        .as_str()
+        .unwrap()
+        .contains("--mode bootstrap"));
+
+    let intake = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "guidance-setup",
+        "--mode",
+        "bootstrap",
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        intake.status.success(),
+        "{}",
+        String::from_utf8_lossy(&intake.stderr)
+    );
+    let intake_json: Value = serde_json::from_slice(&intake.stdout).unwrap();
+    assert_eq!(
+        intake_json["reason_code"],
+        "GUIDANCE_SETUP_PROPOSAL_REQUIRED"
+    );
+    assert_eq!(intake_json["readiness"], "needs_user_approval");
+    assert_eq!(intake_json["writes_state"], false);
+    assert_eq!(intake_json["existing_governance"]["preserved"], true);
+    assert!(intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["path"] == "AGENTS.md"));
+    assert!(intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["path"] == "skills/local-development/SKILL.md"));
+    assert!(intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| { source["path"] == ".appsdk/skills/appsdk-project-governance/SKILL.md" }));
+    assert!(!intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["path"] == "skills/nested/child/SKILL.md"));
+    assert_eq!(
+        intake_json["proposal_schema"]["proposal_type"],
+        "GuidanceSetupProposal"
+    );
+    assert_eq!(
+        intake_json["skill_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|skill| skill["command"] == "$appsdk-project-governance")
+            .count(),
+        1
+    );
+    assert!(intake_json["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|question| question["question_id"] == "project_commands"));
+    assert!(intake_json["after_user_approval"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command == "appsdk guide compile <project>"));
+    assert!(!root
+        .join(".appsdk-control/guidance/guidance-setup")
+        .exists());
+    assert_eq!(fs::read(&project_file).unwrap(), legacy_project);
+    assert_eq!(
+        fs::read(root.join("protected/history/legacy.txt")).unwrap(),
+        legacy_protected
+    );
+
+    let mut approved_project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    approved_project["guidance"] = serde_json::json!({
+        "enforcement": "advisory",
+        "compiled_manifest": ".appsdk/guidance/compiled.json",
+        "rule_sources": [
+            {"source_id":"project-agents","kind":"agents","path":"AGENTS.md","required":false,"precedence":100},
+            {"source_id":"appsdk-governance-skill","kind":"skill","path":".appsdk/skills/appsdk-project-governance/SKILL.md","contract_path":".appsdk/skills/appsdk-project-governance/appsdk-guidance.json","required":true,"precedence":200},
+            {"source_id":"local-development","kind":"skill","path":"skills/local-development/SKILL.md","required":false,"precedence":300}
+        ]
+    });
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&approved_project).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    assert!(run(&["verify", root_text]).status.success());
+    let task_intake = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "feature-1",
+        "--mode",
+        "develop",
+        "--module",
+        "app-core",
+    ]);
+    assert!(task_intake.status.success());
+    let task_intake_json: Value = serde_json::from_slice(&task_intake.stdout).unwrap();
+    assert_eq!(task_intake_json["reason_code"], "GUIDANCE_INTAKE_REQUIRED");
+    assert!(task_intake_json["skill_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["command"] == "$local-development"));
+    assert_eq!(
+        fs::read(root.join("protected/history/legacy.txt")).unwrap(),
+        legacy_protected
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
     let left = temp_root("guidance-compile-left");
     let right = temp_root("guidance-compile-right");

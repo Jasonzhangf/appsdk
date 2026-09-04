@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/guidance/guidance-manifest.schema.json",
+  "title": "AppSDK guidance manifest",
+  "type": "object",
+  "required": ["schema_version", "skill_id", "guidance_version", "rules", "workflows"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "skill_id": {"type": "string", "minLength": 1},
+    "guidance_version": {"type": "string", "minLength": 1},
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "severity", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": {"type": "string", "minLength": 1},
+          "severity": {"enum": ["advisory", "warning", "forbidden"]},
+          "description": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["domain", "objective", "entry_node", "nodes", "edges"],
+        "additionalProperties": false,
+        "properties": {
+          "domain": {"type": "string", "minLength": 1},
+          "objective": {"type": "string", "minLength": 1},
+          "entry_node": {"type": "string", "minLength": 1},
+          "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["node_id", "instruction", "owner", "evidence"],
+              "additionalProperties": false,
+              "properties": {
+                "node_id": {"type": "string", "minLength": 1},
+                "instruction": {"type": "string", "minLength": 1},
+                "owner": {"type": "string", "minLength": 1},
+                "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
+              }
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["from", "to"],
+              "additionalProperties": false,
+              "properties": {
+                "from": {"type": "string", "minLength": 1},
+                "to": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

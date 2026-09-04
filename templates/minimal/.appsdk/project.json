@@ -3,7 +3,7 @@
   "project_id": "change-me",
   "sdk": {
     "name": "appsdk",
-    "version": "0.1.5"
+    "version": "0.1.6"
   },
   "lifecycle": {
     "stage": "draft"

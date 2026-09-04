@@ -2999,3 +2999,591 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
+    let left = temp_root("guidance-compile-left");
+    let right = temp_root("guidance-compile-right");
+    let left_text = left.to_str().unwrap();
+    let right_text = right.to_str().unwrap();
+    assert!(run(&["new", left_text]).status.success());
+    assert!(run(&["new", right_text]).status.success());
+
+    assert!(run(&["verify", left_text]).status.success());
+    let before = run(&["guide", "status", left_text]);
+    assert!(before.status.success());
+    let before_json: Value = serde_json::from_slice(&before.stdout).unwrap();
+    assert_eq!(before_json["reason_code"], "GUIDANCE_NOT_COMPILED");
+    assert_eq!(
+        before_json["next"]["command"],
+        "appsdk guide compile <project>"
+    );
+
+    assert!(run(&["guide", "compile", left_text]).status.success());
+    assert!(run(&["guide", "compile", right_text]).status.success());
+    assert_eq!(
+        fs::read(left.join(".appsdk/guidance/compiled.json")).unwrap(),
+        fs::read(right.join(".appsdk/guidance/compiled.json")).unwrap()
+    );
+
+    let status = run(&["guide", "develop", left_text, "--module", "app-core"]);
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["domain"], "develop");
+    assert_eq!(
+        status_json["lifecycle"]["module_stage"],
+        "source_implemented"
+    );
+    assert_eq!(status_json["next"]["node_id"], "requirements");
+    assert_eq!(status_json["enforcement"], "advisory");
+
+    fs::remove_dir_all(left).unwrap();
+    fs::remove_dir_all(right).unwrap();
+}
+
+#[test]
+fn guidance_projects_missing_module_path_and_recovers_after_rebind() {
+    let root = temp_root("guidance-module-path");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-change-me","raw_request":"bind module","understood_objective":"bind module","acceptance_criteria":["compile"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#).unwrap();
+
+    fs::remove_dir_all(root.join("playground/experiments")).unwrap();
+    let compile = run(&["compile-module", root_text, "--module", "app-core"]);
+    assert!(!compile.status.success());
+    assert!(
+        String::from_utf8_lossy(&compile.stderr)
+            .contains("MODULE_PATH_MISSING:app-core:playground/experiments/**"),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let status = run(&[
+        "guide",
+        "governance-preflight",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status_json["reason_code"],
+        "MODULE_PATH_MISSING:app-core:playground/experiments/**"
+    );
+    assert_eq!(status_json["first_failing_gate"], "module_binding");
+    assert_eq!(status_json["next"]["owner"], "app-core");
+    assert!(status_json["next"]["action"]
+        .as_str()
+        .unwrap()
+        .contains(".appsdk/project.json"));
+
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["modules"][0]["owned_paths"] =
+        serde_json::json!(["playground/**", "protected/source/**", "tests/core/**"]);
+    project["modules"][0]["regression"]["input_paths"] =
+        serde_json::json!(["playground/**", "tests/core/**"]);
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let recovered_compile = run(&["compile-module", root_text, "--module", "app-core"]);
+    assert!(
+        recovered_compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered_compile.stderr)
+    );
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    let recovered = run(&[
+        "guide",
+        "governance-preflight",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(recovered.status.success());
+    let recovered_json: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(recovered_json["readiness"], "ready");
+    assert_eq!(recovered_json["reason_code"], "PLAN_REQUIRED");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_rejects_undeclared_paths_and_non_adjacent_agent_plans() {
+    let root = temp_root("guidance-plan-validation");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["guidance"]["rule_sources"][1]["contract_path"] =
+        Value::String("../outside.json".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let escaped = run(&["guide", "compile", root_text]);
+    assert!(!escaped.status.success());
+    assert!(String::from_utf8_lossy(&escaped.stderr).contains("GUIDANCE_RULE_SOURCE_PATH_ESCAPE"));
+
+    project["guidance"]["rule_sources"][1]["contract_path"] =
+        Value::String(".appsdk/skills/appsdk-project-governance/appsdk-guidance.json".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let proposal_file = root.join("plan.json");
+    fs::write(
+        &proposal_file,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": "develop",
+            "goal_id": "goal-change-me",
+            "task_id": "task-1",
+            "module_id": "app-core",
+            "objective": "test plan validation",
+            "scope_paths": ["playground/experiments/**"],
+            "current_node": "requirements",
+            "steps": [
+                {"step_id":"step-1","node_id":"requirements","action":"analyze","owner":"app-core","expected_evidence":["requirements"]},
+                {"step_id":"step-2","node_id":"detailed_design","action":"design","owner":"app-core","expected_evidence":["detailed-design"]}
+            ]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let supplied_state = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-1",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(!supplied_state.status.success());
+    assert!(String::from_utf8_lossy(&supplied_state.stderr)
+        .contains("GUIDANCE_DERIVED_FIELD_FORBIDDEN:current_node"));
+
+    let mut proposal: Value =
+        serde_json::from_str(&fs::read_to_string(&proposal_file).unwrap()).unwrap();
+    proposal.as_object_mut().unwrap().remove("current_node");
+    fs::write(
+        &proposal_file,
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    let skipped = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-1",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(!skipped.status.success());
+    assert!(String::from_utf8_lossy(&skipped.stderr)
+        .contains("GUIDANCE_NON_ADJACENT_TRANSITION:requirements:detailed_design"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe() {
+    let root = temp_root("guidance-update");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": "develop",
+            "goal_id": "goal-change-me",
+            "task_id": "task-2",
+            "module_id": "app-core",
+            "objective": "test plan updates",
+            "scope_paths": ["playground/experiments/**"],
+            "steps": [
+                {"step_id":"step-1","node_id":"requirements","action":"analyze","owner":"app-core","expected_evidence":["requirements"]},
+                {"step_id":"step-2","node_id":"architecture","action":"design","owner":"app-core","expected_evidence":["architecture-design"]}
+            ]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let planned = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    assert!(root
+        .join(".appsdk-control/guidance/task-2/plan.json")
+        .is_file());
+
+    fs::write(
+        root.join("result.json"),
+        r#"{"schema_version":1,"event_id":"event-1","step_id":"step-1","result":"pass","observations":["closed"],"evidence":[]}
+"#,
+    )
+    .unwrap();
+    let missing = run(&[
+        "guide",
+        "update",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "result.json",
+    ]);
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("GUIDANCE_PASS_REQUIRES_EVIDENCE:step-1")
+    );
+
+    fs::write(
+        root.join("result.json"),
+        r#"{"schema_version":1,"event_id":"event-1","step_id":"step-1","result":"pass","observations":["closed"],"evidence":["requirements-1"]}
+"#,
+    )
+    .unwrap();
+    let first = run(&[
+        "guide",
+        "update",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "result.json",
+    ]);
+    assert!(first.status.success());
+    let duplicate = run(&[
+        "guide",
+        "update",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "result.json",
+    ]);
+    assert!(duplicate.status.success());
+    let duplicate_json: Value = serde_json::from_slice(&duplicate.stdout).unwrap();
+    assert_eq!(duplicate_json["idempotent"], true);
+
+    fs::write(
+        root.join("result.json"),
+        r#"{"schema_version":1,"event_id":"event-1","step_id":"step-1","result":"pass","observations":["changed"],"evidence":["requirements-1"]}
+"#,
+    )
+    .unwrap();
+    let conflict = run(&[
+        "guide",
+        "update",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "result.json",
+    ]);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("GUIDANCE_EVENT_CONFLICT:event-1"));
+
+    let next = run(&["guide", "next", root_text, "--task", "task-2"]);
+    assert!(next.status.success());
+    let next_json: Value = serde_json::from_slice(&next.stdout).unwrap();
+    assert_eq!(next_json["next"]["node_id"], "architecture");
+
+    let goal_file = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+    goal["understood_objective"] = Value::String("drifted objective".into());
+    fs::write(
+        &goal_file,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("result.json"),
+        r#"{"schema_version":1,"event_id":"event-1","step_id":"step-1","result":"pass","observations":["closed"],"evidence":["requirements-1"]}
+"#,
+    )
+    .unwrap();
+    let replay_after_drift = run(&[
+        "guide",
+        "update",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "result.json",
+    ]);
+    assert!(replay_after_drift.status.success());
+    let replay_json: Value = serde_json::from_slice(&replay_after_drift.stdout).unwrap();
+    assert_eq!(replay_json["idempotent"], true);
+
+    fs::write(
+        root.join("result.json"),
+        r#"{"schema_version":1,"event_id":"event-2","step_id":"step-2","result":"pass","observations":[],"evidence":["architecture-1"]}
+"#,
+    )
+    .unwrap();
+    let drift = run(&[
+        "guide",
+        "update",
+        root_text,
+        "--task",
+        "task-2",
+        "--input",
+        "result.json",
+    ]);
+    assert!(!drift.status.success());
+    assert!(String::from_utf8_lossy(&drift.stderr).contains("GUIDANCE_CONTEXT_DRIFT:goal"));
+
+    let status = run(&["guide", "next", root_text, "--task", "task-2"]);
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status_json["next"]["revision_reason"],
+        "rule_context_changed"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_detects_declared_rule_source_drift_and_symlink() {
+    let root = temp_root("guidance-rule-source-drift");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let agents_target = root.join("project-agents.md");
+    fs::write(&agents_target, "# Project rules\n").unwrap();
+    symlink(&agents_target, root.join("AGENTS.md")).unwrap();
+    let linked = run(&["guide", "compile", root_text]);
+    assert!(!linked.status.success());
+    assert!(String::from_utf8_lossy(&linked.stderr).contains("GUIDANCE_RULE_SOURCE_SYMLINK"));
+    fs::remove_file(root.join("AGENTS.md")).unwrap();
+    fs::write(root.join("AGENTS.md"), "# Project rules\n").unwrap();
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let outside = temp_root("guidance-control-symlink-target");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(root.join(".appsdk-control/guidance")).unwrap();
+    symlink(
+        &outside,
+        root.join(".appsdk-control/guidance/task-control-symlink"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": "debug",
+            "goal_id": "goal-change-me",
+            "task_id": "task-control-symlink",
+            "module_id": "app-core",
+            "objective": "reject redirected control state",
+            "scope_paths": ["playground/experiments/**"],
+            "steps": [{"step_id":"debug-1","node_id":"reproduction","action":"reproduce","owner":"app-core","expected_evidence":["reproduction-record"]}]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let redirected = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-control-symlink",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(!redirected.status.success());
+    assert!(String::from_utf8_lossy(&redirected.stderr).contains("GUIDANCE_TASK_CONTROL_SYMLINK"));
+    assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    fs::remove_file(root.join(".appsdk-control/guidance/task-control-symlink")).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": "debug",
+            "goal_id": "goal-change-me",
+            "task_id": "task-rule-drift",
+            "module_id": "app-core",
+            "objective": "detect declared rule drift",
+            "scope_paths": ["playground/experiments/**"],
+            "steps": [{"step_id":"debug-1","node_id":"reproduction","action":"reproduce","owner":"app-core","expected_evidence":["reproduction-record"]}]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-rule-drift",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    fs::write(root.join("AGENTS.md"), "# Project rules\n\nChanged.\n").unwrap();
+    let status = run(&["guide", "next", root_text, "--task", "task-rule-drift"]);
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status_json["reason_code"],
+        "GUIDANCE_COMPILED_CONTEXT_DRIFT:rule_sources"
+    );
+    assert_eq!(
+        status_json["next"]["command"],
+        "appsdk guide compile <project>"
+    );
+
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    let revised_status = run(&["guide", "next", root_text, "--task", "task-rule-drift"]);
+    assert!(revised_status.status.success());
+    let revised_json: Value = serde_json::from_slice(&revised_status.stdout).unwrap();
+    assert_eq!(
+        revised_json["reason_code"],
+        "GUIDANCE_CONTEXT_DRIFT:guidance_manifest"
+    );
+    assert_eq!(
+        revised_json["next"]["revision_reason"],
+        "guidance_manifest_changed"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_plan_revision_requires_reason_and_preserves_history() {
+    let root = temp_root("guidance-plan-revision");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let plan_file = root.join("plan.json");
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-revision",
+        "module_id": "app-core",
+        "objective": "initial objective",
+        "scope_paths": ["playground/experiments/**"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::write(
+        &plan_file,
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-revision",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    let mut revised = proposal.clone();
+    revised["objective"] = Value::String("revised objective".into());
+    fs::write(
+        &plan_file,
+        serde_json::to_string_pretty(&revised).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_reason = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-revision",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(!missing_reason.status.success());
+    assert!(String::from_utf8_lossy(&missing_reason.stderr)
+        .contains("GUIDANCE_PLAN_REVISION_REASON_REQUIRED"));
+
+    revised["revision_reason"] = Value::String("new_evidence".into());
+    fs::write(
+        &plan_file,
+        serde_json::to_string_pretty(&revised).unwrap() + "\n",
+    )
+    .unwrap();
+    let accepted = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-revision",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    let events =
+        fs::read_to_string(root.join(".appsdk-control/guidance/task-revision/events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["record_type"], "PlanRecord");
+    assert_eq!(events[1]["record_type"], "PlanRevisionRecord");
+    assert_eq!(events[1]["reason"], "new_evidence");
+    assert_eq!(events[2]["record_type"], "PlanRecord");
+    assert_ne!(events[0]["plan_hash"], events[2]["plan_hash"]);
+
+    fs::remove_dir_all(root).unwrap();
+}

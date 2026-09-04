@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod guidance;
+
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_MAP_MIGRATION_MANIFEST: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
@@ -33,6 +35,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/development-scenarios.manifest.json",
         "contracts",
         include_str!("../../contracts/development-scenarios.manifest.json"),
+    ),
+    (
+        "contracts/guidance/guidance-manifest.schema.json",
+        "contracts",
+        include_str!("../../contracts/guidance/guidance-manifest.schema.json"),
     ),
     (
         "contracts/maps/resource-map.json",
@@ -180,6 +187,21 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/regression-report.schema.json"),
     ),
     (
+        "contracts/records/plan-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/plan-record.schema.json"),
+    ),
+    (
+        "contracts/records/plan-revision-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/plan-revision-record.schema.json"),
+    ),
+    (
+        "contracts/records/step-execution-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/step-execution-record.schema.json"),
+    ),
+    (
         "docs/design/appsdk-project-integration.md",
         "docs",
         include_str!("../../docs/design/appsdk-project-integration.md"),
@@ -195,6 +217,21 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../docs/design/development-scenarios.md"),
     ),
     (
+        "docs/design/appsdk-guidance-framework.md",
+        "docs",
+        include_str!("../../docs/design/appsdk-guidance-framework.md"),
+    ),
+    (
+        "docs/test-design/appsdk-guidance-framework.md",
+        "docs",
+        include_str!("../../docs/test-design/appsdk-guidance-framework.md"),
+    ),
+    (
+        "docs/architecture/development-process-control-harness.md",
+        "docs",
+        include_str!("../../docs/architecture/development-process-control-harness.md"),
+    ),
+    (
         "docs/architecture/appsdk-governance-architecture.md",
         "docs",
         include_str!("../../docs/architecture/appsdk-governance-architecture.md"),
@@ -208,6 +245,48 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "skills/appsdk-project-governance/SKILL.md",
         "skills",
         include_str!("../../skills/appsdk-project-governance/SKILL.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/appsdk-guidance.json",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/appsdk-guidance.json"),
+    ),
+    (
+        "skills/appsdk-project-governance/agents/openai.yaml",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/agents/openai.yaml"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/bootstrap-migration.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/bootstrap-migration.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/contracts-and-failures.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/contracts-and-failures.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/development-debug.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/development-debug.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/goal-prompt.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/goal-prompt.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/process-control-harness.md",
+        "skills",
+        include_str!(
+            "../../skills/appsdk-project-governance/references/process-control-harness.md"
+        ),
+    ),
+    (
+        "skills/appsdk-project-governance/references/review-delivery.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/review-delivery.md"),
     ),
 ];
 
@@ -302,7 +381,12 @@ fn sdk_resource_install_relative(source: &str, class: &str) -> String {
                 .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE"))
         ),
         "rules" => ".appsdk/rules/appsdk-project-governance.md".into(),
-        "skills" => ".appsdk/skills/appsdk-project-governance/SKILL.md".into(),
+        "skills" => format!(
+            ".appsdk/skills/{}",
+            source
+                .strip_prefix("skills/")
+                .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE"))
+        ),
         _ => fail("INVALID_SDK_BUNDLE"),
     }
 }
@@ -845,7 +929,6 @@ fn assert_governance_maps(root: &Path) {
             fail(format!("INVALID_GOVERNANCE_MAP:{}", name));
         }
         if name == "mainline-call-map.json" {
-            let source = include_str!("main.rs");
             for edge in record_array(&value, "/edges", name) {
                 for field in [
                     "/chain_id",
@@ -865,10 +948,24 @@ fn assert_governance_maps(root: &Path) {
                     record_str(edge, "/caller", name),
                     record_str(edge, "/callee", name),
                 ] {
+                    let source = match record_str(edge, "/path", name) {
+                        "rust/src/main.rs" => include_str!("main.rs"),
+                        "rust/src/guidance.rs" => include_str!("guidance.rs"),
+                        "rust/src/guidance/compiler.rs" => include_str!("guidance/compiler.rs"),
+                        "rust/src/guidance/projector.rs" => include_str!("guidance/projector.rs"),
+                        path => fail(format!("MAINLINE_SOURCE_NOT_REGISTERED:{}", path)),
+                    };
                     if !source.contains(&format!("fn {}", symbol)) {
                         fail(format!("MAINLINE_SYMBOL_MISSING:{}", symbol));
                     }
                 }
+                let source = match record_str(edge, "/path", name) {
+                    "rust/src/main.rs" => include_str!("main.rs"),
+                    "rust/src/guidance.rs" => include_str!("guidance.rs"),
+                    "rust/src/guidance/compiler.rs" => include_str!("guidance/compiler.rs"),
+                    "rust/src/guidance/projector.rs" => include_str!("guidance/projector.rs"),
+                    path => fail(format!("MAINLINE_SOURCE_NOT_REGISTERED:{}", path)),
+                };
                 let caller = record_str(edge, "/caller", name);
                 let callee = record_str(edge, "/callee", name);
                 let caller_start = source
@@ -6969,6 +7066,14 @@ fn write_project_scaffold(root: &Path) {
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
+  "guidance": {
+    "enforcement": "advisory",
+    "compiled_manifest": ".appsdk/guidance/compiled.json",
+    "rule_sources": [
+      {"source_id":"project-agents","kind":"agents","path":"AGENTS.md","required":false,"precedence":100},
+      {"source_id":"appsdk-governance-skill","kind":"skill","path":".appsdk/skills/appsdk-project-governance/SKILL.md","contract_path":".appsdk/skills/appsdk-project-governance/appsdk-guidance.json","required":true,"precedence":200}
+    ]
+  },
   "governance": {
     "playground_root": "playground/experiments/**",
     "active_root": "active/lib/**",
@@ -7742,6 +7847,7 @@ fn main() {
                 verify(Path::new(&first), false);
             }
         }
+        Some("guide") => guidance::run(&mut args),
         Some("pin-lock") => {
             let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk pin-lock <dir> --binary <path>")));
             if args.next().as_deref() != Some("--binary") { fail("USAGE: appsdk pin-lock <dir> --binary <path>"); }
@@ -7844,7 +7950,7 @@ fn main() {
             }
             prepare_project(Path::new(&workspace));
         }
-        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | rehydrate-frozen <dir> --module <id> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | guide <command> <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | rehydrate-frozen <dir> --module <id> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
     }
 }
 

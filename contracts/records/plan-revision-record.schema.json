@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/records/plan-revision-record.schema.json",
+  "title": "AppSDK PlanRevisionRecord",
+  "type": "object",
+  "required": ["schema_version", "record_type", "revision_id", "task_id", "previous_plan_hash", "new_plan_hash", "reason", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "record_type": {"const": "PlanRevisionRecord"},
+    "revision_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "previous_plan_hash": {"type": "string", "pattern": "^sha256:"},
+    "new_plan_hash": {"type": "string", "pattern": "^sha256:"},
+    "reason": {"enum": ["new_evidence", "new_blocker", "hypothesis_rejected", "scope_changed", "owner_changed", "source_drift", "environment_changed", "prior_solution_matched", "rule_context_changed", "guidance_manifest_changed", "project_contract_changed", "gate_contract_changed", "dependency_input_changed"]},
+    "created_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -142,6 +142,20 @@ The lock is committed. A template may retain the two documented `replace-with-*`
 
 Runtime may consume only the compiled manifest and verified Active artifact. Runtime must not scan `.appsdk-control/`, Playground, Protected source, or arbitrary instruction files to reconstruct capability.
 
+## Development Process Control Harness
+
+The Harness is an agent-facing governance control plane, not a business runtime
+capability. `.appsdk/project.json#/guidance/rule_sources` explicitly declares
+project AGENTS, Skills, and their machine JSON contracts. `appsdk guide compile`
+reads only those paths and writes deterministic `.appsdk/guidance/compiled.json`.
+Markdown is digest-bound context for the agent; AppSDK validates only declared
+JSON nodes, edges, severity, and evidence contracts.
+
+Active PlanRecord and append-only PlanRevisionRecord/StepExecutionRecord events
+live under ignored `.appsdk-control/guidance/<task-id>/`. Existing AppSDK records
+remain the lifecycle truth. Missing Harness state does not block ordinary
+`verify` or `compile`; projects opt in and default to advisory guidance.
+
 Frozen artifacts must be reproducible across clean worktree locations. The canonical module build runner appends a Rust `--remap-path-prefix` from the current project root to a stable logical path while preserving existing `RUSTFLAGS`. This removes absolute checkout paths from compiler metadata without changing source, payload, or lifecycle hashes. `rehydrate-frozen` and normal module compilation use the same runner; a path-dependent artifact is rejected rather than reconciled by copying or editing a frozen hash.
 
 ## Bootstrap

@@ -14,7 +14,16 @@ requirements + acceptance
 ```
 
 `init` is idempotent. It fills missing governance resources and preserves
-business files. Use `new` only for an empty destination.
+business files. In a live tmux Agent it also invokes official `collab init`
+once; Collab starts/reuses its daemon, registers the current peer, and arms the
+default finite `direct-message` subscription. Do not run `collab init`,
+`collab whoami`, or a manual ordinary-message subscription afterward. Use
+`new` only for an empty destination.
+
+AppSDK preserves the launching environment and does not pass a project path to
+Collab. Collab resolves project scope from tmux pane cwd. Without a live tmux
+pane, AppSDK initializes governance and reports Collab pending because no peer
+can be registered; it never fabricates subscription state.
 
 For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
 when none exists. It contains the Project Truth, Semantic Invariants,

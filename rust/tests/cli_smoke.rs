@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,7 +68,11 @@ fn init_git(root: &PathBuf) {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(binary()).args(args).output().unwrap()
+    Command::new(binary())
+        .args(args)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap()
 }
 
 fn confirm_preparation(root: &PathBuf, project_root: &str, change_kind: &str) {
@@ -109,6 +114,8 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    assert!(String::from_utf8_lossy(&first.stdout)
+        .contains("collab peer bootstrap pending: no live tmux pane"));
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.starts_with("# project rules\nnode_modules/\n"));
     assert_eq!(gitignore.matches("# BEGIN APPSDK MANAGED").count(), 1);
@@ -175,6 +182,94 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         "{}",
         String::from_utf8_lossy(&verified.stderr)
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_bootstraps_collab_peer_with_same_project_and_environment() {
+    let root = temp_root("init-collab-peer");
+    fs::create_dir_all(&root).unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+if [ "$1" != "init" ]; then
+  exit 64
+fi
+{
+  printf 'cwd=%s\n' "$PWD"
+  printf 'pane=%s\n' "$TMUX_PANE"
+  printf 'probe=%s\n' "$APPSDK_COLLAB_ENV_PROBE"
+  printf 'args=%s\n' "$*"
+} >> "$APPSDK_COLLAB_PROBE"
+printf '{"ok":true,"worker_id":"test-peer","default_subscription":"direct-message"}\n'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let search_path = std::env::join_paths(
+        std::iter::once(fake_bin.clone()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .unwrap();
+    let probe = root.join("collab-init-probe.txt");
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("PATH", search_path)
+        .env("TMUX_PANE", "%42")
+        .env("APPSDK_COLLAB_ENV_PROBE", "same-environment")
+        .env("APPSDK_COLLAB_PROBE", &probe)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocation = fs::read_to_string(&probe).unwrap();
+    let child_cwd = invocation
+        .lines()
+        .find_map(|line| line.strip_prefix("cwd="))
+        .unwrap();
+    assert_eq!(
+        fs::canonicalize(child_cwd).unwrap(),
+        fs::canonicalize(&root).unwrap()
+    );
+    assert!(invocation.contains("pane=%42\n"));
+    assert!(invocation.contains("probe=same-environment\n"));
+    assert!(invocation.contains("args=init\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test-peer"));
+
+    let repeated = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(fake_bin.clone()).chain(std::env::split_paths(&inherited_path)),
+            )
+            .unwrap(),
+        )
+        .env("TMUX_PANE", "%42")
+        .env("APPSDK_COLLAB_ENV_PROBE", "same-environment")
+        .env("APPSDK_COLLAB_PROBE", &probe)
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated_invocation = fs::read_to_string(&probe).unwrap();
+    assert_eq!(repeated_invocation.matches("args=init\n").count(), 2);
+
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -26,7 +26,11 @@ not require.
    rerun `appsdk init <project>` and then run
    `appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <id>`.
    Repeated initialization is a non-destructive resource refresh and upgrade
-   entry even when Guidance already exists. Read current project rules first,
+   entry even when Guidance already exists. In a live tmux Agent it also runs
+   official `collab init` once, starting/reusing the daemon, registering the
+   current peer, and creating/refreshing the default finite `direct-message`
+   subscription. Do not run a second Collab initialization or ordinary-message
+   subscription. Read current project rules first,
    compare them with `.appsdk/templates/minimal/AGENTS.md`, and present only
    useful differences for approval. The versioned standard template is an
    advisory reference, not project truth and not a mandatory replacement.
@@ -88,6 +92,11 @@ not require.
 - Binary byte hash is not a governance admission gate. Use the selected AppSDK
   version/contract; lifecycle compatibility errors expose a migration/reset
   route.
+- `appsdk init` is the single AppSDK + Collab bootstrap entry for a live tmux
+  Agent. It passes no project path to Collab and preserves the current
+  environment; Collab owns pane-cwd scope, daemon, identity, mailbox, and
+  subscription truth. Without live tmux, report Collab pending and never invent
+  a peer. A live-tmux `COLLAB_INIT_*` failure is explicit and not bypassed.
 - Code and committed governance changes use a clean branch worktree from latest
   `origin/main`. Main stays read-only. Preserve other workers' dirty state.
 - Completed claim must bind cleanup evidence. Remote receipt and required

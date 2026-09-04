@@ -187,6 +187,20 @@ project-local Skill and machine contract, and
 `appsdk guide compile` and `appsdk verify`. This setup proposal is project-level
 and must not be replaced by a task PlanProposal.
 
+`appsdk init` is also the single Collab bootstrap entry for a live tmux Agent.
+After AppSDK-owned resources are installed, it invokes the official
+`collab init` once with the same process environment. Collab—not AppSDK—resolves
+the project root from tmux pane cwd, starts or reuses the single daemon,
+registers the current peer, and creates or refreshes its finite default
+`direct-message` subscription. Do not follow `appsdk init` with a second
+`collab init`, `collab whoami`, or manual ordinary-message subscription.
+
+Without `TMUX_PANE`, no Agent peer exists to register. AppSDK keeps governance
+initialization usable and prints an explicit Collab-pending result; it does not
+fabricate identity/subscription state. In a live tmux context, missing Collab or
+a failed official Collab initialization is an explicit `COLLAB_INIT_*` failure
+and is never downgraded to success.
+
 Frozen artifacts must be reproducible across clean worktree locations. The canonical module build runner appends a Rust `--remap-path-prefix` from the current project root to a stable logical path while preserving existing `RUSTFLAGS`. This removes absolute checkout paths from compiler metadata without changing source, payload, or lifecycle hashes. `rehydrate-frozen` and normal module compilation use the same runner; a path-dependent artifact is rejected rather than reconciled by copying or editing a frozen hash.
 
 ## Bootstrap
@@ -225,7 +239,7 @@ confirmed preparation
 appsdk init ./existing-workspace --project-root new-code
 ```
 
-`init` 的第一个参数是已有工作区，`--project-root` 是新 AppSDK 项目的相对根目录。这样旧代码可以留在工作区，新代码和治理面进入独立子目录。它是幂等操作：创建 `playground/`、`active/lib/`、`protected/`、`generated/`、`.appsdk/` 和 `.appsdk-control/`，只补齐缺失的治理合同，并向新项目根目录的 `.gitignore` 追加一次 SDK 管理区块。它不覆盖已有项目文件，也不覆盖已有 Git 忽略规则；绝对路径和 `..` 路径会被拒绝。
+`init` 的第一个参数是已有工作区，`--project-root` 是新 AppSDK 项目的相对根目录。这样旧代码可以留在工作区，新代码和治理面进入独立子目录。它是幂等操作：创建 `playground/`、`active/lib/`、`protected/`、`generated/`、`.appsdk/` 和 `.appsdk-control/`，只补齐缺失的治理合同，并向新项目根目录的 `.gitignore` 追加一次 SDK 管理区块。在 live tmux Agent 中，它还以同一环境调用一次官方 `collab init`，由 Collab 完成 daemon、peer 与默认 `direct-message` 订阅；不需要第二次初始化。它不覆盖已有项目文件，也不覆盖已有 Git 忽略规则；绝对路径和 `..` 路径会被拒绝。
 
 新项目执行：
 

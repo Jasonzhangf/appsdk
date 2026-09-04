@@ -20,6 +20,12 @@ appsdk guide compile ./existing-project
 appsdk verify ./existing-project
 ```
 
+在 live tmux Agent 中，`appsdk init` 同时执行官方 `collab init`：幂等创建
+Collab 项目状态、启动单 daemon、注册当前 peer，并建立默认有限
+`direct-message` 订阅。无需再运行 `collab whoami` 或手工订阅普通消息。
+AppSDK 不选择 Collab 路径；Collab 继承同一环境，并以 tmux pane cwd 作为项目根。
+非 tmux 操作没有可注册 peer，AppSDK 只初始化治理并明确输出 Collab pending。
+
 ```bash
 appsdk guide compile ./my-app
 appsdk guide status ./my-app --task task-id
@@ -61,7 +67,7 @@ appsdk publish-active ./my-app --module app-core --version active-v1
 
 ```
 
-`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，`appsdk init` 才允许执行。`appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块。
+`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，`appsdk init` 才允许执行。`appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；在 live tmux Agent 中还通过同环境官方 `collab init` 完成 Collab/daemon/peer/default direct-message subscription 的一次性初始化。
 
 治理设计：
 

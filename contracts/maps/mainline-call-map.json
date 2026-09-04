@@ -11,6 +11,7 @@
     ,{"chain_id":"development-process-control-v1","scenario_condition":"project_guidance_declared","entry_symbol":"run","terminal_symbol":"project_status"}
     ,{"chain_id":"project-agent-contract-init-v1","scenario_condition":"fresh_prepared_governance_root","entry_symbol":"init_project","terminal_symbol":"write_project_agent_contract"}
     ,{"chain_id":"project-agent-contract-new-v1","scenario_condition":"empty_new_project","entry_symbol":"new_project","terminal_symbol":"write_project_agent_contract"}
+    ,{"chain_id":"project-collab-bootstrap-v1","scenario_condition":"appsdk_init_from_live_tmux_peer","entry_symbol":"init_project","terminal_symbol":"initialize_collab_peer"}
   ],
   "edges": [
     {"chain_id":"sdk-pin-migrate-v1","from":"project_sdk_version_read","to":"bundle_identity_verified","owner":"appsdk::delivery","caller":"pin_lock","callee":"digest_bytes","path":"rust/src/main.rs","input_resource_id":"sdk_bundle","output_resource_id":"sdk_bundle","error_resource_id":"lifecycle_error"},
@@ -51,5 +52,6 @@
     {"chain_id":"development-process-control-v1","from":"step_event_appended","to":"next_step_projected","owner":"appsdk::process_control","caller":"project_status","callee":"next_step","path":"rust/src/guidance/projector.rs","input_resource_id":"guidance_event_ledger","output_resource_id":"guidance_active_plan","error_resource_id":"lifecycle_error"}
     ,{"chain_id":"project-agent-contract-init-v1","from":"fresh_governance_detected","to":"project_agent_contract_installed","owner":"appsdk::delivery","caller":"init_project","callee":"write_project_agent_contract","path":"rust/src/main.rs","input_resource_id":"project_agent_contract_template","output_resource_id":"project_agent_contract","error_resource_id":"lifecycle_error"}
     ,{"chain_id":"project-agent-contract-new-v1","from":"empty_project_created","to":"project_agent_contract_installed","owner":"appsdk::delivery","caller":"new_project","callee":"write_project_agent_contract","path":"rust/src/main.rs","input_resource_id":"project_agent_contract_template","output_resource_id":"project_agent_contract","error_resource_id":"lifecycle_error"}
+    ,{"chain_id":"project-collab-bootstrap-v1","from":"governance_resources_installed","to":"collab_peer_ready","owner":"appsdk::delivery","caller":"init_project","callee":"initialize_collab_peer","path":"rust/src/main.rs","input_resource_id":"project_contract","output_resource_id":"collab_peer_runtime","error_resource_id":"lifecycle_error"}
   ]
 }

@@ -7350,6 +7350,25 @@ fn prepare_project(workspace: &Path) {
     }
 }
 
+fn initialize_collab_peer() {
+    if env::var_os("TMUX_PANE").is_none() {
+        println!("collab peer bootstrap pending: no live tmux pane");
+        return;
+    }
+    let output = Command::new("collab")
+        .arg("init")
+        .output()
+        .unwrap_or_else(|error| fail(format!("COLLAB_INIT_UNAVAILABLE:{}", error)));
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        fail(format!("COLLAB_INIT_FAILED:{}", detail.trim()));
+    }
+    let result = String::from_utf8_lossy(&output.stdout);
+    if !result.trim().is_empty() {
+        println!("collab {}", result.trim());
+    }
+}
+
 fn init_project(root: &Path) {
     if root.exists()
         && fs::symlink_metadata(root)
@@ -7375,6 +7394,7 @@ fn init_project(root: &Path) {
     }
     install_bundle_resources(root);
     install_standard_template_reference(root);
+    initialize_collab_peer();
     println!("initialized {}", root.display());
     if existing_project_needs_guidance {
         println!(

@@ -27,6 +27,18 @@
 - missing compiled manifest returns `GUIDANCE_NOT_COMPILED` and the compile
   action without retrying automatically.
 
+## Initialization intake
+
+- `new` and `init` print the `guide compile -> guide init` onboarding route;
+- `guide --help` exposes every command, including `guide init`;
+- uncompiled intake returns the missing compile/init commands without writing;
+- compiled intake returns declared AGENTS/Skill sources, exact Skill commands,
+  project/module/goal context, and the next guide commands;
+- develop intake asks requirements, architecture, and delivery questions;
+- debug intake asks failing-sample, causal-evidence, and replay questions;
+- intake never creates `.appsdk-control` task state; `guide plan` remains the
+  first write.
+
 ## Plan
 
 - a valid adjacent agent plan is persisted with derived context hashes;

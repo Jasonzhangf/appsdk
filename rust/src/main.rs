@@ -952,6 +952,7 @@ fn assert_governance_maps(root: &Path) {
                         "rust/src/main.rs" => include_str!("main.rs"),
                         "rust/src/guidance.rs" => include_str!("guidance.rs"),
                         "rust/src/guidance/compiler.rs" => include_str!("guidance/compiler.rs"),
+                        "rust/src/guidance/intake.rs" => include_str!("guidance/intake.rs"),
                         "rust/src/guidance/projector.rs" => include_str!("guidance/projector.rs"),
                         path => fail(format!("MAINLINE_SOURCE_NOT_REGISTERED:{}", path)),
                     };
@@ -963,6 +964,7 @@ fn assert_governance_maps(root: &Path) {
                     "rust/src/main.rs" => include_str!("main.rs"),
                     "rust/src/guidance.rs" => include_str!("guidance.rs"),
                     "rust/src/guidance/compiler.rs" => include_str!("guidance/compiler.rs"),
+                    "rust/src/guidance/intake.rs" => include_str!("guidance/intake.rs"),
                     "rust/src/guidance/projector.rs" => include_str!("guidance/projector.rs"),
                     path => fail(format!("MAINLINE_SOURCE_NOT_REGISTERED:{}", path)),
                 };
@@ -7301,6 +7303,10 @@ fn init_project(root: &Path) {
     write_project_scaffold(root);
     install_bundle_resources(root);
     println!("initialized {}", root.display());
+    println!("next appsdk guide compile <project>");
+    println!(
+        "then appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>"
+    );
 }
 
 fn new_project(root: &Path) {
@@ -7341,6 +7347,10 @@ fn new_project(root: &Path) {
     write_project_scaffold(root);
     install_bundle_resources(root);
     println!("created {}", root.display());
+    println!("next appsdk guide compile <project>");
+    println!(
+        "then appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>"
+    );
 }
 
 fn sdk_map_migration_root(root: &Path) -> PathBuf {

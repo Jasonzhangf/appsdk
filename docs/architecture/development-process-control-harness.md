@@ -24,7 +24,7 @@ appsdk-guidance.json
   machine nodes, edges, evidence requirements, severity
 
 Process Control Harness
-  deterministic compile, validation, projection, persistence
+  deterministic compile, intake, validation, projection, persistence
 
 Agent
   authors the plan, executes one step, returns observations/evidence
@@ -65,7 +65,7 @@ agent-writable truth field.
 | Rule compiler | declared AGENTS, Skill, JSON contracts | deterministic rule context | prose semantics |
 | Plan controller | agent PlanProposal | validated PlanRecord/revision | technical decisions |
 | Execution ledger | step result + evidence refs | append-only events | evidence production |
-| State projector | lifecycle + plan + events | readiness, blocker, next node | lifecycle mutation |
+| State projector | lifecycle + declared rules + plan + events | intake questions, readiness, blocker, next node | user answers or lifecycle mutation |
 | Lifecycle bridge | domain/node mapping | canonical command/gate hints | duplicate commands |
 | Closeout projector | final state/evidence | gaps, cleanup, memory candidates | automatic memory writes |
 
@@ -74,7 +74,7 @@ agent-writable truth field.
 One engine covers AppSDK as a whole:
 
 ```text
-bootstrap -> migration -> governance-preflight
+guide init -> bootstrap -> migration -> governance-preflight
           -> develop/debug -> review -> delivery
           -> integration -> promotion -> freeze -> cleanup
 ```
@@ -82,6 +82,15 @@ bootstrap -> migration -> governance-preflight
 Domains select prompts and workflow contracts. They do not duplicate canonical
 commands such as `prepare`, `init`, `pin-lock`, `verify`, `compile`,
 `verify --review-admission`, `promote`, `publish-active`, or `freeze`.
+
+`guide init` is the read-only intake before a domain plan. It projects only
+explicitly declared AGENTS and local Skill sources, their precedence/digests,
+the selected project/module/goal context, standard unresolved questions, exact
+Skill invocation suggestions from declared Skill contracts/paths, and the next
+guide commands. AppSDK does not
+interpret prose, answer questions, call a model, or persist a second intake
+record. The confirmed result becomes the agent-authored PlanProposal and is
+persisted by `guide plan`.
 
 ## L5 Rule context
 

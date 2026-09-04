@@ -26,19 +26,26 @@ not require.
 5. Select one domain: `bootstrap`, `migration`, `governance-preflight`,
    `develop`, `debug`, `review`, `delivery`, `integration`, `promotion`,
    `freeze`, or `cleanup`.
-6. Let the agent write PlanProposal JSON. Submit it with
+6. Run `appsdk guide init <project> --task <id> --mode <domain> --module <id>`.
+   Read the returned AGENTS/Skill paths in precedence order, invoke the
+   suggested Skill commands, and ask the user only questions still unresolved.
+7. Run the projected domain command. Let the agent write PlanProposal JSON and
+   submit it with
    `appsdk guide plan <project> --task <id> --input <file>`.
-7. Execute only the projected step. Submit observation/evidence with
+8. Execute only the projected step. Submit observation/evidence with
    `appsdk guide update <project> --task <id> --input <file>`.
-8. Read `appsdk guide next`; revise the plan when scope, owner, source, rule
+9. Read `appsdk guide next`; revise the plan when scope, owner, source, rule
    context, evidence, blocker, or environment changes.
-9. Finish with `appsdk guide close`; then complete canonical lifecycle and
+10. Finish with `appsdk guide close`; then complete canonical lifecycle and
    worktree/claim cleanup. Workflow completion is not lifecycle completion.
 
 ## L2 Hard boundaries
 
 - AppSDK never calls a model. Agent authors technical plans; Harness validates,
   persists, projects state, and returns adjacent next steps.
+- `guide init` is read-only. It projects declared context, interactive questions,
+  Skill invocations, and missing/next commands. `guide plan` is the first task
+  state write.
 - Existing AppSDK lifecycle is sole truth. No second lifecycle enum or manual
   PASS/record/hash/artifact.
 - `AGENTS.md` owns project facts. `SKILL.md` owns agent procedure. Declared JSON

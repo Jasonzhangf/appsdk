@@ -156,6 +156,19 @@ live under ignored `.appsdk-control/guidance/<task-id>/`. Existing AppSDK record
 remain the lifecycle truth. Missing Harness state does not block ordinary
 `verify` or `compile`; projects opt in and default to advisory guidance.
 
+After `new` or `init`, follow the printed onboarding route:
+
+```bash
+appsdk guide compile <project>
+appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>
+```
+
+The read-only intake names declared AGENTS/local Skill sources, questions still
+requiring user confirmation, exact Skill invocation suggestions, and the next
+guide commands. It never scans undeclared directories or writes an intake
+record. The Agent asks only unresolved questions and persists the confirmed
+technical plan through `appsdk guide plan`.
+
 Frozen artifacts must be reproducible across clean worktree locations. The canonical module build runner appends a Rust `--remap-path-prefix` from the current project root to a stable logical path while preserving existing `RUSTFLAGS`. This removes absolute checkout paths from compiler metadata without changing source, payload, or lifecycle hashes. `rehydrate-frozen` and normal module compilation use the same runner; a path-dependent artifact is rejected rather than reconciled by copying or editing a frozen hash.
 
 ## Bootstrap

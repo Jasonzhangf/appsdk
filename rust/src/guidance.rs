@@ -7,10 +7,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 mod compiler;
+mod intake;
 mod ledger;
 mod projector;
 
 use compiler::{compile, compiled_context_drift, current_rule_sources, load_compiled};
+use intake::initialize;
 use ledger::{atomic_write, event_file, plan_file, read_events, read_plan};
 use projector::{close, next_step, project_status, step_events};
 
@@ -838,13 +840,64 @@ fn parse_mutation_options(args: &mut impl Iterator<Item = String>) -> (String, S
     )
 }
 
+fn parse_init_options(args: &mut impl Iterator<Item = String>) -> (String, String, Option<String>) {
+    let mut task = None;
+    let mut mode = None;
+    let mut module = None;
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--task" => task = args.next(),
+            "--mode" => mode = args.next(),
+            "--module" => module = args.next(),
+            _ => fail(
+                "GUIDANCE_USAGE",
+                "use --task <id> --mode <domain> [--module <id>]",
+            ),
+        }
+    }
+    (
+        task.unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide --task <id>")),
+        mode.unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide --mode <domain>")),
+        module,
+    )
+}
+
+fn help() -> Value {
+    serde_json::json!({
+        "harness": "appsdk-development-process-control",
+        "commands": [
+            {"command": "compile", "usage": "appsdk guide compile <project>", "writes_state": true},
+            {"command": "init", "usage": "appsdk guide init <project> --task <id> --mode <domain> [--module <id>]", "writes_state": false},
+            {"command": "status", "usage": "appsdk guide status <project> [--task <id>] [--module <id>]", "writes_state": false},
+            {"command": "<domain>", "usage": "appsdk guide <domain> <project> [--task <id>] [--module <id>]", "writes_state": false},
+            {"command": "plan", "usage": "appsdk guide plan <project> --task <id> --input <plan.json>", "writes_state": true},
+            {"command": "update", "usage": "appsdk guide update <project> --task <id> --input <result.json>", "writes_state": true},
+            {"command": "next", "usage": "appsdk guide next <project> --task <id>", "writes_state": false},
+            {"command": "close", "usage": "appsdk guide close <project> --task <id>", "writes_state": false}
+        ],
+        "domains": DOMAINS,
+        "start": [
+            "appsdk guide status <project> --task <id>",
+            "appsdk guide compile <project>",
+            "appsdk guide init <project> --task <id> --mode <develop|debug> --module <id>"
+        ]
+    })
+}
+
 pub fn run(args: &mut impl Iterator<Item = String>) {
     let command = args.next().unwrap_or_else(|| {
         fail(
             "GUIDANCE_USAGE",
-            "select compile, status, a domain, plan, update, next, or close",
+            "select --help, compile, init, status, a domain, plan, update, next, or close",
         )
     });
+    if matches!(command.as_str(), "help" | "--help" | "-h") {
+        if args.next().is_some() {
+            fail("GUIDANCE_USAGE", "use appsdk guide --help");
+        }
+        output(&help());
+        return;
+    }
     let root = PathBuf::from(
         args.next()
             .unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide the project root")),
@@ -865,6 +918,10 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
                 module.as_deref(),
                 false,
             ));
+        }
+        "init" => {
+            let (task, mode, module) = parse_init_options(args);
+            output(&initialize(&root, &task, &mode, module.as_deref()));
         }
         "plan" => {
             let (task, input) = parse_mutation_options(args);
@@ -902,7 +959,7 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
         }
         _ => fail(
             format!("GUIDANCE_DOMAIN_UNKNOWN:{}", command),
-            "select compile, status, bootstrap, migration, governance-preflight, develop, debug, review, delivery, integration, promotion, freeze, cleanup, plan, update, next, or close",
+            "select --help, compile, init, status, bootstrap, migration, governance-preflight, develop, debug, review, delivery, integration, promotion, freeze, cleanup, plan, update, next, or close",
         ),
     }
 }

@@ -8,6 +8,7 @@ requirements + acceptance
 -> confirm project root/boundaries/non-goals
 -> appsdk init
 -> appsdk guide compile
+-> appsdk guide init --mode develop|debug
 -> appsdk verify
 -> clean owner worktree
 ```
@@ -47,6 +48,7 @@ inventory + immutable audit snapshot
 -> appsdk prepare/init with current SDK
 -> rebuild maps/goal/module/owner from current project truth
 -> appsdk guide compile
+-> appsdk guide init for the current task/domain
 -> appsdk verify
 ```
 
@@ -62,6 +64,7 @@ Do not force release/freeze evidence onto unfinished work.
 snapshot current source and task state
 -> initialize advisory governance
 -> bind current goal/module/owner/worktree
+-> run guide init, read declared AGENTS/Skills, ask unresolved questions
 -> place workflow at the current real phase
 -> apply new rules to new/changed nodes
 -> continue development
@@ -69,4 +72,3 @@ snapshot current source and task state
 
 Untouched legacy gaps are warnings unless safety, source ownership, evidence
 truth, or current delivery is affected.
-

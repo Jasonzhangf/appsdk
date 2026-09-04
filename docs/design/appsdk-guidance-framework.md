@@ -55,6 +55,7 @@ worktree.
 Read-only commands:
 
 ```text
+appsdk guide init <project> --task <id> --mode <domain> [--module <id>]
 appsdk guide status <project> [--task <id>]
 appsdk guide <domain> <project> [--task <id>] [--module <id>]
 appsdk guide next <project> --task <id>
@@ -87,6 +88,23 @@ failure.
 `readiness` and `reason_code` explain lifecycle state; they are not lifecycle
 nodes. Prompt commands add declared rule paths, allowed evidence, and the plan
 proposal schema. They never choose technical implementation details.
+
+### Initialization intake
+
+`guide init` is the standard entry before an agent creates a task plan. It
+returns `guide_flow_required`, the selected goal/module/workflow projection,
+present declared sources in precedence order, missing optional context, exact
+`$skill-id` suggestions from a declared Skill contract or `<skill-id>/SKILL.md`
+path, and mode-specific questions. Develop intake confirms requirements,
+architecture closure, and delivery depth. Debug intake confirms the failing
+sample, causal experiment, and old-sample replay.
+
+The command never scans undeclared Skill directories and never writes task
+state. If guidance has not been compiled, it returns the missing `guide compile`
+and repeatable `guide init` commands. `new` and `init` print this same onboarding
+sequence. After the Agent reads context and asks only unresolved questions, it
+runs the projected domain command and submits PlanProposal; `guide plan` is the
+first task-state write.
 
 ## 4. Plan controller
 
@@ -191,7 +209,7 @@ rules or memory. Applying those candidates is a separate reviewed workflow.
 
 - Projects without `guidance` continue to use every existing command unchanged.
 - New projects receive advisory guidance declarations and the canonical Skill
-  contract.
+  contract, and initialization prints the `guide compile -> guide init` route.
 - Existing projects opt in by adding declared sources and compiling once.
 - Binary byte hashes are not a guidance prerequisite. Version and project
   contract compatibility remain owned by existing AppSDK lifecycle commands.

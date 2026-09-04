@@ -3018,6 +3018,11 @@ fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
         before_json["next"]["command"],
         "appsdk guide compile <project>"
     );
+    assert_eq!(before_json["guide_flow_required"], true);
+    assert!(before_json["next"]["then"]
+        .as_str()
+        .unwrap()
+        .contains("appsdk guide init"));
 
     assert!(run(&["guide", "compile", left_text]).status.success());
     assert!(run(&["guide", "compile", right_text]).status.success());
@@ -3039,6 +3044,149 @@ fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
 
     fs::remove_dir_all(left).unwrap();
     fs::remove_dir_all(right).unwrap();
+}
+
+#[test]
+fn guidance_init_projects_declared_context_and_commands() {
+    let root = temp_root("guidance-init");
+    let root_text = root.to_str().unwrap();
+    let created = run(&["new", root_text]);
+    assert!(created.status.success());
+    let created_stdout = String::from_utf8_lossy(&created.stdout);
+    assert!(created_stdout.contains("appsdk guide compile"));
+    assert!(created_stdout.contains("appsdk guide init"));
+
+    let help = run(&["guide", "--help"]);
+    assert!(help.status.success());
+    let help_json: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert_eq!(help_json["commands"][1]["command"], "init");
+
+    fs::write(
+        root.join("AGENTS.md"),
+        "# Project rules\n\nRead the project-owned Skills before planning.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("skills/local-debug")).unwrap();
+    fs::write(
+        root.join("skills/local-debug/SKILL.md"),
+        "---\nname: local-debug\ndescription: Project-local debug procedure.\n---\n",
+    )
+    .unwrap();
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["guidance"]["rule_sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "source_id": "local-debug",
+            "kind": "skill",
+            "path": "skills/local-debug/SKILL.md",
+            "required": false,
+            "precedence": 300
+        }));
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let before_compile = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "task-intake",
+        "--mode",
+        "develop",
+        "--module",
+        "app-core",
+    ]);
+    assert!(before_compile.status.success());
+    let before_json: Value = serde_json::from_slice(&before_compile.stdout).unwrap();
+    assert_eq!(before_json["reason_code"], "GUIDANCE_NOT_COMPILED");
+    assert_eq!(
+        before_json["missing_commands"][0],
+        "appsdk guide compile <project>"
+    );
+    assert!(before_json["missing_commands"][1]
+        .as_str()
+        .unwrap()
+        .contains("appsdk guide init"));
+    assert!(!root.join(".appsdk-control/guidance/task-intake").exists());
+
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    let developed = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "task-intake",
+        "--mode",
+        "develop",
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        developed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&developed.stderr)
+    );
+    let developed_json: Value = serde_json::from_slice(&developed.stdout).unwrap();
+    assert_eq!(developed_json["reason_code"], "GUIDANCE_INTAKE_REQUIRED");
+    assert_eq!(developed_json["task_id"], "task-intake");
+    assert_eq!(developed_json["mode"], "develop");
+    assert_eq!(developed_json["module"]["module_id"], "app-core");
+    assert!(developed_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["path"] == "AGENTS.md"));
+    assert!(developed_json["skill_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["command"] == "$appsdk-project-governance"));
+    assert!(developed_json["skill_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["command"] == "$local-debug"));
+    assert!(developed_json["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|question| question["question_id"] == "architecture_confirmation"));
+    assert!(developed_json["next"]["command"]
+        .as_str()
+        .unwrap()
+        .contains("appsdk guide develop"));
+    assert!(!root.join(".appsdk-control/guidance/task-intake").exists());
+
+    let debugged = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "task-debug",
+        "--mode",
+        "debug",
+        "--module",
+        "app-core",
+    ]);
+    assert!(debugged.status.success());
+    let debugged_json: Value = serde_json::from_slice(&debugged.stdout).unwrap();
+    assert!(debugged_json["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|question| question["question_id"] == "failure_sample"));
+    assert!(debugged_json["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|question| question["question_id"] == "causal_evidence"));
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

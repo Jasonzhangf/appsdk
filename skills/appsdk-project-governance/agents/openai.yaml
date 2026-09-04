@@ -1,4 +1,4 @@
 interface:
   display_name: "AppSDK Project Governance"
   short_description: "Guide and govern the full project lifecycle"
-  default_prompt: "Use $appsdk-project-governance and the AppSDK Development Process Control Harness to bind project rules, persist the plan, execute the next legal step, verify evidence, deliver, freeze, and clean up."
+  default_prompt: "Use $appsdk-project-governance and appsdk guide init to read declared project rules and Skills, ask only unresolved questions, persist the plan, execute the next legal step, verify evidence, deliver, freeze, and clean up."

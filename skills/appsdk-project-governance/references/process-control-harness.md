@@ -19,10 +19,21 @@ or write memory automatically.
 ```bash
 appsdk guide status <project> --task <task-id>
 appsdk guide compile <project>
-appsdk guide develop <project> --module <module-id>
+appsdk guide init <project> --task <task-id> --mode develop --module <module-id>
+appsdk guide develop <project> --task <task-id> --module <module-id>
 ```
 
-Use another domain when appropriate. Read only returned declared rule sources.
+Use `--mode debug` for a bug, regression, or incident. Use another declared
+domain when appropriate. `guide init` is read-only and returns:
+
+- declared AGENTS and local Skill paths to read in precedence order;
+- unresolved develop/debug questions to ask the user;
+- exact `$skill-id` suggestions for declared local Skills;
+- missing commands and the next `appsdk guide` command sequence.
+
+Ask only questions still unresolved after reading the returned sources and the
+current user request. Then run the projected domain command and write the
+PlanProposal. `appsdk guide --help` lists the full command surface.
 
 If status returns `MODULE_PATH_MISSING`, treat it as a project module-binding
 error. The named module owner updates that module's `owned_paths` or
@@ -57,6 +68,10 @@ rule-context hash. Harness derives them.
 ```bash
 appsdk guide plan <project> --task <task-id> --input plan.json
 ```
+
+This is the first task-state write. It creates the active PlanRecord under
+`.appsdk-control/guidance/<task-id>/plan.json`; initialization does not create a
+second intake truth.
 
 ## Update
 

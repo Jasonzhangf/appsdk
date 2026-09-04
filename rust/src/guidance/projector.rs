@@ -91,6 +91,9 @@ pub(super) fn project_status(
         });
     }
     let Some(compiled) = load_compiled(root, &project) else {
+        let domain = domain.unwrap_or("governance-preflight");
+        let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
+        let task_id = task.unwrap_or("<task-id>");
         return serde_json::json!({
             "harness": "appsdk-development-process-control",
             "enforcement": enforcement,
@@ -98,7 +101,11 @@ pub(super) fn project_status(
             "readiness": "ready",
             "reason_code": "GUIDANCE_NOT_COMPILED",
             "first_failing_gate": null,
-            "next": {"command": "appsdk guide compile <project>"}
+            "guide_flow_required": true,
+            "next": {
+                "command": "appsdk guide compile <project>",
+                "then": format!("appsdk guide init <project> --task {} --mode {} --module {}", task_id, domain, module_id)
+            }
         });
     };
     if let Some(reason) = compiled_context_drift(root, &project, &compiled) {
@@ -207,6 +214,13 @@ pub(super) fn project_status(
                 .into(),
         );
     }
+    let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
+    let task_id = task.unwrap_or("<task-id>");
+    value["guide_flow_required"] = Value::Bool(true);
+    value["init_command"] = Value::String(format!(
+        "appsdk guide init <project> --task {} --mode {} --module {}",
+        task_id, domain, module_id
+    ));
     value
 }
 

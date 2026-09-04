@@ -11,12 +11,15 @@ Harness 将项目声明的 `AGENTS.md`、Skill 和 JSON 流程合同编译为确
 ```bash
 appsdk guide compile ./my-app
 appsdk guide status ./my-app --task task-id
-appsdk guide develop ./my-app --module app-core
+appsdk guide init ./my-app --task task-id --mode develop --module app-core
+appsdk guide develop ./my-app --task task-id --module app-core
 appsdk guide plan ./my-app --task task-id --input plan.json
 appsdk guide update ./my-app --task task-id --input result.json
 appsdk guide next ./my-app --task task-id
 appsdk guide close ./my-app --task task-id
 ```
+
+`guide init` 只读返回需要先读的项目 AGENTS/本地 Skills、仍需询问用户的问题、Skill 调用建议和下一条 guide 命令；`guide plan` 才开始写入任务控制态。
 
 功能边界见 [Development Process Control Harness](./docs/architecture/development-process-control-harness.md)，详细合同见 [Harness design](./docs/design/appsdk-guidance-framework.md)。
 

@@ -144,6 +144,7 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         ".appsdk/docs/design/fix-lifecycle-v2.md",
         ".appsdk/rules/appsdk-project-governance.md",
         ".appsdk/skills/appsdk-project-governance/SKILL.md",
+        ".appsdk/templates/minimal/AGENTS.md",
         ".appsdk/maps/resource-map.json",
         ".appsdk/maps/module-registry.json",
         ".appsdk/contracts/records/worktree-record.schema.json",
@@ -196,6 +197,217 @@ fn project_agent_contract_is_created_for_new_projects_but_never_overwrites_proje
     assert!(run(&["init", created_text]).status.success());
     assert!(!created.join("AGENTS.md").exists());
     fs::remove_dir_all(created).unwrap();
+}
+
+#[test]
+fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
+    let root = temp_root("guidance-template-upgrade");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+
+    let project_file = root.join(".appsdk/project.json");
+    let project_before = fs::read(&project_file).unwrap();
+    fs::write(root.join("AGENTS.md"), "# Project-owned rules\n").unwrap();
+    let agents_before = fs::read(root.join("AGENTS.md")).unwrap();
+    fs::create_dir_all(root.join("skills/project-flow")).unwrap();
+    fs::write(
+        root.join("skills/project-flow/SKILL.md"),
+        "---\nname: project-flow\ndescription: Project-owned flow.\n---\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".appsdk/guidance")).unwrap();
+    fs::write(
+        root.join(".appsdk/guidance/project-guidance.json"),
+        "{\"schema_version\":1}\n",
+    )
+    .unwrap();
+    fs::write(root.join(".appsdk/records/project-record.json"), "{}\n").unwrap();
+    fs::write(root.join("active/lib/project-active.txt"), "active\n").unwrap();
+    fs::write(
+        root.join("protected/history/project-history.txt"),
+        "history\n",
+    )
+    .unwrap();
+    let project_skill_before = fs::read(root.join("skills/project-flow/SKILL.md")).unwrap();
+    let machine_guidance_before =
+        fs::read(root.join(".appsdk/guidance/project-guidance.json")).unwrap();
+    let lifecycle_record_before =
+        fs::read(root.join(".appsdk/records/project-record.json")).unwrap();
+    let active_before = fs::read(root.join("active/lib/project-active.txt")).unwrap();
+    let protected_before = fs::read(root.join("protected/history/project-history.txt")).unwrap();
+    let reference = root.join(".appsdk/templates/minimal/AGENTS.md");
+    fs::write(&reference, "stale template reference\n").unwrap();
+
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let initialized_stdout = String::from_utf8_lossy(&initialized.stdout);
+    assert!(initialized_stdout.contains("--task guidance-upgrade"));
+    assert!(initialized_stdout.contains("--mode bootstrap"));
+    assert_eq!(fs::read(&project_file).unwrap(), project_before);
+    assert_eq!(fs::read(root.join("AGENTS.md")).unwrap(), agents_before);
+    assert_eq!(
+        fs::read(root.join("skills/project-flow/SKILL.md")).unwrap(),
+        project_skill_before
+    );
+    assert_eq!(
+        fs::read(root.join(".appsdk/guidance/project-guidance.json")).unwrap(),
+        machine_guidance_before
+    );
+    assert_eq!(
+        fs::read(root.join(".appsdk/records/project-record.json")).unwrap(),
+        lifecycle_record_before
+    );
+    assert_eq!(
+        fs::read(root.join("active/lib/project-active.txt")).unwrap(),
+        active_before
+    );
+    assert_eq!(
+        fs::read(root.join("protected/history/project-history.txt")).unwrap(),
+        protected_before
+    );
+    assert!(fs::read_to_string(&reference)
+        .unwrap()
+        .contains("## Development Process Control"));
+
+    let intake = run(&[
+        "guide",
+        "init",
+        root_text,
+        "--task",
+        "guidance-upgrade",
+        "--mode",
+        "bootstrap",
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        intake.status.success(),
+        "{}",
+        String::from_utf8_lossy(&intake.stderr)
+    );
+    let intake_json: Value = serde_json::from_slice(&intake.stdout).unwrap();
+    assert_eq!(intake_json["setup_kind"], "template_upgrade_review");
+    assert_eq!(
+        intake_json["reason_code"],
+        "GUIDANCE_TEMPLATE_UPGRADE_PROPOSAL_REQUIRED"
+    );
+    assert_eq!(intake_json["readiness"], "needs_user_approval");
+    assert_eq!(intake_json["writes_state"], false);
+    assert_eq!(
+        intake_json["standard_template"]["path"],
+        ".appsdk/templates/minimal/AGENTS.md"
+    );
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.6");
+    assert_eq!(
+        intake_json["standard_template"]["digest"],
+        file_digest(&reference)
+    );
+    let reference_source = intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["source_id"] == "appsdk-standard-project-agent-template")
+        .unwrap();
+    assert_eq!(reference_source["kind"], "template");
+    assert_eq!(reference_source["disposition"], "standard_reference");
+    assert_eq!(reference_source["required"], false);
+    assert_eq!(reference_source["enforcement"], "advisory");
+    assert_eq!(
+        intake_json["read_first"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["source_id"],
+        "appsdk-standard-project-agent-template"
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["setup_kind"],
+        "template_upgrade_review"
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["standard_template"]["digest"],
+        file_digest(&reference)
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["recommended_changes"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["retained_project_rules"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        intake_json["proposal_schema"]["declined_template_items"],
+        serde_json::json!([])
+    );
+    assert_eq!(intake_json["proposal_schema"]["approval_required"], true);
+    assert!(!intake_json["read_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| {
+            source["source_id"] == "appsdk-standard-project-agent-template"
+                && source["disposition"] == "declared"
+        }));
+    let project_after: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    assert!(!project_after["guidance"]["rule_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["source_id"] == "appsdk-standard-project-agent-template"));
+    assert!(!root
+        .join(".appsdk-control/guidance/guidance-upgrade")
+        .exists());
+    assert_eq!(fs::read(&project_file).unwrap(), project_before);
+    assert_eq!(fs::read(root.join("AGENTS.md")).unwrap(), agents_before);
+    assert_eq!(
+        fs::read(root.join("skills/project-flow/SKILL.md")).unwrap(),
+        project_skill_before
+    );
+    assert_eq!(
+        fs::read(root.join(".appsdk/guidance/project-guidance.json")).unwrap(),
+        machine_guidance_before
+    );
+    assert_eq!(
+        fs::read(root.join(".appsdk/records/project-record.json")).unwrap(),
+        lifecycle_record_before
+    );
+    assert_eq!(
+        fs::read(root.join("active/lib/project-active.txt")).unwrap(),
+        active_before
+    );
+    assert_eq!(
+        fs::read(root.join("protected/history/project-history.txt")).unwrap(),
+        protected_before
+    );
+
+    fs::remove_file(&reference).unwrap();
+    let verified_without_reference = run(&["verify", root_text]);
+    assert!(
+        verified_without_reference.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified_without_reference.stderr)
+    );
+
+    let outside = temp_root("guidance-template-upgrade-outside");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("AGENTS.md");
+    fs::write(&outside_file, "outside\n").unwrap();
+    symlink(&outside_file, &reference).unwrap();
+    let symlinked_init = run(&["init", root_text]);
+    assert!(!symlinked_init.status.success());
+    assert!(String::from_utf8_lossy(&symlinked_init.stderr)
+        .contains("GOVERNANCE_PATH_SYMLINK:guidance_standard_template"));
+    assert_eq!(fs::read_to_string(&outside_file).unwrap(), "outside\n");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
 }
 
 #[test]

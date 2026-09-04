@@ -22,40 +22,49 @@ not require.
 2. Identify goal, module, owner, allowed paths, forbidden paths, lifecycle stage,
    required evidence, and clean owner worktree.
 3. Run `appsdk guide status <project> [--task <id>]`.
-4. If status returns `GUIDANCE_SETUP_REQUIRED`, run
+4. After an AppSDK update, or whenever the user asks to revisit project rules,
+   rerun `appsdk init <project>` and then run
+   `appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <id>`.
+   Repeated initialization is a non-destructive resource refresh and upgrade
+   entry even when Guidance already exists. Read current project rules first,
+   compare them with `.appsdk/templates/minimal/AGENTS.md`, and present only
+   useful differences for approval. The versioned standard template is an
+   advisory reference, not project truth and not a mandatory replacement.
+5. If status returns `GUIDANCE_SETUP_REQUIRED`, run
    `appsdk guide init <project> --task guidance-setup --mode bootstrap --module <id>`.
    Read every returned project document and candidate Skill, ask only unresolved
    questions, and present one `GuidanceSetupProposal`. Do not write or compile
    durable rules before explicit user approval.
-5. After approval, update the project-owned `AGENTS.md`, local Skill, machine
+6. After approval, update only accepted differences in the project-owned
+   `AGENTS.md`, local Skill, machine
    guidance contract, and `.appsdk/project.json#/guidance/rule_sources` in a
    clean owner worktree. If already configured but uncompiled, skip setup and
    run `appsdk guide compile <project>` once.
-6. Select one domain: `bootstrap`, `migration`, `governance-preflight`,
+7. Select one domain: `bootstrap`, `migration`, `governance-preflight`,
    `develop`, `debug`, `review`, `delivery`, `integration`, `promotion`,
    `freeze`, or `cleanup`.
-7. Run `appsdk guide init <project> --task <id> --mode <domain> --module <id>`.
+8. Run `appsdk guide init <project> --task <id> --mode <domain> --module <id>`.
    Read the returned AGENTS/Skill paths in precedence order, invoke the
    suggested Skill commands, and ask the user only questions still unresolved.
-8. Run the projected domain command. Let the agent write PlanProposal JSON and
+9. Run the projected domain command. Let the agent write PlanProposal JSON and
    submit it with
    `appsdk guide plan <project> --task <id> --input <file>`.
-9. Execute only the projected step. Submit observation/evidence with
+10. Execute only the projected step. Submit observation/evidence with
    `appsdk guide update <project> --task <id> --input <file>`.
-10. Read `appsdk guide next`; revise the plan when scope, owner, source, rule
+11. Read `appsdk guide next`; revise the plan when scope, owner, source, rule
    context, evidence, blocker, or environment changes.
-11. Finish with `appsdk guide close`; then complete canonical lifecycle and
+12. Finish with `appsdk guide close`; then complete canonical lifecycle and
    worktree/claim cleanup. Workflow completion is not lifecycle completion.
 
 ## L2 Hard boundaries
 
 - AppSDK never calls a model. Agent authors technical plans; Harness validates,
   persists, projects state, and returns adjacent next steps.
-- `guide init` is read-only. Before initial compile, bootstrap mode projects
-  bounded project-document candidates and a setup proposal schema. After
-  compile, it projects declared context, interactive questions, Skill
-  invocations, and missing/next commands. `guide plan` is the first task state
-  write.
+- `guide init` is read-only. Bootstrap mode always projects bounded current
+  project sources plus the versioned standard template and a setup/upgrade
+  proposal schema, including after Guidance has compiled. Other modes project
+  declared context, interactive questions, Skill invocations, and missing/next
+  commands. `guide plan` is the first task state write.
 - Existing AppSDK lifecycle is sole truth. No second lifecycle enum or manual
   PASS/record/hash/artifact.
 - `AGENTS.md` owns project facts. `SKILL.md` owns agent procedure. Declared JSON
@@ -65,6 +74,12 @@ not require.
   bundled AppSDK Skill, and one-level project-local Skills under `skills/`,
   `.agents/skills/`, or `.codex/skills/`; these remain candidates until the user
   approves and the project declares them.
+- The installed standard template is never automatically declared as a rule
+  source. Repeated `init` may refresh it, but never overwrites root `AGENTS.md`,
+  project Skills, machine Guidance, records, Active, or Protected.
+- The advisory template is not an SDK resource-integrity or ordinary `verify`
+  gate. If absent, rerun `init` before requesting comparison; do not block
+  unrelated development or delivery.
 - Guidance defaults to `advisory`. Missing PlanRecord never fails ordinary
   `appsdk verify` or `appsdk compile`.
 - `forbidden` stays narrow: fabricated evidence, non-adjacent transition,

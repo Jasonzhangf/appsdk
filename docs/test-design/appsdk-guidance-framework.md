@@ -35,19 +35,26 @@
 
 ## Initialization intake
 
-- `new` and configured `init` print the `guide compile -> guide init`
-  onboarding route;
+- `new` prints the initial `guide compile -> guide init` onboarding route;
+- configured repeated `init` refreshes the versioned standard template and
+  prints the read-only `guidance-upgrade` bootstrap route;
 - an existing governance-only project preserves its project contract and
   records, and `init` prints the bootstrap setup intake route;
 - `guide --help` exposes every command, including `guide init`;
 - uncompiled intake returns the missing compile/init commands without writing;
-- bootstrap intake works before compile, returns root AGENTS, bundled AppSDK
-  Skill, and direct project-local Skill candidates, and never scans nested or
-  unrelated directories;
+- bootstrap intake works before and after compile, returns current root AGENTS,
+  the advisory standard template path/version/digest, bundled AppSDK Skill, and
+  direct project-local Skill candidates, and never scans nested or unrelated
+  directories;
 - bootstrap intake returns project/module state, user questions, a
   `GuidanceSetupProposal` schema, and post-approval compile/verify commands;
 - bootstrap intake does not modify project.json, lifecycle records, Skills,
   compiled guidance, or `.appsdk-control`;
+- template upgrade intake requires user approval, distinguishes recommended,
+  retained, and declined items, never overwrites project rules, and never
+  declares the standard template as a rule source;
+- removing the advisory template does not fail ordinary `appsdk verify`, while
+  a symlinked reference path fails safely without modifying its target;
 - compiled intake returns declared AGENTS/Skill sources, exact Skill commands,
   project/module/goal context, and the next guide commands;
 - develop intake asks requirements, architecture, and delivery questions;

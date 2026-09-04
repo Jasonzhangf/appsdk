@@ -24,6 +24,37 @@ the bracketed project facts through the approved setup flow. Existing project
 rules are never overwritten, and rerunning `init` on an already governed root
 does not recreate a deliberately absent `AGENTS.md`.
 
+## Repeat initialization and template upgrade
+
+Initialization is not one-shot. After AppSDK is updated, or when the project
+wants to revisit its process, rerun `appsdk init` to refresh AppSDK-owned Bundle
+resources. It installs the current versioned standard reference at
+`.appsdk/templates/minimal/AGENTS.md` while preserving the project-owned
+`AGENTS.md`, local Skills, machine Guidance, lifecycle records, Active, and
+Protected state.
+
+```text
+appsdk init
+-> appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>
+-> Agent reads current AGENTS/Skills/Guidance first
+-> Agent reads the versioned standard template reference
+-> compare retained rules and useful differences
+-> GuidanceSetupProposal
+-> explicit user approval
+-> latest origin/main clean owner worktree
+-> apply only approved changes
+-> appsdk guide compile
+-> appsdk verify
+```
+
+The template is a standard reference, not an active rule source. Do not add it
+to `.appsdk/project.json#/guidance/rule_sources`, automatically overwrite
+project rules, or reset valid governance merely to adopt a newer template.
+The proposal records retained project rules, recommended changes, and declined
+template items so choosing not to adopt an item is explicit and valid.
+Missing or locally removed reference material does not fail ordinary
+`appsdk verify`; rerun `appsdk init` only when a fresh comparison is wanted.
+
 ## Governance exists but Guide is missing
 
 Do not reset or migrate valid lifecycle truth merely to add Guide. Run
@@ -50,7 +81,8 @@ appsdk init
 -> appsdk verify
 ```
 
-Bootstrap intake is read-only. Candidate files are not compiled rule sources
+Bootstrap intake is read-only and may be invoked again after Guidance has been
+compiled. Candidate files are not compiled rule sources
 until the user approves them and `.appsdk/project.json` declares them. A
 task-level PlanProposal is not a substitute for this project-level setup and is
 never copied into a Skill automatically.

@@ -49,6 +49,10 @@ fn push_bootstrap_source(
         "digest": digest_bytes(&bytes),
         "disposition": candidate.disposition
     });
+    if candidate.disposition == "standard_reference" {
+        source["required"] = Value::Bool(false);
+        source["enforcement"] = Value::String("advisory".into());
+    }
     if let Some(contract_path) = candidate.contract_path {
         let relative = safe_relative(contract_path, "GUIDANCE_BOOTSTRAP_CONTRACT_PATH_ESCAPE");
         if readable_project_file(root, &relative).is_some() {
@@ -170,6 +174,18 @@ fn bootstrap_sources(root: &Path, project: &Value) -> Vec<Value> {
             },
         );
     }
+    push_bootstrap_source(
+        root,
+        &mut sources,
+        &mut seen,
+        BootstrapSource {
+            source_id: "appsdk-standard-project-agent-template",
+            kind: "template",
+            path: ".appsdk/templates/minimal/AGENTS.md",
+            disposition: "standard_reference",
+            contract_path: None,
+        },
+    );
     sources
 }
 
@@ -202,11 +218,47 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
     let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
     let sources = bootstrap_sources(root, project);
     let skill_commands = bootstrap_skill_commands(&sources);
+    let guidance_compiled = root.join(compiled_relative(project)).is_file();
+    let setup_kind = if guidance_compiled {
+        "template_upgrade_review"
+    } else {
+        "initial_setup"
+    };
+    let reason_code = if guidance_compiled {
+        "GUIDANCE_TEMPLATE_UPGRADE_PROPOSAL_REQUIRED"
+    } else {
+        "GUIDANCE_SETUP_PROPOSAL_REQUIRED"
+    };
+    let standard_template = sources
+        .iter()
+        .find(|source| {
+            source.get("source_id").and_then(Value::as_str)
+                == Some("appsdk-standard-project-agent-template")
+        })
+        .map(|source| {
+            serde_json::json!({
+                "path": source["path"],
+                "version": env!("CARGO_PKG_VERSION"),
+                "digest": source["digest"],
+                "disposition": "standard_reference",
+                "enforcement": "advisory"
+            })
+        })
+        .unwrap_or(Value::Null);
+    let current_sources = sources
+        .iter()
+        .filter(|source| {
+            source.get("source_id").and_then(Value::as_str)
+                != Some("appsdk-standard-project-agent-template")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     serde_json::json!({
         "harness": "appsdk-development-process-control",
         "guide_flow_required": true,
         "task_id": task,
         "mode": "bootstrap",
+        "setup_kind": setup_kind,
         "project_id": project["project_id"],
         "module": {
             "module_id": module_id,
@@ -216,8 +268,9 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
             "contract_paths": selected_module["contract_paths"]
         },
         "readiness": "needs_user_approval",
-        "reason_code": "GUIDANCE_SETUP_PROPOSAL_REQUIRED",
+        "reason_code": reason_code,
         "writes_state": false,
+        "standard_template": standard_template,
         "existing_governance": {
             "project_contract": ".appsdk/project.json",
             "project_stage": project.pointer("/lifecycle/stage"),
@@ -232,6 +285,11 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         "read_first": sources,
         "skill_commands": skill_commands,
         "questions": [
+            {
+                "question_id": "standard_template_comparison",
+                "prompt": "Read current project rules first, then compare them with the installed AppSDK standard template. Recommend only useful differences; retain project decisions and record declined template items without forcing adoption.",
+                "required": true
+            },
             {
                 "question_id": "standard_workflows",
                 "prompt": "After reading the project documents, confirm the reusable develop, debug, review, delivery, integration, promotion, freeze, and cleanup flows; ask only unresolved questions.",
@@ -256,10 +314,17 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         "proposal_schema": {
             "schema_version": 1,
             "proposal_type": "GuidanceSetupProposal",
+            "setup_kind": setup_kind,
             "task_id": task,
             "project_id": project["project_id"],
             "module_id": module_id,
             "objective": "Describe the reusable project development process to standardize.",
+            "standard_template": standard_template,
+            "current_sources": current_sources,
+            "recommended_changes": [],
+            "retained_project_rules": [],
+            "declined_template_items": [],
+            "approval_required": true,
             "rule_sources": [],
             "workflows": [],
             "project_commands": [],
@@ -276,11 +341,11 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
                 "source_declaration": ".appsdk/project.json#/guidance"
             }
         },
-        "agent_instruction": "Read every read_first source and invoke relevant candidate Skills. Reconcile existing governance, project procedures, and current commands. Ask only unresolved questions, then present one GuidanceSetupProposal. Do not modify AGENTS.md, Skills, machine contracts, project.json, lifecycle records, or compiled guidance before explicit user approval.",
+        "agent_instruction": "Read current project AGENTS and Skills before the AppSDK standard template. Treat the template as an advisory versioned reference, compare differences, retain project decisions, and recommend only useful upgrades. Ask only unresolved questions, then present one GuidanceSetupProposal. Do not modify AGENTS.md, Skills, machine contracts, project.json, lifecycle records, Active, Protected, compiled guidance, or task state before explicit user approval.",
         "after_user_approval": {
             "actions": [
                 "Use a clean owner worktree from latest origin/main.",
-                "Update project facts in AGENTS.md, reusable agent procedure in project-local Skills, and nodes, edges, gates, severities, commands, and evidence contracts in machine guidance.",
+                "Apply only user-approved differences while preserving retained project rules; update project facts in AGENTS.md, reusable agent procedure in project-local Skills, and nodes, edges, gates, severities, commands, and evidence contracts in machine guidance as needed.",
                 "Declare only the approved sources in .appsdk/project.json#/guidance/rule_sources."
             ],
             "commands": [
@@ -422,10 +487,7 @@ pub(super) fn initialize(
     let project = read_project(root);
     let selected_module = module(&project, requested_module);
     let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
-    if mode == "bootstrap"
-        && (guidance_contract(&project).is_none()
-            || !root.join(compiled_relative(&project)).is_file())
-    {
+    if mode == "bootstrap" {
         return bootstrap_setup(root, &project, selected_module, task);
     }
     let base = project_status(root, Some(mode), Some(task), Some(module_id), false);

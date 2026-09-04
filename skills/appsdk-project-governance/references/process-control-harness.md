@@ -35,6 +35,20 @@ declares them in `.appsdk/project.json`, and runs `appsdk guide compile` plus
 `appsdk verify`. If status is only `GUIDANCE_NOT_COMPILED`, approved sources are
 already declared and compile is the next command.
 
+After an AppSDK update, or for an explicit rules refresh, a configured project
+uses the same read-only bootstrap intake:
+
+```bash
+appsdk init <project>
+appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <module-id>
+```
+
+Read current project sources before the returned standard template reference.
+The resulting `template_upgrade_review` proposal may recommend changes, retain
+project rules, or decline template items. It does not write state or activate
+the template. Apply only user-approved differences in a clean owner worktree,
+then compile and verify.
+
 Use `--mode debug` for a bug, regression, or incident. Use another declared
 domain when appropriate. `guide init` is read-only and returns:
 

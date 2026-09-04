@@ -7071,6 +7071,25 @@ fn write_project_agent_contract(root: &Path) {
     write_if_missing(root, "AGENTS.md", PROJECT_AGENTS_TEMPLATE);
 }
 
+fn install_standard_template_reference(root: &Path) {
+    let target = root.join(".appsdk/templates/minimal/AGENTS.md");
+    assert_no_symlink_components(root, &target, "guidance_standard_template");
+    if fs::symlink_metadata(&target)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:guidance_standard_template");
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    }
+    atomic_write_bytes(
+        &target,
+        PROJECT_AGENTS_TEMPLATE.as_bytes(),
+        "GUIDANCE_STANDARD_TEMPLATE_WRITE_FAILED",
+    );
+}
+
 fn write_project_scaffold(root: &Path) {
     write_if_missing(
         root,
@@ -7355,12 +7374,20 @@ fn init_project(root: &Path) {
         write_project_agent_contract(root);
     }
     install_bundle_resources(root);
+    install_standard_template_reference(root);
     println!("initialized {}", root.display());
     if existing_project_needs_guidance {
         println!(
             "next appsdk guide init <project> --task guidance-setup --mode bootstrap --module <module-id>"
         );
         println!("then read project documents and present GuidanceSetupProposal for user approval");
+    } else if !fresh_governance {
+        println!(
+            "next appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <module-id>"
+        );
+        println!(
+            "then compare current project rules with the installed standard template and present a non-destructive GuidanceSetupProposal for user approval"
+        );
     } else {
         println!("next appsdk guide compile <project>");
         println!(
@@ -7407,6 +7434,7 @@ fn new_project(root: &Path) {
     write_project_scaffold(root);
     write_project_agent_contract(root);
     install_bundle_resources(root);
+    install_standard_template_reference(root);
     println!("created {}", root.display());
     println!("next appsdk guide compile <project>");
     println!(

@@ -673,6 +673,31 @@ fn collaboration_is_optional_and_does_not_require_a_merge_queue() {
 }
 
 #[test]
+fn verify_accepts_current_zone_transition_contract_path() {
+    let root = temp_root("current-zone-transition-contract");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["governance"]["zone_transition_contract"] =
+        Value::String("contracts/transitions/zone-transition.manifest.json".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let result = run(&["verify", root_text]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn parallel_development_requires_tested_integration_and_remote_main_receipt() {
     let root = temp_root("parallel-main-receipt");
     let root_text = root.to_str().unwrap();

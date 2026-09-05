@@ -748,19 +748,27 @@ fn assert_version(value: &str, error: &str) {
 
 fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     let zone = contract_root(root, project, "/governance/zone_transition_contract");
-    let canonical_project = project
+    let canonical_zone = project
         .pointer("/governance/zone_transition_contract")
         .and_then(Value::as_str)
-        == Some("contracts/transitions/zone-transition-manifest.json")
-        && project
-            .pointer("/governance/record_contracts")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values.iter().any(|value| {
-                    value.as_str() == Some("contracts/records/record-graph.contract.json")
-                })
-            })
-            .unwrap_or(false);
+        .map(|path| {
+            matches!(
+                path,
+                "contracts/transitions/zone-transition.manifest.json"
+                    | "contracts/transitions/zone-transition-manifest.json"
+            )
+        })
+        .unwrap_or(false);
+    let canonical_records = project
+        .pointer("/governance/record_contracts")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .any(|value| value.as_str() == Some("contracts/records/record-graph.contract.json"))
+        })
+        .unwrap_or(false);
+    let canonical_project = canonical_zone && canonical_records;
     let strict = strict || canonical_project;
     if !canonical_project {
         fail("NON_CANONICAL_GOVERNANCE_CONTRACT");

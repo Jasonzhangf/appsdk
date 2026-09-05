@@ -2,7 +2,7 @@ use super::*;
 
 fn command(mode: &str, task: &str, module_id: &str) -> String {
     format!(
-        "appsdk guide {} <project> --task {} --module {}",
+        "appsdk guide {} --task {} --module {}",
         mode, task, module_id
     )
 }
@@ -349,9 +349,9 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
                 "Declare only the approved sources in .appsdk/project.json#/guidance/rule_sources."
             ],
             "commands": [
-                "appsdk guide compile <project>",
-                "appsdk verify <project>",
-                format!("appsdk guide init <project> --task <task-id> --mode <develop|debug> --module {}", module_id)
+                "appsdk guide compile",
+                "appsdk verify",
+                format!("appsdk guide init --task <task-id> --mode <develop|debug> --module {}", module_id)
             ]
         },
         "next": {
@@ -502,10 +502,10 @@ pub(super) fn initialize(
             "reason_code": "GUIDANCE_NOT_COMPILED",
             "writes_state": false,
             "missing_commands": [
-                "appsdk guide compile <project>",
-                format!("appsdk guide init <project> --task {} --mode {} --module {}", task, mode, module_id)
+                "appsdk guide compile",
+                format!("appsdk guide init --task {} --mode {} --module {}", task, mode, module_id)
             ],
-            "next": {"command": "appsdk guide compile <project>"}
+            "next": {"command": "appsdk guide compile"}
         });
     }
     if base.get("readiness").and_then(Value::as_str) == Some("blocked") {
@@ -524,15 +524,11 @@ pub(super) fn initialize(
             "readiness": "ready",
             "reason_code": "GUIDANCE_PLAN_ALREADY_INITIALIZED",
             "writes_state": false,
-            "next": {"command": format!("appsdk guide next <project> --task {}", task)}
+            "next": {"command": format!("appsdk guide next --task {}", task)}
         });
     }
-    let compiled = load_compiled(root, &project).unwrap_or_else(|| {
-        fail(
-            "GUIDANCE_NOT_COMPILED",
-            "run appsdk guide compile <project>",
-        )
-    });
+    let compiled = load_compiled(root, &project)
+        .unwrap_or_else(|| fail("GUIDANCE_NOT_COMPILED", "run appsdk guide compile"));
     let goal = read_goal(root);
     let selected_workflow = workflow(&compiled, mode);
     let sources = required_array(&compiled, "sources", "GUIDANCE_COMPILED_INVALID");
@@ -598,10 +594,10 @@ pub(super) fn initialize(
         "agent_instruction": "Read the declared context in precedence order. Reconcile it with the current request. Ask the user only questions still unresolved, invoke relevant Skill commands, then enter the projected guide domain and submit the PlanProposal. Do not invent answers or hashes.",
         "command_sequence": [
             domain_command,
-            format!("appsdk guide plan <project> --task {} --input <plan.json>", task),
-            format!("appsdk guide next <project> --task {}", task)
+            format!("appsdk guide plan --task {} --input <plan.json>", task),
+            format!("appsdk guide next --task {}", task)
         ],
         "next": {"command": command(mode, task, module_id)},
-        "persistence": {"command": format!("appsdk guide plan <project> --task {} --input <plan.json>", task), "truth": ".appsdk-control/guidance/<task-id>/plan.json"}
+        "persistence": {"command": format!("appsdk guide plan --task {} --input <plan.json>", task), "truth": ".appsdk-control/guidance/<task-id>/plan.json"}
     })
 }

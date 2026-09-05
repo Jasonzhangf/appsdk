@@ -2179,9 +2179,9 @@ fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: O
                 "idempotent": true,
                 "next": [
                     "confirm .appsdk/goal.json through the user-approved goal clarification flow",
-                    "appsdk promote <project> --to source_implemented",
-                    "appsdk promote <project> --to contract_bound",
-                    "rerun appsdk compile <project> once the project is contract_bound"
+                    "appsdk promote --to source_implemented",
+                    "appsdk promote --to contract_bound",
+                    "rerun appsdk compile once the project is contract_bound"
                 ],
                 "forbidden": [
                     "do not create generated/module artifacts by hand",
@@ -7365,20 +7365,20 @@ fn init_project(root: &Path) {
     println!("initialized {}", root.display());
     if existing_project_needs_guidance {
         println!(
-            "next appsdk guide init <project> --task guidance-setup --mode bootstrap --module <module-id>"
+            "next appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>"
         );
         println!("then read project documents and present GuidanceSetupProposal for user approval");
     } else if !fresh_governance {
         println!(
-            "next appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <module-id>"
+            "next appsdk guide init --task guidance-upgrade --mode bootstrap --module <module-id>"
         );
         println!(
             "then compare current project rules with the installed standard template and present a non-destructive GuidanceSetupProposal for user approval"
         );
     } else {
-        println!("next appsdk guide compile <project>");
+        println!("next appsdk guide compile");
         println!(
-            "then appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>"
+            "then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>"
         );
     }
 }
@@ -7423,10 +7423,8 @@ fn new_project(root: &Path) {
     install_bundle_resources(root);
     install_standard_template_reference(root);
     println!("created {}", root.display());
-    println!("next appsdk guide compile <project>");
-    println!(
-        "then appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>"
-    );
+    println!("next appsdk guide compile");
+    println!("then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>");
 }
 
 fn sdk_map_migration_root(root: &Path) -> PathBuf {
@@ -8028,118 +8026,237 @@ fn pin_lock(root: &Path, binary: &Path) {
     println!("pinned {}", binary.display());
 }
 
+const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.";
+
+fn is_help(value: &str) -> bool {
+    matches!(value, "help" | "--help" | "-h")
+}
+
+fn print_cli_help(command: Option<&str>) {
+    let usage = match command {
+        Some("verify") => {
+            "Usage: appsdk verify [project]\n       appsdk verify --admission [project]\n       appsdk verify --review-admission [project] --module <id>"
+        }
+        Some("compile") => "Usage: appsdk compile [project]",
+        Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
+        Some("pin-lock") => "Usage: appsdk pin-lock [project] --binary <path>",
+        Some("init") => "Usage: appsdk init [workspace] [--project-root <relative-path>]",
+        Some("prepare") => "Usage: appsdk prepare [workspace]",
+        Some("new") => "Usage: appsdk new [project]",
+        _ => CLI_USAGE,
+    };
+    println!("{usage}\n\nNo project-root environment variable is required.");
+}
+
+fn project_root_or_cwd<I>(args: &mut std::iter::Peekable<I>) -> PathBuf
+where
+    I: Iterator<Item = String>,
+{
+    if args.peek().is_some_and(|value| value.starts_with('-')) {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(args.next().unwrap_or_else(|| ".".into()))
+    }
+}
+
 fn main() {
-    let mut args = env::args().skip(1);
+    let argv = env::args().skip(1).collect::<Vec<_>>();
+    if argv.is_empty() || is_help(&argv[0]) {
+        print_cli_help(None);
+        return;
+    }
+    if argv.len() == 2 && is_help(&argv[1]) && argv[0] != "guide" {
+        print_cli_help(Some(&argv[0]));
+        return;
+    }
+    let mut args = argv.into_iter().peekable();
     match args.next().as_deref() {
         Some("version") => println!("appsdk 0.1.6 (rust)"),
-        Some("verify-sdk-source-registry") => assert_sdk_source_registry(Path::new(
-            &args.next().unwrap_or_else(|| ".".into()),
-        )),
+        Some("verify-sdk-source-registry") => {
+            assert_sdk_source_registry(Path::new(&args.next().unwrap_or_else(|| ".".into())))
+        }
         Some("verify") => {
-            let first = args.next().unwrap_or_else(|| ".".into());
-            if first == "--admission" {
-                let root = args
-                    .next()
-                    .unwrap_or_else(|| fail("USAGE: appsdk verify [--admission] <dir>"));
-                verify(Path::new(&root), true);
-            } else if first == "--review-admission" {
-                let root = args.next().unwrap_or_else(|| {
-                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>")
-                });
+            if args.peek().is_some_and(|value| value == "--admission") {
+                args.next();
+                let root = project_root_or_cwd(&mut args);
+                if args.next().is_some() {
+                    fail("USAGE: appsdk verify --admission [project]");
+                }
+                verify(&root, true);
+            } else if args
+                .peek()
+                .is_some_and(|value| value == "--review-admission")
+            {
+                args.next();
+                let root = project_root_or_cwd(&mut args);
                 if args.next().as_deref() != Some("--module") {
-                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>");
+                    fail("USAGE: appsdk verify --review-admission [project] --module <id>");
                 }
                 let module_id = args.next().unwrap_or_else(|| {
-                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>")
+                    fail("USAGE: appsdk verify --review-admission [project] --module <id>")
                 });
                 if args.next().is_some() {
-                    fail("USAGE: appsdk verify --review-admission <dir> --module <id>");
+                    fail("USAGE: appsdk verify --review-admission [project] --module <id>");
                 }
-                verify_review_admission(Path::new(&root), &module_id);
+                verify_review_admission(&root, &module_id);
             } else {
-                verify(Path::new(&first), false);
+                let root = project_root_or_cwd(&mut args);
+                if args.next().is_some() {
+                    fail("USAGE: appsdk verify [project]");
+                }
+                verify(&root, false);
             }
         }
         Some("guide") => guidance::run(&mut args),
         Some("pin-lock") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk pin-lock <dir> --binary <path>")));
-            if args.next().as_deref() != Some("--binary") { fail("USAGE: appsdk pin-lock <dir> --binary <path>"); }
-            let binary = args.next().unwrap_or_else(|| fail("USAGE: appsdk pin-lock <dir> --binary <path>"));
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--binary") {
+                fail("USAGE: appsdk pin-lock [project] --binary <path>");
+            }
+            let binary = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk pin-lock [project] --binary <path>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk pin-lock [project] --binary <path>");
+            }
             pin_lock(&root, Path::new(&binary));
         }
-        Some("compile") => compile(Path::new(&args.next().unwrap_or_else(|| ".".into()))),
+        Some("compile") => {
+            let root = project_root_or_cwd(&mut args);
+            if args.next().is_some() {
+                fail("USAGE: appsdk compile [project]");
+            }
+            compile(&root);
+        }
         Some("compile-module") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk compile-module <dir> --module <id>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk compile-module <dir> --module <id>"); }
-            compile_module(&root, &args.next().unwrap_or_else(|| fail("USAGE: appsdk compile-module <dir> --module <id>")));
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk compile-module [project] --module <id>");
+            }
+            let module = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk compile-module [project] --module <id>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk compile-module [project] --module <id>");
+            }
+            compile_module(&root, &module);
         }
         Some("begin-version") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
-            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"));
-            if args.next().as_deref() != Some("--from") { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
-            let from = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"));
-            if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
-            let to = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"));
-            if args.next().is_some() { fail("USAGE: appsdk begin-version <dir> --module <id> --from <version> --to <version>"); }
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>");
+            }
+            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>"));
+            if args.next().as_deref() != Some("--from") {
+                fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>");
+            }
+            let from = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>"));
+            if args.next().as_deref() != Some("--to") {
+                fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>");
+            }
+            let to = args.next().unwrap_or_else(|| fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk begin-version [project] --module <id> --from <version> --to <version>");
+            }
             begin_version(&root, &module_id, &from, &to);
         }
         Some("rehydrate-frozen") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>"); }
-            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>"));
-            if args.next().is_some() { fail("USAGE: appsdk rehydrate-frozen <dir> --module <id>"); }
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk rehydrate-frozen [project] --module <id>");
+            }
+            let module_id = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk rehydrate-frozen [project] --module <id>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk rehydrate-frozen [project] --module <id>");
+            }
             rehydrate_frozen(&root, &module_id);
         }
         Some("promote") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk promote <dir> --to <stage>")));
-            if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk promote <dir> --to <stage>"); }
-            promote(&root, &args.next().unwrap_or_else(|| fail("USAGE: appsdk promote <dir> --to <stage>")));
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--to") {
+                fail("USAGE: appsdk promote [project] --to <stage>");
+            }
+            let stage = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk promote [project] --to <stage>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk promote [project] --to <stage>");
+            }
+            promote(&root, &stage);
         }
         Some("promote-module") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk promote-module <dir> --module <id> --to <stage>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk promote-module <dir> --module <id> --to <stage>"); }
-            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk promote-module <dir> --module <id> --to <stage>"));
-            if args.next().as_deref() != Some("--to") { fail("USAGE: appsdk promote-module <dir> --module <id> --to <stage>"); }
-            let target = args.next().unwrap_or_else(|| fail("USAGE: appsdk promote-module <dir> --module <id> --to <stage>"));
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk promote-module [project] --module <id> --to <stage>");
+            }
+            let module_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk promote-module [project] --module <id> --to <stage>")
+            });
+            if args.next().as_deref() != Some("--to") {
+                fail("USAGE: appsdk promote-module [project] --module <id> --to <stage>");
+            }
+            let target = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk promote-module [project] --module <id> --to <stage>")
+            });
+            if args.next().is_some() {
+                fail("USAGE: appsdk promote-module [project] --module <id> --to <stage>");
+            }
             promote_module(&root, &module_id, &target);
         }
         Some("freeze") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk freeze <dir> --module <id>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk freeze <dir> --module <id>"); }
-            freeze_module(&root, &args.next().unwrap_or_else(|| fail("USAGE: appsdk freeze <dir> --module <id>")));
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk freeze [project] --module <id>");
+            }
+            let module = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk freeze [project] --module <id>"));
+            if args.next().is_some() {
+                fail("USAGE: appsdk freeze [project] --module <id>");
+            }
+            freeze_module(&root, &module);
         }
         Some("publish-active") => {
-            let root = PathBuf::from(args.next().unwrap_or_else(|| fail("USAGE: appsdk publish-active <dir> --module <id> --version <version>")));
-            if args.next().as_deref() != Some("--module") { fail("USAGE: appsdk publish-active <dir> --module <id> --version <version>"); }
-            let module_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk publish-active <dir> --module <id> --version <version>"));
-            if args.next().as_deref() != Some("--version") { fail("USAGE: appsdk publish-active <dir> --module <id> --version <version>"); }
-            let version = args.next().unwrap_or_else(|| fail("USAGE: appsdk publish-active <dir> --module <id> --version <version>"));
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk publish-active [project] --module <id> --version <version>");
+            }
+            let module_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk publish-active [project] --module <id> --version <version>")
+            });
+            if args.next().as_deref() != Some("--version") {
+                fail("USAGE: appsdk publish-active [project] --module <id> --version <version>");
+            }
+            let version = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk publish-active [project] --module <id> --version <version>")
+            });
+            if args.next().is_some() {
+                fail("USAGE: appsdk publish-active [project] --module <id> --version <version>");
+            }
             publish_active(&root, &module_id, &version);
         }
         Some("new") => {
-            let root = args.next().unwrap_or_else(|| fail("USAGE: appsdk new <dir>"));
+            let root = project_root_or_cwd(&mut args);
             if args.next().is_some() {
-                fail("USAGE: appsdk new <dir>");
+                fail("USAGE: appsdk new [project]");
             }
-            new_project(Path::new(&root));
+            new_project(&root);
         }
         Some("init") => {
-            let workspace =
-                args.next()
-                    .unwrap_or_else(|| fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]"));
+            let workspace = project_root_or_cwd(&mut args);
             let project_root = match args.next().as_deref() {
                 None => None,
-                Some("--project-root") => Some(
-                    args.next()
-                        .unwrap_or_else(|| fail("USAGE: appsdk init <workspace> --project-root <relative-path>")),
-                ),
-                Some(_) => fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]"),
+                Some("--project-root") => Some(args.next().unwrap_or_else(|| {
+                    fail("USAGE: appsdk init [workspace] --project-root <relative-path>")
+                })),
+                Some(_) => fail("USAGE: appsdk init [workspace] [--project-root <relative-path>]"),
             };
             if args.next().is_some() {
-                fail("USAGE: appsdk init <workspace> [--project-root <relative-path>]");
+                fail("USAGE: appsdk init [workspace] [--project-root <relative-path>]");
             }
-            let workspace_path = Path::new(&workspace);
+            let workspace_path = workspace.as_path();
             if let Some(root) = existing_init_target(workspace_path, project_root.as_deref()) {
                 init_project(&root);
             } else {
@@ -8151,7 +8268,10 @@ fn main() {
                 if let Some(explicit_root) = project_root.as_deref() {
                     let _ = resolve_init_target(&preparation_workspace, Some(explicit_root));
                 }
-                if project_root.as_deref().is_some_and(|root| root != prepared_root) {
+                if project_root
+                    .as_deref()
+                    .is_some_and(|root| root != prepared_root)
+                {
                     fail("PREPARATION_PROJECT_ROOT_MISMATCH");
                 }
                 let root = resolve_init_target(&preparation_workspace, Some(prepared_root));
@@ -8159,15 +8279,13 @@ fn main() {
             }
         }
         Some("prepare") => {
-            let workspace = args
-                .next()
-                .unwrap_or_else(|| fail("USAGE: appsdk prepare <workspace>"));
+            let workspace = project_root_or_cwd(&mut args);
             if args.next().is_some() {
-                fail("USAGE: appsdk prepare <workspace>");
+                fail("USAGE: appsdk prepare [workspace]");
             }
-            prepare_project(Path::new(&workspace));
+            prepare_project(&workspace);
         }
-        _ => fail("USAGE: appsdk version | prepare <workspace> | init <workspace> [--project-root <relative-path>] | new <dir> | verify <dir> | guide <command> <dir> | pin-lock <dir> --binary <path> | compile <dir> | compile-module <dir> --module <id> | begin-version <dir> --module <id> --from <version> --to <version> | rehydrate-frozen <dir> --module <id> | promote <dir> --to <stage> | promote-module <dir> --module <id> --to <stage> | freeze <dir> --module <id> | publish-active <dir> --module <id> --version <version>"),
+        _ => fail(CLI_USAGE),
     }
 }
 

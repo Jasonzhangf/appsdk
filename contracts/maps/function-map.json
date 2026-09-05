@@ -19,6 +19,7 @@
     {"function_id":"development_process_intake","owner":"appsdk::process_control","entry_symbols":["initialize","questions","skill_commands"],"required_gates":["guidance_initialization","guidance_declared_sources","guidance_module_binding"]},
     {"function_id":"development_process_plan_control","owner":"appsdk::process_control","entry_symbols":["plan","rule_context","scope_allowed"],"required_gates":["guidance_plan_schema","guidance_adjacent_transition","guidance_context_binding"]},
     {"function_id":"development_process_execution_ledger","owner":"appsdk::process_control","entry_symbols":["update","append_event"],"required_gates":["guidance_evidence_required","guidance_event_idempotency","guidance_context_binding"]},
-    {"function_id":"development_process_state_projection","owner":"appsdk::process_control","entry_symbols":["project_status","next_step","lifecycle_projection","close"],"required_gates":["guidance_module_binding","guidance_lifecycle_projection","guidance_close_boundary"]}
+    {"function_id":"development_process_state_projection","owner":"appsdk::process_control","entry_symbols":["project_status","next_step","lifecycle_projection","close"],"required_gates":["guidance_module_binding","guidance_lifecycle_projection","guidance_close_boundary"]},
+    {"function_id":"project_cli_context_resolution","owner":"appsdk::cli","entry_symbols":["is_help","print_cli_help","project_root_or_cwd","main","guidance::run"],"required_gates":["cwd_default_cli"]}
   ]
 }

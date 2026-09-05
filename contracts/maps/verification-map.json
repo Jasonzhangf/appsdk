@@ -44,6 +44,7 @@
     {"gate_id":"guidance_event_idempotency","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_update"]},
     {"gate_id":"guidance_module_binding","command":"cargo test --test cli_smoke guidance_projects_missing_module_path_and_recovers_after_rebind","required_for":["guidance_status","governance_preflight","release"]},
     {"gate_id":"guidance_lifecycle_projection","command":"cargo test --test cli_smoke guidance_compile_is_deterministic_and_optional_for_existing_commands","required_for":["guidance_status"]},
-    {"gate_id":"guidance_close_boundary","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_close"]}
+    {"gate_id":"guidance_close_boundary","command":"cargo test --test cli_smoke guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe","required_for":["guidance_close"]},
+    {"gate_id":"cwd_default_cli","command":"cargo test --manifest-path rust/Cargo.toml project_commands_default_to_cwd_and_help_never_resolves_a_project","required_for":["project_cli","guidance_cli","release"]}
   ]
 }

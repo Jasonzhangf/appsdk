@@ -263,7 +263,7 @@ pub(super) fn load_compiled(root: &Path, project: &Value) -> Option<Value> {
         .unwrap_or_else(|| {
             fail(
                 "GUIDANCE_COMPILED_HASH_MISSING",
-                "rerun appsdk guide compile <project>",
+                "rerun appsdk guide compile",
             )
         })
         .to_string();
@@ -271,7 +271,7 @@ pub(super) fn load_compiled(root: &Path, project: &Value) -> Option<Value> {
     if digest_value(&value) != recorded {
         fail(
             "GUIDANCE_COMPILED_HASH_MISMATCH",
-            "rerun appsdk guide compile <project>",
+            "rerun appsdk guide compile",
         );
     }
     value["manifest_hash"] = Value::String(recorded);

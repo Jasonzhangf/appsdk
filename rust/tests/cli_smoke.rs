@@ -75,6 +75,42 @@ fn run(args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+fn run_in(root: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(binary())
+        .args(args)
+        .current_dir(root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn project_commands_default_to_cwd_and_help_never_resolves_a_project() {
+    let root = temp_root("cwd-default");
+    fs::create_dir_all(&root).unwrap();
+
+    for args in [
+        &["--help"][..],
+        &["verify", "--help"],
+        &["compile", "--help"],
+    ] {
+        let help = run_in(&root, args);
+        assert!(
+            help.status.success(),
+            "{}",
+            String::from_utf8_lossy(&help.stderr)
+        );
+        assert!(String::from_utf8_lossy(&help.stdout).contains("Usage:"));
+        assert!(!String::from_utf8_lossy(&help.stderr).contains("PROJECT_ROOT_MISSING"));
+    }
+
+    assert!(run(&["new", root.to_str().unwrap()]).status.success());
+    assert!(run_in(&root, &["verify"]).status.success());
+    assert!(run_in(&root, &["guide", "compile"]).status.success());
+    assert!(run_in(&root, &["guide", "status"]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn confirm_preparation(root: &PathBuf, project_root: &str, change_kind: &str) {
     fs::write(
         root.join(".appsdk-prepare.json"),
@@ -1337,16 +1373,16 @@ fn pinned_global_binary_verifies_without_local_sdk_witness() {
     )
     .unwrap();
     pin_test_lock(root_text);
-    let source_promote = run(&["promote", root_text, "--to", "source_implemented"]);
+    let source_promote = run_in(&root, &["promote", "--to", "source_implemented"]);
     assert!(
         source_promote.status.success(),
         "{}",
         String::from_utf8_lossy(&source_promote.stderr)
     );
-    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+    assert!(run_in(&root, &["promote", "--to", "contract_bound"])
         .status
         .success());
-    let compile = run(&["compile", root_text]);
+    let compile = run_in(&root, &["compile"]);
     assert!(
         compile.status.success(),
         "{}",
@@ -3769,7 +3805,7 @@ fn existing_governance_without_guide_gets_read_only_setup_proposal() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|command| command == "appsdk guide compile <project>"));
+        .any(|command| command == "appsdk guide compile"));
     assert!(!root
         .join(".appsdk-control/guidance/guidance-setup")
         .exists());
@@ -3838,10 +3874,7 @@ fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
     assert!(before.status.success());
     let before_json: Value = serde_json::from_slice(&before.stdout).unwrap();
     assert_eq!(before_json["reason_code"], "GUIDANCE_NOT_COMPILED");
-    assert_eq!(
-        before_json["next"]["command"],
-        "appsdk guide compile <project>"
-    );
+    assert_eq!(before_json["next"]["command"], "appsdk guide compile");
     assert_eq!(before_json["guide_flow_required"], true);
     assert!(before_json["next"]["then"]
         .as_str()
@@ -4054,10 +4087,7 @@ fn guidance_init_projects_declared_context_and_commands() {
     assert!(before_compile.status.success());
     let before_json: Value = serde_json::from_slice(&before_compile.stdout).unwrap();
     assert_eq!(before_json["reason_code"], "GUIDANCE_NOT_COMPILED");
-    assert_eq!(
-        before_json["missing_commands"][0],
-        "appsdk guide compile <project>"
-    );
+    assert_eq!(before_json["missing_commands"][0], "appsdk guide compile");
     assert!(before_json["missing_commands"][1]
         .as_str()
         .unwrap()
@@ -4567,10 +4597,7 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
         status_json["reason_code"],
         "GUIDANCE_COMPILED_CONTEXT_DRIFT:rule_sources"
     );
-    assert_eq!(
-        status_json["next"]["command"],
-        "appsdk guide compile <project>"
-    );
+    assert_eq!(status_json["next"]["command"], "appsdk guide compile");
 
     assert!(run(&["guide", "compile", root_text]).status.success());
     let revised_status = run(&["guide", "next", root_text, "--task", "task-rule-drift"]);

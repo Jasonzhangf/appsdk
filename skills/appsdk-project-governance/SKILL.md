@@ -17,14 +17,19 @@ not require.
 
 ## L1 Entry loop
 
+Run project-scoped commands from the project root. AppSDK uses the process
+`cwd` by default; do not set or pass a project-root environment variable.
+Supply the optional project path only when an operator intentionally works from
+outside that project.
+
 1. Read project `AGENTS.md`, `note.md`, current run notes, project `MEMORY.md`,
    `.appsdk/project.json`, maps, and relevant records.
 2. Identify goal, module, owner, allowed paths, forbidden paths, lifecycle stage,
    required evidence, and clean owner worktree.
-3. Run `appsdk guide status <project> [--task <id>]`.
+3. Run `appsdk guide status [--task <id>]`.
 4. After an AppSDK update, or whenever the user asks to revisit project rules,
-   rerun `appsdk init <project>` and then run
-   `appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <id>`.
+   rerun `appsdk init` and then run
+   `appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>`.
    Repeated initialization is a non-destructive resource refresh and upgrade
    entry even when Guidance already exists. In a live tmux Agent it also runs
    official `collab init` once, starting/reusing the daemon, registering the
@@ -35,7 +40,7 @@ not require.
    useful differences for approval. The versioned standard template is an
    advisory reference, not project truth and not a mandatory replacement.
 5. If status returns `GUIDANCE_SETUP_REQUIRED`, run
-   `appsdk guide init <project> --task guidance-setup --mode bootstrap --module <id>`.
+   `appsdk guide init --task guidance-setup --mode bootstrap --module <id>`.
    Read every returned project document and candidate Skill, ask only unresolved
    questions, and present one `GuidanceSetupProposal`. Do not write or compile
    durable rules before explicit user approval.
@@ -43,18 +48,18 @@ not require.
    `AGENTS.md`, local Skill, machine
    guidance contract, and `.appsdk/project.json#/guidance/rule_sources` in a
    clean owner worktree. If already configured but uncompiled, skip setup and
-   run `appsdk guide compile <project>` once.
+   run `appsdk guide compile` once.
 7. Select one domain: `bootstrap`, `migration`, `governance-preflight`,
    `develop`, `debug`, `review`, `delivery`, `integration`, `promotion`,
    `freeze`, or `cleanup`.
-8. Run `appsdk guide init <project> --task <id> --mode <domain> --module <id>`.
+8. Run `appsdk guide init --task <id> --mode <domain> --module <id>`.
    Read the returned AGENTS/Skill paths in precedence order, invoke the
    suggested Skill commands, and ask the user only questions still unresolved.
 9. Run the projected domain command. Let the agent write PlanProposal JSON and
    submit it with
-   `appsdk guide plan <project> --task <id> --input <file>`.
+   `appsdk guide plan --task <id> --input <file>`.
 10. Execute only the projected step. Submit observation/evidence with
-   `appsdk guide update <project> --task <id> --input <file>`.
+   `appsdk guide update --task <id> --input <file>`.
 11. Read `appsdk guide next`; revise the plan when scope, owner, source, rule
    context, evidence, blocker, or environment changes.
 12. Finish with `appsdk guide close`; then complete canonical lifecycle and

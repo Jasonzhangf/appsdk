@@ -5,7 +5,7 @@
 Start by projecting the project-specific intake:
 
 ```bash
-appsdk guide init <project> --task <task-id> --mode develop --module <module-id>
+appsdk guide init --task <task-id> --mode develop --module <module-id>
 ```
 
 Read the returned AGENTS and Skill sources, invoke the suggested Skills, and ask
@@ -57,7 +57,7 @@ payloads, metadata, debug logs, or implicit context.
 Start with:
 
 ```bash
-appsdk guide init <project> --task <task-id> --mode debug --module <module-id>
+appsdk guide init --task <task-id> --mode debug --module <module-id>
 ```
 
 Use the projected questions to bind the real failing sample and experiment

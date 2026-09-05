@@ -398,16 +398,12 @@ fn scope_allowed(module: &Value, candidate: &str) -> bool {
 fn plan(root: &Path, task: &str, input: &str) {
     assert_owner_worktree(root);
     let project = read_project(root);
-    let compiled = load_compiled(root, &project).unwrap_or_else(|| {
-        fail(
-            "GUIDANCE_NOT_COMPILED",
-            "run appsdk guide compile <project>",
-        )
-    });
+    let compiled = load_compiled(root, &project)
+        .unwrap_or_else(|| fail("GUIDANCE_NOT_COMPILED", "run appsdk guide compile"));
     if let Some(reason) = compiled_context_drift(root, &project, &compiled) {
         fail(
             format!("GUIDANCE_COMPILED_CONTEXT_DRIFT:{}", reason),
-            "run appsdk guide compile <project>",
+            "run appsdk guide compile",
         );
     }
     let input_relative = safe_relative(input, "GUIDANCE_INPUT_PATH_ESCAPE");
@@ -682,12 +678,8 @@ fn lifecycle_projection(project: &Value, selected_module: &Value) -> Value {
 fn update(root: &Path, task: &str, input: &str) {
     assert_owner_worktree(root);
     let project = read_project(root);
-    let compiled = load_compiled(root, &project).unwrap_or_else(|| {
-        fail(
-            "GUIDANCE_NOT_COMPILED",
-            "run appsdk guide compile <project>",
-        )
-    });
+    let compiled = load_compiled(root, &project)
+        .unwrap_or_else(|| fail("GUIDANCE_NOT_COMPILED", "run appsdk guide compile"));
     let plan = read_plan(root, task);
     let input_relative = safe_relative(input, "GUIDANCE_INPUT_PATH_ESCAPE");
     assert_no_symlink(root, &input_relative, "GUIDANCE_INPUT_SYMLINK");
@@ -737,7 +729,7 @@ fn update(root: &Path, task: &str, input: &str) {
         Ok(Some(step)) => step,
         Ok(None) => fail(
             "GUIDANCE_WORKFLOW_COMPLETE",
-            "run appsdk guide close <project> --task <id>",
+            "run appsdk guide close --task <id>",
         ),
         Err(_) => fail(
             "GUIDANCE_PLAN_BLOCKED",
@@ -865,34 +857,35 @@ fn parse_init_options(args: &mut impl Iterator<Item = String>) -> (String, Strin
 fn help() -> Value {
     serde_json::json!({
         "harness": "appsdk-development-process-control",
+        "project_root": "optional; defaults to the current working directory",
         "commands": [
-            {"command": "compile", "usage": "appsdk guide compile <project>", "writes_state": true},
-            {"command": "init", "usage": "appsdk guide init <project> --task <id> --mode <domain> [--module <id>]", "writes_state": false},
-            {"command": "status", "usage": "appsdk guide status <project> [--task <id>] [--module <id>]", "writes_state": false},
-            {"command": "<domain>", "usage": "appsdk guide <domain> <project> [--task <id>] [--module <id>]", "writes_state": false},
-            {"command": "plan", "usage": "appsdk guide plan <project> --task <id> --input <plan.json>", "writes_state": true},
-            {"command": "update", "usage": "appsdk guide update <project> --task <id> --input <result.json>", "writes_state": true},
-            {"command": "next", "usage": "appsdk guide next <project> --task <id>", "writes_state": false},
-            {"command": "close", "usage": "appsdk guide close <project> --task <id>", "writes_state": false}
+            {"command": "compile", "usage": "appsdk guide compile [project]", "writes_state": true},
+            {"command": "init", "usage": "appsdk guide init [project] --task <id> --mode <domain> [--module <id>]", "writes_state": false},
+            {"command": "status", "usage": "appsdk guide status [project] [--task <id>] [--module <id>]", "writes_state": false},
+            {"command": "<domain>", "usage": "appsdk guide <domain> [project] [--task <id>] [--module <id>]", "writes_state": false},
+            {"command": "plan", "usage": "appsdk guide plan [project] --task <id> --input <plan.json>", "writes_state": true},
+            {"command": "update", "usage": "appsdk guide update [project] --task <id> --input <result.json>", "writes_state": true},
+            {"command": "next", "usage": "appsdk guide next [project] --task <id>", "writes_state": false},
+            {"command": "close", "usage": "appsdk guide close [project] --task <id>", "writes_state": false}
         ],
         "domains": DOMAINS,
         "existing_project_setup": [
-            "appsdk guide status <project>",
-            "appsdk guide init <project> --task guidance-setup --mode bootstrap --module <id>",
+            "appsdk guide status",
+            "appsdk guide init --task guidance-setup --mode bootstrap --module <id>",
             "read project documents and present GuidanceSetupProposal for explicit user approval",
-            "after approval update project rule sources, then run appsdk guide compile <project>"
+            "after approval update project rule sources, then run appsdk guide compile"
         ],
         "existing_project_upgrade": [
-            "appsdk init <project>",
-            "appsdk guide init <project> --task guidance-upgrade --mode bootstrap --module <id>",
+            "appsdk init",
+            "appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>",
             "read current project rules before the installed standard template reference",
             "present retained rules, recommended differences, and declined template items for explicit user approval",
             "after approval apply only accepted differences, then compile and verify"
         ],
         "start": [
-            "appsdk guide status <project> --task <id>",
-            "appsdk guide compile <project>",
-            "appsdk guide init <project> --task <id> --mode <develop|debug> --module <id>"
+            "appsdk guide status --task <id>",
+            "appsdk guide compile",
+            "appsdk guide init --task <id> --mode <develop|debug> --module <id>"
         ]
     })
 }
@@ -911,14 +904,25 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
         output(&help());
         return;
     }
-    let root = PathBuf::from(
-        args.next()
-            .unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide the project root")),
-    );
+    let remaining = args.collect::<Vec<_>>();
+    if remaining.len() == 1 && matches!(remaining[0].as_str(), "help" | "--help" | "-h") {
+        output(&help());
+        return;
+    }
+    let mut remaining = remaining.into_iter().peekable();
+    let root = if remaining
+        .peek()
+        .is_some_and(|value| !value.starts_with('-'))
+    {
+        PathBuf::from(remaining.next().unwrap())
+    } else {
+        PathBuf::from(".")
+    };
+    let args = &mut remaining;
     match command.as_str() {
         "compile" => {
             if args.next().is_some() {
-                fail("GUIDANCE_USAGE", "use appsdk guide compile <project>");
+                fail("GUIDANCE_USAGE", "use appsdk guide compile [project]");
             }
             compile(&root);
         }

@@ -77,7 +77,7 @@ pub(super) fn project_status(
             "first_failing_gate": null,
             "guide_flow_required": true,
             "next": {
-                "command": format!("appsdk guide init <project> --task guidance-setup --mode bootstrap --module {}", module_id),
+                "command": format!("appsdk guide init --task guidance-setup --mode bootstrap --module {}", module_id),
                 "then": "read project documents, present GuidanceSetupProposal, and wait for explicit user approval before durable rule writes or compile"
             }
         });
@@ -119,8 +119,8 @@ pub(super) fn project_status(
             "first_failing_gate": null,
             "guide_flow_required": true,
             "next": {
-                "command": "appsdk guide compile <project>",
-                "then": format!("appsdk guide init <project> --task {} --mode {} --module {}", task_id, domain, module_id)
+                "command": "appsdk guide compile",
+                "then": format!("appsdk guide init --task {} --mode {} --module {}", task_id, domain, module_id)
             }
         });
     };
@@ -132,7 +132,7 @@ pub(super) fn project_status(
             "readiness": "blocked",
             "reason_code": format!("GUIDANCE_COMPILED_CONTEXT_DRIFT:{}", reason),
             "first_failing_gate": "guidance_compile",
-            "next": {"command": "appsdk guide compile <project>"}
+            "next": {"command": "appsdk guide compile"}
         });
     }
     if let Some(task) = task {
@@ -161,7 +161,7 @@ pub(super) fn project_status(
                     "readiness": "blocked",
                     "reason_code": format!("GUIDANCE_CONTEXT_DRIFT:{}", reason),
                     "first_failing_gate": "rule_context",
-                    "next": {"command": "appsdk guide plan <project> --task <id> --input <revised-plan>", "revision_reason": revision_reason}
+                    "next": {"command": "appsdk guide plan --task <id> --input <revised-plan>", "revision_reason": revision_reason}
                 });
             }
             return match next_step(&plan, &current_events) {
@@ -196,7 +196,7 @@ pub(super) fn project_status(
                     "readiness": "blocked",
                     "reason_code": reason,
                     "first_failing_gate": "step_result",
-                    "next": {"command": "appsdk guide plan <project> --task <id> --input <revised-plan>", "revision_reason": "new_blocker"}
+                    "next": {"command": "appsdk guide plan --task <id> --input <revised-plan>", "revision_reason": "new_blocker"}
                 }),
             };
         }
@@ -234,7 +234,7 @@ pub(super) fn project_status(
     let task_id = task.unwrap_or("<task-id>");
     value["guide_flow_required"] = Value::Bool(true);
     value["init_command"] = Value::String(format!(
-        "appsdk guide init <project> --task {} --mode {} --module {}",
+        "appsdk guide init --task {} --mode {} --module {}",
         task_id, domain, module_id
     ));
     value

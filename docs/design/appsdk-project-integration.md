@@ -14,6 +14,11 @@ external AppSDK installation
 
 The business project must not copy AppSDK source, compiler, or harness into its own source tree.
 
+Project-scoped CLI commands use the process `cwd` as the default project root.
+An explicit project argument is optional for out-of-directory operator use.
+Projects and Skills must not require a project-root environment variable, and
+help output must remain available without loading project state.
+
 ## Governance preflight ownership
 
 Governance readiness is part of the implementation task. Missing contracts,

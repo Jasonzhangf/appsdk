@@ -36,7 +36,7 @@ IDs are invalid.
 
 ## 2. Rule compiler
 
-`appsdk guide compile <project>`:
+`appsdk guide compile [project]`:
 
 1. reads the project contract;
 2. reads only declared rule sources;
@@ -55,11 +55,11 @@ worktree.
 Read-only commands:
 
 ```text
-appsdk guide init <project> --task <id> --mode <domain> [--module <id>]
-appsdk guide status <project> [--task <id>]
-appsdk guide <domain> <project> [--task <id>] [--module <id>]
-appsdk guide next <project> --task <id>
-appsdk guide close <project> --task <id>
+appsdk guide init [project] --task <id> --mode <domain> [--module <id>]
+appsdk guide status [project] [--task <id>]
+appsdk guide <domain> [project] [--task <id>] [--module <id>]
+appsdk guide next [project] --task <id>
+appsdk guide close [project] --task <id>
 ```
 
 Supported domains are `bootstrap`, `migration`, `governance-preflight`,
@@ -151,7 +151,7 @@ cannot automatically modify AGENTS, Skills, machine contracts, or memory.
 The agent writes JSON and submits it with:
 
 ```text
-appsdk guide plan <project> --task <id> --input <file>
+appsdk guide plan [project] --task <id> --input <file>
 ```
 
 Required proposal fields:
@@ -205,7 +205,7 @@ Scope, owner, source, manifest, or forbidden-rule drift cannot be auto-admitted.
 ## 6. Execution event ledger
 
 ```text
-appsdk guide update <project> --task <id> --input <file>
+appsdk guide update [project] --task <id> --input <file>
 ```
 
 Input:

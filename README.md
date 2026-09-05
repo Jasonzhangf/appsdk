@@ -8,16 +8,19 @@ AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实�
 
 Harness 将项目声明的 `AGENTS.md`、Skill 和 JSON 流程合同编译为确定性规则上下文；Agent 生成 Plan，AppSDK 校验并持久化 Plan/Revision/Step event，投影当前状态和唯一相邻下一步。它不调用模型、不复制 lifecycle、不自动写 memory，且默认 advisory。
 
-已有 `.appsdk` 但没有 Guide 的项目先执行幂等 `appsdk init`，再执行只读
+项目命令默认以当前进程 `cwd` 为项目根，不需要项目根环境变量。只有从项目目录
+外操作时才传可选路径。已有 `.appsdk` 但没有 Guide 的项目先执行幂等
+`appsdk init`，再执行只读
 bootstrap intake。Agent 读取返回的项目文档和本地 Skill 候选，向用户提交
 `GuidanceSetupProposal`；批准后才写项目规则并 compile：
 
 ```bash
-appsdk init ./existing-project
-appsdk guide init ./existing-project --task guidance-setup --mode bootstrap --module app-core
+cd ./existing-project
+appsdk init
+appsdk guide init --task guidance-setup --mode bootstrap --module app-core
 # user approves the Agent proposal; Agent updates project-owned rule sources
-appsdk guide compile ./existing-project
-appsdk verify ./existing-project
+appsdk guide compile
+appsdk verify
 ```
 
 在 live tmux Agent 中，`appsdk init` 同时执行官方 `collab init`：幂等创建
@@ -27,14 +30,14 @@ AppSDK 不选择 Collab 路径；Collab 继承同一环境，并以 tmux pane cw
 非 tmux 操作没有可注册 peer，AppSDK 只初始化治理并明确输出 Collab pending。
 
 ```bash
-appsdk guide compile ./my-app
-appsdk guide status ./my-app --task task-id
-appsdk guide init ./my-app --task task-id --mode develop --module app-core
-appsdk guide develop ./my-app --task task-id --module app-core
-appsdk guide plan ./my-app --task task-id --input plan.json
-appsdk guide update ./my-app --task task-id --input result.json
-appsdk guide next ./my-app --task task-id
-appsdk guide close ./my-app --task task-id
+appsdk guide compile
+appsdk guide status --task task-id
+appsdk guide init --task task-id --mode develop --module app-core
+appsdk guide develop --task task-id --module app-core
+appsdk guide plan --task task-id --input plan.json
+appsdk guide update --task task-id --input result.json
+appsdk guide next --task task-id
+appsdk guide close --task task-id
 ```
 
 `guide init` 只读返回需要先读的项目 AGENTS/本地 Skills、仍需询问用户的问题、Skill 调用建议和下一条 guide 命令。项目级 `GuidanceSetupProposal` 与任务级 `PlanProposal` 分离；`guide plan` 才开始写入任务控制态，任务 Plan 不会自动写入项目 Skill。
@@ -54,16 +57,16 @@ Goal clarification -> clean worktree -> reproduce -> fix candidate -> developmen
 appsdk prepare ./existing-workspace
 appsdk init ./existing-workspace --project-root new-code
 appsdk new ./my-app
-appsdk pin-lock ./my-app --binary /path/to/appsdk
-appsdk compile ./my-app
-appsdk rehydrate-frozen ./my-app --module app-core
-appsdk begin-version ./my-app --module app-core --from active-v1 --to active-v2
-appsdk verify ./my-app
-appsdk verify --review-admission ./my-app --module app-core
-appsdk promote ./my-app --to source_implemented
-appsdk promote-module ./my-app --module app-core --to architecture_stable
-appsdk freeze ./my-app --module app-core
-appsdk publish-active ./my-app --module app-core --version active-v1
+appsdk pin-lock --binary /path/to/appsdk
+appsdk compile
+appsdk rehydrate-frozen --module app-core
+appsdk begin-version --module app-core --from active-v1 --to active-v2
+appsdk verify
+appsdk verify --review-admission --module app-core
+appsdk promote --to source_implemented
+appsdk promote-module --module app-core --to architecture_stable
+appsdk freeze --module app-core
+appsdk publish-active --module app-core --version active-v1
 
 ```
 

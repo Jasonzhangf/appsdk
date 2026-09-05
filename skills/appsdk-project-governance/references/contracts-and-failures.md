@@ -29,6 +29,11 @@ delivery boundary.
 
 ## Compatibility
 
+Project-scoped commands resolve the project from the process `cwd` when their
+optional project argument is omitted. Do not require a project-root environment
+variable. `--help` is project-independent and must never resolve or validate a
+project.
+
 Harness does not check binary SHA. Existing AppSDK version/contract compatibility
 belongs to canonical lifecycle commands. A mismatch must return either a
 supported migration route or an authorized reset/reinitialize route; it must

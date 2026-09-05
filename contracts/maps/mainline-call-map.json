@@ -12,6 +12,7 @@
     ,{"chain_id":"project-agent-contract-init-v1","scenario_condition":"fresh_prepared_governance_root","entry_symbol":"init_project","terminal_symbol":"write_project_agent_contract"}
     ,{"chain_id":"project-agent-contract-new-v1","scenario_condition":"empty_new_project","entry_symbol":"new_project","terminal_symbol":"write_project_agent_contract"}
     ,{"chain_id":"project-collab-bootstrap-v1","scenario_condition":"appsdk_init_from_live_tmux_peer","entry_symbol":"init_project","terminal_symbol":"initialize_collab_peer"}
+    ,{"chain_id":"project-cli-context-v1","scenario_condition":"project_scoped_command_with_optional_explicit_root","entry_symbol":"main","terminal_symbol":"project_root_or_cwd"}
   ],
   "edges": [
     {"chain_id":"sdk-pin-migrate-v1","from":"project_sdk_version_read","to":"bundle_identity_verified","owner":"appsdk::delivery","caller":"pin_lock","callee":"digest_bytes","path":"rust/src/main.rs","input_resource_id":"sdk_bundle","output_resource_id":"sdk_bundle","error_resource_id":"lifecycle_error"},
@@ -53,5 +54,6 @@
     ,{"chain_id":"project-agent-contract-init-v1","from":"fresh_governance_detected","to":"project_agent_contract_installed","owner":"appsdk::delivery","caller":"init_project","callee":"write_project_agent_contract","path":"rust/src/main.rs","input_resource_id":"project_agent_contract_template","output_resource_id":"project_agent_contract","error_resource_id":"lifecycle_error"}
     ,{"chain_id":"project-agent-contract-new-v1","from":"empty_project_created","to":"project_agent_contract_installed","owner":"appsdk::delivery","caller":"new_project","callee":"write_project_agent_contract","path":"rust/src/main.rs","input_resource_id":"project_agent_contract_template","output_resource_id":"project_agent_contract","error_resource_id":"lifecycle_error"}
     ,{"chain_id":"project-collab-bootstrap-v1","from":"governance_resources_installed","to":"collab_peer_ready","owner":"appsdk::delivery","caller":"init_project","callee":"initialize_collab_peer","path":"rust/src/main.rs","input_resource_id":"project_contract","output_resource_id":"collab_peer_runtime","error_resource_id":"lifecycle_error"}
+    ,{"chain_id":"project-cli-context-v1","from":"command_parsed","to":"project_context_resolved","owner":"appsdk::cli","caller":"main","callee":"project_root_or_cwd","path":"rust/src/main.rs","input_resource_id":"project_cli_context","output_resource_id":"project_cli_context","error_resource_id":"lifecycle_error"}
   ]
 }

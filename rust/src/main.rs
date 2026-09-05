@@ -7576,11 +7576,24 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         let canonical_target = entry
             .get("canonical_target_digest")
             .unwrap_or_else(|| entry.get("target_digest").unwrap());
+        // An interrupted migration may snapshot the old bundle's already
+        // canonical target. Retain that exact map instead of interpreting its
+        // historical template digest as the current bundle's template. The
+        // lock must witness the bundle transition; snapshot/live hashes below
+        // still bind the original bytes. Custom source-to-target maps do not
+        // qualify for this identity transition.
+        let previous_target_snapshot = bundle_transition
+            && entry
+                .get("canonical_target_digest")
+                .is_some_and(Value::is_string)
+            && entry.get("source_digest") == Some(canonical_target)
+            && entry.get("target_digest") == Some(canonical_target);
         if (Some(canonical_source) != declared.get("source_digest")
             && entry
                 .get("canonical_source_digest")
                 .is_some_and(|value| !value.is_null()))
             || (Some(canonical_target) != declared.get("target_digest")
+                && !previous_target_snapshot
                 && entry
                     .get("canonical_target_digest")
                     .is_some_and(|value| !value.is_null()))

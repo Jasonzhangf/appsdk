@@ -1241,6 +1241,61 @@ fn pin_lock_rejects_custom_map_record_from_bundle_reconciliation() {
 }
 
 #[test]
+fn pin_lock_preserves_previous_canonical_target_snapshot() {
+    let root = temp_root("pin-lock-previous-canonical-target");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original, _) = install_previous_bundle_migration_record(&root);
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let mut record: Value = serde_json::from_str(&original).unwrap();
+    for entry in record["maps"].as_array_mut().unwrap() {
+        let name = entry["name"].as_str().unwrap().to_string();
+        let live = root.join(".appsdk/maps").join(&name);
+        // Canonical 0.1.6 maps snapshotted by a previous bundle. Whitespace
+        // models a real versioned template change without changing meaning.
+        let previous = fs::read_to_string(&live).unwrap() + "\n";
+        entry["canonical_source_digest"] = entry["source_digest"].clone();
+        entry["canonical_target_digest"] = Value::String(digest(&previous));
+        entry["source_digest"] = Value::String(digest(&previous));
+        entry["target_digest"] = Value::String(digest(&previous));
+        fs::write(&live, &previous).unwrap();
+        fs::write(
+            root.join(entry["snapshot_path"].as_str().unwrap()),
+            previous,
+        )
+        .unwrap();
+    }
+    let preserved = serde_json::to_string_pretty(&record).unwrap() + "\n";
+    fs::write(&record_path, &preserved).unwrap();
+    for _ in 0..2 {
+        let result = run(&[
+            "pin-lock",
+            root_text,
+            "--binary",
+            binary().to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read_to_string(&record_path).unwrap(), preserved);
+        let verified = run(&["verify", root_text]);
+        assert!(
+            verified.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+    }
+    let snapshot = root.join(record["maps"][0]["snapshot_path"].as_str().unwrap());
+    fs::write(snapshot, "tampered").unwrap();
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SDK_MIGRATION_SNAPSHOT_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_reconciliation_is_idempotent_and_snapshot_remains_immutable() {
     let root = temp_root("pin-lock-reconciliation-idempotent");
     let root_text = root.to_str().unwrap();

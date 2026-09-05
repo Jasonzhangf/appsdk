@@ -11,8 +11,12 @@
     "content": {"type": "string", "minLength": 1},
     "tags": {"type": "array", "items": {"type": "string"}},
     "source_refs": {"type": "array", "items": {"type": "string"}},
+    "memory_level": {"type": "integer", "enum": [1, 2, 3]},
+    "review_status": {"enum": ["unreviewed", "reviewed"]},
+    "review_evidence": {"type": "array", "items": {"type": "string"}},
+    "detail_path": {"type": "string"},
     "importance": {"type": "integer", "minimum": 0, "maximum": 100},
-    "layer": {"type": "integer", "minimum": 0},
+    "layer": {"type": "integer", "minimum": 1, "maximum": 3},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"}
   },

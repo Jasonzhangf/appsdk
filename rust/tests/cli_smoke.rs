@@ -5087,7 +5087,7 @@ fn project_memory_edges_and_latest_compaction_are_explicit() {
     fs::write(
         root.join("memory/knowledge.jsonl"),
         concat!(
-            r#"{"id":"anchor-edge","category":"knowledge","title":"Anchor","content":"stable node anchor","tags":["stable"],"source_refs":["guide/node"],"related_ids":["lesson-edge"],"semantic_relations":[{"to_id":"lesson-edge","type":"similar_lesson","score":0.91,"model_revision":"wemm-test-v1"}],"importance":95,"layer":1}"#,
+            r#"{"id":"anchor-edge","category":"knowledge","title":"Anchor","content":"stable node anchor","tags":["stable"],"source_refs":["guide/node"],"related_ids":["lesson-edge"],"semantic_relations":[{"to_id":"lesson-edge","type":"similar_lesson","score":0.91,"model_revision":"wemm-test-v1"}],"importance":95,"memory_level":1,"review_status":"reviewed","review_evidence":["review/anchor-edge"]}"#,
             "\n",
             r#"{"id":"latest-entry","category":"knowledge","content":"old content","tags":["old"],"source_refs":["source/old"],"updated_at":"2026-01-01T00:00:00Z"}"#,
             "\n",
@@ -5320,6 +5320,15 @@ fn project_memory_migration_and_reentry_are_resumable_and_source_preserving() {
         .unwrap()
         .iter()
         .any(|source| source == "old/path"));
+    let migrated_detail = root.join(migrated_path["matches"][0]["detail_path"].as_str().unwrap());
+    assert!(migrated_detail.is_file());
+    assert!(fs::read_to_string(root.join("memory/index.md"))
+        .unwrap()
+        .contains("### legacy-path"));
+    let exported = run_memory(&root, &["export"], &memory_home);
+    assert!(exported.status.success());
+    let exported: Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert_eq!(exported["project"]["entries"], 2);
 
     fs::create_dir_all(root.join(".agent-collab/runs/reentry-run")).unwrap();
     fs::write(
@@ -5378,6 +5387,215 @@ fn project_memory_migration_and_reentry_are_resumable_and_source_preserving() {
     assert!(already.status.success());
     let already: Value = serde_json::from_slice(&already.stdout).unwrap();
     assert_eq!(already["status"], "already_complete");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn project_memory_uses_review_levels_markdown_details_and_tag_search() {
+    let root = temp_root("project-memory-review-levels");
+    let memory_home = temp_root("project-memory-review-levels-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+
+    let created = run_memory(
+        &root,
+        &[
+            "entry",
+            "--title",
+            "Canonical memory title",
+            "--text",
+            "The full detail stays outside the short index",
+            "--tag",
+            "architecture",
+            "--tag",
+            "review",
+        ],
+        &memory_home,
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created["memory_level"], 3);
+    assert_eq!(created["review_status"], "unreviewed");
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(created["detail_path"], format!("memory/L3/{id}.md"));
+    let detail = root.join(created["detail_path"].as_str().unwrap());
+    assert!(detail.is_file());
+    assert!(fs::read_to_string(&detail)
+        .unwrap()
+        .contains("The full detail stays outside the short index"));
+    let index = fs::read_to_string(root.join("memory/index.md")).unwrap();
+    assert!(index.contains("### Canonical memory title"));
+    assert!(index.contains("- tags: `architecture`, `review`"));
+    assert!(index.contains(&format!("details: [L3/{id}.md](L3/{id}.md)")));
+    assert!(!index.contains("The full detail stays outside the short index"));
+    assert!(index.contains("## Level 3"));
+    assert!(index.contains(&format!(
+        "- L3: Canonical memory title (knowledge) [architecture,review] -> L3/{id}.md"
+    )));
+
+    let tagged = run_memory(&root, &["query", "--tag", "architecture"], &memory_home);
+    assert!(tagged.status.success());
+    let tagged: Value = serde_json::from_slice(&tagged.stdout).unwrap();
+    assert!(tagged["keyword_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == id && entry["tags"].as_array().unwrap().len() == 2));
+
+    let promoted = run_memory(
+        &root,
+        &[
+            "promote",
+            "--id",
+            id,
+            "--level",
+            "2",
+            "--evidence",
+            "review/run-1#memory-1",
+        ],
+        &memory_home,
+    );
+    assert!(
+        promoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+    let promoted: Value = serde_json::from_slice(&promoted.stdout).unwrap();
+    assert_eq!(promoted["level"], 2);
+    let current = run_memory(&root, &["get", id], &memory_home);
+    let current: Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(current["matches"][0]["memory_level"], 2);
+    assert_eq!(current["matches"][0]["review_status"], "reviewed");
+    assert_eq!(
+        current["matches"][0]["detail_path"],
+        format!("memory/L2/{id}.md")
+    );
+    assert!(root.join(format!("memory/L2/{id}.md")).is_file());
+    assert!(fs::read_to_string(root.join("memory/index.md"))
+        .unwrap()
+        .contains("## Level 2"));
+    assert!(fs::read_to_string(root.join("memory/index.md"))
+        .unwrap()
+        .contains(&format!(
+            "- L2: Canonical memory title (knowledge) [architecture,review] -> L2/{id}.md"
+        )));
+
+    fs::remove_dir_all(memory_home.join("projects")).unwrap();
+    let rebuilt = run_memory(&root, &["query", "--tag", "review"], &memory_home);
+    assert!(rebuilt.status.success());
+    let rebuilt: Value = serde_json::from_slice(&rebuilt.stdout).unwrap();
+    assert!(rebuilt["keyword_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == id && entry["memory_level"] == 2));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn project_memory_markdown_round_trip_import_is_idempotent() {
+    let root = temp_root("project-memory-markdown-round-trip");
+    let memory_home = temp_root("project-memory-markdown-round-trip-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+
+    let created = run_memory(
+        &root,
+        &[
+            "entry",
+            "--id",
+            "round-trip",
+            "--category",
+            "lesson",
+            "--title",
+            "Original title",
+            "--text",
+            "Original detail",
+            "--tag",
+            "compatibility",
+        ],
+        &memory_home,
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created["write_mode"], "one_shot");
+    let detail = root.join(created["detail_path"].as_str().unwrap());
+    let mut markdown = fs::read_to_string(&detail).unwrap();
+    assert!(markdown.starts_with("<!-- project-memory:v1 "));
+    markdown = markdown
+        .replace("# Original title", "# Edited title")
+        .replace("Original detail", "Edited detail");
+    fs::write(&detail, markdown).unwrap();
+
+    let imported = run_memory(&root, &["import"], &memory_home);
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let imported: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    assert_eq!(imported["status"], "complete");
+    assert_eq!(imported["imported_entries"], 1);
+
+    let current = run_memory(&root, &["get", "round-trip"], &memory_home);
+    let current: Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(current["matches"][0]["title"], "Edited title");
+    assert_eq!(current["matches"][0]["content"], "Edited detail");
+    assert_eq!(
+        fs::read_to_string(root.join("memory/lesson.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "import appends an event and preserves the original event"
+    );
+
+    let repeated = run_memory(&root, &["import"], &memory_home);
+    assert!(repeated.status.success());
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["status"], "already_current");
+    assert_eq!(repeated["skipped_existing"], 1);
+    assert_eq!(
+        fs::read_to_string(root.join("memory/lesson.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "repeating import must not append another event"
+    );
+
+    fs::create_dir_all(root.join("memory/details")).unwrap();
+    let legacy_detail = root.join("memory/details/legacy-markdown.md");
+    fs::write(
+        &legacy_detail,
+        "# Legacy Markdown\n\nLegacy detail\n\n---\n\n- id: `legacy-markdown`\n- tags: `legacy` `compatible`\n- source_refs: `old/export`\n",
+    )
+    .unwrap();
+    let legacy_import = run_memory(&root, &["import"], &memory_home);
+    assert!(legacy_import.status.success());
+    let legacy_import: Value = serde_json::from_slice(&legacy_import.stdout).unwrap();
+    assert_eq!(legacy_import["imported_entries"], 1);
+    let legacy = run_memory(&root, &["get", "legacy-markdown"], &memory_home);
+    let legacy: Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_eq!(legacy["matches"][0]["content"], "Legacy detail");
+    assert_eq!(legacy["matches"][0]["category"], "knowledge");
+    assert!(legacy["matches"][0]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| tag == "compatible"));
 
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(memory_home).unwrap();

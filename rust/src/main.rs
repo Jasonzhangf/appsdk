@@ -8093,7 +8093,7 @@ fn print_cli_help(command: Option<&str>) {
         Some("prepare") => "Usage: appsdk prepare [workspace]",
         Some("new") => "Usage: appsdk new [project]",
         Some("memory") | Some("project-memory") => {
-            "Usage: appsdk memory <entry|query|get|review|migrate|reentry|index|compact|verify> [project]"
+            "Usage: appsdk memory <entry|query|get|review|promote|migrate|import|reentry|index|export|compact|verify> [project]"
         }
         _ => CLI_USAGE,
     };

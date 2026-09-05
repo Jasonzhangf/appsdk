@@ -1,19 +1,28 @@
-# Project memory index
+# Memory Index
 
-This is the stable L1 entrypoint for local project memory. Keep this page short,
-project-neutral, and rarely changing so resident context and cache hits remain
-stable. Ordinary memory writes update lower layers only.
+Index stores short titles, tags, and relative detail paths. Open the linked Markdown detail for content.
 
-## Entrances
+## Raw sources
 
-- [Plan](plan.jsonl): project goals, architecture, owners, boundaries, and constraints.
-- [Path](path.jsonl): nodes, edges, flow paths, checklists, and execution rules.
-- [Knowledge](knowledge.jsonl): one discrete verified fact, contract, function, resource, or setting.
-- [Lesson](lesson.jsonl): verified historical experience, root cause, pitfall, or resolution.
+- [Plan](plan.jsonl)
+- [Path](path.jsonl)
+- [Knowledge](knowledge.jsonl)
+- [Lesson](lesson.jsonl)
 
-## Scope
+## Level 1 — reviewed critical
 
-Ordinary entries belong in one of the four JSONL files. Do not rewrite this page
-for an individual entry: it is the stable L1 map, while SQLite and FTS are
-rebuildable projections. Use the project-memory skill for ordered retrieval,
-reviewed write-back, and WeMM candidate handling.
+_Empty._
+
+## Level 2 — reviewed reusable
+
+_Empty._
+
+## Level 3 — new or unreviewed
+
+_Empty._
+
+## Skill description candidates
+
+Base budget: 8 lines. Copy the compact lines into the project Skill `description` after manual architecture deduplication. Fill level 1 first; use level 2, then level 3, only for remaining slots.
+
+- _No reviewed or searchable entries yet._

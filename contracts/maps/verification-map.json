@@ -51,6 +51,9 @@
     {"gate_id":"memory_index_deterministic","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_index_query_review_and_compact_are_layered","required_for":["memory_index","release"]},
     {"gate_id":"memory_query_order","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_index_query_review_and_compact_are_layered","required_for":["memory_query"]},
     {"gate_id":"memory_review_writeback","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_index_query_review_and_compact_are_layered","required_for":["memory_review"]},
+    {"gate_id":"memory_review_level","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_uses_review_levels_markdown_details_and_tag_search","required_for":["memory_review","memory_index"]},
+    {"gate_id":"memory_markdown_export","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_migration_and_reentry_are_resumable_and_source_preserving","required_for":["memory_index","memory_migration"]},
+    {"gate_id":"memory_markdown_import","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_markdown_round_trip_import_is_idempotent","required_for":["memory_index","memory_import"]},
     {"gate_id":"memory_global_promotion_explicit","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke project_memory_index_query_review_and_compact_are_layered","required_for":["memory_review","memory_global"]}
   ]
 }

@@ -3006,6 +3006,29 @@ fn stage_protected_archive(
     );
 }
 
+fn protected_archive_for_version(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    version: &str,
+) -> PathBuf {
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    assert_version(version, "INVALID_ACTIVE_VERSION");
+    let protected = contract_root(root, project, "/governance/protected_root");
+    let versioned = protected
+        .join("history-versions")
+        .join(module_id)
+        .join(version);
+    assert_no_symlink_components(root, &versioned, "protected_archive");
+    // These are the two archive layouts emitted by freeze. An explicit
+    // version wins; validation failures never select the legacy layout.
+    if versioned.exists() {
+        versioned
+    } else {
+        protected.join("history").join(module_id)
+    }
+}
+
 fn assert_protected_archive_matches(root: &Path, module: &Value, artifact: &Value, archive: &Path) {
     assert_no_symlink_components(root, archive, "protected_archive");
     let archived: Value = serde_json::from_str(
@@ -3320,7 +3343,7 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_version(version, "INVALID_ACTIVE_VERSION");
     let promotion = read_record(root, &module_record_name("promotion-record", module_id));
     let protected_root = contract_root(root, &project, "/governance/protected_root");
-    let archive = protected_root.join("history").join(module_id);
+    let archive = protected_archive_for_version(root, &project, module_id, version);
     assert_no_symlink_components(root, &archive, "protected_archive");
     assert_protected_not_ignored(root, &archive);
     let active_root = contract_root(root, &project, "/governance/active_root");
@@ -6885,9 +6908,8 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
                 module_artifact_matches_project(module, &active_value);
                 let generated_module = read_module_artifact(root, &project, id);
                 module_artifact_matches_project(module, &generated_module);
-                let protected_archive = contract_root(root, &project, "/governance/protected_root")
-                    .join("history")
-                    .join(id);
+                let protected_archive =
+                    protected_archive_for_version(root, &project, id, active_version);
                 if !protected_archive.is_dir() {
                     fail("PROTECTED_HISTORY_MISSING");
                 }

@@ -3967,6 +3967,28 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         "{}",
         String::from_utf8_lossy(&idempotent_v2.stderr)
     );
+    // freeze may retain the old history root and publish the current version
+    // under history-versions. Verification and rehydrate must agree with it.
+    let versioned = root.join("protected/history-versions/app-core/active-v2");
+    let legacy = root.join("protected/history/app-core");
+    fs::rename(&legacy, &versioned).unwrap();
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("module-artifact.json"), &active_v1_text).unwrap();
+    let versioned_verify = run(&["verify", root_text]);
+    assert!(
+        versioned_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&versioned_verify.stderr)
+    );
+    let versioned_rehydrate = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(
+        versioned_rehydrate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&versioned_rehydrate.stderr)
+    );
+    // A corrupt selected archive must fail, never fall through to history.
+    fs::write(versioned.join("module-artifact.json"), "{}\n").unwrap();
+    assert!(!run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
 }
 

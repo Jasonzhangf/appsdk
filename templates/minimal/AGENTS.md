@@ -67,6 +67,9 @@ contracts.
   collaboration, not independent isolated work or quality checks.
 - Long tasks and handoffs may save relevant notes; no automatic promotion to
   memory, Skills or rules. Delivery and retained-resource cleanup are separate.
+- Memory stores historical conclusions, source references and retrieval
+  summaries. Current facts, rules and gates remain owned by project AGENTS,
+  Skills and declared contracts; memory never overrides them.
 
 ## Git Protection
 
@@ -80,7 +83,8 @@ contracts.
 
 ## Task Routing
 
-Declare project-owned routes during Guide setup:
+Declare project-owned routes at setup or when the relevant boundary becomes
+clear. Guide may assist; enabling it is not a prerequisite.
 
 | Need | Project-owned source |
 | --- | --- |
@@ -88,6 +92,7 @@ Declare project-owned routes during Guide setup:
 | feature development and debug | [Skill] |
 | build, install, restart, and replay | [document or adapter] |
 | review and delivery | [Skill or contract] |
+| optional history retrieval or explicitly authorized memory writes | [.appsdk/skills/project-memory/SKILL.md](.appsdk/skills/project-memory/SKILL.md) |
 
 ## Evidence Boundary
 

@@ -84,3 +84,11 @@
 - close emits memory candidates but never edits durable memory/rule files.
 - feature/debug/review nodes require changed-scope architecture-conformance
   evidence and describe historical findings as non-blocking recommendations.
+- tour persists a user-selected adjacent path without changing the active plan;
+  review rejects flow changes until every selected node has an accepted content
+  revision, then stages a flow patch carrying those node revision IDs.
+- rejected node content keeps flow review blocked until a later node review
+  supersedes it with an accepted revision; active compiled guidance is never
+  mutated implicitly.
+- review-node memory reminders are advisory and do not appear as debug/develop
+  gates; `project-memory review` remains an independent task-end write path.

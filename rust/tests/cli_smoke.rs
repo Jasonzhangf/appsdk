@@ -9,6 +9,10 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_appsdk"))
 }
 
+fn memory_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_project-memory"))
+}
+
 fn temp_root(name: &str) -> PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -80,6 +84,15 @@ fn run_in(root: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(root)
         .env_remove("TMUX_PANE")
+        .output()
+        .unwrap()
+}
+
+fn run_memory(root: &Path, args: &[&str], home: &Path) -> std::process::Output {
+    Command::new(memory_binary())
+        .args(args)
+        .current_dir(root)
+        .env("PROJECT_MEMORY_HOME", home)
         .output()
         .unwrap()
 }
@@ -192,6 +205,8 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         ".appsdk/contracts/records/worktree-record.schema.json",
         ".appsdk/contracts/records/effectiveness-record.schema.json",
         ".appsdk/contracts/records/merge-record.schema.json",
+        ".appsdk/contracts/guidance/tour-review.schema.json",
+        ".appsdk/contracts/memory/memory-entry.schema.json",
         "playground/experiments",
         "active/lib",
         "protected/source",
@@ -199,8 +214,16 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         "protected/history",
         "generated",
         ".appsdk-control",
+        "memory/index.md",
     ] {
         assert!(root.join(path).exists(), "missing {}", path);
+    }
+    let memory_index = fs::read_to_string(root.join("memory/index.md")).unwrap();
+    for entrance in ["[Plan]", "[Path]", "[Knowledge]", "[Lesson]"] {
+        assert!(
+            memory_index.contains(entrance),
+            "missing memory entrance {entrance}"
+        );
     }
 
     let second = run(&["init", root_text]);
@@ -4692,6 +4715,425 @@ fn guidance_plan_update_is_evidence_bound_idempotent_and_drift_safe() {
     );
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_tour_review_requires_node_content_before_flow_update() {
+    let root = temp_root("guidance-tour-review");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": "develop",
+            "goal_id": "goal-change-me",
+            "task_id": "tour-task",
+            "module_id": "app-core",
+            "objective": "tour review ordering",
+            "scope_paths": ["playground/experiments/**"],
+            "steps": [
+                {"step_id":"step-1","node_id":"requirements","action":"inspect","owner":"app-core","expected_evidence":["requirements"]},
+                {"step_id":"step-2","node_id":"map_check","action":"inspect","owner":"app-core","expected_evidence":["function-map-binding","verification-map-binding"]}
+            ]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "plan.json"
+    ])
+    .status
+    .success());
+
+    fs::write(
+        root.join("tour.json"),
+        r#"{"schema_version":1,"tour_id":"tour-1","selected_path":["requirements","map_check"]}
+"#,
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "tour",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "tour.json"
+    ])
+    .status
+    .success());
+
+    fs::write(
+        root.join("flow-review.json"),
+        r#"{"schema_version":1,"review_id":"flow-before-nodes","stage":"flow_review","flow_update":{"order":["requirements","map_check"],"edges":[{"from":"requirements","to":"map_check"}],"rules":["keep-adjacent"]}}
+"#,
+    )
+    .unwrap();
+    let blocked = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "flow-review.json",
+    ]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr)
+        .contains("GUIDANCE_FLOW_REVIEW_REQUIRES_NODE_APPROVAL"));
+
+    fs::write(
+        root.join("node-one.json"),
+        r#"{"schema_version":1,"review_id":"node-1","stage":"node_review","node_updates":[{"node_id":"requirements","verdict":"accept","content":"confirmed requirements"}]}
+"#,
+    )
+    .unwrap();
+    let first = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "node-one.json",
+    ]);
+    assert!(first.status.success());
+    let first_json: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["node_review_complete"], false);
+
+    fs::write(
+        root.join("node-two.json"),
+        r#"{"schema_version":1,"review_id":"node-2","stage":"node_review","node_updates":[{"node_id":"map_check","verdict":"approved","content":"confirmed maps"}]}
+"#,
+    )
+    .unwrap();
+    let second = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "node-two.json",
+    ]);
+    assert!(second.status.success());
+    let second_json: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_json["node_review_complete"], true);
+    assert_eq!(second_json["flow_review_allowed"], true);
+
+    fs::write(
+        root.join("empty-flow.json"),
+        r#"{"schema_version":1,"review_id":"empty-flow","stage":"flow_review"}
+"#,
+    )
+    .unwrap();
+    let empty_flow = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "empty-flow.json",
+    ]);
+    assert!(!empty_flow.status.success());
+    assert!(String::from_utf8_lossy(&empty_flow.stderr).contains("GUIDANCE_FLOW_UPDATE_REQUIRED"));
+
+    fs::write(
+        root.join("rejected-flow.json"),
+        r#"{"schema_version":1,"review_id":"flow-rejected","stage":"flow_review","verdict":"reject","flow_update":{"order":["requirements","map_check"],"edges":[{"from":"requirements","to":"map_check"}],"rules":["keep-adjacent"]}}
+"#,
+    )
+    .unwrap();
+    let rejected_flow = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "rejected-flow.json",
+    ]);
+    assert!(rejected_flow.status.success());
+    let rejected_json: Value = serde_json::from_slice(&rejected_flow.stdout).unwrap();
+    assert_eq!(rejected_json["verdict"], "rejected");
+    assert_eq!(rejected_json["flow_revision"], Value::Null);
+    assert!(rejected_json["next"]
+        .as_str()
+        .unwrap()
+        .contains("submit flow_review again"));
+
+    let flow = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "flow-review.json",
+    ]);
+    assert!(
+        flow.status.success(),
+        "{}",
+        String::from_utf8_lossy(&flow.stderr)
+    );
+    let flow_json: Value = serde_json::from_slice(&flow.stdout).unwrap();
+    assert_eq!(flow_json["stage"], "flow_review");
+    assert_eq!(flow_json["active_revision_changed"], false);
+    let events =
+        fs::read_to_string(root.join(".appsdk-control/guidance/tour-task/events.jsonl")).unwrap();
+    let flow_line = events
+        .lines()
+        .find(|line| line.contains("\"stage\":\"flow_review\""))
+        .unwrap();
+    assert!(flow_line.contains("node-requirements-"));
+    assert!(flow_line.contains("node-map_check-"));
+
+    fs::write(
+        root.join("node-revision.json"),
+        r#"{"schema_version":1,"review_id":"node-3","stage":"node_review","node_updates":[{"node_id":"requirements","verdict":"accept","content":"reconfirmed requirements"}]}
+"#,
+    )
+    .unwrap();
+    let revised_node = run(&[
+        "guide",
+        "review",
+        root_text,
+        "--task",
+        "tour-task",
+        "--input",
+        "node-revision.json",
+    ]);
+    assert!(revised_node.status.success());
+    let status = run(&["guide", "status", root_text, "--task", "tour-task"]);
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["tour_review"]["stage"], "flow_review");
+    assert_eq!(status_json["tour_review"]["flow_review_complete"], false);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_memory_index_query_review_and_compact_are_layered() {
+    let root = temp_root("project-memory");
+    fs::create_dir_all(&root).unwrap();
+    let memory_home = temp_root("project-memory-home");
+    fs::create_dir_all(&memory_home).unwrap();
+    let root_text = root.to_str().unwrap();
+    let home_text = memory_home.to_str().unwrap();
+    let anchor = run_memory(
+        &root,
+        &[
+            "entry",
+            "--id",
+            "plan-root",
+            "--category",
+            "plan",
+            "--text",
+            "stable project anchor",
+            "--importance",
+            "95",
+            "--tag",
+            "owner",
+        ],
+        &memory_home,
+    );
+    assert!(
+        anchor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&anchor.stderr)
+    );
+    let fact = run_memory(
+        &root,
+        &[
+            "entry",
+            "--id",
+            "fact-one",
+            "--category",
+            "knowledge",
+            "--text",
+            "SQLite stores the rebuildable index",
+            "--tag",
+            "storage",
+        ],
+        &memory_home,
+    );
+    assert!(
+        fact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fact.stderr)
+    );
+    let queried = run_memory(&root, &["query", "SQLite"], &memory_home);
+    assert!(queried.status.success());
+    let queried_json: Value = serde_json::from_slice(&queried.stdout).unwrap();
+    assert_eq!(queried_json["semantic_backend"]["status"], "candidate-only");
+    assert!(queried_json["keyword_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == "fact-one"));
+    let inspected = run_memory(&root, &["verify"], &memory_home);
+    assert!(inspected.status.success());
+    let inspected_json: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(inspected_json["ok"], true);
+
+    fs::create_dir_all(root.join(".agent-collab/runs/run-memory")).unwrap();
+    fs::write(
+        root.join(".agent-collab/runs/run-memory/notes.jsonl"),
+        r#"{"record_type":"lesson","memory":{"id":"lesson-one","category":"lesson","content":"verified review ordering","tags":["review"]}}
+"#,
+    )
+    .unwrap();
+    let reviewed = run_memory(&root, &["review", "--run", "run-memory"], &memory_home);
+    assert!(
+        reviewed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reviewed.stderr)
+    );
+    let reviewed_json: Value = serde_json::from_slice(&reviewed.stdout).unwrap();
+    assert_eq!(reviewed_json["checked"], true);
+    let duplicate = run_memory(
+        &root,
+        &[
+            "entry",
+            "--id",
+            "lesson-one",
+            "--category",
+            "lesson",
+            "--text",
+            "verified review ordering",
+            "--tag",
+            "ordering",
+        ],
+        &memory_home,
+    );
+    assert!(duplicate.status.success());
+    let compacted = run_memory(&root, &["compact"], &memory_home);
+    assert!(
+        compacted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compacted.stderr)
+    );
+    let lesson = run_memory(&root, &["get", "lesson-one"], &memory_home);
+    let lesson_json: Value = serde_json::from_slice(&lesson.stdout).unwrap();
+    let tags = lesson_json["matches"][0]["tags"].as_array().unwrap();
+    assert!(tags.iter().any(|tag| tag == "review"));
+    assert!(tags.iter().any(|tag| tag == "ordering"));
+    assert!(!home_text.is_empty() && !root_text.is_empty());
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn project_memory_edges_and_latest_compaction_are_explicit() {
+    let root = temp_root("project-memory-edges");
+    let caller = temp_root("project-memory-edge-caller");
+    let memory_home = temp_root("project-memory-edge-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&caller).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    fs::create_dir_all(root.join("memory")).unwrap();
+    fs::write(
+        root.join("memory/knowledge.jsonl"),
+        concat!(
+            r#"{"id":"anchor-edge","category":"knowledge","title":"Anchor","content":"stable node anchor","tags":["stable"],"source_refs":["guide/node"],"related_ids":["lesson-edge"],"semantic_relations":[{"to_id":"lesson-edge","type":"similar_lesson","score":0.91,"model_revision":"wemm-test-v1"}],"importance":95,"layer":1}"#,
+            "\n",
+            r#"{"id":"latest-entry","category":"knowledge","content":"old content","tags":["old"],"source_refs":["source/old"],"updated_at":"2026-01-01T00:00:00Z"}"#,
+            "\n",
+            r#"{"id":"latest-entry","category":"knowledge","content":"new content","tags":["new"],"source_refs":["source/new"],"updated_at":"2026-01-02T00:00:00Z"}"#,
+            "\n",
+            r#"{"id":"lesson-edge","category":"lesson","content":"verified historical lesson","tags":["lesson"],"source_refs":["review/1"]}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let indexed = run_memory(&root, &["index"], &memory_home);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let root_text = root.to_str().unwrap();
+    let queried = run_memory(&caller, &["query", "stable", root_text], &memory_home);
+    assert!(
+        queried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queried.stderr)
+    );
+    let queried_json: Value = serde_json::from_slice(&queried.stdout).unwrap();
+    assert!(queried_json["anchors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == "anchor-edge"));
+    assert!(queried_json["declared_related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["from_id"] == "anchor-edge" && edge["to_id"] == "lesson-edge"));
+    assert!(queried_json["semantic_related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["type"] == "similar_lesson" && edge["model_revision"] == "wemm-test-v1"));
+
+    let inspected = run_memory(&caller, &["get", "anchor-edge", root_text], &memory_home);
+    assert!(inspected.status.success());
+    let inspected_json: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(inspected_json["matches"][0]["scope"], "project");
+
+    let compacted = run_memory(&root, &["compact"], &memory_home);
+    assert!(
+        compacted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compacted.stderr)
+    );
+    let compacted_entries = fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap();
+    let latest: Value = compacted_entries
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|entry: &Value| entry["id"] == "latest-entry")
+        .unwrap();
+    assert_eq!(latest["content"], "new content");
+    assert!(latest["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| tag == "old"));
+    assert!(latest["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| tag == "new"));
+    assert!(latest["source_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source == "source/old"));
+    assert!(latest["source_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source == "source/new"));
+
+    let empty = run_memory(&root, &["query", "   "], &memory_home);
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("MEMORY_QUERY_EMPTY"));
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(caller).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
 }
 
 #[test]

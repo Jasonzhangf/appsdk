@@ -69,7 +69,7 @@
         {"node_id": "candidate", "instruction": "Create and bind the exact candidate commit and tree.", "owner": "project", "evidence": ["candidate-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then add build, install, restart, and same-entry replay only when the change affects those surfaces.", "owner": "project", "evidence": ["validation-record"]},
         {"node_id": "map_update", "instruction": "Update declared function ownership, paths, call edges, and verification gates when the validated change altered them.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
-        {"node_id": "review", "instruction": "Review the validated candidate against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
+        {"node_id": "review", "instruction": "Review the validated candidate against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
         {"node_id": "effectiveness", "instruction": "Check effectiveness identity and freshness; reuse valid unchanged candidate evidence and rerun only affected checks on drift.", "owner": "project", "evidence": ["effectiveness-record"]},
         {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact integration tree.", "owner": "project", "evidence": ["mainline-receipt"]},
         {"node_id": "promotion", "instruction": "Compile, publish Active, archive Protected, and freeze when required.", "owner": "project", "evidence": ["freeze-record"]},
@@ -96,7 +96,7 @@
         {"node_id": "resolve", "instruction": "After causal evidence, fix the unique mapped owner, add proportionate regression coverage, and update maps or gates when their truth changed.", "owner": "project", "evidence": ["resolution-record", "red-green-test"]},
         {"node_id": "candidate", "instruction": "Create and bind the exact fix candidate.", "owner": "project", "evidence": ["candidate-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then choose build, install, restart, and original-input replay according to runtime impact.", "owner": "project", "evidence": ["validation-record"]},
-        {"node_id": "review", "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
+        {"node_id": "review", "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
         {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact tree.", "owner": "project", "evidence": ["mainline-receipt"]},
         {"node_id": "cleanup", "instruction": "Record evidence and actual retained resources or verified authorized removal; delivery and resource closure are separate.", "owner": "project", "evidence": ["cleanup-record"]}
       ],
@@ -113,7 +113,7 @@
       "entry_node": "review_admission",
       "nodes": [
         {"node_id": "review_admission", "instruction": "Pass AppSDK review admission for the exact candidate.", "owner": "project", "evidence": ["pre-review-validation"]},
-        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
+        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
         {"node_id": "unchanged_effectiveness", "instruction": "Replay effectiveness without source drift.", "owner": "project", "evidence": ["effectiveness-record"]}
       ],
       "edges": [{"from": "review_admission", "to": "architecture_review"}, {"from": "architecture_review", "to": "unchanged_effectiveness"}]

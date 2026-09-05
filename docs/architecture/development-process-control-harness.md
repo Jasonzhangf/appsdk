@@ -183,3 +183,14 @@ retry is part of guidance.
 cleanup requirements, and memory candidates. The first release never writes
 AGENTS, Skills, MEMORY, or USER files automatically. Durable-rule changes use a
 separate human-reviewed change.
+
+## L9 Human tour and process review
+
+`guide tour` lets a human inspect the generated workflow and persist an explicit
+node path. `guide review` is staged over the same append-only task ledger:
+`node_review` checks and accepts node-content revisions first; only after every
+selected node has an accepted revision can `flow_review` update edges, order, or
+rules. Flow patches retain the accepted node revision IDs and remain staged;
+they do not silently mutate the active compiled manifest. The memory reminder
+on review nodes is advisory and invokes the independent `project-memory review`
+command only at task close.

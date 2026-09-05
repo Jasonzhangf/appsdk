@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod guidance;
+mod memory;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_MAP_MIGRATION_MANIFEST: &str =
@@ -41,6 +42,16 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/guidance/guidance-manifest.schema.json",
         "contracts",
         include_str!("../../contracts/guidance/guidance-manifest.schema.json"),
+    ),
+    (
+        "contracts/guidance/tour-review.schema.json",
+        "contracts",
+        include_str!("../../contracts/guidance/tour-review.schema.json"),
+    ),
+    (
+        "contracts/memory/memory-entry.schema.json",
+        "contracts",
+        include_str!("../../contracts/memory/memory-entry.schema.json"),
     ),
     (
         "contracts/maps/resource-map.json",
@@ -238,6 +249,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../docs/architecture/appsdk-governance-architecture.md"),
     ),
     (
+        "docs/design/project-memory.md",
+        "docs",
+        include_str!("../../docs/design/project-memory.md"),
+    ),
+    (
         "skills/appsdk-project-governance/SKILL.md",
         "rules",
         include_str!("../../skills/appsdk-project-governance/SKILL.md"),
@@ -288,6 +304,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "skills/appsdk-project-governance/references/review-delivery.md",
         "skills",
         include_str!("../../skills/appsdk-project-governance/references/review-delivery.md"),
+    ),
+    (
+        "skills/project-memory/SKILL.md",
+        "skills",
+        include_str!("../../skills/project-memory/SKILL.md"),
     ),
 ];
 
@@ -7383,6 +7404,7 @@ fn init_project(root: &Path) {
         .is_none();
     ensure_governance_layout(root);
     write_project_scaffold(root);
+    memory::initialize_project(root);
     if fresh_governance {
         write_project_agent_contract(root);
     }
@@ -7446,6 +7468,7 @@ fn new_project(root: &Path) {
     }
     ensure_governance_layout(root);
     write_project_scaffold(root);
+    memory::initialize_project(root);
     write_project_agent_contract(root);
     install_bundle_resources(root);
     install_standard_template_reference(root);
@@ -8070,6 +8093,9 @@ fn print_cli_help(command: Option<&str>) {
         Some("init") => "Usage: appsdk init [workspace] [--project-root <relative-path>]",
         Some("prepare") => "Usage: appsdk prepare [workspace]",
         Some("new") => "Usage: appsdk new [project]",
+        Some("memory") | Some("project-memory") => {
+            "Usage: appsdk memory <entry|query|get|review|index|compact|verify> [project]"
+        }
         _ => CLI_USAGE,
     };
     println!("{usage}\n\nNo project-root environment variable is required.");
@@ -8135,6 +8161,7 @@ fn main() {
             }
         }
         Some("guide") => guidance::run(&mut args),
+        Some("memory") | Some("project-memory") => memory::run(&mut args),
         Some("pin-lock") => {
             let root = project_root_or_cwd(&mut args);
             if args.next().as_deref() != Some("--binary") {

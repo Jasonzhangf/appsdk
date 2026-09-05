@@ -19,6 +19,16 @@ closeout projector final state -> gaps/cleanup/memory candidates
 Harness does not call a model, produce project evidence, mutate lifecycle truth,
 or write memory automatically.
 
+## Tour and ordered review
+
+Use `appsdk guide tour --task <id> --mode <domain>` to inspect the generated
+workflow and let a human choose an adjacent path. Persist that choice with a
+TourProposal input when needed. Submit `appsdk guide review` in two stages:
+`node_review` checks and accepts node content first; only after every selected
+node has an accepted revision may `flow_review` update edges, order, or rules.
+The accepted flow patch retains node revision IDs and stays staged until the
+declared source is explicitly updated and compiled.
+
 ## Start
 
 ```bash

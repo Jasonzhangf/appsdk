@@ -2,6 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://appsdk.local/contracts/project.schema.json",
   "type": "object",
+  "allOf": [{"properties": {"modules": {"items": {"properties": {
+    "deployment_operations": {"description": "Required service operations before public-entrypoint blackbox. Omission preserves legacy install and restart; [] declares neither applicable. Bound into module artifact identity.", "type": "array", "uniqueItems": true, "items": {"enum": ["install", "restart"]}}
+  }}}}}],
   "required": ["schema_version", "project_id", "sdk", "lifecycle", "access", "development_scenarios", "governance", "modules"],
   "properties": {
     "schema_version": {"type": "integer", "const": 1},

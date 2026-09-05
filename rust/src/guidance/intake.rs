@@ -215,6 +215,10 @@ fn bootstrap_skill_commands(sources: &[Value]) -> Vec<Value> {
 }
 
 fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: &str) -> Value {
+    let flow_required = project
+        .pointer("/guidance/enforcement")
+        .and_then(Value::as_str)
+        == Some("forbidden");
     let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
     let sources = bootstrap_sources(root, project);
     let skill_commands = bootstrap_skill_commands(&sources);
@@ -255,7 +259,7 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         .collect::<Vec<_>>();
     serde_json::json!({
         "harness": "appsdk-development-process-control",
-        "guide_flow_required": true,
+        "guide_flow_required": flow_required,
         "task_id": task,
         "mode": "bootstrap",
         "setup_kind": setup_kind,
@@ -491,10 +495,14 @@ pub(super) fn initialize(
         return bootstrap_setup(root, &project, selected_module, task);
     }
     let base = project_status(root, Some(mode), Some(task), Some(module_id), false);
+    let flow_required = project
+        .pointer("/guidance/enforcement")
+        .and_then(Value::as_str)
+        == Some("forbidden");
     if base.get("reason_code").and_then(Value::as_str) == Some("GUIDANCE_NOT_COMPILED") {
         return serde_json::json!({
             "harness": "appsdk-development-process-control",
-            "guide_flow_required": true,
+            "guide_flow_required": flow_required,
             "task_id": task,
             "mode": mode,
             "module_id": module_id,
@@ -510,14 +518,14 @@ pub(super) fn initialize(
     }
     if base.get("readiness").and_then(Value::as_str) == Some("blocked") {
         let mut blocked = base;
-        blocked["guide_flow_required"] = Value::Bool(true);
+        blocked["guide_flow_required"] = Value::Bool(flow_required);
         blocked["writes_state"] = Value::Bool(false);
         return blocked;
     }
     if plan_file(root, task).is_file() {
         return serde_json::json!({
             "harness": "appsdk-development-process-control",
-            "guide_flow_required": true,
+            "guide_flow_required": flow_required,
             "task_id": task,
             "mode": mode,
             "module_id": module_id,
@@ -561,7 +569,7 @@ pub(super) fn initialize(
     let domain_command = command(mode, task, module_id);
     serde_json::json!({
         "harness": "appsdk-development-process-control",
-        "guide_flow_required": true,
+        "guide_flow_required": flow_required,
         "task_id": task,
         "mode": mode,
         "project_id": project["project_id"],

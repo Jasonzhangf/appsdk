@@ -75,7 +75,7 @@ pub(super) fn project_status(
             "readiness": "needs_setup",
             "reason_code": "GUIDANCE_SETUP_REQUIRED",
             "first_failing_gate": null,
-            "guide_flow_required": true,
+            "guide_flow_required": enforcement == "forbidden",
             "next": {
                 "command": format!("appsdk guide init --task guidance-setup --mode bootstrap --module {}", module_id),
                 "then": "read project documents, present GuidanceSetupProposal, and wait for explicit user approval before durable rule writes or compile"
@@ -117,7 +117,7 @@ pub(super) fn project_status(
             "readiness": "ready",
             "reason_code": "GUIDANCE_NOT_COMPILED",
             "first_failing_gate": null,
-            "guide_flow_required": true,
+            "guide_flow_required": enforcement == "forbidden",
             "next": {
                 "command": "appsdk guide compile",
                 "then": format!("appsdk guide init --task {} --mode {} --module {}", task_id, domain, module_id)
@@ -232,7 +232,7 @@ pub(super) fn project_status(
     }
     let module_id = required_string(selected_module, "module_id", "GUIDANCE_MODULE_INVALID");
     let task_id = task.unwrap_or("<task-id>");
-    value["guide_flow_required"] = Value::Bool(true);
+    value["guide_flow_required"] = Value::Bool(enforcement == "forbidden");
     value["init_command"] = Value::String(format!(
         "appsdk guide init --task {} --mode {} --module {}",
         task_id, domain, module_id
@@ -246,14 +246,17 @@ pub(super) fn close(root: &Path, task: &str) -> Value {
         .pointer("/lifecycle/module_stage")
         .and_then(Value::as_str)
         .is_some_and(|stage| matches!(stage, "frozen" | "retired"));
+    let workflow_complete = status.get("readiness").and_then(Value::as_str) == Some("complete");
+    let domain = status.get("domain").and_then(Value::as_str);
+    let freeze_in_scope = matches!(domain, Some("freeze" | "promotion"));
     serde_json::json!({
         "harness": "appsdk-development-process-control",
         "task_id": task,
-        "workflow_complete": status.get("readiness").and_then(Value::as_str) == Some("complete"),
+        "workflow_complete": workflow_complete,
         "appsdk_lifecycle_complete": lifecycle_complete,
         "status": status,
-        "remaining_gaps": if lifecycle_complete { serde_json::json!([]) } else { serde_json::json!(["canonical AppSDK lifecycle is not frozen or retired"]) },
-        "cleanup_required": true,
+        "remaining_gaps": if freeze_in_scope && !lifecycle_complete { serde_json::json!(["canonical AppSDK lifecycle is not frozen or retired"]) } else { serde_json::json!([]) },
+        "cleanup_required": domain == Some("cleanup") && !workflow_complete,
         "memory_candidates": [],
         "memory_applied": false
     })

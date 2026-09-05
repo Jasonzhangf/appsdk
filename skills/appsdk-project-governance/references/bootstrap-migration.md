@@ -7,8 +7,7 @@ requirements + acceptance
 -> appsdk prepare
 -> confirm project root/boundaries/non-goals
 -> appsdk init
--> appsdk guide compile
--> appsdk guide init --mode develop|debug
+-> optional approved Guidance setup/compile
 -> appsdk verify
 -> clean owner worktree
 ```
@@ -24,6 +23,10 @@ AppSDK preserves the launching environment and does not pass a project path to
 Collab. Collab resolves project scope from tmux pane cwd. Without a live tmux
 pane, AppSDK initializes governance and reports Collab pending because no peer
 can be registered; it never fabricates subscription state.
+
+Collab initialization errors are explicit warnings for AppSDK initialization.
+Automatic multi-worker registration and task/file coordination remain enabled;
+shared operations wait for reliable ownership while independent work continues.
 
 For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
 when none exists. It contains the Project Truth, Semantic Invariants,

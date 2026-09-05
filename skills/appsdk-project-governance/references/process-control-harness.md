@@ -1,5 +1,10 @@
 # Development Process Control Harness
 
+This reference applies only when persistent Guidance is selected. `advisory`
+and `warning` never require setup, a plan or workflow close for independent
+development. Quality admission remains in canonical AppSDK gates. A missing
+optional setup returns `guide_flow_required: false`; do not start a setup detour.
+
 ## Functions
 
 ```text

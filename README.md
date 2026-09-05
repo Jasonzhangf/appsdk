@@ -4,12 +4,21 @@
 
 AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实现。新项目拥有业务语义；AppSDK 只提供机制。
 
+默认流程：明确目标/范围 → 实现 → 相关验证 → review → 授权交付。
+质量、安全和证据真实性门禁按适用范围强制。Collab 保持多 worker 自动注册、
+通信与任务/文件归属；仅协作不强制启用合并队列。Guidance、Memory 默认辅助，
+不要求每个任务创建计划、写记忆或清理工作树才能交付。
+运行时 review 的安装/重启要求由模块 `deployment_operations` 声明，缺省保留
+两项旧要求，`[]` 表示均不适用。该声明绑定产物；黑盒、准确候选和产物证据仍强制。
+Review 后复用相同输入/产物的有效证据，发生相关变化才重跑；AI 置信度不再是门禁。
+下面的完整运行时冻结流程仅在相应交付范围内使用。
+
 ## Development Process Control Harness
 
 Harness 将项目声明的 `AGENTS.md`、Skill 和 JSON 流程合同编译为确定性规则上下文；Agent 生成 Plan，AppSDK 校验并持久化 Plan/Revision/Step event，投影当前状态和唯一相邻下一步。它不调用模型、不复制 lifecycle、不自动写 memory，且默认 advisory。
 
 项目命令默认以当前进程 `cwd` 为项目根，不需要项目根环境变量。只有从项目目录
-外操作时才传可选路径。已有 `.appsdk` 但没有 Guide 的项目先执行幂等
+外操作时才传可选路径。明确选择 Guide 的项目若尚未配置，执行幂等
 `appsdk init`，再执行只读
 bootstrap intake。Agent 读取返回的项目文档和本地 Skill 候选，向用户提交
 `GuidanceSetupProposal`；批准后才写项目规则并 compile：
@@ -91,7 +100,7 @@ appsdk publish-active --module app-core --version active-v1
 
 `goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 review 前必须同时有开发白盒 PASS、部署后的公开入口黑盒 PASS，以及绑定候选 commit/tree、artifact、environment 和 entrypoint 的 PreReviewValidationRecord；`appsdk verify --review-admission` 是强制 admission 命令，宿主 CI/pre-commit 需要调用它才能物理阻断 Git commit。进入 Active 还必须有架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
 
-多 worker 场景必须同时启用 `multi_worker_collaboration` 与 `multi_worktree_merge_queue`。每个 worker 独占一个 semantic claim、branch 和 clean worktree；worker 不写 main。候选变更经单一 merge owner 串行入队，验证精确 integration commit/tree，并在本地与远端 main 都可达后才允许 promotion、cleanup 和 claim release。
+多 worker 自动使用 Collab 注册、通信和任务/文件归属。`multi_worker_collaboration` 可独立启用；选择 `multi_worktree_merge_queue` 时才额外要求串行集成及其完整证据。每个 worker 独占 semantic claim、branch 和 clean worktree；worker 不写 main。队列验证精确 integration commit/tree，并在本地与远端 main 都可达后才允许对应 promotion、cleanup 和 claim release。
 
 Playground 不是永久缓存：实验必须在 review/closeout 时归档并清理，默认 `archive_then_remove`；debug 正式合并必须在变更附近留下根因、设计批准 ID 和修改理由注释，并在 PromotionRecord 中留证。
 

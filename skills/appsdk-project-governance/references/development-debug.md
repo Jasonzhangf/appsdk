@@ -2,15 +2,15 @@
 
 ## Feature or new project
 
-Start by projecting the project-specific intake:
+When persistent Guidance is selected, project the task-specific intake:
 
 ```bash
 appsdk guide init --task <task-id> --mode develop --module <module-id>
 ```
 
 Read the returned AGENTS and Skill sources, invoke the suggested Skills, and ask
-only unresolved questions. Do not implement until the following context is
-confirmed and submitted as a PlanProposal.
+only unresolved questions. A PlanProposal is required only for the selected
+Guidance workflow. Otherwise establish the same goal/scope directly and proceed.
 
 Before implementation, bind the project context:
 
@@ -23,8 +23,7 @@ requirements + acceptance + non-goals
 
 Architecture and detailed design are required for a new project or meaningful
 cross-module or semantic change. A local change may use the existing design and
-take the declared bypass edge after recording why it is sufficient. Never skip
-through an undeclared transition.
+use it directly. Within a selected Guidance workflow, use its declared bypass.
 
 Then:
 
@@ -44,17 +43,17 @@ Candidate commit binds tree/artifact/evidence. It is not a delivery commit and
 does not authorize merge.
 
 Before adding behavior, perform an ablation check: confirm that the behavior is
-necessary, no declared owner already provides it, and common semantics cannot
-reuse an existing shared function. Keep lifecycle skeletons fixed; add missing
-capability through declared operation configuration, registered hooks, or
-declared gates. Missing capability fails or skips explicitly with a recorded
+necessary, no declared owner already provides it, and common semantics can
+reuse an existing shared function. Preserve a fixed lifecycle skeleton only
+when the project declares one. Choose direct code or configuration by actual
+complexity, not by a universal preference. Missing capability fails or skips with a
 reason. Control/configuration truth belongs only in declared typed control
 resources, error chains, or project configuration sources, never business
 payloads, metadata, debug logs, or implicit context.
 
 ## Debug
 
-Start with:
+When persistent Guidance is selected, start with:
 
 ```bash
 appsdk guide init --task <task-id> --mode debug --module <module-id>

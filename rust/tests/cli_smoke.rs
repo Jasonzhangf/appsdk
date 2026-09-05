@@ -150,8 +150,7 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert!(String::from_utf8_lossy(&first.stdout)
-        .contains("collab peer bootstrap pending: no live tmux pane"));
+    assert!(String::from_utf8_lossy(&first.stdout).contains("collab peer bootstrap pending"));
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.starts_with("# project rules\nnode_modules/\n"));
     assert_eq!(gitignore.matches("# BEGIN APPSDK MANAGED").count(), 1);
@@ -222,7 +221,7 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
 }
 
 #[test]
-fn init_bootstraps_collab_peer_with_same_project_and_environment() {
+fn init_automatically_attempts_collab_without_blocking_independent_work() {
     let root = temp_root("init-collab-peer");
     fs::create_dir_all(&root).unwrap();
     confirm_preparation(&root, ".", "project_refactor");
@@ -242,7 +241,7 @@ fi
   printf 'probe=%s\n' "$APPSDK_COLLAB_ENV_PROBE"
   printf 'args=%s\n' "$*"
 } >> "$APPSDK_COLLAB_PROBE"
-printf '{"ok":true,"worker_id":"test-peer","default_subscription":"direct-message"}\n'
+exit 73
 "#,
     )
     .unwrap();
@@ -269,19 +268,11 @@ printf '{"ok":true,"worker_id":"test-peer","default_subscription":"direct-messag
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let invocation = fs::read_to_string(&probe).unwrap();
-    let child_cwd = invocation
-        .lines()
-        .find_map(|line| line.strip_prefix("cwd="))
-        .unwrap();
-    assert_eq!(
-        fs::canonicalize(child_cwd).unwrap(),
-        fs::canonicalize(&root).unwrap()
+    assert!(
+        probe.exists(),
+        "AppSDK should automatically initialize Collab"
     );
-    assert!(invocation.contains("pane=%42\n"));
-    assert!(invocation.contains("probe=same-environment\n"));
-    assert!(invocation.contains("args=init\n"));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("test-peer"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_FAILED"));
 
     let repeated = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
@@ -303,8 +294,43 @@ printf '{"ok":true,"worker_id":"test-peer","default_subscription":"direct-messag
         "{}",
         String::from_utf8_lossy(&repeated.stderr)
     );
-    let repeated_invocation = fs::read_to_string(&probe).unwrap();
-    assert_eq!(repeated_invocation.matches("args=init\n").count(), 2);
+    let invocation = fs::read_to_string(&probe).unwrap();
+    assert_eq!(invocation.matches("args=init\n").count(), 2);
+    assert!(invocation.contains("pane=%42\n"));
+    assert!(invocation.contains("probe=same-environment\n"));
+    let child_cwd = invocation
+        .lines()
+        .find_map(|line| line.strip_prefix("cwd="))
+        .unwrap();
+    assert_eq!(
+        fs::canonicalize(child_cwd).unwrap(),
+        fs::canonicalize(&root).unwrap()
+    );
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\nprintf '{\"ok\":true,\"worker_id\":\"test-peer\"}\\n'\n",
+    )
+    .unwrap();
+    let ready = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("TMUX_PANE", "%42")
+        .output()
+        .unwrap();
+    assert!(ready.status.success());
+    assert!(String::from_utf8_lossy(&ready.stdout).contains("test-peer"));
+    fs::remove_file(&fake_collab).unwrap();
+    let unavailable = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("TMUX_PANE", "%42")
+        .output()
+        .unwrap();
+    assert!(unavailable.status.success());
+    assert!(String::from_utf8_lossy(&unavailable.stderr).contains("COLLAB_INIT_UNAVAILABLE"));
+    assert!(run(&["verify", root.to_str().unwrap()]).status.success());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -588,7 +614,7 @@ fn verify_requires_the_project_pinned_sdk_binary_version() {
 }
 
 #[test]
-fn parallel_development_scenarios_require_atomic_activation() {
+fn collaboration_is_optional_and_does_not_require_a_merge_queue() {
     let root = temp_root("scenario-pair");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
@@ -605,8 +631,21 @@ fn parallel_development_scenarios_require_atomic_activation() {
     )
     .unwrap();
     let result = run(&["verify", root_text]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("DEVELOPMENT_SCENARIO_PAIR_REQUIRED"));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    project["development_scenarios"]["enabled"] = serde_json::json!(["multi_worktree_merge_queue"]);
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap(),
+    )
+    .unwrap();
+    let missing_ownership = run(&["verify", root_text]);
+    assert!(!missing_ownership.status.success());
+    assert!(String::from_utf8_lossy(&missing_ownership.stderr)
+        .contains("MERGE_QUEUE_COLLABORATION_REQUIRED"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -906,10 +945,11 @@ fn init_target_accepts_matching_nested_parent_preparation() {
 
 fn pin_test_lock(root: &str) {
     let sdk_binary = binary();
+    let result = run(&["pin-lock", root, "--binary", sdk_binary.to_str().unwrap()]);
     assert!(
-        run(&["pin-lock", root, "--binary", sdk_binary.to_str().unwrap()])
-            .status
-            .success()
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
     );
 }
 
@@ -1728,7 +1768,6 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
             "function_map_hash":file_digest(&map_root.join("function-map.json")),
             "mainline_call_map_hash":file_digest(&map_root.join("mainline-call-map.json")),
             "verification_map_hash":file_digest(&map_root.join("verification-map.json")),
-            "ai_confidence":1.0,"confidence_rationale":"architecture and boundary evidence",
             "created_at":"2026-01-01T00:04:00Z"
         }))
         .unwrap()
@@ -2341,6 +2380,117 @@ fn active_publish_rejects_unfrozen_module() {
 }
 
 #[test]
+fn review_requires_only_declared_deployment_operations_and_binds_the_contract() {
+    for operations in [serde_json::json!([]), serde_json::json!(["install"])] {
+        let root = temp_root("deployment-applicability");
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let project_file = root.join(".appsdk/project.json");
+        let mut project: Value =
+            serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+        project["modules"][0]["deployment_operations"] = operations.clone();
+        fs::write(
+            &project_file,
+            serde_json::to_string_pretty(&project).unwrap(),
+        )
+        .unwrap();
+        init_git(&root);
+        let goal_file = root.join(".appsdk/goal.json");
+        let mut goal: Value =
+            serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+        goal["status"] = serde_json::json!("confirmed");
+        goal["confirmed_by"] = serde_json::json!("test");
+        goal["confirmed_at"] = serde_json::json!("2026-01-01T00:00:00Z");
+        fs::write(&goal_file, serde_json::to_string_pretty(&goal).unwrap()).unwrap();
+        pin_test_lock(root_text);
+        for stage in ["source_implemented", "contract_bound"] {
+            assert!(run(&["promote", root_text, "--to", stage]).status.success());
+        }
+        assert!(run(&["compile", root_text]).status.success());
+        let artifact: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        write_records(
+            &root,
+            "app-core",
+            artifact["artifact_hash"].as_str().unwrap(),
+            false,
+        );
+        let validation_file =
+            root.join(".appsdk/records/pre-review-validation-record-app-core.json");
+        let mut validation: Value =
+            serde_json::from_str(&fs::read_to_string(&validation_file).unwrap()).unwrap();
+        validation["deployment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("restart_receipt_id");
+        if operations.as_array().unwrap().is_empty() {
+            validation["deployment"]
+                .as_object_mut()
+                .unwrap()
+                .remove("install_receipt_id");
+        }
+        fs::write(
+            &validation_file,
+            serde_json::to_string_pretty(&validation).unwrap(),
+        )
+        .unwrap();
+        let admission = run(&[
+            "verify",
+            "--review-admission",
+            root_text,
+            "--module",
+            "app-core",
+        ]);
+        assert!(
+            admission.status.success(),
+            "{}",
+            String::from_utf8_lossy(&admission.stderr)
+        );
+        // A missing required blackbox must still fail even with no service receipts.
+        fs::remove_file(root.join(".appsdk/records/evidence/app-core/blackbox-1.json")).unwrap();
+        assert!(!run(&[
+            "verify",
+            "--review-admission",
+            root_text,
+            "--module",
+            "app-core"
+        ])
+        .status
+        .success());
+        write_records(
+            &root,
+            "app-core",
+            artifact["artifact_hash"].as_str().unwrap(),
+            false,
+        );
+        let mut drifted: Value =
+            serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+        drifted["modules"][0]["deployment_operations"] = serde_json::json!(["install", "restart"]);
+        fs::write(
+            &project_file,
+            serde_json::to_string_pretty(&drifted).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !run(&[
+                "verify",
+                "--review-admission",
+                root_text,
+                "--module",
+                "app-core"
+            ])
+            .status
+            .success(),
+            "changing verification applicability invalidates the candidate"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn full_module_freeze_and_active_publish_require_record_graph() {
     let root = temp_root("full-lifecycle");
     let root_text = root.to_str().unwrap();
@@ -2734,6 +2884,33 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         effectiveness_only.status.success(),
         "{}",
         String::from_utf8_lossy(&effectiveness_only.stderr)
+    );
+    let reuse_file = root.join(".appsdk/records/effectiveness-record-app-core.json");
+    let mut reused: Value =
+        serde_json::from_str(&fs::read_to_string(&reuse_file).unwrap()).unwrap();
+    reused["positive_evidence_ids"] = serde_json::json!(["positive-1"]);
+    reused["negative_evidence_ids"] = serde_json::json!(["negative-1"]);
+    reused["fixed_replay_evidence_id"] = serde_json::json!("blackbox-1");
+    reused["blackbox_evidence_ids"] = serde_json::json!(["blackbox-1"]);
+    fs::write(&reuse_file, serde_json::to_string_pretty(&reused).unwrap()).unwrap();
+    let reuse_result = run(&["verify", root_text]);
+    assert!(
+        reuse_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reuse_result.stderr)
+    );
+    let positive_file = root.join(".appsdk/records/evidence/app-core/positive-1.json");
+    let mut stale_positive: Value =
+        serde_json::from_str(&fs::read_to_string(&positive_file).unwrap()).unwrap();
+    stale_positive["input_hashes"] = serde_json::json!(["unrelated-input"]);
+    fs::write(
+        &positive_file,
+        serde_json::to_string_pretty(&stale_positive).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !run(&["verify", root_text]).status.success(),
+        "reuse must preserve reproduction input identity"
     );
     write_records(&root, "app-core", &architecture_hash, true);
     let effectiveness_file = root.join(".appsdk/records/effectiveness-record-app-core.json");
@@ -3875,7 +4052,7 @@ fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
     let before_json: Value = serde_json::from_slice(&before.stdout).unwrap();
     assert_eq!(before_json["reason_code"], "GUIDANCE_NOT_COMPILED");
     assert_eq!(before_json["next"]["command"], "appsdk guide compile");
-    assert_eq!(before_json["guide_flow_required"], true);
+    assert_eq!(before_json["guide_flow_required"], false);
     assert!(before_json["next"]["then"]
         .as_str()
         .unwrap()
@@ -3898,6 +4075,19 @@ fn guidance_compile_is_deterministic_and_optional_for_existing_commands() {
     );
     assert_eq!(status_json["next"]["node_id"], "requirements");
     assert_eq!(status_json["enforcement"], "advisory");
+    assert_eq!(status_json["guide_flow_required"], false);
+    let init = run(&[
+        "guide", "init", left_text, "--task", "optional", "--mode", "develop", "--module",
+        "app-core",
+    ]);
+    assert!(init.status.success());
+    let init_json: Value = serde_json::from_slice(&init.stdout).unwrap();
+    assert_eq!(init_json["guide_flow_required"], false);
+    let close = run(&["guide", "close", left_text, "--task", "optional"]);
+    assert!(close.status.success());
+    let closed: Value = serde_json::from_slice(&close.stdout).unwrap();
+    assert_eq!(closed["cleanup_required"], false);
+    assert_eq!(closed["remaining_gaps"], serde_json::json!([]));
 
     fs::remove_dir_all(left).unwrap();
     fs::remove_dir_all(right).unwrap();
@@ -3920,7 +4110,7 @@ fn bundled_guidance_uses_project_neutral_feature_and_debug_context() {
         ("changed-scope-control-truth", "forbidden"),
         ("changed-scope-single-owner", "forbidden"),
         ("changed-scope-configured-orchestration", "forbidden"),
-        ("changed-scope-ablation-and-sharing", "forbidden"),
+        ("changed-scope-ablation-and-sharing", "advisory"),
         ("historical-architecture-debt", "advisory"),
         ("project-context-binding", "warning"),
         ("debug-notes-required", "warning"),

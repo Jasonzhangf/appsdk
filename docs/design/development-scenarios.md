@@ -4,7 +4,7 @@ AppSDK provides composable development constraints. A project declares enabled s
 
 ## Parallel development pair
 
-`multi_worker_collaboration` and `multi_worktree_merge_queue` use `all_or_none` activation. Enabling either without the other fails verification.
+`multi_worker_collaboration` can be enabled independently for automatic registration, communication and task/file ownership. `multi_worktree_merge_queue` requires collaboration ownership, but communication and independent work do not require a serial queue. The remaining integration rules apply only when the queue is selected.
 
 Each worker owns one semantic claim and one clean isolated worktree. Workers never write main. A single merge owner serializes accepted candidates through a merge queue.
 
@@ -27,4 +27,4 @@ The candidate tree is not required to equal the final main tree. Other accepted 
 
 Conflict resolution never occurs inside the merge queue. A conflict returns the task to its owning worker and worktree, producing a new candidate and new review/effectiveness evidence.
 
-Cleanup is forbidden until the remote main receipt passes.
+Cleanup is forbidden until the required remote main receipt passes. Engineering delivery and resource closure are distinct; a deliberately retained worktree stays owned with its cleanup obligation open.

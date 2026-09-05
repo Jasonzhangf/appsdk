@@ -11,8 +11,8 @@
     {"rule_id": "lifecycle-truth", "severity": "forbidden", "description": "Do not claim lifecycle completion before canonical AppSDK gates pass."},
     {"rule_id": "changed-scope-control-truth", "severity": "forbidden", "description": "New or changed control and configuration behavior must use declared typed control resources, error chains, or project configuration sources, never payloads, metadata, debug logs, or implicit context."},
     {"rule_id": "changed-scope-single-owner", "severity": "forbidden", "description": "New or changed behavior must retain one semantic owner and one implementation, with no duplicate path, fallback, or temporary bypass."},
-    {"rule_id": "changed-scope-configured-orchestration", "severity": "forbidden", "description": "New or changed orchestration must keep the lifecycle skeleton fixed and use declared operation configuration, registered hooks, and declared gates; missing capabilities fail or skip explicitly without mock success."},
-    {"rule_id": "changed-scope-ablation-and-sharing", "severity": "forbidden", "description": "Before adding new behavior, establish necessity and absence of an existing owner; common semantics use the existing or a single shared function, while separate implementations retain only necessary differences."},
+    {"rule_id": "changed-scope-configured-orchestration", "severity": "forbidden", "description": "Preserve fixed operation/hook/gate boundaries only where the project declares them. Missing required capabilities fail explicitly; never mock success."},
+    {"rule_id": "changed-scope-ablation-and-sharing", "severity": "advisory", "description": "Compare deletion, reuse and direct implementation by actual complexity. Optional simplification does not block; concrete quality, safety or ownership regressions remain forbidden."},
     {"rule_id": "historical-architecture-debt", "severity": "advisory", "description": "Report untouched historical violations as recommendations; do not block the candidate unless they enter changed scope or affect safety, ownership, evidence truth, or required delivery."},
     {"rule_id": "project-context-binding", "severity": "warning", "description": "Locate feature and debug work in the declared function and verification maps before implementation."},
     {"rule_id": "debug-notes-required", "severity": "warning", "description": "During debug exploration, append observations, hypotheses, and evidence to the active run notes before resolution."},
@@ -69,11 +69,11 @@
         {"node_id": "candidate", "instruction": "Create and bind the exact candidate commit and tree.", "owner": "project", "evidence": ["candidate-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then add build, install, restart, and same-entry replay only when the change affects those surfaces.", "owner": "project", "evidence": ["validation-record"]},
         {"node_id": "map_update", "instruction": "Update declared function ownership, paths, call edges, and verification gates when the validated change altered them.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
-        {"node_id": "review", "instruction": "Review the unchanged candidate for typed control truth, one owner and implementation, fixed skeleton with configured operations and registered hooks, declared gates, ablation, and shared-function reuse. New or changed violations block; untouched historical debt is advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
-        {"node_id": "effectiveness", "instruction": "Replay effectiveness without changing candidate source.", "owner": "project", "evidence": ["effectiveness-record"]},
+        {"node_id": "review", "instruction": "Review the validated candidate against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
+        {"node_id": "effectiveness", "instruction": "Check effectiveness identity and freshness; reuse valid unchanged candidate evidence and rerun only affected checks on drift.", "owner": "project", "evidence": ["effectiveness-record"]},
         {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact integration tree.", "owner": "project", "evidence": ["mainline-receipt"]},
         {"node_id": "promotion", "instruction": "Compile, publish Active, archive Protected, and freeze when required.", "owner": "project", "evidence": ["freeze-record"]},
-        {"node_id": "cleanup", "instruction": "Close records, release claims, and remove the merged worktree.", "owner": "project", "evidence": ["cleanup-record"]}
+        {"node_id": "cleanup", "instruction": "Record actual retained resources and owner or verified authorized removal. Delivery can complete with retention; do not claim Collab resource close before its cleanup requirements pass.", "owner": "project", "evidence": ["cleanup-record"]}
       ],
       "edges": [
         {"from": "requirements", "to": "map_check"},
@@ -83,7 +83,7 @@
         {"from": "candidate", "to": "validation"}, {"from": "validation", "to": "map_update"},
         {"from": "validation", "to": "review"}, {"from": "map_update", "to": "review"},
         {"from": "review", "to": "effectiveness"}, {"from": "effectiveness", "to": "integration"},
-        {"from": "integration", "to": "promotion"}, {"from": "promotion", "to": "cleanup"}
+        {"from": "integration", "to": "promotion"}, {"from": "integration", "to": "cleanup"}, {"from": "promotion", "to": "cleanup"}
       ]
     },
     {
@@ -96,9 +96,9 @@
         {"node_id": "resolve", "instruction": "After causal evidence, fix the unique mapped owner, add proportionate regression coverage, and update maps or gates when their truth changed.", "owner": "project", "evidence": ["resolution-record", "red-green-test"]},
         {"node_id": "candidate", "instruction": "Create and bind the exact fix candidate.", "owner": "project", "evidence": ["candidate-record"]},
         {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then choose build, install, restart, and original-input replay according to runtime impact.", "owner": "project", "evidence": ["validation-record"]},
-        {"node_id": "review", "instruction": "Review the unchanged fix for typed control truth, one owner and implementation, fixed skeleton with configured operations and registered hooks, declared gates, ablation, and shared-function reuse. New or changed violations block; untouched historical debt is advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
+        {"node_id": "review", "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
         {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact tree.", "owner": "project", "evidence": ["mainline-receipt"]},
-        {"node_id": "cleanup", "instruction": "Close evidence and remove the merged owner worktree.", "owner": "project", "evidence": ["cleanup-record"]}
+        {"node_id": "cleanup", "instruction": "Record evidence and actual retained resources or verified authorized removal; delivery and resource closure are separate.", "owner": "project", "evidence": ["cleanup-record"]}
       ],
       "edges": [
         {"from": "orient", "to": "explore"}, {"from": "explore", "to": "resolve"},
@@ -113,7 +113,7 @@
       "entry_node": "review_admission",
       "nodes": [
         {"node_id": "review_admission", "instruction": "Pass AppSDK review admission for the exact candidate.", "owner": "project", "evidence": ["pre-review-validation"]},
-        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route. Block changed-scope violations of control truth, ownership, configured operations, registered hooks, declared gates, ablation, or shared-function reuse; return untouched historical violations as advisory findings.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
+        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"]},
         {"node_id": "unchanged_effectiveness", "instruction": "Replay effectiveness without source drift.", "owner": "project", "evidence": ["effectiveness-record"]}
       ],
       "edges": [{"from": "review_admission", "to": "architecture_review"}, {"from": "architecture_review", "to": "unchanged_effectiveness"}]
@@ -130,7 +130,7 @@
         {"node_id": "blackbox", "instruction": "Replay through the public deployed entrypoint.", "owner": "project", "evidence": ["blackbox-evidence"]},
         {"node_id": "bind_validation", "instruction": "Bind whitebox, artifact, deployment, and blackbox evidence.", "owner": "project", "evidence": ["pre-review-validation"]}
       ],
-      "edges": [{"from": "whitebox", "to": "build"}, {"from": "build", "to": "install"}, {"from": "install", "to": "restart"}, {"from": "restart", "to": "blackbox"}, {"from": "blackbox", "to": "bind_validation"}]
+      "edges": [{"from": "whitebox", "to": "build"}, {"from": "build", "to": "install"}, {"from": "build", "to": "restart"}, {"from": "build", "to": "blackbox"}, {"from": "install", "to": "restart"}, {"from": "install", "to": "blackbox"}, {"from": "restart", "to": "blackbox"}, {"from": "blackbox", "to": "bind_validation"}]
     },
     {
       "domain": "integration",

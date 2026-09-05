@@ -203,8 +203,9 @@ registers the current peer, and creates or refreshes its finite default
 Without `TMUX_PANE`, no Agent peer exists to register. AppSDK keeps governance
 initialization usable and prints an explicit Collab-pending result; it does not
 fabricate identity/subscription state. In a live tmux context, missing Collab or
-a failed official Collab initialization is an explicit `COLLAB_INIT_*` failure
-and is never downgraded to success.
+a failed official Collab initialization reports `COLLAB_INIT_*` and collaboration
+unavailable. Independent AppSDK work continues; dependent shared writes wait for
+reliable task/file ownership. No failed registration is reported as successful.
 
 Frozen artifacts must be reproducible across clean worktree locations. The canonical module build runner appends a Rust `--remap-path-prefix` from the current project root to a stable logical path while preserving existing `RUSTFLAGS`. This removes absolute checkout paths from compiler metadata without changing source, payload, or lifecycle hashes. `rehydrate-frozen` and normal module compilation use the same runner; a path-dependent artifact is rejected rather than reconciled by copying or editing a frozen hash.
 
@@ -277,7 +278,7 @@ is:
 clean owner worktree + candidate commit
   -> lifecycle adapter binds FixCandidateRecord
   -> whitebox adapter runs and records the actual whitebox result
-  -> deployment adapter installs and restarts the exact artifact, recording both receipts
+  -> deployment adapter performs module.deployment_operations and records applicable receipts
   -> blackbox adapter exercises the deployed public entrypoint
   -> lifecycle adapter binds PreReviewValidationRecord
   -> appsdk verify --review-admission <project> --module <id>
@@ -292,8 +293,9 @@ artifact from another worktree/project/version.
 For an upgrade, run `appsdk prepare`/`init` idempotently, inspect and snapshot
 the old project and legacy roots, obtain explicit ownership-transfer approval,
 run the pinned target binary's migration command, then execute the adapter
-sequence above. Only after admission passes may review, merge, install,
-restart, promotion, and freeze proceed. A blocked adapter is an actionable
+sequence above. Only after admission passes may runtime review and applicable
+merge/promotion/freeze proceed. Installation needed for admission runs before
+admission. A blocked required adapter is an actionable
 external capability gap, not permission to edit records manually.
 
 `init` intentionally leaves a project at `draft`. The required promotion before
@@ -305,7 +307,8 @@ early, AppSDK returns `COMPILE_BLOCKED` with this exact ordered continuation and
 
 ## Lifecycle
 
-新 feature 和新项目在进入代码实现前必须完成闭环设计：
+新项目和涉及实质架构变化的 feature 先确认相称设计；局部变更复用已有设计。
+下面是需要完整设计时的参考流程，不强制每个任务另写计划或使用 Guidance：
 
 ```text
 需求与验收标准
@@ -321,7 +324,8 @@ early, AppSDK returns `COMPILE_BLOCKED` with this exact ordered continuation and
 每个验收标准必须有 verification gate。设计缺失或矛盾是 worker 自身的
 治理前置失败，不得先写业务代码。
 
-Debug 必须保存思维链、错误证据、实验条件与结果、根因判断；合并前必须
+Debug 保留可复核的决策摘要、错误证据、实验条件与结果；长任务按需保存交接。
+合并前检查本次涉及的
 对集成后的 tree 重新做 resource/function/mainline/module map、边界、
 payload/control 隔离、owner 唯一和重复实现架构检查。
 
@@ -332,12 +336,12 @@ goal clarification
   -> baseline reproduction
   -> committed fix candidate + positive/negative evidence
   -> development whitebox PASS
-  -> build + install + restart
+  -> build + applicable install/restart
   -> deployed public-entrypoint blackbox PASS
   -> PreReviewValidationRecord + `appsdk verify --review-admission` PASS
   -> architecture boundary check
   -> selected review tool ReviewRecord PASS
-  -> unchanged-source effectiveness replay PASS
+  -> unchanged-source effectiveness evidence PASS (reuse valid evidence)
   -> one independently verifiable milestone per clean worktree
   -> commit + serial merge queue + tested integration for every milestone
   -> start the next milestone only after the predecessor remote-main receipt

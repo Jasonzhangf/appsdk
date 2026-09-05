@@ -1,147 +1,106 @@
 ---
 name: appsdk-project-governance
-description: Bootstrap, migrate, plan, execute, verify, review, deliver, freeze, and clean projects through AppSDK. Use for AppSDK governance, Development Process Control Harness, persistent agent plans, project lifecycle evidence, or governance recovery.
+description: Apply AppSDK engineering quality gates, project contracts and lifecycle evidence. Use optional Guidance for planning; keep automatic multi-worker Collab separate from quality admission.
 ---
 
 # AppSDK Project Governance
 
-## L0 Goal
+## Purpose and mandatory boundary
 
-Use external AppSDK as governance engine. Keep project contracts and records in
-the project. Use one Development Process Control Harness to guide the agent
-across the full lifecycle.
+AppSDK verifies engineering quality. Collab supports automatic multi-worker
+registration, communication and task/file ownership. Memory and Guidance help
+when useful. Missing auxiliary state does not fail independent development.
 
-Governance helps delivery. It must not block unrelated work through binary byte
-identity, old optional metadata, or release evidence that the current phase does
-not require.
+Default flow: understand goal/scope → implement → relevant verification →
+review → authorized delivery. Require applicable quality, safety and evidence
+integrity gates; do not turn every available command into a mandatory phase.
 
-## L1 Entry loop
+Run project commands from project cwd. An explicit optional project path is for
+operators intentionally working elsewhere; no project-root environment variable.
 
-Run project-scoped commands from the project root. AppSDK uses the process
-`cwd` by default; do not set or pass a project-root environment variable.
-Supply the optional project path only when an operator intentionally works from
-outside that project.
+## Working loop
 
-1. Read project `AGENTS.md`, `note.md`, current run notes, project `MEMORY.md`,
-   `.appsdk/project.json`, maps, and relevant records.
-2. Identify goal, module, owner, allowed paths, forbidden paths, lifecycle stage,
-   required evidence, and clean owner worktree.
-3. Run `appsdk guide status [--task <id>]`.
-4. After an AppSDK update, or whenever the user asks to revisit project rules,
-   rerun `appsdk init` and then run
-   `appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>`.
-   Repeated initialization is a non-destructive resource refresh and upgrade
-   entry even when Guidance already exists. In a live tmux Agent it also runs
-   official `collab init` once, starting/reusing the daemon, registering the
-   current peer, and creating/refreshing the default finite `direct-message`
-   subscription. Do not run a second Collab initialization or ordinary-message
-   subscription. Read current project rules first,
-   compare them with `.appsdk/templates/minimal/AGENTS.md`, and present only
-   useful differences for approval. The versioned standard template is an
-   advisory reference, not project truth and not a mandatory replacement.
-5. If status returns `GUIDANCE_SETUP_REQUIRED`, run
-   `appsdk guide init --task guidance-setup --mode bootstrap --module <id>`.
-   Read every returned project document and candidate Skill, ask only unresolved
-   questions, and present one `GuidanceSetupProposal`. Do not write or compile
-   durable rules before explicit user approval.
-6. After approval, update only accepted differences in the project-owned
-   `AGENTS.md`, local Skill, machine
-   guidance contract, and `.appsdk/project.json#/guidance/rule_sources` in a
-   clean owner worktree. If already configured but uncompiled, skip setup and
-   run `appsdk guide compile` once.
-7. Select one domain: `bootstrap`, `migration`, `governance-preflight`,
-   `develop`, `debug`, `review`, `delivery`, `integration`, `promotion`,
-   `freeze`, or `cleanup`.
-8. Run `appsdk guide init --task <id> --mode <domain> --module <id>`.
-   Read the returned AGENTS/Skill paths in precedence order, invoke the
-   suggested Skill commands, and ask the user only questions still unresolved.
-9. Run the projected domain command. Let the agent write PlanProposal JSON and
-   submit it with
-   `appsdk guide plan --task <id> --input <file>`.
-10. Execute only the projected step. Submit observation/evidence with
-   `appsdk guide update --task <id> --input <file>`.
-11. Read `appsdk guide next`; revise the plan when scope, owner, source, rule
-   context, evidence, blocker, or environment changes.
-12. Finish with `appsdk guide close`; then complete canonical lifecycle and
-   worktree/claim cleanup. Workflow completion is not lifecycle completion.
+1. Read project AGENTS and affected code/contracts. Resolve owner, scope,
+   acceptance and relevant gates. Read historical notes only when they help.
+2. Use a clean owner worktree from latest origin/main. Preserve others' work.
+   For multi-worker work, automatically register the peer, communications and
+   task/file scope through official Collab; enforce overlap/resource ownership.
+3. Implement the smallest adequate change. Use existing design for local work;
+   clarify only material unknowns. Do not require a new plan or approval when
+   scope is already authorized and clear.
+4. Run applicable tests, necessary build and actual entrypoint checks. Install
+   and restart only when required by the delivery object. Fix failures at their
+   owner, never forge evidence or hide errors.
+5. Review exact validated changes under the shared review standard. Block
+   concrete correctness, safety, contract or material structural regressions;
+   optional simplifications are advisory.
+6. Reuse still-valid evidence when relevant source, inputs, dependencies,
+   configuration, artifact and environment remain unchanged. Rerun affected
+   checks after changes; verify an altered integration candidate.
+7. Deliver within authorization. Report test, review, merge, install, publish
+   and resource cleanup as separate achieved states.
 
-## L2 Hard boundaries
+## Optional Guidance
 
-- AppSDK never calls a model. Agent authors technical plans; Harness validates,
-  persists, projects state, and returns adjacent next steps.
-- `guide init` is read-only. Bootstrap mode always projects bounded current
-  project sources plus the versioned standard template and a setup/upgrade
-  proposal schema, including after Guidance has compiled. Other modes project
-  declared context, interactive questions, Skill invocations, and missing/next
-  commands. `guide plan` is the first task state write.
-- Existing AppSDK lifecycle is sole truth. No second lifecycle enum or manual
-  PASS/record/hash/artifact.
-- `AGENTS.md` owns project facts. `SKILL.md` owns agent procedure. Declared JSON
-  owns machine nodes, edges, gates, severity, and evidence contracts.
-- Compiled and task guidance reads only rule sources explicitly declared by
-  `.appsdk/project.json`. Bootstrap may discover only root `AGENTS.md`, the
-  bundled AppSDK Skill, and one-level project-local Skills under `skills/`,
-  `.agents/skills/`, or `.codex/skills/`; these remain candidates until the user
-  approves and the project declares them.
-- The installed standard template is never automatically declared as a rule
-  source. Repeated `init` may refresh it, but never overwrites root `AGENTS.md`,
-  project Skills, machine Guidance, records, Active, or Protected.
-- The advisory template is not an SDK resource-integrity or ordinary `verify`
-  gate. If absent, rerun `init` before requesting comparison; do not block
-  unrelated development or delivery.
-- Guidance defaults to `advisory`. Missing PlanRecord never fails ordinary
-  `appsdk verify` or `appsdk compile`.
-- `forbidden` stays narrow: fabricated evidence, non-adjacent transition,
-  history overwrite/delete, bound-context drift, main mutation, or false
-  review/delivery/promotion/freeze/cleanup completion.
-- Binary byte hash is not a governance admission gate. Use the selected AppSDK
-  version/contract; lifecycle compatibility errors expose a migration/reset
-  route.
-- `appsdk init` is the single AppSDK + Collab bootstrap entry for a live tmux
-  Agent. It passes no project path to Collab and preserves the current
-  environment; Collab owns pane-cwd scope, daemon, identity, mailbox, and
-  subscription truth. Without live tmux, report Collab pending and never invent
-  a peer. A live-tmux `COLLAB_INIT_*` failure is explicit and not bypassed.
-- Code and committed governance changes use a clean branch worktree from latest
-  `origin/main`. Main stays read-only. Preserve other workers' dirty state.
-- Completed claim must bind cleanup evidence. Remote receipt and required
-  retention first; then remove owned worktree/branch and release claim.
-- No automatic retry, polling storm, fallback, downgrade, or automatic durable
-  memory/rule write.
-- A task `PlanProposal` never becomes a project Skill automatically. Promote a
-  reusable procedure only through a separate user-approved governance change.
+Use `appsdk guide status/init/plan/update/next/close` when the user/project
+selects persistent planning or a long task benefits from recovery. Default
+`advisory` and `warning` do not require a task plan or setup before development.
+Missing PlanRecord does not fail ordinary `verify` or `compile`.
 
-## L3 Domain routing
+When using Guidance, follow its declared transitions and bind observations to
+the current context. A failed optional workflow is not a failed quality gate.
+Do not fabricate a successful step to close a plan.
 
-- Bootstrap or old state: read
-  [bootstrap-migration.md](references/bootstrap-migration.md).
-- Feature or project development: read
-  [development-debug.md](references/development-debug.md).
-- Bug, regression, or incident: read the debug section in that same reference.
-- Candidate, review, deployment, merge, Active, Protected, or freeze: read
-  [review-delivery.md](references/review-delivery.md).
-- Harness Plan/Update/Next/Close: read
-  [process-control-harness.md](references/process-control-harness.md).
-- Gate classification, structured failures, cleanup, or compatibility: read
-  [contracts-and-failures.md](references/contracts-and-failures.md).
-- `/goal` prompt request: read [goal-prompt.md](references/goal-prompt.md).
+For a requested setup/upgrade, `guide init --mode bootstrap` is read-only.
+Compare current project-owned sources with the advisory standard template;
+apply only authorized rule changes. `appsdk init` refreshes SDK resources but
+never overwrites project AGENTS, Skills, records, Active or Protected. Merely
+auditing rules does not require running initialization or changing setup.
 
-## L4 Evidence contract
+## Automatic Collab
 
-State exact evidence achieved: source, test, build, installed artifact, restart,
-deployed entrypoint replay, review, merge, remote receipt, freeze, cleanup.
-Never collapse these levels.
+`appsdk init` attempts official `collab init` once in a live tmux peer, preserving
+the inherited environment. Successful initialization registers identity and the
+finite direct-message subscription. Do not duplicate that initialization.
+Once task/worktree scope is known, use the Collab task lifecycle to register
+feature/resource and file ownership before concurrent edits. Do not invent
+task scope inside AppSDK initialization.
 
-Debug evidence includes hypothesis, confirmation/falsification signals, first
-divergence, experiment, forward/reversal result, root cause, and regression.
+No tmux peer means pending. An unavailable/failed Collab reports its error;
+independent work continues, while operations requiring shared ownership wait.
+Keep automatic communication and file/task collaboration enabled; a serial
+merge queue is required only when the project selects that integration mode.
+Its ownership and tested-integration protections remain mandatory.
 
-Every blocked result includes first failing gate, project/module/lifecycle
-state, preserved state, retry permission, owner, and one executable next action.
-Generic refusal is invalid.
+## Evidence and state ownership
 
-## L5 Canonical references
+- Project AGENTS owns project facts; Skills own procedure; declared machine
+  contracts own enforceable gates. Existing lifecycle records remain the sole
+  evidence truth. Plans, notes and Collab statuses do not duplicate PASS.
+- Runtime review admission retains whitebox, public-entrypoint blackbox and
+  exact candidate/artifact/environment identity. Module `deployment_operations`
+  declares required `install`/`restart` receipts; omission retains both for
+  compatibility, `[]` means neither operation applies. Bind this choice before
+  validation; changes invalidate artifact identity. Every supplied receipt is
+  checked. A missing required capability remains a blocker.
+- Review confidence scores are optional annotation, never proof of quality.
+- Freeze/Active/Protected apply when immutable artifact publication is in
+  scope. Do not require freezing for a documentation edit or ordinary review.
+- Engineering delivery may complete with a retained worktree. Keep ownership
+  and cleanup obligations explicit; only claim resource closure after actual
+  safe cleanup. No forced deletion to make a task appear complete.
+- Memory is optional. No automatic durable memory/rule promotion. Long tasks
+  and handoffs may record concise decisions and references to existing evidence.
 
-- Architecture: `.appsdk/docs/architecture/development-process-control-harness.md`
-- Detailed design: `.appsdk/docs/design/appsdk-guidance-framework.md`
-- Machine workflow: `appsdk-guidance.json`
-- Project integration: `.appsdk/docs/design/appsdk-project-integration.md`
+## References: load only the relevant domain
+
+- Initialization or migration: [bootstrap-migration.md](references/bootstrap-migration.md).
+- Development/debug: [development-debug.md](references/development-debug.md).
+- Runtime review/delivery/freeze: [review-delivery.md](references/review-delivery.md).
+- Selected persistent planning: [process-control-harness.md](references/process-control-harness.md).
+- Contract errors/compatibility: [contracts-and-failures.md](references/contracts-and-failures.md).
+- Explicit goal-prompt request: [goal-prompt.md](references/goal-prompt.md).
+
+Failure reports name the failed applicable gate, preserved state, owner and next
+action. Never infer deployed success, merge, freeze or cleanup from an earlier
+test or an auxiliary workflow close.

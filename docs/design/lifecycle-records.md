@@ -6,7 +6,7 @@ String requirements are only declarations. A closed lifecycle requires records w
 
 - `GoalClarificationRecord`: raw request, restated objective, acceptance criteria, non-goals, assumptions, ambiguities, questions, scope, confirmation, and admission status;
 - `EvidenceRecord`: one red/positive/negative test, replay, build, artifact, runtime, or gate result;
-- `ReviewRecord`: reviewer identity, reviewed commit, verdict, evidence IDs, and AI confidence rationale;
+- `ReviewRecord`: reviewer identity, reviewed commit, verdict and evidence IDs;
 - `PromotionRecord`: issue/experiment, base/source commits, old/new Active versions, hashes, review, gates, compatibility, and migration;
 - `RegressionReport`: freeze candidate's whitebox and blackbox regression result bound to source, scope, artifact, API, and declared regression inputs;
 - `FreezeRecord`: source tag, Active version, library/API hashes, Git clean, old Active immutability, and adapter owners.
@@ -54,7 +54,7 @@ Evidence is invalid when:
 - expiry is reached;
 - reviewed commit changes after review.
 
-AI confidence is evidence metadata and review input. It is not a promotion result. `review_verdict=pass` is the promotion admission result.
+AI confidence is optional annotation, never a required admission field or proof. `review_verdict=pass` and its validated evidence are the review admission result.
 
 ## Regression freeze gate
 

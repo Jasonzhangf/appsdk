@@ -1879,6 +1879,27 @@ fn module_public_api_hash(artifact_entries: &[Value]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn module_deployment_operations(module: &Value) -> Vec<&str> {
+    let Some(value) = module.get("deployment_operations") else {
+        // Existing service contracts retain both receipts until explicitly changed.
+        return vec!["install", "restart"];
+    };
+    let values = value
+        .as_array()
+        .unwrap_or_else(|| fail("INVALID_DEPLOYMENT_OPERATIONS"));
+    let mut operations = Vec::new();
+    for value in values {
+        let operation = value
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_DEPLOYMENT_OPERATIONS"));
+        if !matches!(operation, "install" | "restart") || operations.contains(&operation) {
+            fail("INVALID_DEPLOYMENT_OPERATIONS");
+        }
+        operations.push(operation);
+    }
+    operations
+}
+
 fn build_module_artifact(root: &Path, project: &Value, module: &Value, module_id: &str) -> Value {
     let source_hash = hash_module_paths(root, project, module, module_id, "owned_paths");
     let contract_hash = hash_module_paths(root, project, module, module_id, "contract_paths");
@@ -1887,6 +1908,10 @@ fn build_module_artifact(root: &Path, project: &Value, module: &Value, module_id
     let artifact_entries = hash_module_artifacts(root, project, module, module_id);
     let public_api_hash = module_public_api_hash(&artifact_entries);
     let mut unsigned = serde_json::Map::new();
+    if let Some(operations) = module.get("deployment_operations") {
+        let _ = module_deployment_operations(module);
+        unsigned.insert("deployment_operations".into(), operations.clone());
+    }
     unsigned.insert("artifact_schema".into(), Value::from(1));
     unsigned.insert("module_id".into(), Value::String(module_id.into()));
     unsigned.insert(
@@ -1963,6 +1988,9 @@ fn module_artifact_matches_project(module: &Value, artifact: &Value) -> Value {
         || artifact.get("artifact_paths") != module.get("artifact_paths")
     {
         fail(format!("MODULE_ARTIFACT_MISMATCH:{}", module_id));
+    }
+    if artifact.get("deployment_operations") != module.get("deployment_operations") {
+        fail("MODULE_DEPLOYMENT_CONTRACT_DRIFT");
     }
     let stored_hash = record_str(artifact, "/artifact_hash", "module-artifact");
     let mut unsigned = artifact.clone();
@@ -2251,10 +2279,10 @@ fn assert_development_scenarios(root: &Path, project: &Value) -> bool {
             _ => fail("UNKNOWN_DEVELOPMENT_SCENARIO"),
         }
     }
-    if multi_worker != multi_worktree {
-        fail("DEVELOPMENT_SCENARIO_PAIR_REQUIRED");
+    if multi_worktree && !multi_worker {
+        fail("MERGE_QUEUE_COLLABORATION_REQUIRED");
     }
-    multi_worker
+    multi_worktree
 }
 
 fn assert_project_contract(root: &Path, project: &Value) {
@@ -2418,6 +2446,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
     let mut ids = std::collections::HashSet::new();
     let mut owned_surfaces: Vec<(String, String)> = Vec::new();
     for module in modules {
+        let _ = module_deployment_operations(module);
         let id = module
             .get("module_id")
             .and_then(Value::as_str)
@@ -3651,7 +3680,6 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
                 "function_map_hash",
                 "mainline_call_map_hash",
                 "verification_map_hash",
-                "confidence_rationale",
                 "created_at",
             ][..],
         ),
@@ -3695,7 +3723,6 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
         "/reviewed_commit",
         "/reviewed_artifact_hash",
         "/reviewed_scope_hash",
-        "/confidence_rationale",
         "/created_at",
     ] {
         record_str(review, path, "review-record.json");
@@ -4141,59 +4168,45 @@ fn assert_pre_review_validation_gate(root: &Path, module_id: &str, artifact: &Va
         })
         .map(|_| validation.get("whitebox_producer").unwrap())
         .unwrap_or_else(|| fail("DEVELOPMENT_WHITEBOX_PRODUCER_MISSING"));
-    for path in [
-        "/deployment/install_receipt_id",
-        "/deployment/restart_receipt_id",
-        "/deployment/observed_at",
-    ] {
-        if record_str(&validation, path, &validation_name).is_empty() {
-            fail("DEPLOYMENT_BLACKBOX_RECEIPT_MISSING");
-        }
-    }
     if environment_id.is_empty() || entrypoint.is_empty() {
         fail("DEPLOYMENT_BLACKBOX_RECEIPT_MISSING");
     }
-    let install_receipt_id = record_str(
-        &validation,
-        "/deployment/install_receipt_id",
-        &validation_name,
-    );
-    let restart_receipt_id = record_str(
-        &validation,
-        "/deployment/restart_receipt_id",
-        &validation_name,
-    );
-    let install_time = deployment_receipt_time(
-        root,
-        module_id,
-        install_receipt_id,
-        "deployment_install",
-        "install",
-        issue_id,
-        scope_hash,
-        candidate_commit,
-        artifact_hash,
-        environment_id,
-        entrypoint,
-        producer,
-    );
-    let restart_time = deployment_receipt_time(
-        root,
-        module_id,
-        restart_receipt_id,
-        "deployment_restart",
-        "restart",
-        issue_id,
-        scope_hash,
-        candidate_commit,
-        artifact_hash,
-        environment_id,
-        entrypoint,
-        producer,
-    );
     let mut all_ids = std::collections::HashSet::new();
-    if !all_ids.insert(install_receipt_id) || !all_ids.insert(restart_receipt_id) {
-        fail("PRE_REVIEW_EVIDENCE_NOT_DISJOINT");
+    let required_operations = module_deployment_operations(module);
+    let mut receipt_times = Vec::new();
+    for (operation, phase, path) in [
+        (
+            "install",
+            "deployment_install",
+            "/deployment/install_receipt_id",
+        ),
+        (
+            "restart",
+            "deployment_restart",
+            "/deployment/restart_receipt_id",
+        ),
+    ] {
+        // Validate supplied receipts too; optional does not mean silently ignored.
+        if required_operations.contains(&operation) || validation.pointer(path).is_some() {
+            let id = record_str(&validation, path, &validation_name);
+            if !all_ids.insert(id) {
+                fail("PRE_REVIEW_EVIDENCE_NOT_DISJOINT");
+            }
+            receipt_times.push(deployment_receipt_time(
+                root,
+                module_id,
+                id,
+                phase,
+                operation,
+                issue_id,
+                scope_hash,
+                candidate_commit,
+                artifact_hash,
+                environment_id,
+                entrypoint,
+                producer,
+            ));
+        }
     }
     let mut latest_whitebox = None;
     let mut earliest_whitebox = None;
@@ -4272,12 +4285,17 @@ fn assert_pre_review_validation_gate(root: &Path, module_id: &str, artifact: &Va
         }
     }
     let observed_at = record_datetime(&validation, "/deployment/observed_at", &validation_name);
+    let mut previous_time =
+        latest_whitebox.unwrap_or_else(|| fail("MISSING_DEVELOPMENT_WHITEBOX_EVIDENCE"));
+    for time in receipt_times {
+        if previous_time > time {
+            fail("PRE_REVIEW_CAUSAL_ORDER_MISMATCH");
+        }
+        previous_time = time;
+    }
     if record_time(&candidate, &candidate_name)
         > earliest_whitebox.unwrap_or_else(|| fail("MISSING_DEVELOPMENT_WHITEBOX_EVIDENCE"))
-        || latest_whitebox.unwrap_or_else(|| fail("MISSING_DEVELOPMENT_WHITEBOX_EVIDENCE"))
-            > install_time
-        || install_time > restart_time
-        || restart_time
+        || previous_time
             > earliest_blackbox.unwrap_or_else(|| fail("MISSING_DEPLOYED_BLACKBOX_EVIDENCE"))
         || latest_blackbox.unwrap_or_else(|| fail("MISSING_DEPLOYED_BLACKBOX_EVIDENCE"))
             > observed_at
@@ -4544,15 +4562,6 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
         fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
     }
     assert_review_map_bindings(root, module_id, &review, &review_name);
-    let confidence = review
-        .get("ai_confidence")
-        .and_then(Value::as_f64)
-        .unwrap_or_else(|| fail("INVALID_REVIEW_CONFIDENCE"));
-    if !(0.0..=1.0).contains(&confidence)
-        || record_str(&review, "/confidence_rationale", &review_name).is_empty()
-    {
-        fail("INVALID_REVIEW_CONFIDENCE");
-    }
     let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
     let baseline = evidence_by_id(root, module_id, baseline_id);
     assert_evidence_record(&baseline, baseline_id, Utc::now());
@@ -4630,6 +4639,8 @@ fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
     let candidate = read_record(root, &candidate_name);
     let review = read_record(root, &review_name);
     let effectiveness = read_record(root, &effectiveness_name);
+    let validation_name = module_record_name("pre-review-validation-record", module_id);
+    let validation = read_record(root, &validation_name);
     let issue_id = record_str(&candidate, "/issue_id", &candidate_name);
     let scope_hash = record_str(&candidate, "/scope_hash", &candidate_name);
     let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
@@ -4689,20 +4700,41 @@ fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
             || record_str(&evidence, "/scope_hash", &id) != scope_hash
             || record_str(&evidence, "/source_commit", &id) != candidate_commit
             || evidence.get("result").and_then(Value::as_str) != Some("pass")
-            || record_time(&evidence, &id) < record_time(&review, &review_name)
+            || record_time(&evidence, &id) < record_time(&candidate, &candidate_name)
+            || record_time(&evidence, &id) > record_time(&effectiveness, &effectiveness_name)
         {
             fail("POST_ARCHITECTURE_EFFECTIVENESS_EVIDENCE_MISMATCH");
         }
+        if record_time(&evidence, &id) < record_time(&review, &review_name) {
+            let bound_before_review =
+                record_array(&candidate, "/verification_evidence_ids", &candidate_name)
+                    .iter()
+                    .chain(
+                        record_array(&validation, "/blackbox_evidence_ids", &validation_name)
+                            .iter(),
+                    )
+                    .any(|value| value.as_str() == Some(id.as_str()));
+            if !bound_before_review
+                || evidence.get("input_hashes") != reproduction.get("input_hashes")
+                || evidence.get("artifact_hash") != validation.get("artifact_hash")
+            {
+                fail("EFFECTIVENESS_REUSED_EVIDENCE_MISMATCH");
+            }
+        }
         phases.push(record_str(&evidence, "/phase", &id).to_string());
     }
-    for phase in [
-        "positive_intervention",
-        "negative_intervention",
-        "post_architecture_effectiveness",
-    ] {
+    for phase in ["positive_intervention", "negative_intervention"] {
         if !phases.iter().any(|value| value == phase) {
             fail(format!("MISSING_EFFECTIVENESS_EVIDENCE_PHASE:{}", phase));
         }
+    }
+    if !phases.iter().any(|phase| {
+        matches!(
+            phase.as_str(),
+            "post_architecture_effectiveness" | "deployed_blackbox"
+        )
+    }) {
+        fail("MISSING_EFFECTIVENESS_EVIDENCE_PHASE:public_entrypoint");
     }
 }
 
@@ -5567,15 +5599,6 @@ fn assert_record_graph(
             != record_str(&promotion, "/scope_hash", "promotion-record.json")
     {
         fail("RECORD_GRAPH_INPUT_MISMATCH");
-    }
-    let confidence = review
-        .get("ai_confidence")
-        .and_then(Value::as_f64)
-        .unwrap_or_else(|| fail("INVALID_REVIEW_CONFIDENCE"));
-    if !(0.0..=1.0).contains(&confidence)
-        || record_str(&review, "/confidence_rationale", "review-record.json").is_empty()
-    {
-        fail("INVALID_REVIEW_CONFIDENCE");
     }
     let gates = record_array(
         &promotion,
@@ -7322,13 +7345,17 @@ fn initialize_collab_peer() {
         println!("collab peer bootstrap pending: no live tmux pane");
         return;
     }
-    let output = Command::new("collab")
-        .arg("init")
-        .output()
-        .unwrap_or_else(|error| fail(format!("COLLAB_INIT_UNAVAILABLE:{}", error)));
+    let output = match Command::new("collab").arg("init").output() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("COLLAB_INIT_UNAVAILABLE:{}; shared collaboration unavailable; independent work may continue", error);
+            return;
+        }
+    };
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
-        fail(format!("COLLAB_INIT_FAILED:{}", detail.trim()));
+        eprintln!("COLLAB_INIT_FAILED:{}; shared collaboration unavailable; independent work may continue", detail.trim());
+        return;
     }
     let result = String::from_utf8_lossy(&output.stdout);
     if !result.trim().is_empty() {

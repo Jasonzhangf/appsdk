@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://appsdk.local/contracts/records/review-record.schema.json",
   "type": "object",
-  "required": ["review_id", "review_kind", "issue_id", "promotion_id", "fix_candidate_id", "pre_review_validation_id", "reviewer", "verdict", "evidence_ids", "reviewed_commit", "reviewed_tree_hash", "reviewed_diff_hash", "reviewed_artifact_hash", "reviewed_scope_hash", "resource_map_hash", "function_map_hash", "mainline_call_map_hash", "verification_map_hash", "ai_confidence", "confidence_rationale", "created_at"],
+  "required": ["review_id", "review_kind", "issue_id", "promotion_id", "fix_candidate_id", "pre_review_validation_id", "reviewer", "verdict", "evidence_ids", "reviewed_commit", "reviewed_tree_hash", "reviewed_diff_hash", "reviewed_artifact_hash", "reviewed_scope_hash", "resource_map_hash", "function_map_hash", "mainline_call_map_hash", "verification_map_hash", "created_at"],
   "properties": {
     "review_id": {"type": "string"},
     "review_kind": {"const": "architecture"},

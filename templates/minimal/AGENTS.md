@@ -1,7 +1,7 @@
 # Project Agent Contract
 
 This file owns project facts and boundaries. Replace bracketed items during the
-approved Guide setup; do not invent project-specific values. Reusable procedure
+project setup; do not invent project-specific values. Reusable procedure
 belongs in project Skills, and machine workflow belongs in declared guidance
 contracts.
 
@@ -30,10 +30,9 @@ contracts.
   owner.
 - Record allowed and forbidden paths at the narrowest stable boundary.
 - Derived output never becomes a second source of truth.
-- Keep lifecycle skeletons fixed. Configure operations, register hooks, and
-  declare gates through their owning contracts instead of adding inline
-  behavioral branches.
-- Before adding behavior, prove it is necessary and not already owned. Reuse a
+- If this project declares a fixed lifecycle skeleton, preserve its operation,
+  hook and gate boundaries. Do not introduce that architecture by default.
+- Before adding behavior, check whether it is needed and already owned. Reuse a
   shared function for common semantics; retain separate implementations only
   for necessary differences.
 - Missing operators, hooks, or gates fail or skip explicitly with a recorded
@@ -41,8 +40,8 @@ contracts.
 
 ## Architecture Truth
 
-- Declare the project resource, function, mainline, verification, and module
-  maps and keep them aligned with source anchors and gates.
+- Maintain only the maps this project requires for ownership, affected
+  boundaries and verification. Do not duplicate the same facts across maps.
 - Missing or ambiguous ownership blocks the affected change, not unrelated
   project work.
 - Update maps and verification gates in the same change when ownership, paths,
@@ -50,20 +49,24 @@ contracts.
 
 ## Development Process Control
 
-- Use AppSDK Guide for non-trivial feature, debug, review, delivery, and cleanup
-  work.
-- Persist plans bound to the current goal, task, module, owner, scope, declared
-  rule sources, source commit, and tree.
-- Execute only declared transitions. Optional nodes are skipped through an
+- AppSDK quality, safety and evidence gates are mandatory when applicable.
+  Guidance and Memory are auxiliary; no plan or memory write is required by
+  default. Select persistent Guidance when it helps the task.
+- When using Guidance, bind plans to current goal, task, module, owner, scope,
+  declared rule sources, source commit, and tree.
+- Within a selected workflow execute declared transitions. Optional nodes use an
   explicit bypass edge, never an undeclared jump.
 - Append observations and evidence to the active step. Revise the plan when
   source, scope, owner, rules, environment, or evidence changes.
 - Workflow close and lifecycle completion are separate results.
-- Review new and changed behavior as a hard boundary for control-truth
-  separation, single ownership, configuration-first orchestration, registered
-  hooks, declared gates, ablation, and shared-function reuse. Report untouched
-  historical violations as non-blocking recommendations unless they affect the
-  changed scope or a safety/evidence boundary.
+- Review blocks concrete quality, safety, contract and material structural
+  regressions. Optional simplification is advisory. Reuse valid evidence when
+  relevant inputs are unchanged; rerun affected checks on drift.
+- Keep Collab automatic for multi-worker identity, communication and task/file
+  ownership. Check conflicts before shared writes. Failure blocks dependent
+  collaboration, not independent isolated work or quality checks.
+- Long tasks and handoffs may save relevant notes; no automatic promotion to
+  memory, Skills or rules. Delivery and retained-resource cleanup are separate.
 
 ## Git Protection
 

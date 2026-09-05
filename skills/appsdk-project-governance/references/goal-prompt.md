@@ -1,6 +1,8 @@
 # Goal Prompt Generation
 
-When Jason gives a development or debug objective, clarify it before execution:
+Use only when the user asks for a goal prompt. An ordinary development/debug
+request does not require generating a prompt or writing a separate plan file.
+For a requested prompt, clarify material unknowns:
 
 1. Restate the objective in one sentence.
 2. List acceptance criteria.

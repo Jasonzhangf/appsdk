@@ -5,7 +5,7 @@
       "scenario_id": "multi_worker_collaboration",
       "status": "active",
       "owner": "appsdk::collaboration",
-      "requires": ["multi_worktree_merge_queue"],
+      "requires": [],
       "invariants": [
         "one_worker_one_clean_worktree",
         "one_worker_one_semantic_claim",
@@ -38,7 +38,7 @@
     {
       "rule_id": "parallel-development-pair",
       "members": ["multi_worker_collaboration", "multi_worktree_merge_queue"],
-      "activation": "all_or_none"
+      "activation": "merge_queue_requires_collaboration"
     },
     {
       "rule_id": "incremental-milestone-delivery",

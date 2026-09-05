@@ -3378,23 +3378,10 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
         assert_record_graph(root, Some(module_id), &artifact, true);
         assert_protected_archive_matches(root, module, &artifact, &archive);
         assert_active_projection_matches(root, &project, module_id, version, &artifact);
-        if let Some(previous) = previous_version {
-            let previous_archive = protected_root
-                .join("history-versions")
-                .join(module_id)
-                .join(previous);
-            if !previous_archive.is_dir() {
-                fail("PROTECTED_VERSION_HISTORY_MISSING");
-            }
-            assert_previous_active_projection_matches(
-                root,
-                &project,
-                module,
-                module_id,
-                previous,
-                &previous_archive,
-            );
-        }
+        // A complete current projection is already the idempotent result.
+        // The previous Active archive is only needed when this invocation has
+        // to restore it; older version metadata must not invalidate the
+        // current Active/Protected projection.
         verify_internal(root, false, false);
         println!(
             "{}",

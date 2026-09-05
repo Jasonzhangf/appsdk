@@ -3896,6 +3896,22 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         "{}",
         String::from_utf8_lossy(&restored_v2_verify.stderr)
     );
+    let previous_archive_artifact =
+        root.join("protected/history-versions/app-core/active-v1/module-artifact.json");
+    let mut previous_archive: Value =
+        serde_json::from_str(&fs::read_to_string(&previous_archive_artifact).unwrap()).unwrap();
+    previous_archive["artifact_paths"] = serde_json::json!(["legacy/app-core.placeholder"]);
+    fs::write(
+        &previous_archive_artifact,
+        serde_json::to_string_pretty(&previous_archive).unwrap() + "\n",
+    )
+    .unwrap();
+    let idempotent_v2 = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
+    assert!(
+        idempotent_v2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&idempotent_v2.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

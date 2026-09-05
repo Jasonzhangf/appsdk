@@ -37,9 +37,44 @@ the next layer without changing the resident L0 protocol.
 
 `project-memory review --run <run-id>` checks completed run notes. Only an
 explicit `memory`/`memory_update` candidate is classified and appended; absent
-candidates return `no_update`. Tags and source references are unioned during
-`compact`; raw entries remain recoverable. Review never promotes project data to
-global memory. Global writes require an explicit `entry --global` action.
+candidates return `no_update`. `compact` updates only the rebuildable index:
+the latest event owns content while tags, source references, and relations are
+unioned; raw JSONL events remain unchanged and recoverable. Review never
+promotes project data to global memory. Global writes require an explicit
+`entry --global` action.
+
+## Migration and re-entry
+
+The memory path has two explicit recovery routes:
+
+```text
+legacy flat JSONL
+  -> validate all source lines
+  -> memory/migration.json (in_progress)
+  -> append new or metadata-completing categorized events
+  -> compact + rebuild SQLite
+  -> memory/migration.json (complete)
+```
+
+`project-memory migrate` keeps the legacy source, records its digest and
+progress, and is safe to repeat after interruption. It refuses a changed
+source or conflicting ID/content rather than replacing project truth. When no
+legacy source is present it records an idempotent `not_needed` migration.
+
+```text
+same run ID
+  -> read notes.jsonl last state
+  -> check migration marker
+  -> rebuild missing index
+  -> return L1 anchors + next_queries
+  -> query L2/L3 and continue the interrupted node
+```
+
+`project-memory reentry [project] --run <run-id>` never creates a new run or
+mutates durable memory. The project path is optional and may follow the run ID.
+It blocks with the migration command when migration is absent
+or unfinished, and returns the same run ID plus the last known node/step for
+resume.
 
 ## Guide hand-off
 

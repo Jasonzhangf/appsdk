@@ -36,6 +36,8 @@ project-memory query <text> [project]
 project-memory get <memory-id> [project]
 project-memory entry --id <id> --category <category> --text <text> [--tag <tag>]
 project-memory review --run <run-id>
+project-memory migrate [project]
+project-memory reentry [project] --run <run-id>
 project-memory index
 project-memory compact
 project-memory verify
@@ -45,6 +47,32 @@ project-memory verify
 classifies, preserves source references and tag unions, and updates the
 rebuildable index. Global promotion is explicit (`--global` on an entry); a
 project review never writes global memory.
+
+`compact` only compacts the rebuildable projection. It never rewrites, deletes,
+or drops events from the JSONL sources. The effective node is the last event
+for an ID with monotonic tag/source-reference/relation unions; changing an ID
+across categories is rejected.
+
+## Migration and re-entry
+
+Migration is explicit and source-preserving. `project-memory migrate` accepts
+the supported legacy flat sources (`memory/entries.jsonl` or
+`memory/memories.jsonl`), validates every line before writing, records a
+versioned `memory/migration.json` marker, appends new entries or
+metadata-completing events when the effective version lacks incoming tags or
+source references, and rebuilds the SQLite projection. The legacy source is
+never deleted or overwritten. A marker in `in_progress` can be run again with
+the same source digest; completed migration is idempotent. A changed source or
+an ID/content conflict is reported instead of silently replacing project
+truth.
+
+Re-entry is read-only apart from rebuilding a missing SQLite projection. Run
+`project-memory reentry [project] --run <run-id>` after an interruption (the
+project path is optional and may also follow the `--run` value). It keeps the
+same run ID, reads the last note as `resume_from`, checks the migration marker,
+rebuilds a missing index, and returns L1 anchors plus bounded `next_queries`
+for the next L2/L3 lookup. If migration is absent or unfinished, re-entry is
+blocked with the exact migration command; it never invents a new run or state.
 
 The WeMM adapter is optional. Until a pinned local inference backend is
 configured, it reports candidate-only status and does not mock semantic edges.

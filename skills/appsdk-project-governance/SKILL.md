@@ -91,6 +91,12 @@ Its ownership and tested-integration protections remain mandatory.
   safe cleanup. No forced deletion to make a task appear complete.
 - Memory is optional. No automatic durable memory/rule promotion. Long tasks
   and handoffs may record concise decisions and references to existing evidence.
+  Memory migration and re-entry are explicit independent operations: use
+  `project-memory migrate` for a source-preserving, resumable schema move and
+  `project-memory reentry [project] --run <run-id>` to resume the same run after
+  interruption. A missing or rebuilding memory index is not a governance
+  failure, and memory state must not be reconstructed from Guide, debug,
+  develop, or log payloads.
 
 ## References: load only the relevant domain
 

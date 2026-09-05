@@ -7404,13 +7404,15 @@ fn init_project(root: &Path) {
         .is_none();
     ensure_governance_layout(root);
     write_project_scaffold(root);
-    memory::initialize_project(root);
     if fresh_governance {
         write_project_agent_contract(root);
     }
     install_bundle_resources(root);
     install_standard_template_reference(root);
     initialize_collab_peer();
+    if let Err(reason) = memory::initialize_project(root) {
+        eprintln!("{}; optional project memory initialization skipped", reason);
+    }
     println!("initialized {}", root.display());
     if existing_project_needs_guidance {
         println!(
@@ -7468,10 +7470,12 @@ fn new_project(root: &Path) {
     }
     ensure_governance_layout(root);
     write_project_scaffold(root);
-    memory::initialize_project(root);
     write_project_agent_contract(root);
     install_bundle_resources(root);
     install_standard_template_reference(root);
+    if let Err(reason) = memory::initialize_project(root) {
+        eprintln!("{}; optional project memory initialization skipped", reason);
+    }
     println!("created {}", root.display());
     println!("next appsdk guide compile");
     println!("then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>");
@@ -8094,7 +8098,7 @@ fn print_cli_help(command: Option<&str>) {
         Some("prepare") => "Usage: appsdk prepare [workspace]",
         Some("new") => "Usage: appsdk new [project]",
         Some("memory") | Some("project-memory") => {
-            "Usage: appsdk memory <entry|query|get|review|index|compact|verify> [project]"
+            "Usage: appsdk memory <entry|query|get|review|migrate|reentry|index|compact|verify> [project]"
         }
         _ => CLI_USAGE,
     };

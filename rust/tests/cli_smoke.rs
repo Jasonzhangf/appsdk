@@ -5094,18 +5094,22 @@ fn project_memory_edges_and_latest_compaction_are_explicit() {
     let inspected_json: Value = serde_json::from_slice(&inspected.stdout).unwrap();
     assert_eq!(inspected_json["matches"][0]["scope"], "project");
 
+    let source_before = fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap();
     let compacted = run_memory(&root, &["compact"], &memory_home);
     assert!(
         compacted.status.success(),
         "{}",
         String::from_utf8_lossy(&compacted.stderr)
     );
-    let compacted_entries = fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap();
-    let latest: Value = compacted_entries
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .find(|entry: &Value| entry["id"] == "latest-entry")
-        .unwrap();
+    let source_after = fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap();
+    assert_eq!(
+        source_after, source_before,
+        "compact must retain raw event history"
+    );
+    let latest = run_memory(&root, &["get", "latest-entry"], &memory_home);
+    assert!(latest.status.success());
+    let latest: Value = serde_json::from_slice(&latest.stdout).unwrap();
+    let latest = &latest["matches"][0];
     assert_eq!(latest["content"], "new content");
     assert!(latest["tags"]
         .as_array()
@@ -5134,6 +5138,225 @@ fn project_memory_edges_and_latest_compaction_are_explicit() {
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(caller).unwrap();
     fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn project_memory_updates_follow_current_version_and_verify_source_drift() {
+    let root = temp_root("project-memory-versioning");
+    let memory_home = temp_root("project-memory-versioning-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+
+    for (content, tag) in [("A", "a"), ("B", "b"), ("A", "c")] {
+        let result = run_memory(
+            &root,
+            &[
+                "entry",
+                "--id",
+                "cycle",
+                "--category",
+                "knowledge",
+                "--text",
+                content,
+                "--tag",
+                tag,
+            ],
+            &memory_home,
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let source = fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap();
+    assert_eq!(
+        source.lines().count(),
+        3,
+        "A -> B -> A must retain three events"
+    );
+    let current = run_memory(&root, &["get", "cycle"], &memory_home);
+    assert!(current.status.success());
+    let current: Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(current["matches"][0]["content"], "A");
+    for tag in ["a", "b", "c"] {
+        assert!(current["matches"][0]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == tag));
+    }
+    let wrong_category = run_memory(
+        &root,
+        &[
+            "entry",
+            "--id",
+            "cycle",
+            "--category",
+            "lesson",
+            "--text",
+            "cross category",
+        ],
+        &memory_home,
+    );
+    assert!(!wrong_category.status.success());
+    assert!(String::from_utf8_lossy(&wrong_category.stderr).contains("MEMORY_CATEGORY_CHANGE"));
+
+    let source_path = root.join("memory/knowledge.jsonl");
+    let mut changed = fs::read_to_string(&source_path).unwrap();
+    changed.push_str(r#"{"id":"drifted","category":"knowledge","content":"added outside index","tags":[],"source_refs":[]}"#);
+    changed.push('\n');
+    fs::write(&source_path, &changed).unwrap();
+    let stale = run_memory(&root, &["verify"], &memory_home);
+    assert!(stale.status.success());
+    let stale: Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(stale["ok"], false);
+    assert!(stale["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|scope| { scope["scope"] == "project" && scope["source_consistent"] == false }));
+    let refreshed = run_memory(&root, &["query", "drifted"], &memory_home);
+    assert!(refreshed.status.success());
+    let refreshed: Value = serde_json::from_slice(&refreshed.stdout).unwrap();
+    assert!(refreshed["keyword_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == "drifted"));
+    let healthy = run_memory(&root, &["verify"], &memory_home);
+    let healthy: Value = serde_json::from_slice(&healthy.stdout).unwrap();
+    assert_eq!(healthy["ok"], true);
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn project_memory_migration_and_reentry_are_resumable_and_source_preserving() {
+    let root = temp_root("project-memory-migration");
+    let memory_home = temp_root("project-memory-migration-home");
+    let root_text = root.to_str().unwrap();
+    fs::create_dir_all(root.join("memory")).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    let legacy = concat!(
+        r#"{"id":"legacy-path","category":"path","content":"legacy node","tags":["node"],"source_refs":["old/path"]}"#,
+        "\n",
+        r#"{"id":"legacy-lesson","category":"lesson","text":"legacy lesson","tags":["old"]}"#,
+        "\n"
+    );
+    fs::write(
+        root.join("memory/path.jsonl"),
+        r#"{"id":"legacy-path","category":"path","content":"legacy node","tags":["existing"]}
+"#,
+    )
+    .unwrap();
+    fs::write(root.join("memory/entries.jsonl"), legacy).unwrap();
+
+    let migrated = run_memory(&root, &["migrate"], &memory_home);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let migrated: Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    assert_eq!(migrated["status"], "complete");
+    assert_eq!(migrated["migrated_entries"], 2);
+    assert_eq!(migrated["raw_sources_retained"], true);
+    assert_eq!(
+        fs::read_to_string(root.join("memory/entries.jsonl")).unwrap(),
+        legacy
+    );
+    assert!(root.join("memory/path.jsonl").is_file());
+    assert!(root.join("memory/lesson.jsonl").is_file());
+    let migrated_path = run_memory(&root, &["get", "legacy-path"], &memory_home);
+    let migrated_path: Value = serde_json::from_slice(&migrated_path.stdout).unwrap();
+    let migrated_tags = migrated_path["matches"][0]["tags"].as_array().unwrap();
+    assert!(migrated_tags.iter().any(|tag| tag == "existing"));
+    assert!(migrated_tags.iter().any(|tag| tag == "node"));
+    assert!(migrated_path["matches"][0]["source_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source == "old/path"));
+
+    fs::create_dir_all(root.join(".agent-collab/runs/reentry-run")).unwrap();
+    fs::write(
+        root.join(".agent-collab/runs/reentry-run/notes.jsonl"),
+        r#"{"event_id":"e1","node_id":"path-node","step_id":"step-2","status":"working"}
+"#,
+    )
+    .unwrap();
+    fs::remove_dir_all(memory_home.join("projects")).unwrap();
+    let reentered = run_memory(&root, &["reentry", "--run", "reentry-run"], &memory_home);
+    assert!(
+        reentered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reentered.stderr)
+    );
+    let reentered: Value = serde_json::from_slice(&reentered.stdout).unwrap();
+    assert_eq!(reentered["status"], "ready");
+    assert_eq!(reentered["run_id"], "reentry-run");
+    assert_eq!(reentered["preserves_run_id"], true);
+    assert_eq!(reentered["index"]["rebuilt"], true);
+    assert_eq!(reentered["resume_from"]["node_id"], "path-node");
+    assert!(reentered["next_queries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|query| query == "path-node"));
+    let explicit_project = run_memory(
+        &memory_home,
+        &["reentry", "--run", "reentry-run", root_text],
+        &memory_home,
+    );
+    assert!(
+        explicit_project.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit_project.stderr)
+    );
+    let explicit_project: Value = serde_json::from_slice(&explicit_project.stdout).unwrap();
+    assert_eq!(explicit_project["run_id"], "reentry-run");
+    assert_eq!(explicit_project["status"], "ready");
+
+    let marker_path = root.join("memory/migration.json");
+    let mut marker: Value =
+        serde_json::from_str(&fs::read_to_string(&marker_path).unwrap()).unwrap();
+    marker["status"] = Value::String("in_progress".into());
+    fs::write(
+        &marker_path,
+        serde_json::to_string_pretty(&marker).unwrap() + "\n",
+    )
+    .unwrap();
+    let resumed = run_memory(&root, &["migrate"], &memory_home);
+    assert!(resumed.status.success());
+    let resumed: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(resumed["status"], "complete");
+    assert_eq!(resumed["resumed"], true);
+    let already = run_memory(&root, &["migrate"], &memory_home);
+    assert!(already.status.success());
+    let already: Value = serde_json::from_slice(&already.stdout).unwrap();
+    assert_eq!(already["status"], "already_complete");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn optional_memory_does_not_block_governance_initialization() {
+    let root = temp_root("optional-memory-init");
+    assert!(run(&["new", root.to_str().unwrap()]).status.success());
+    fs::remove_dir_all(root.join("memory")).unwrap();
+    fs::write(root.join("memory"), "business file").unwrap();
+    let result = run(&["init", root.to_str().unwrap()]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(root.join(".appsdk/project.json").is_file());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("MEMORY_DIR_INVALID"));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

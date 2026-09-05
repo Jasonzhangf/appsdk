@@ -142,6 +142,7 @@ pub(super) fn project_status(
             let events = read_events(root, task);
             let plan_hash = required_string(&plan, "plan_hash", "GUIDANCE_PLAN_INVALID");
             let current_events = step_events(&events, plan_hash);
+            let tour_review = review_state(root, task);
             if let Some(reason) = context_drift(root, &project, &compiled, &plan) {
                 let revision_reason = match reason {
                     "source" => "source_drift",
@@ -161,7 +162,8 @@ pub(super) fn project_status(
                     "readiness": "blocked",
                     "reason_code": format!("GUIDANCE_CONTEXT_DRIFT:{}", reason),
                     "first_failing_gate": "rule_context",
-                    "next": {"command": "appsdk guide plan --task <id> --input <revised-plan>", "revision_reason": revision_reason}
+                    "next": {"command": "appsdk guide plan --task <id> --input <revised-plan>", "revision_reason": revision_reason},
+                    "tour_review": tour_review
                 });
             }
             return match next_step(&plan, &current_events) {
@@ -174,6 +176,7 @@ pub(super) fn project_status(
                     "readiness": "ready",
                     "reason_code": "NEXT_STEP_READY",
                     "first_failing_gate": null,
+                    "tour_review": tour_review,
                     "next": {"step_id": step["step_id"], "node_id": step["node_id"], "action": step["action"], "expected_evidence": step["expected_evidence"]}
                 }),
                 Ok(None) => serde_json::json!({
@@ -185,6 +188,7 @@ pub(super) fn project_status(
                     "readiness": "complete",
                     "reason_code": "WORKFLOW_COMPLETE",
                     "first_failing_gate": null,
+                    "tour_review": tour_review,
                     "next": null
                 }),
                 Err(reason) => serde_json::json!({
@@ -196,7 +200,8 @@ pub(super) fn project_status(
                     "readiness": "blocked",
                     "reason_code": reason,
                     "first_failing_gate": "step_result",
-                    "next": {"command": "appsdk guide plan --task <id> --input <revised-plan>", "revision_reason": "new_blocker"}
+                    "next": {"command": "appsdk guide plan --task <id> --input <revised-plan>", "revision_reason": "new_blocker"},
+                    "tour_review": tour_review
                 }),
             };
         }
@@ -255,6 +260,12 @@ pub(super) fn close(root: &Path, task: &str) -> Value {
         "remaining_gaps": if lifecycle_complete { serde_json::json!([]) } else { serde_json::json!(["canonical AppSDK lifecycle is not frozen or retired"]) },
         "cleanup_required": true,
         "memory_candidates": [],
-        "memory_applied": false
+        "memory_applied": false,
+        "memory_review": {
+            "blocking": false,
+            "command": "project-memory review --run <run-id>",
+            "required_check": true
+        },
+        "tour_review": review_state(root, task)
     })
 }

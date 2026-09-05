@@ -7,14 +7,18 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 mod compiler;
+mod help;
 mod intake;
 mod ledger;
 mod projector;
+mod review;
 
 use compiler::{compile, compiled_context_drift, current_rule_sources, load_compiled};
+use help::help;
 use intake::initialize;
 use ledger::{atomic_write, event_file, plan_file, read_events, read_plan};
 use projector::{close, next_step, project_status, step_events};
+use review::{review as review_task, state as review_state, tour as tour_task};
 
 const DOMAINS: [&str; 11] = [
     "bootstrap",
@@ -832,6 +836,30 @@ fn parse_mutation_options(args: &mut impl Iterator<Item = String>) -> (String, S
     )
 }
 
+fn parse_tour_options(
+    args: &mut impl Iterator<Item = String>,
+) -> (String, Option<String>, Option<String>) {
+    let mut task = None;
+    let mut mode = None;
+    let mut input = None;
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--task" => task = args.next(),
+            "--mode" => mode = args.next(),
+            "--input" => input = args.next(),
+            _ => fail(
+                "GUIDANCE_USAGE",
+                "use --task <id> [--mode <domain>] [--input <tour.json>]",
+            ),
+        }
+    }
+    (
+        task.unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide --task <id>")),
+        mode,
+        input,
+    )
+}
+
 fn parse_init_options(args: &mut impl Iterator<Item = String>) -> (String, String, Option<String>) {
     let mut task = None;
     let mut mode = None;
@@ -852,42 +880,6 @@ fn parse_init_options(args: &mut impl Iterator<Item = String>) -> (String, Strin
         mode.unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide --mode <domain>")),
         module,
     )
-}
-
-fn help() -> Value {
-    serde_json::json!({
-        "harness": "appsdk-development-process-control",
-        "project_root": "optional; defaults to the current working directory",
-        "commands": [
-            {"command": "compile", "usage": "appsdk guide compile [project]", "writes_state": true},
-            {"command": "init", "usage": "appsdk guide init [project] --task <id> --mode <domain> [--module <id>]", "writes_state": false},
-            {"command": "status", "usage": "appsdk guide status [project] [--task <id>] [--module <id>]", "writes_state": false},
-            {"command": "<domain>", "usage": "appsdk guide <domain> [project] [--task <id>] [--module <id>]", "writes_state": false},
-            {"command": "plan", "usage": "appsdk guide plan [project] --task <id> --input <plan.json>", "writes_state": true},
-            {"command": "update", "usage": "appsdk guide update [project] --task <id> --input <result.json>", "writes_state": true},
-            {"command": "next", "usage": "appsdk guide next [project] --task <id>", "writes_state": false},
-            {"command": "close", "usage": "appsdk guide close [project] --task <id>", "writes_state": false}
-        ],
-        "domains": DOMAINS,
-        "existing_project_setup": [
-            "appsdk guide status",
-            "appsdk guide init --task guidance-setup --mode bootstrap --module <id>",
-            "read project documents and present GuidanceSetupProposal for explicit user approval",
-            "after approval update project rule sources, then run appsdk guide compile"
-        ],
-        "existing_project_upgrade": [
-            "appsdk init",
-            "appsdk guide init --task guidance-upgrade --mode bootstrap --module <id>",
-            "read current project rules before the installed standard template reference",
-            "present retained rules, recommended differences, and declined template items for explicit user approval",
-            "after approval apply only accepted differences, then compile and verify"
-        ],
-        "start": [
-            "appsdk guide status --task <id>",
-            "appsdk guide compile",
-            "appsdk guide init --task <id> --mode <develop|debug> --module <id>"
-        ]
-    })
 }
 
 pub fn run(args: &mut impl Iterator<Item = String>) {
@@ -963,6 +955,14 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
             let (task, _) = parse_options(args);
             let task = task.unwrap_or_else(|| fail("GUIDANCE_USAGE", "provide --task <id>"));
             output(&close(&root, &task));
+        }
+        "tour" => {
+            let (task, mode, input) = parse_tour_options(args);
+            tour_task(&root, &task, mode.as_deref(), input.as_deref());
+        }
+        "review" => {
+            let (task, input) = parse_mutation_options(args);
+            review_task(&root, &task, &input);
         }
         domain if DOMAINS.contains(&domain) => {
             let (task, module) = parse_options(args);

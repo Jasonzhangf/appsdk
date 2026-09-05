@@ -86,6 +86,23 @@ fn validate_manifest(
                     "use non-empty evidence identifiers",
                 );
             }
+            if let Some(reminders) = node.get("reminders") {
+                for reminder in reminders.as_array().unwrap_or_else(|| {
+                    fail(
+                        "GUIDANCE_NODE_REMINDERS_INVALID",
+                        "declare reminders as an array",
+                    )
+                }) {
+                    required_string(reminder, "kind", "GUIDANCE_NODE_REMINDER_INVALID");
+                    required_string(reminder, "command", "GUIDANCE_NODE_REMINDER_INVALID");
+                    if reminder.get("blocking") != Some(&Value::Bool(false)) {
+                        fail(
+                            "GUIDANCE_NODE_REMINDER_BLOCKING",
+                            "tour and memory reminders must remain non-blocking",
+                        );
+                    }
+                }
+            }
         }
         if !node_ids.contains(entry) {
             fail(

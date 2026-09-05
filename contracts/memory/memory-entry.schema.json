@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/memory/memory-entry.schema.json",
+  "title": "Project memory entry",
+  "type": "object",
+  "required": ["id", "category", "content", "tags", "source_refs"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "category": {"enum": ["plan", "path", "knowledge", "lesson"]},
+    "title": {"type": "string"},
+    "content": {"type": "string", "minLength": 1},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "source_refs": {"type": "array", "items": {"type": "string"}},
+    "importance": {"type": "integer", "minimum": 0, "maximum": 100},
+    "layer": {"type": "integer", "minimum": 0},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": true
+}

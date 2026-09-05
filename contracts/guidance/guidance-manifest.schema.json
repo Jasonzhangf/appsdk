@@ -43,7 +43,20 @@
                 "node_id": {"type": "string", "minLength": 1},
                 "instruction": {"type": "string", "minLength": 1},
                 "owner": {"type": "string", "minLength": 1},
-                "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
+                "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "reminders": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["kind", "blocking", "command"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {"type": "string", "minLength": 1},
+                      "blocking": {"const": false},
+                      "command": {"type": "string", "minLength": 1}
+                    }
+                  }
+                }
               }
             }
           },

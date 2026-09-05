@@ -92,7 +92,7 @@ clear. Guide may assist; enabling it is not a prerequisite.
 | feature development and debug | [Skill] |
 | build, install, restart, and replay | [document or adapter] |
 | review and delivery | [Skill or contract] |
-| optional history retrieval or explicitly authorized memory writes | [.appsdk/skills/project-memory/SKILL.md](.appsdk/skills/project-memory/SKILL.md) |
+| optional memory retrieval, level-3 writes, and evidence-backed promotion | [.appsdk/skills/project-memory/SKILL.md](.appsdk/skills/project-memory/SKILL.md) |
 
 ## Evidence Boundary
 

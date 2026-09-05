@@ -18,6 +18,9 @@ const CATEGORIES: [&str; 4] = ["plan", "path", "knowledge", "lesson"];
 const MEMORY_SCHEMA_VERSION: i64 = 1;
 const MIGRATION_RECORD: &str = "memory/migration.json";
 const LEGACY_MEMORY_SOURCES: [&str; 2] = ["memory/entries.jsonl", "memory/memories.jsonl"];
+const DETAIL_MARKER_PREFIX: &str = "<!-- project-memory:v1 ";
+const DETAIL_END_MARKER: &str = "<!-- project-memory:end -->";
+const SKILL_DESCRIPTION_BASE_SLOTS: usize = 8;
 #[allow(dead_code)]
 const INDEX_TEMPLATE: &str = include_str!("../../memory/index.md");
 
@@ -114,6 +117,484 @@ fn category(value: &str) -> &str {
             "use plan, path, knowledge, or lesson",
         );
     }
+}
+
+fn memory_level(value: &Value) -> i64 {
+    let candidate = value
+        .get("memory_level")
+        .or_else(|| value.get("level"))
+        .or_else(|| value.get("layer"))
+        .and_then(Value::as_i64)
+        .filter(|level| (1..=3).contains(level))
+        .unwrap_or(3);
+    if review_status(value) == "reviewed" {
+        candidate
+    } else {
+        3
+    }
+}
+
+fn review_status(value: &Value) -> &str {
+    let has_evidence = value
+        .get("review_evidence")
+        .and_then(Value::as_array)
+        .is_some_and(|evidence| {
+            evidence
+                .iter()
+                .any(|item| item.as_str().is_some_and(|item| !item.is_empty()))
+        });
+    match value.get("review_status").and_then(Value::as_str) {
+        Some("reviewed") if has_evidence => "reviewed",
+        _ => "unreviewed",
+    }
+}
+
+fn detail_relative_path(id: &str, level: i64) -> String {
+    let filename = id.replace('/', "--");
+    format!("L{}/{}.md", level, filename)
+}
+
+fn detail_display_path(global: bool, id: &str, level: i64) -> String {
+    if global {
+        format!("global/{}", detail_relative_path(id, level))
+    } else {
+        format!("memory/{}", detail_relative_path(id, level))
+    }
+}
+
+fn detail_path(root: &Path, global: bool, id: &str, level: i64) -> PathBuf {
+    if global {
+        home_dir()
+            .join("global")
+            .join(detail_relative_path(id, level))
+    } else {
+        memory_dir(root).join(detail_relative_path(id, level))
+    }
+}
+
+fn markdown_heading(value: &str) -> String {
+    value
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .replace('#', "\\#")
+}
+
+fn write_detail(root: &Path, global: bool, value: &Value) {
+    let id = entry_id(value);
+    let level = memory_level(value);
+    let metadata = json!({
+        "id": id,
+        "category": value.get("category").and_then(Value::as_str).unwrap_or("knowledge"),
+        "tags": tags(value),
+        "source_refs": refs(value),
+        "memory_level": memory_level(value),
+        "review_status": review_status(value),
+        "review_evidence": value.get("review_evidence").cloned().unwrap_or_else(|| json!([])),
+        "importance": value.get("importance").and_then(Value::as_i64).unwrap_or(0),
+        "created_at": value.get("created_at").and_then(Value::as_str).unwrap_or(""),
+        "updated_at": value.get("updated_at").and_then(Value::as_str).unwrap_or(""),
+    });
+    let title = value.get("title").and_then(Value::as_str).unwrap_or(&id);
+    let content = entry_text(value);
+    let mut text = format!(
+        "{}{} -->\n\n# {}\n\n",
+        DETAIL_MARKER_PREFIX,
+        serde_json::to_string(&metadata).unwrap(),
+        markdown_heading(title)
+    );
+    text.push_str(&content);
+    if !content.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(DETAIL_END_MARKER);
+    text.push('\n');
+    atomic_write(&detail_path(root, global, &id, level), &text);
+}
+
+fn detail_directories(root: &Path, global: bool) -> Vec<(Option<i64>, PathBuf)> {
+    let base = if global {
+        home_dir().join("global")
+    } else {
+        memory_dir(root)
+    };
+    let mut directories = vec![(None, base.join("details"))];
+    directories.extend((1..=3).map(|level| (Some(level), base.join(format!("L{level}")))));
+    directories
+}
+
+fn parse_code_values(value: &str) -> Vec<String> {
+    value
+        .split('`')
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, value)| value.to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn parse_detail(path: &Path) -> Value {
+    let text = fs::read_to_string(path)
+        .unwrap_or_else(|_| fail("MEMORY_DETAIL_INVALID", "repair the Markdown detail file"));
+    let mut metadata = None;
+    if let Some(first) = text.lines().next() {
+        if let Some(json_text) = first
+            .strip_prefix(DETAIL_MARKER_PREFIX)
+            .and_then(|value| value.strip_suffix(" -->"))
+        {
+            let value: Value = serde_json::from_str(json_text).unwrap_or_else(|_| {
+                fail(
+                    "MEMORY_DETAIL_INVALID",
+                    "repair the project-memory metadata marker",
+                )
+            });
+            if !value.is_object() {
+                fail(
+                    "MEMORY_DETAIL_INVALID",
+                    "project-memory metadata must be a JSON object",
+                );
+            }
+            metadata = Some(value);
+        }
+    }
+
+    let mut heading = None;
+    let mut body_start = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let line_text = line
+            .strip_suffix('\n')
+            .unwrap_or(line)
+            .trim_end_matches('\r');
+        if let Some(title) = line_text.strip_prefix("# ") {
+            heading = Some(title.replace("\\#", "#"));
+            body_start = Some(offset + line.len());
+            break;
+        }
+        offset += line.len();
+    }
+    let Some(title) = heading else {
+        fail(
+            "MEMORY_DETAIL_INVALID",
+            "add a Markdown level-one title to the detail file",
+        )
+    };
+    let body_start = body_start.unwrap();
+    let marked_end = text[body_start..]
+        .split_inclusive('\n')
+        .scan(body_start, |offset, line| {
+            let line_start = *offset;
+            *offset += line.len();
+            Some((line_start, line))
+        })
+        .find_map(|(line_start, line)| {
+            let line_text = line
+                .strip_suffix('\n')
+                .unwrap_or(line)
+                .trim_end_matches('\r');
+            (line_text == DETAIL_END_MARKER).then_some(line_start)
+        });
+    let (body_end, legacy_footer) = if let Some(end) = marked_end {
+        (end, None)
+    } else {
+        let remainder = &text[body_start..];
+        let separator = remainder.find("\n---\n").unwrap_or_else(|| {
+            fail(
+                "MEMORY_DETAIL_UNSUPPORTED",
+                "use an exported project-memory detail or migrate the raw JSONL source",
+            )
+        });
+        (
+            body_start + separator,
+            Some(&remainder[separator + "\n---\n".len()..]),
+        )
+    };
+    let mut content = text[body_start..body_end].to_string();
+    if content.starts_with('\n') {
+        content.remove(0);
+    }
+    if legacy_footer.is_some() {
+        content = content.trim_end_matches('\n').to_string();
+    } else if content.ends_with('\n') {
+        content.pop();
+    }
+    if content.is_empty() {
+        fail(
+            "MEMORY_ENTRY_CONTENT_REQUIRED",
+            "add non-empty Markdown detail content",
+        );
+    }
+
+    let mut value = metadata.unwrap_or_else(|| json!({}));
+    if let Some(footer) = legacy_footer {
+        for line in footer.lines() {
+            if let Some(raw) = line.strip_prefix("- id: ") {
+                if let Some(id) = parse_code_values(raw).first() {
+                    value["id"] = Value::String(id.clone());
+                }
+            } else if let Some(raw) = line.strip_prefix("- tags: ") {
+                value["tags"] = Value::Array(
+                    parse_code_values(raw)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                );
+            } else if let Some(raw) = line.strip_prefix("- source_refs: ") {
+                value["source_refs"] = Value::Array(
+                    parse_code_values(raw)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                );
+            } else if let Some(raw) = line.strip_prefix("- memory_level: ") {
+                if let Ok(level) = raw.trim().parse::<i64>() {
+                    value["memory_level"] = Value::Number(level.into());
+                }
+            } else if let Some(raw) = line.strip_prefix("- review_status: ") {
+                value["review_status"] = Value::String(raw.trim_matches('`').to_string());
+            }
+        }
+    }
+    if value.get("id").and_then(Value::as_str).is_none() {
+        fail(
+            "MEMORY_DETAIL_INVALID",
+            "exported detail metadata must contain an id",
+        );
+    }
+    value["title"] = Value::String(title);
+    value["content"] = Value::String(content);
+    value
+}
+
+fn read_detail_entries(root: &Path, global: bool) -> Vec<Value> {
+    let mut legacy = BTreeMap::new();
+    let mut canonical = BTreeMap::new();
+    let expected_levels = effective_entries_for_scope(root, global)
+        .into_iter()
+        .map(|entry| (entry_id(&entry), memory_level(&entry)))
+        .collect::<BTreeMap<_, _>>();
+    for (level, directory) in detail_directories(root, global) {
+        if fs::symlink_metadata(&directory)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            fail(
+                "MEMORY_DETAILS_SYMLINK",
+                "replace the detail directory with a project-owned directory",
+            );
+        }
+        if !directory.is_dir() {
+            continue;
+        }
+        let mut paths = fs::read_dir(&directory)
+            .unwrap_or_else(|_| fail("MEMORY_DETAILS_READ_FAILED", "repair memory details"))
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("md"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            if fs::symlink_metadata(&path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                fail(
+                    "MEMORY_DETAIL_SYMLINK",
+                    "replace the detail file with a project-owned regular file",
+                );
+            }
+            let value = parse_detail(&path);
+            let id = entry_id(&value);
+            if let Some(level) = level {
+                if let Some((existing_level, _)) = canonical.get(&id) {
+                    let expected = expected_levels.get(&id).copied();
+                    let existing_is_expected = expected == Some(*existing_level);
+                    let incoming_is_expected = expected == Some(level);
+                    if existing_is_expected && !incoming_is_expected {
+                        continue;
+                    }
+                    if incoming_is_expected && !existing_is_expected {
+                        canonical.insert(id, (level, value));
+                        continue;
+                    }
+                    fail(
+                        "MEMORY_DETAIL_DUPLICATE_ID",
+                        "keep one Markdown detail file per memory ID",
+                    );
+                }
+                canonical.insert(id, (level, value));
+            } else if legacy.insert(id, value).is_some() {
+                fail(
+                    "MEMORY_DETAIL_DUPLICATE_ID",
+                    "keep one Markdown detail file per memory ID",
+                );
+            }
+        }
+    }
+    for (id, (_, value)) in canonical {
+        legacy.insert(id, value);
+    }
+    legacy.into_values().collect()
+}
+
+fn import_details(root: &Path, global: bool) -> Value {
+    assert_memory_dir(root);
+    let mut entries = read_detail_entries(root, global);
+    let existing = effective_entries_for_scope(root, global);
+    let mut ids = BTreeSet::new();
+    for entry in &mut entries {
+        let id = entry_id(entry);
+        assert_id(&id);
+        if !ids.insert(id.clone()) {
+            fail(
+                "MEMORY_DETAIL_DUPLICATE_ID",
+                "keep one Markdown detail file per memory ID",
+            );
+        }
+        if entry.get("category").and_then(Value::as_str).is_none() {
+            let inferred = existing
+                .iter()
+                .find(|existing| entry_id(existing) == id)
+                .and_then(|existing| {
+                    existing
+                        .get("category")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "knowledge".to_string());
+            entry["category"] = Value::String(inferred);
+        }
+        let entry_category = entry
+            .get("category")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                fail(
+                    "MEMORY_DETAIL_INVALID",
+                    "detail metadata category must be a string",
+                )
+            });
+        category(entry_category);
+        if let Some(previous) = existing.iter().find(|previous| entry_id(previous) == id) {
+            if previous.get("category").and_then(Value::as_str) != Some(entry_category) {
+                fail(
+                    "MEMORY_CATEGORY_CHANGE",
+                    "keep one category per memory ID or create a new ID",
+                );
+            }
+        }
+    }
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    for entry in entries {
+        let result = write_entry(root, global, entry);
+        if result.get("deduplicated") == Some(&Value::Bool(true)) {
+            skipped += 1;
+        } else {
+            imported += 1;
+        }
+    }
+    json!({
+        "status": if imported == 0 { "already_current" } else { "complete" },
+        "scope": if global { "global" } else { "project" },
+        "details_found": imported + skipped,
+        "imported_entries": imported,
+        "skipped_existing": skipped,
+        "raw_sources_retained": true,
+        "index_updated": true
+    })
+}
+
+fn write_memory_index(root: &Path, global: bool, entries: &[Value]) -> PathBuf {
+    let path = if global {
+        home_dir().join("global/index.md")
+    } else {
+        memory_dir(root).join("index.md")
+    };
+    let mut text = String::from("# Memory Index\n\n");
+    text.push_str(
+        "Index stores short titles, tags, and detail paths. Open the linked Markdown detail for content.\n\n",
+    );
+    text.push_str("## Raw sources\n\n");
+    for category in CATEGORIES {
+        text.push_str(&format!(
+            "- [{}]({}.jsonl)\n",
+            category[..1].to_uppercase() + &category[1..],
+            category
+        ));
+    }
+    text.push('\n');
+    for level in 1..=3 {
+        let label = match level {
+            1 => "reviewed critical",
+            2 => "reviewed reusable",
+            _ => "new or unreviewed",
+        };
+        text.push_str(&format!("## Level {} — {}\n\n", level, label));
+        let mut count = 0;
+        for entry in entries.iter().filter(|entry| memory_level(entry) == level) {
+            let id = entry_id(entry);
+            let title = entry.get("title").and_then(Value::as_str).unwrap_or(&id);
+            let detail = detail_relative_path(&id, level);
+            text.push_str(&format!(
+                "### {}\n- tags: {}\n- details: [{}]({})\n\n",
+                markdown_heading(title),
+                if tags(entry).is_empty() {
+                    "_none_".to_string()
+                } else {
+                    tags(entry)
+                        .into_iter()
+                        .map(|tag| format!("`{tag}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                detail,
+                detail
+            ));
+            count += 1;
+        }
+        if count == 0 {
+            text.push_str("_Empty._\n\n");
+        }
+    }
+    text.push_str("## Skill description candidates\n\n");
+    text.push_str(
+        "Base budget: 8 lines. Copy the compact lines into the project Skill `description` after manual architecture deduplication. Fill level 1 first; use level 2, then level 3, only for remaining slots.\n\n",
+    );
+    let mut candidate_count = 0;
+    for level in 1..=3 {
+        for entry in entries.iter().filter(|entry| memory_level(entry) == level) {
+            if candidate_count >= SKILL_DESCRIPTION_BASE_SLOTS {
+                break;
+            }
+            let id = entry_id(entry);
+            let title = entry.get("title").and_then(Value::as_str).unwrap_or(&id);
+            let kind = entry
+                .get("category")
+                .and_then(Value::as_str)
+                .unwrap_or("knowledge");
+            let tag_text = if tags(entry).is_empty() {
+                "no-tag".to_string()
+            } else {
+                tags(entry).join(",")
+            };
+            text.push_str(&format!(
+                "- L{}: {} ({}) [{}] -> {}\n",
+                level,
+                markdown_heading(title),
+                kind,
+                tag_text,
+                detail_relative_path(&id, level)
+            ));
+            candidate_count += 1;
+        }
+        if candidate_count >= SKILL_DESCRIPTION_BASE_SLOTS {
+            break;
+        }
+    }
+    if candidate_count == 0 {
+        text.push_str("- _No reviewed or searchable entries yet._\n");
+    }
+    text.push('\n');
+    atomic_write(&path, &text);
+    path
 }
 
 fn home_dir() -> PathBuf {
@@ -609,6 +1090,18 @@ fn effective_entries(entries: Vec<Value>) -> Vec<Value> {
                     merged["updated_at"] = updated_at.clone();
                 }
             }
+            for field in [
+                "memory_level",
+                "review_status",
+                "review_evidence",
+                "detail_path",
+            ] {
+                if merged.get(field).is_none() {
+                    if let Some(previous_value) = previous.get(field) {
+                        merged[field] = previous_value.clone();
+                    }
+                }
+            }
             effective.insert(id, merged);
         } else {
             effective.insert(id, value);
@@ -816,6 +1309,29 @@ fn init_schema(connection: &Connection) {
                 "repair the local SQLite runtime",
             )
         });
+    let columns = connection
+        .prepare("PRAGMA table_info(memory_nodes)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect::<BTreeSet<_>>();
+    if !columns.contains("review_status") {
+        connection
+            .execute(
+                "ALTER TABLE memory_nodes ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unreviewed'",
+                [],
+            )
+            .unwrap();
+    }
+    if !columns.contains("detail_path") {
+        connection
+            .execute(
+                "ALTER TABLE memory_nodes ADD COLUMN detail_path TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .unwrap();
+    }
 }
 
 fn sync_index(root: &Path, global: bool) -> Value {
@@ -843,6 +1359,7 @@ fn sync_index(root: &Path, global: bool) -> Value {
     for value in &entries {
         let id = entry_id(value);
         assert_id(&id);
+        write_detail(root, global, value);
         let cat = category(
             value
                 .get("category")
@@ -858,10 +1375,9 @@ fn sync_index(root: &Path, global: bool) -> Value {
             .and_then(Value::as_i64)
             .unwrap_or(0)
             .clamp(0, 100);
-        let layer = value
-            .get("layer")
-            .and_then(Value::as_i64)
-            .unwrap_or(if importance >= 90 { 1 } else { 3 });
+        let layer = memory_level(value);
+        let status = review_status(value);
+        let detail = detail_display_path(global, &id, layer);
         let created = value
             .get("created_at")
             .and_then(Value::as_str)
@@ -871,8 +1387,8 @@ fn sync_index(root: &Path, global: bool) -> Value {
             .and_then(Value::as_str)
             .unwrap_or(created);
         connection.execute(
-            "INSERT OR REPLACE INTO memory_nodes (id,category,title,content,tags_json,source_refs_json,importance,layer,created_at,updated_at,project_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![id, cat, title, content, serde_json::to_string(&tags).unwrap(), serde_json::to_string(&refs).unwrap(), importance, layer, created, updated, if global { "global".to_string() } else { project_id(root) }],
+            "INSERT OR REPLACE INTO memory_nodes (id,category,title,content,tags_json,source_refs_json,importance,layer,created_at,updated_at,project_id,review_status,detail_path) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![id, cat, title, content, serde_json::to_string(&tags).unwrap(), serde_json::to_string(&refs).unwrap(), importance, layer, created, updated, if global { "global".to_string() } else { project_id(root) }, status, detail],
         ).unwrap_or_else(|_| fail("MEMORY_INDEX_WRITE_FAILED", "repair memory entry fields"));
         connection
             .execute(
@@ -898,9 +1414,10 @@ fn sync_index(root: &Path, global: bool) -> Value {
                 .unwrap_or_else(|_| fail("MEMORY_INDEX_WRITE_FAILED", "repair a memory relation"));
         }
     }
+    let index_path = write_memory_index(root, global, &entries);
     connection
         .execute(
-            "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('schema_version','1')",
+            "INSERT OR REPLACE INTO index_profile (key,value) VALUES ('schema_version','2')",
             [],
         )
         .unwrap();
@@ -914,10 +1431,22 @@ fn sync_index(root: &Path, global: bool) -> Value {
             params![source_digest],
         )
         .unwrap();
-    json!({"database": path, "scope": if global { "global" } else { "project" }, "entries": entries.len(), "source_digest": source_digest, "semantic_backend": "wemm-adapter", "semantic_status": "candidate-only"})
+    json!({"database": path, "index": index_path, "scope": if global { "global" } else { "project" }, "entries": entries.len(), "source_digest": source_digest, "semantic_backend": "wemm-adapter", "semantic_status": "candidate-only"})
 }
 
-fn write_entry(root: &Path, global: bool, mut value: Value) -> Value {
+fn generated_id(value: &Value) -> String {
+    let title = value.get("title").and_then(Value::as_str).unwrap_or("");
+    let content = entry_text(value);
+    let seed = format!("{}\0{}\0{}", title, content, tags(value).join("\0"));
+    format!("memory-{}", &digest(&seed)[7..23])
+}
+
+fn write_entry_with_review(
+    root: &Path,
+    global: bool,
+    mut value: Value,
+    reviewed: Option<(i64, Vec<String>)>,
+) -> Value {
     let cat = category(
         value
             .get("category")
@@ -925,6 +1454,9 @@ fn write_entry(root: &Path, global: bool, mut value: Value) -> Value {
             .unwrap_or("knowledge"),
     )
     .to_string();
+    if value.get("id").and_then(Value::as_str).is_none() {
+        value["id"] = Value::String(generated_id(&value));
+    }
     let id = entry_id(&value);
     assert_id(&id);
     let content = entry_text(&value);
@@ -936,6 +1468,37 @@ fn write_entry(root: &Path, global: bool, mut value: Value) -> Value {
     value["content"] = Value::String(content);
     value["tags"] = Value::Array(tags(&value).into_iter().map(Value::String).collect());
     value["source_refs"] = Value::Array(refs(&value).into_iter().map(Value::String).collect());
+    let current = effective_entries_for_scope(root, global)
+        .into_iter()
+        .find(|existing| entry_id(existing) == id);
+    let is_review_write = reviewed.is_some();
+    match reviewed {
+        Some((level, evidence)) => {
+            if !matches!(level, 1 | 2) || evidence.is_empty() {
+                fail(
+                    "MEMORY_REVIEW_INVALID",
+                    "promote only to level 1 or 2 with review evidence",
+                );
+            }
+            value["memory_level"] = Value::Number(level.into());
+            value["review_status"] = Value::String("reviewed".into());
+            value["review_evidence"] =
+                Value::Array(evidence.into_iter().map(Value::String).collect());
+        }
+        None => {
+            let level = current.as_ref().map(memory_level).unwrap_or(3);
+            let status = current.as_ref().map(review_status).unwrap_or("unreviewed");
+            value["memory_level"] = Value::Number(level.into());
+            value["review_status"] = Value::String(status.into());
+            if let Some(existing) = &current {
+                if let Some(evidence) = existing.get("review_evidence") {
+                    value["review_evidence"] = evidence.clone();
+                }
+            }
+        }
+    }
+    value["layer"] = Value::Number(memory_level(&value).into());
+    value["detail_path"] = Value::String(detail_display_path(global, &id, memory_level(&value)));
     value["created_at"] = value
         .get("created_at")
         .cloned()
@@ -943,9 +1506,6 @@ fn write_entry(root: &Path, global: bool, mut value: Value) -> Value {
     value["updated_at"] = Value::String(timestamp);
     let incoming_tags = tags(&value);
     let incoming_refs = refs(&value);
-    let current = effective_entries_for_scope(root, global)
-        .into_iter()
-        .find(|existing| entry_id(existing) == id);
     if let Some(existing) = &current {
         if existing.get("category").and_then(Value::as_str) != Some(cat.as_str()) {
             fail(
@@ -954,14 +1514,15 @@ fn write_entry(root: &Path, global: bool, mut value: Value) -> Value {
             );
         }
     }
-    let duplicate = current.as_ref().is_some_and(|existing| {
-        existing.get("content").and_then(Value::as_str)
-            == value.get("content").and_then(Value::as_str)
-            && incoming_tags.iter().all(|tag| tags(existing).contains(tag))
-            && incoming_refs
-                .iter()
-                .all(|source| refs(existing).contains(source))
-    });
+    let duplicate = !is_review_write
+        && current.as_ref().is_some_and(|existing| {
+            existing.get("content").and_then(Value::as_str)
+                == value.get("content").and_then(Value::as_str)
+                && incoming_tags.iter().all(|tag| tags(existing).contains(tag))
+                && incoming_refs
+                    .iter()
+                    .all(|source| refs(existing).contains(source))
+        });
     if duplicate {
         let index = sync_index(root, global);
         return json!({"accepted": true, "deduplicated": true, "id": id, "category": cat, "index": index});
@@ -981,7 +1542,11 @@ fn write_entry(root: &Path, global: bool, mut value: Value) -> Value {
         atomic_write(&path, &(serde_json::to_string(&value).unwrap() + "\n"));
     }
     let index = sync_index(root, global);
-    json!({"accepted": true, "id": id, "category": cat, "index": index})
+    json!({"accepted": true, "write_mode": "one_shot", "id": id, "category": cat, "memory_level": memory_level(&value), "review_status": review_status(&value), "detail_path": detail_display_path(global, &id, memory_level(&value)), "index": index})
+}
+
+fn write_entry(root: &Path, global: bool, value: Value) -> Value {
+    write_entry_with_review(root, global, value, None)
 }
 
 fn open_scope(root: &Path, global: bool) -> Connection {
@@ -1011,6 +1576,9 @@ fn open_scope(root: &Path, global: bool) -> Connection {
 }
 
 fn query_scope(root: &Path, global: bool, query: &str) -> Vec<Value> {
+    if query.trim().is_empty() {
+        return all_scope(root, global);
+    }
     let connection = open_scope(root, global);
     let pattern = query
         .split_whitespace()
@@ -1019,7 +1587,7 @@ fn query_scope(root: &Path, global: bool, query: &str) -> Vec<Value> {
         .join(" ");
     let mut statement = connection
         .prepare(
-            "SELECT n.id,n.category,n.title,n.content,n.tags_json,n.importance,n.layer,n.updated_at
+            "SELECT n.id,n.category,n.title,n.content,n.tags_json,n.importance,n.layer,n.updated_at,n.review_status,n.detail_path
          FROM memory_nodes n JOIN fts_entries f ON f.id=n.id
          WHERE fts_entries MATCH ?1 ORDER BY n.importance DESC,n.updated_at DESC LIMIT 50",
         )
@@ -1031,6 +1599,9 @@ fn query_scope(root: &Path, global: bool, query: &str) -> Vec<Value> {
             "title": row.get::<_, String>(2)?, "content": row.get::<_, String>(3)?,
             "tags": serde_json::from_str::<Value>(&tags_json).unwrap_or(json!([])),
             "importance": row.get::<_, i64>(5)?, "layer": row.get::<_, i64>(6)?,
+            "memory_level": row.get::<_, i64>(6)?,
+            "review_status": row.get::<_, String>(8)?,
+            "detail_path": row.get::<_, String>(9)?,
             "updated_at": row.get::<_, String>(7)?, "scope": if global { "global" } else { "project" }
         }))
     }).unwrap_or_else(|_| fail("MEMORY_QUERY_FAILED", "use a plain-text query"));
@@ -1041,7 +1612,7 @@ fn all_scope(root: &Path, global: bool) -> Vec<Value> {
     let connection = open_scope(root, global);
     let mut statement = connection
         .prepare(
-            "SELECT id,category,title,content,tags_json,importance,layer,updated_at
+            "SELECT id,category,title,content,tags_json,importance,layer,updated_at,review_status,detail_path
              FROM memory_nodes ORDER BY importance DESC,updated_at DESC LIMIT 50",
         )
         .unwrap();
@@ -1056,6 +1627,9 @@ fn all_scope(root: &Path, global: bool) -> Vec<Value> {
                 "tags": serde_json::from_str::<Value>(&tags_json).unwrap_or(json!([])),
                 "importance": row.get::<_, i64>(5)?,
                 "layer": row.get::<_, i64>(6)?,
+                "memory_level": row.get::<_, i64>(6)?,
+                "review_status": row.get::<_, String>(8)?,
+                "detail_path": row.get::<_, String>(9)?,
                 "updated_at": row.get::<_, String>(7)?,
                 "scope": if global { "global" } else { "project" }
             }))
@@ -1087,7 +1661,22 @@ fn edge_scope(root: &Path, global: bool) -> Vec<Value> {
     rows.filter_map(Result::ok).collect()
 }
 
-fn query(root: &Path, text: &str) -> Value {
+fn filter_tags(entries: Vec<Value>, wanted: &[String]) -> Vec<Value> {
+    if wanted.is_empty() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let actual = tags(entry);
+            wanted
+                .iter()
+                .all(|wanted| actual.iter().any(|tag| tag == wanted))
+        })
+        .collect()
+}
+
+fn query(root: &Path, text: &str, wanted_tags: &[String]) -> Value {
     let mut indexed = all_scope(root, false);
     indexed.extend(all_scope(root, true));
     let exact = if valid_id(text) {
@@ -1099,8 +1688,9 @@ fn query(root: &Path, text: &str) -> Value {
     } else {
         Vec::new()
     };
-    let project = query_scope(root, false, text);
-    let global = query_scope(root, true, text);
+    let exact = filter_tags(exact, wanted_tags);
+    let project = filter_tags(query_scope(root, false, text), wanted_tags);
+    let global = filter_tags(query_scope(root, true, text), wanted_tags);
     let mut all = project.clone();
     all.extend(global.clone());
     let anchors = indexed
@@ -1167,6 +1757,7 @@ fn query(root: &Path, text: &str) -> Value {
         .collect::<Vec<_>>();
     json!({
         "query": text,
+        "tags": wanted_tags,
         "anchors": anchors,
         "exact_matches": exact,
         "node_matches": [],
@@ -1176,6 +1767,7 @@ fn query(root: &Path, text: &str) -> Value {
         "keyword_matches": all,
         "semantic_related": semantic_related,
         "semantic_backend": {"name":"WeMM-Embedding", "status":"candidate-only", "reason":"inference adapter is not configured"},
+        "open_details": "use the detail_path returned for each match",
         "next_queries": next_queries
     })
 }
@@ -1185,11 +1777,11 @@ fn get(root: &Path, id: &str) -> Value {
     let mut matches = Vec::new();
     for global in [false, true] {
         let connection = open_scope(root, global);
-        let mut statement = connection.prepare("SELECT id,category,title,content,tags_json,source_refs_json,importance,layer,created_at,updated_at FROM memory_nodes WHERE id=?1").unwrap();
+        let mut statement = connection.prepare("SELECT id,category,title,content,tags_json,source_refs_json,importance,layer,created_at,updated_at,review_status,detail_path FROM memory_nodes WHERE id=?1").unwrap();
         let value = statement.query_row(params![id], |row| {
             let tags_json: String = row.get(4)?;
             let refs_json: String = row.get(5)?;
-            Ok(json!({"id":row.get::<_,String>(0)?,"category":row.get::<_,String>(1)?,"title":row.get::<_,String>(2)?,"content":row.get::<_,String>(3)?,"tags":serde_json::from_str::<Value>(&tags_json).unwrap_or(json!([])),"source_refs":serde_json::from_str::<Value>(&refs_json).unwrap_or(json!([])),"importance":row.get::<_,i64>(6)?,"layer":row.get::<_,i64>(7)?,"created_at":row.get::<_,String>(8)?,"updated_at":row.get::<_,String>(9)?,"scope":if global {"global"} else {"project"}}))
+            Ok(json!({"id":row.get::<_,String>(0)?,"category":row.get::<_,String>(1)?,"title":row.get::<_,String>(2)?,"content":row.get::<_,String>(3)?,"tags":serde_json::from_str::<Value>(&tags_json).unwrap_or(json!([])),"source_refs":serde_json::from_str::<Value>(&refs_json).unwrap_or(json!([])),"importance":row.get::<_,i64>(6)?,"layer":row.get::<_,i64>(7)?,"memory_level":row.get::<_,i64>(7)?,"created_at":row.get::<_,String>(8)?,"updated_at":row.get::<_,String>(9)?,"review_status":row.get::<_,String>(10)?,"detail_path":row.get::<_,String>(11)?,"scope":if global {"global"} else {"project"}}))
         }).optional().unwrap();
         if let Some(value) = value {
             matches.push(value);
@@ -1237,6 +1829,28 @@ fn review(root: &Path, run_id: &str) -> Value {
                 index + 1
             )]);
         }
+        let review = note
+            .get("memory_review")
+            .or_else(|| memory.get("memory_review"));
+        if let Some(review) = review {
+            let status = review.get("status").and_then(Value::as_str);
+            let level = review.get("level").and_then(Value::as_i64);
+            let evidence = review
+                .get("evidence")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if status == Some("reviewed") && matches!(level, Some(1 | 2)) && !evidence.is_empty() {
+                value["memory_review"] =
+                    json!({"status":"reviewed","level":level,"evidence":evidence});
+            }
+        }
         updates.push(value);
     }
     if updates.is_empty() {
@@ -1244,9 +1858,43 @@ fn review(root: &Path, run_id: &str) -> Value {
     }
     let mut result = Vec::new();
     for value in updates {
-        result.push(write_entry(root, false, value));
+        let policy = value.get("memory_review").and_then(|review| {
+            let level = review.get("level").and_then(Value::as_i64)?;
+            let evidence = review
+                .get("evidence")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            Some((level, evidence))
+        });
+        result.push(write_entry_with_review(root, false, value, policy));
     }
     json!({"status":"multiple_updates","run_id":run_id,"checked":true,"updates":result,"index_updated":true})
+}
+
+fn promote(root: &Path, id: &str, level: i64, evidence: Vec<String>) -> Value {
+    assert_id(id);
+    if !matches!(level, 1 | 2) || evidence.is_empty() {
+        fail(
+            "MEMORY_REVIEW_INVALID",
+            "use level 1 or 2 with at least one review evidence reference",
+        );
+    }
+    let current = effective_entries_for_scope(root, false)
+        .into_iter()
+        .find(|entry| entry_id(entry) == id)
+        .unwrap_or_else(|| {
+            fail(
+                "MEMORY_ENTRY_NOT_FOUND",
+                "query or create the memory before promotion",
+            )
+        });
+    let mut next = current;
+    next["memory_review"] = json!({"status":"reviewed","level":level,"evidence":evidence});
+    let result = write_entry_with_review(root, false, next, Some((level, evidence)));
+    json!({"status":"reviewed","id":id,"level":level,"result":result})
 }
 
 fn compact(root: &Path) -> Value {
@@ -1423,7 +2071,7 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
     let command = values.first().cloned().unwrap_or_else(|| {
         fail(
             "MEMORY_USAGE",
-            "select entry, query, get, review, migrate, reentry, index, compact, or verify",
+            "select entry, query, get, review, promote, migrate, import, reentry, index, export, compact, or verify",
         )
     });
     values.remove(0);
@@ -1478,21 +2126,38 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
             output(&write_entry(&root, global, Value::Object(value)));
         }
         "query" => {
-            let text = values
-                .first()
-                .cloned()
-                .unwrap_or_else(|| fail("MEMORY_USAGE", "provide a query string"));
-            if text.trim().is_empty() {
-                fail("MEMORY_QUERY_EMPTY", "provide a non-empty query string");
+            let mut text_parts = Vec::new();
+            let mut wanted_tags = Vec::new();
+            let mut query_root = None;
+            let mut index = 0;
+            while index < values.len() {
+                if values[index] == "--tag" {
+                    wanted_tags.push(values.get(index + 1).cloned().unwrap_or_else(|| {
+                        fail("MEMORY_USAGE", "provide a value after --tag")
+                    }));
+                    index += 2;
+                } else if !values[index].starts_with('-') {
+                    if text_parts.is_empty() {
+                        text_parts.push(values[index].clone());
+                    } else if query_root.is_none() {
+                        query_root = Some(PathBuf::from(&values[index]));
+                    } else {
+                        fail("MEMORY_USAGE", "use query [text] [--tag <tag>] [project]");
+                    }
+                    index += 1;
+                } else {
+                    fail("MEMORY_USAGE", "use query [text] [--tag <tag>] [project]");
+                }
             }
-            let query_root = values
-                .get(1)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root.clone());
-            if values.len() > 2 {
-                fail("MEMORY_USAGE", "use project-memory query <text> [project]");
+            if (text_parts.is_empty() || text_parts[0].trim().is_empty()) && wanted_tags.is_empty() {
+                fail("MEMORY_QUERY_EMPTY", "provide text or at least one --tag");
             }
-            output(&query(&query_root, &text));
+            let text = text_parts.first().cloned().unwrap_or_default();
+            output(&query(
+                query_root.as_deref().unwrap_or(&root),
+                &text,
+                &wanted_tags,
+            ));
         }
         "get" => {
             let id = values
@@ -1527,11 +2192,51 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
                 &run_id.unwrap_or_else(|| fail("MEMORY_USAGE", "provide --run <run-id>")),
             ));
         }
+        "promote" => {
+            let mut id = None;
+            let mut level = None;
+            let mut evidence = Vec::new();
+            let mut index = 0;
+            while index < values.len() {
+                match values[index].as_str() {
+                    "--id" | "--level" | "--evidence" => {
+                        let arg = values.get(index + 1).cloned().unwrap_or_else(|| {
+                            fail("MEMORY_USAGE", "provide a value after the promote option")
+                        });
+                        match values[index].as_str() {
+                            "--id" => id = Some(arg),
+                            "--level" => level = Some(arg.parse::<i64>().unwrap_or(0)),
+                            "--evidence" => evidence.push(arg),
+                            _ => unreachable!(),
+                        }
+                        index += 2;
+                    }
+                    _ => fail("MEMORY_USAGE", "use promote --id <id> --level <1|2> --evidence <ref>"),
+                }
+            }
+            output(&promote(
+                &root,
+                &id.unwrap_or_else(|| fail("MEMORY_USAGE", "provide --id")),
+                level.unwrap_or(0),
+                evidence,
+            ));
+        }
         "migrate" => {
             if !values.is_empty() {
                 fail("MEMORY_USAGE", "use project-memory migrate [project]");
             }
             output(&migration(&root));
+        }
+        "import" => {
+            let mut global = false;
+            for value in &values {
+                if value == "--global" {
+                    global = true;
+                } else {
+                    fail("MEMORY_USAGE", "use project-memory import [project] [--global]");
+                }
+            }
+            output(&import_details(&root, global));
         }
         "reentry" | "resume" => {
             let mut run_id = None;
@@ -1553,9 +2258,9 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
                 &run_id.unwrap_or_else(|| fail("MEMORY_USAGE", "provide --run <run-id>")),
             ));
         }
-        "index" => {
+        "index" | "export" => {
             if !values.is_empty() {
-                fail("MEMORY_USAGE", "use project-memory index [project]");
+                fail("MEMORY_USAGE", "use project-memory index|export [project]");
             }
             output(&json!({"project":sync_index(&root, false),"global":sync_index(&root, true)}));
         }
@@ -1572,11 +2277,11 @@ pub fn run(args: &mut impl Iterator<Item = String>) {
             output(&verify(&root));
         }
         "help" | "--help" | "-h" => output(
-            &json!({"commands":["entry","query","get","review","migrate","reentry","index","compact","verify"],"query_order":["L1 anchors","exact ID","node/function/resource","category/tag","declared relations","lesson references","FTS5","WeMM semantic candidates","importance","updated_at"]}),
+            &json!({"commands":["entry","query","get","review","promote","migrate","import","reentry","index","export","compact","verify"],"query_order":["level 1 titles","exact ID","node/function/resource","category/tag","declared relations/graph","lesson references","FTS5/tag","RAG candidates","importance","updated_at"],"query_hint":"project-memory query --tag <tag> [text] [project]; open detail_path directly; use export to render legacy/raw entries as Markdown; use import after intentionally editing an exported detail"}),
         ),
         _ => fail(
             "MEMORY_COMMAND_UNKNOWN",
-            "select entry, query, get, review, migrate, reentry, index, compact, or verify",
+            "select entry, query, get, review, promote, migrate, import, reentry, index, export, compact, or verify",
         ),
     }
 }

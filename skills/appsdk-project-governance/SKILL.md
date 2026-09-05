@@ -93,6 +93,18 @@ Its ownership and tested-integration protections remain mandatory.
   and handoffs may record concise decisions and references to existing evidence.
   Memory migration and re-entry are explicit independent operations: use
   `project-memory migrate` for a source-preserving, resumable schema move and
+  `project-memory index|export` to render old and current raw records as a
+  Markdown index/details directory; after an intentional detail edit, use
+  `project-memory import` to append the change back to raw history. Markdown
+  is an interchange view, not a second truth store.
+  Normal memory writes use one `project-memory entry` invocation, which writes
+  the raw event and regenerates detail/index/projection together; do not hand
+  write one of those derived files as a separate step.
+  `memory/index.md` contains fixed-size Skill description candidates. Their L2/L3
+  lines already include the kind, tags, and relative `L2/` or `L3/` detail path.
+  During initialization or an intentional refresh, manually carry deduplicated
+  L1 lines into the project Skill description, then fill unused slots with L2
+  and L3 lines. Memory writes never rewrite Skill descriptions automatically.
   `project-memory reentry [project] --run <run-id>` to resume the same run after
   interruption. A missing or rebuilding memory index is not a governance
   failure, and memory state must not be reconstructed from Guide, debug,

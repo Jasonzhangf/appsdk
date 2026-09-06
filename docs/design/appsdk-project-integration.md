@@ -160,6 +160,13 @@ Bundle and writes the lock and project version. It must never overwrite custom
 project maps or hand-edit ReviewRecord hashes. Missing, mixed, drifted, or
 ambiguous migration truth fails closed.
 
+For a later bundle refresh, a historical custom map's canonical target may
+differ from the current SDK manifest only when the lock witnesses the original
+bundle. The historical record and snapshot remain immutable, and each live
+custom map must still match its recorded target digest. A repeated pin uses the
+same previous-bundle witness; missing witnesses, malformed digests, altered
+snapshots and changed live maps fail explicitly.
+
 ## Runtime boundary
 
 Runtime may consume only the compiled manifest and verified Active artifact. Runtime must not scan `.appsdk-control/`, Playground, Protected source, or arbitrary instruction files to reconstruct capability.

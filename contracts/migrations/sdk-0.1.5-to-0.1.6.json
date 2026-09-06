@@ -36,7 +36,7 @@
       "source": "contracts/migrations/0.1.5/governance-maps/verification-map.json",
       "source_digest": "sha256:8dcc1e9444f62f7e407fa1e37a6c8d004de55587950f8e600dc5f3c711981230",
       "target": "contracts/maps/verification-map.json",
-      "target_digest": "sha256:21ae8fcd3aa3d017321e5bb5ee3a9606fdf561f9d69348802f1bcd1a12bef3a7"
+      "target_digest": "sha256:640136ffee5447cf7fa67451e11552e1af5485d3e8435983637ad8e0587d5f72"
     }
   ]
 }

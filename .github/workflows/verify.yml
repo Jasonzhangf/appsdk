@@ -14,7 +14,35 @@ jobs:
       - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
-      - run: cargo test --manifest-path rust/Cargo.toml
+      - name: Prepare cleanup diagnostics
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y strace
+          mkdir -p "$RUNNER_TEMP/appsdk-cleanup-trace"
+          {
+            uname -a
+            cat /etc/os-release
+            git --version
+            rustc --version
+            cargo --version
+            strace --version
+          } > "$RUNNER_TEMP/appsdk-cleanup-trace/versions.txt"
+      - name: Test with process and file diagnostics
+        shell: bash
+        env:
+          GIT_TRACE2_EVENT: ${{ runner.temp }}/appsdk-cleanup-trace/git-trace.jsonl
+        run: |
+          strace -ff -ttt -e trace=process,file -o "$RUNNER_TEMP/appsdk-cleanup-trace/syscall" \
+            cargo test --manifest-path rust/Cargo.toml
+      - name: Retain cleanup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appsdk-cleanup-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/appsdk-cleanup-trace/
+          retention-days: 3
+          if-no-files-found: error
       - run: cargo build --release --manifest-path rust/Cargo.toml
       - run: rust/target/release/appsdk verify-sdk-source-registry .
       - run: |

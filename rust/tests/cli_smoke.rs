@@ -32,6 +32,19 @@ fn init_git(root: &PathBuf) {
         .status()
         .unwrap()
         .success());
+    // These repositories are deleted by the test. Detached maintenance can
+    // recreate .git/objects after teardown has already removed it.
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "config",
+            "maintenance.auto",
+            "false",
+        ])
+        .status()
+        .unwrap()
+        .success());
     assert!(Command::new("git")
         .args([
             "-C",

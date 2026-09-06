@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "gates":[
+    {"gate_id":"module_dependency_freshness","command":"cargo test --manifest-path rust/Cargo.toml --test cli_smoke development_dependencies_require_current_artifacts_and_freeze_order -- --exact","required_for":["compile","review_admission","freeze"]},
     {"gate_id":"contract_valid","command":"appsdk verify <project>","required_for":["compile","promotion","freeze"]},
     {"gate_id":"sdk_source_registry","command":"appsdk verify-sdk-source-registry <sdk-repo>","required_for":["build","release"]},
     {"gate_id":"sdk_migration","command":"cargo test --test cli_smoke pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary","required_for":["sdk_upgrade","release"]},

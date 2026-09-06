@@ -1795,11 +1795,19 @@ fn module_dependency_hashes(
                     module_id, dependency_id
                 ))
             });
-        if dependency_module.get("stage").and_then(Value::as_str) != Some("frozen") {
+        let dependency_frozen = dependency_module.get("stage").and_then(Value::as_str) == Some("frozen");
+        if module.get("stage").and_then(Value::as_str) == Some("frozen") && !dependency_frozen {
             fail(format!(
                 "MODULE_DEPENDENCY_NOT_FROZEN:{}:{}",
                 module_id, dependency_id
             ));
+        }
+        // Dependency-first declaration is also the recursion bound for freshness
+        // checks invoked directly by review admission, before project verification.
+        let position = |id: &str| modules.iter().position(|entry|
+            entry.get("module_id").and_then(Value::as_str) == Some(id));
+        if position(dependency_id) >= position(module_id) {
+            fail(format!("MODULE_DEPENDENCY_ORDER:{}:{}", module_id, dependency_id));
         }
         let artifact_file = module_artifact_file(root, project, dependency_id);
         if !artifact_file.is_file() {
@@ -1813,7 +1821,14 @@ fn module_dependency_hashes(
                 .unwrap_or_else(|_| fail("MODULE_ARTIFACT_READ_FAILED")),
         )
         .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+        module_artifact_matches_project(dependency_module, &artifact);
         let hash = record_str(&artifact, "/artifact_hash", "module-artifact");
+        if !dependency_frozen {
+            let current = build_module_artifact(root, project, dependency_module, dependency_id);
+            if record_str(&current, "/artifact_hash", "dependency-artifact") != hash {
+                fail(format!("MODULE_DEPENDENCY_ARTIFACT_STALE:{}:{}", module_id, dependency_id));
+            }
+        }
         entries.push(serde_json::json!({"module_id": dependency_id, "artifact_hash": hash}));
     }
     entries
@@ -6024,6 +6039,8 @@ fn freeze_module(root: &Path, module_id: &str) {
     }
     let mut candidate = project.clone();
     candidate["modules"][index]["stage"] = Value::String("frozen".into());
+    // Development artifacts are admissible inputs, never frozen publications.
+    module_dependency_hashes(root, &candidate, &candidate["modules"][index], module_id);
     assert_compile_preconditions(root, &project, Some(module_id));
     let promoted_artifact = read_compiled_artifact(root, &project);
     assert_artifact_matches(&project, &promoted_artifact);

@@ -4,6 +4,21 @@ AppSDK is an external governance implementation. A new project consumes its CLI/
 
 ## Repository boundary
 
+### Module dependency artifacts
+
+Declare modules in dependency-first order. During development, `compile-module`
+requires each dependency's compiled artifact to exist and match its current
+module contract, source, output bytes and transitive dependency hashes. Missing
+or stale dependency artifacts fail explicitly; compile the dependency first, or
+use the ordered project `compile` command. Admission uses the same freshness
+owner without building or repairing artifacts. Self-dependencies and reverse
+dependency edges fail before recursive hashing.
+
+Development admission is not publication. `freeze` requires every dependency
+to be frozen before it reads or creates publication records. Frozen dependencies
+retain the existing immutable artifact verification; development compilation
+does not manufacture a FreezeRecord or alter Active/Protected.
+
 ```text
 external AppSDK installation
   -> versioned Bundle: CLI / compiler / contracts / docs / rules / skills

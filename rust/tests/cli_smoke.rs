@@ -2754,6 +2754,72 @@ fn verify_allows_pending_clarification_but_compile_rejects_it() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[test]
+fn development_dependencies_require_current_artifacts_and_freeze_order() {
+    let root = temp_root("development-dependencies");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::from("confirmed");
+    goal["confirmed_by"] = Value::from("test");
+    goal["confirmed_at"] = Value::from("2026-01-01T00:00:00Z");
+    fs::write(&goal_path, serde_json::to_vec_pretty(&goal).unwrap()).unwrap();
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    let mut edge = project["modules"][0].clone();
+    edge["module_id"] = Value::from("app-edge");
+    edge["source_owner"] = Value::from("app-edge");
+    edge["owned_paths"] = serde_json::json!(["playground/edge/**"]);
+    edge["active_artifact"] = Value::from("active/lib/app-edge/**");
+    edge["dependency_modules"] = serde_json::json!(["app-core"]);
+    edge["build"]["args"] = serde_json::json!(["-c", "mkdir -p generated/modules/app-edge/lib && printf edge > generated/modules/app-edge/lib/edge.txt"]);
+    edge["artifact_paths"] = serde_json::json!(["edge.txt"]);
+    project["modules"].as_array_mut().unwrap().push(edge);
+    fs::create_dir_all(root.join("playground/edge")).unwrap();
+    fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+    pin_test_lock(root_text);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"]).status.success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"]).status.success());
+    project = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    let compiled = run(&["compile", root_text]);
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    let core_path = root.join("generated/modules/app-core/module.compiled.json");
+    let edge_path = root.join("generated/modules/app-edge/module.compiled.json");
+    let core: Value = serde_json::from_slice(&fs::read(&core_path).unwrap()).unwrap();
+    let edge: Value = serde_json::from_slice(&fs::read(&edge_path).unwrap()).unwrap();
+    assert_eq!(edge["dependency_hashes"][0]["artifact_hash"], core["artifact_hash"]);
+    fs::write(root.join("playground/experiments/changed.txt"), "changed").unwrap();
+    let stale = run(&["compile-module", root_text, "--module", "app-edge"]);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("MODULE_DEPENDENCY_ARTIFACT_STALE"));
+    assert!(run(&["compile", root_text]).status.success());
+    let current: Value = serde_json::from_slice(&fs::read(&core_path).unwrap()).unwrap();
+    let library = root.join("generated/modules/app-core/lib")
+        .join(current["artifacts"][0]["path"].as_str().unwrap());
+    fs::write(library, "tampered dependency bytes").unwrap();
+    let tampered = run(&["compile-module", root_text, "--module", "app-edge"]);
+    assert!(!tampered.status.success());
+    assert!(String::from_utf8_lossy(&tampered.stderr).contains("MODULE_DEPENDENCY_ARTIFACT_STALE"));
+    assert!(run(&["compile", root_text]).status.success());
+    project["modules"][0]["dependency_modules"] = serde_json::json!(["app-core"]);
+    fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+    let cycle = run(&["compile-module", root_text, "--module", "app-core"]);
+    assert!(!cycle.status.success());
+    assert!(String::from_utf8_lossy(&cycle.stderr).contains("MODULE_DEPENDENCY_ORDER"));
+    project["modules"][0]["dependency_modules"] = serde_json::json!([]);
+    // Publication must not turn a development dependency into an immutable one.
+    project["modules"][1]["stage"] = Value::from("architecture_stable");
+    fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+    init_git(&root);
+    let freeze = run(&["freeze", root_text, "--module", "app-edge"]);
+    assert!(!freeze.status.success());
+    assert!(String::from_utf8_lossy(&freeze.stderr).contains("MODULE_DEPENDENCY_NOT_FROZEN"),
+        "{}", String::from_utf8_lossy(&freeze.stderr));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
     let root = temp_root("positive");

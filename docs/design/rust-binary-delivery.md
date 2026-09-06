@@ -32,17 +32,27 @@ freeze
 publish-active
 ```
 
-新项目生成后，用发布版 binary 计算并写入真实锁：
+新项目由 `new`/`init` 直接写入当前 0.1.6 Bundle lock，无需执行
+`pin-lock`：
 
 ```bash
-appsdk pin-lock ./my-app --binary /path/to/appsdk
+appsdk init ./my-app
 appsdk verify ./my-app
 ```
 
-`pin-lock` 将 binary digest 写入 `.appsdk/sdk.lock` 的 `digest` 和
-`compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；本地会生成忽略且不可作为执行入口的 `.appsdk/sdk.bin` 见证副本。后续普通 `verify`、`compile`、promotion、freeze 不把当前运行 binary、固定 SHA、compiler digest 或 Bundle identity 当作开发准入；它们只校验项目治理合同和生命周期真相。干净 checkout 不依赖本地见证副本。
+`.appsdk/sdk.lock` 绑定项目 SDK 版本、contract schema、Bundle digest、
+manifest digest 和 Bundle resource set。它不绑定当前运行 binary；
+`digest`、`compiler_digest` 和 `binary_ref` 仅可作为旧迁移留下的历史见证，
+不参与 `verify`、`compile`、promotion、rehydrate 或 freeze 准入。干净
+checkout 不依赖本地 `.appsdk/sdk.bin`。
 
-`pin-lock` 也是真实 SDK 版本迁移入口。0.1.6 只接受项目 0.1.5 或已是 0.1.6，并要求执行中的 binary 与 `--binary` 字节一致。0.1.5 → 0.1.6 会先校验并快照旧 canonical maps 与 frozen ReviewRecord 哈希，再安装新 Bundle/maps，最后让 lock、project version 同步前进；旧 review 只能经精确 migration record 解析旧 map snapshot。该事务也可恢复此前已写入 0.1.6 version/lock、但尚未迁移 maps 的中断状态。禁止用旧 CLI 给新 binary 写锁，禁止手改版本、review hash 或 migration snapshot。
+`pin-lock` 仅保留为真实 SDK 版本迁移入口。0.1.6 接受项目 0.1.5 或可恢复
+的未完成 0.1.6 migration，并要求执行中的 binary 与 `--binary` 字节一致。
+0.1.5 → 0.1.6 会先校验并快照旧 canonical maps 与 frozen ReviewRecord
+哈希，再安装新 Bundle/maps，最后让 lock、project version 同步前进；旧
+review 只能经精确 migration record 解析旧 map snapshot。禁止对已完成
+0.1.6 初始化的项目重复使用 `pin-lock` 作为日常准入，也禁止手改版本、
+review hash 或 migration snapshot。
 
 `compile`、promotion、module promotion、freeze、record graph 和 Active publish 均由 Rust 执行。
 

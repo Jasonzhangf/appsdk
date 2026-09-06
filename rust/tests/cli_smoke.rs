@@ -175,6 +175,101 @@ fn reset_governance_discards_only_control_plane_and_is_idempotent() {
 }
 
 #[test]
+fn reset_governance_init_and_compile_do_not_require_pin_lock() {
+    let root = temp_root("reset-governance-unbound-lock");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    assert!(run(&["reset-governance", root_text, "--discard-legacy"])
+        .status
+        .success());
+    assert!(run(&["init", root_text]).status.success());
+
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    for stage in ["source_implemented", "contract_bound"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    let compiled = run(&["compile", root_text]);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(root.join("generated/project.compiled.json").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_upgrades_legacy_placeholder_lock_without_pin_lock() {
+    let root = temp_root("init-upgrades-placeholder-lock");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/sdk.lock"),
+        r#"{"sdk":"appsdk","version":"0.1.6","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+"#,
+    )
+    .unwrap();
+
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let lock: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
+    assert!(lock.get("digest").is_none());
+    assert!(lock.get("compiler_digest").is_none());
+    assert!(lock.get("binary_ref").is_none());
+    assert_eq!(
+        lock["bundle_resources"],
+        serde_json::from_str::<Value>(include_str!("../../contracts/sdk-bundle.manifest.json"))
+            .unwrap()["resources"]
+    );
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_rejects_malformed_or_wrong_identity_sdk_lock() {
+    for (name, lock) in [
+        ("malformed-sdk-lock", "{not-json}\n"),
+        (
+            "wrong-identity-sdk-lock",
+            r#"{"sdk":"other","version":"0.1.6","contract_schema":1}
+"#,
+        ),
+    ] {
+        let root = temp_root(name);
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        fs::write(root.join(".appsdk/sdk.lock"), lock).unwrap();
+        let initialized = run(&["init", root_text]);
+        assert!(!initialized.status.success());
+        assert!(
+            String::from_utf8_lossy(&initialized.stderr).contains("INVALID_SDK_LOCK"),
+            "stderr={}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap(),
+            lock
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn reset_governance_refuses_main_worktree() {
     let root = temp_root("reset-main-worktree");
     let root_text = root.to_str().unwrap();
@@ -1546,7 +1641,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
 }
 
 #[test]
-fn pinned_global_binary_verifies_without_local_sdk_witness() {
+fn migrated_project_verifies_without_local_sdk_witness_or_binary_digest_match() {
     let root = temp_root("global-sdk-no-local-witness");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
@@ -1593,9 +1688,12 @@ fn pinned_global_binary_verifies_without_local_sdk_witness() {
         serde_json::to_string_pretty(&lock).unwrap() + "\n",
     )
     .unwrap();
-    let rejected = run(&["verify", root_text]);
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SDK_BINARY_DIGEST_MISMATCH"));
+    let verified_after_digest_change = run(&["verify", root_text]);
+    assert!(
+        verified_after_digest_change.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified_after_digest_change.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2411,15 +2509,13 @@ fn verify_allows_pending_clarification_but_compile_rejects_it() {
 }
 
 #[test]
-fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
+fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
     let root = temp_root("positive");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
     let goal_file = root.join(".appsdk/goal.json");
     fs::write(&goal_file, r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#).unwrap();
-    fs::write(root.join(".appsdk/sdk.lock"), format!(r#"{{"sdk":"appsdk","version":"0.1.6","digest":"sha256:{}","compiler_digest":"sha256:{}","contract_schema":1}}
-"#, "a".repeat(64), "b".repeat(64))).unwrap();
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
@@ -2432,7 +2528,6 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
     "modules": [{"module_id":"app-core","stage":"source_implemented","owned_paths":["playground/experiments/**"],"source_owner":"app-core","active_artifact":"active/lib/app-core/**","generated_outputs":["generated/**"],"contract_paths":["contracts/records/**","contracts/transitions/**"],"dependency_modules":[],"build":{"program":"sh","args":["-c","mkdir -p generated/modules/app-core/lib && printf 'app-core placeholder\\n' > generated/modules/app-core/lib/app-core.placeholder"],"working_directory":"."},"artifact_paths":["app-core.placeholder"],"regression":{"required_before_freeze":true,"suite_id":"app-core-regression","command":{"program":"cargo","args":["test"],"working_directory":"."},"input_paths":["playground/experiments/**"],"minimum_test_count":1,"allow_skipped":false,"ordinary_mode_after_freeze":"disabled","reenable_on":["source_change","contract_change","public_api_change","artifact_change","dependency_change"]}}]
 }
 "#).unwrap();
-    pin_test_lock(root_text);
     let source_promote = run(&["promote", root_text, "--to", "source_implemented"]);
     assert!(
         source_promote.status.success(),
@@ -2491,6 +2586,82 @@ fn confirmed_goal_and_pinned_lock_allow_compile_and_adjacent_promote() {
         String::from_utf8_lossy(&module.stderr)
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn initialized_lock_is_not_bound_to_the_running_binary() {
+    let root = temp_root("unbound-sdk-lock");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/goal.json"),
+        r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#,
+    )
+    .unwrap();
+    for stage in ["source_implemented", "contract_bound"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["digest"] = Value::String(format!("sha256:{}", "a".repeat(64)));
+    lock["compiler_digest"] = Value::String(format!("sha256:{}", "b".repeat(64)));
+    lock["binary_ref"] = Value::String("historical-binary-witness".into());
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let compile = run(&["compile", root_text]);
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn initialized_lock_rejects_wrong_version_schema_and_bundle_binding() {
+    for (name, mutate, expected) in [
+        ("wrong-version", "version", "INVALID_SDK_LOCK"),
+        ("wrong-schema", "contract_schema", "INVALID_SDK_LOCK"),
+        (
+            "wrong-bundle",
+            "bundle_digest",
+            "SDK_BUNDLE_DIGEST_MISMATCH",
+        ),
+    ] {
+        let root = temp_root(name);
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let lock_path = root.join(".appsdk/sdk.lock");
+        let mut lock: Value =
+            serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+        match mutate {
+            "version" => lock["version"] = Value::String("0.1.5".into()),
+            "contract_schema" => lock["contract_schema"] = Value::from(2),
+            "bundle_digest" => {
+                lock["bundle_digest"] = Value::String(format!("sha256:{}", "0".repeat(64)))
+            }
+            _ => unreachable!(),
+        }
+        fs::write(
+            &lock_path,
+            serde_json::to_string_pretty(&lock).unwrap() + "\n",
+        )
+        .unwrap();
+        let verified = run(&["verify", root_text]);
+        assert!(!verified.status.success());
+        assert!(
+            String::from_utf8_lossy(&verified.stderr).contains(expected),
+            "stderr={}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

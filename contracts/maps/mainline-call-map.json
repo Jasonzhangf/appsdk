@@ -3,6 +3,7 @@
   "lifecycle_id": "appsdk-governance",
   "chains": [
     {"chain_id":"sdk-pin-migrate-v1","scenario_condition":"project_sdk_0.1.5_or_incomplete_0.1.6","entry_symbol":"pin_lock","terminal_symbol":"write_project"},
+    {"chain_id":"sdk-lock-init-v1","scenario_condition":"new_reset_or_existing_project_sdk_0.1.6_initialization","entry_symbol":"init_project","terminal_symbol":"write_current_sdk_lock"},
     {"chain_id":"single-worker-v1","scenario_condition":"parallel_pair_disabled","entry_symbol":"assert_fix_merge_gate","terminal_symbol":"assert_single_merge_gate"},
     {"chain_id":"parallel-worktree-v1","scenario_condition":"parallel_pair_enabled","entry_symbol":"assert_fix_merge_gate","terminal_symbol":"assert_parallel_merge_gate"},
     {"chain_id":"frozen-rehydrate-v1","scenario_condition":"frozen_projection_missing_without_previous_active","entry_symbol":"rehydrate_frozen","terminal_symbol":"finish_rehydrate_transaction"},
@@ -19,6 +20,8 @@
     ,{"chain_id":"project-memory-promotion-v1","scenario_condition":"evidence_backed_memory_review","entry_symbol":"promote","terminal_symbol":"sync_index"}
   ],
   "edges": [
+    {"chain_id":"sdk-lock-init-v1","from":"project_contract_initialized","to":"sdk_resources_installed","owner":"appsdk::delivery","caller":"init_project","callee":"install_bundle_resources","path":"rust/src/main.rs","input_resource_id":"project_contract","output_resource_id":"installed_sdk_resources","error_resource_id":"lifecycle_error"},
+    {"chain_id":"sdk-lock-init-v1","from":"sdk_resources_installed","to":"sdk_lock_bound","owner":"appsdk::delivery","caller":"init_project","callee":"write_current_sdk_lock","path":"rust/src/main.rs","input_resource_id":"installed_sdk_resources","output_resource_id":"sdk_lock","error_resource_id":"lifecycle_error"},
     {"chain_id":"sdk-pin-migrate-v1","from":"project_sdk_version_read","to":"bundle_identity_verified","owner":"appsdk::delivery","caller":"pin_lock","callee":"digest_bytes","path":"rust/src/main.rs","input_resource_id":"sdk_bundle","output_resource_id":"sdk_bundle","error_resource_id":"lifecycle_error"},
     {"chain_id":"sdk-pin-migrate-v1","from":"bundle_identity_verified","to":"historical_maps_snapshotted","owner":"appsdk::delivery","caller":"pin_lock","callee":"migrate_governance_maps","path":"rust/src/main.rs","input_resource_id":"canonical_governance_maps","output_resource_id":"sdk_migration_record","error_resource_id":"lifecycle_error"},
     {"chain_id":"sdk-pin-migrate-v1","from":"historical_maps_snapshotted","to":"maps_reconciled","owner":"appsdk::delivery","caller":"migrate_governance_maps","callee":"install_current_governance_maps","path":"rust/src/main.rs","input_resource_id":"sdk_migration_record","output_resource_id":"canonical_governance_maps","error_resource_id":"lifecycle_error"},

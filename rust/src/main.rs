@@ -1240,7 +1240,7 @@ fn assert_goal_contract(root: &Path, require_confirmed: bool) {
     }
 }
 
-fn assert_sdk_lock(root: &Path, project: &Value, require_pinned: bool) {
+fn assert_sdk_lock(root: &Path, project: &Value) {
     let file = root.join(".appsdk").join("sdk.lock");
     if fs::symlink_metadata(&file)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -1260,32 +1260,21 @@ fn assert_sdk_lock(root: &Path, project: &Value, require_pinned: bool) {
         fail("INVALID_SDK_LOCK");
     }
     for key in ["digest", "compiler_digest"] {
-        let digest = lock.get(key).and_then(Value::as_str).unwrap_or("");
-        let placeholder = digest == "sha256:replace-with-compiled-sdk-digest"
-            || digest == "sha256:replace-with-compiler-digest";
-        if require_pinned && placeholder {
-            fail("SDK_LOCK_NOT_PINNED");
-        }
-        if (!placeholder && digest.len() != 71)
-            || !digest.starts_with("sha256:")
-            || (!placeholder && !digest[7..].chars().all(|c| c.is_ascii_hexdigit()))
-        {
-            fail("INVALID_SDK_LOCK_DIGEST");
+        if let Some(digest) = lock.get(key) {
+            let digest = digest.as_str().unwrap_or("");
+            if digest.len() != 71
+                || !digest.starts_with("sha256:")
+                || !digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+            {
+                fail("INVALID_SDK_LOCK_DIGEST");
+            }
         }
     }
-    for key in ["bundle_digest", "bundle_manifest_digest"] {
-        let digest = lock.get(key).and_then(Value::as_str).unwrap_or("");
-        let placeholder = digest == "sha256:replace-with-sdk-bundle-digest"
-            || digest == "sha256:replace-with-bundle-manifest-digest";
-        if require_pinned && placeholder {
-            fail("SDK_LOCK_NOT_PINNED");
-        }
-        if (!placeholder && digest.len() != 71)
-            || !digest.starts_with("sha256:")
-            || (!placeholder && !digest[7..].chars().all(|c| c.is_ascii_hexdigit()))
-        {
-            fail("INVALID_SDK_BUNDLE_DIGEST");
-        }
+    if lock.get("bundle_digest").and_then(Value::as_str) != Some(sdk_bundle_digest().as_str())
+        || lock.get("bundle_manifest_digest").and_then(Value::as_str)
+            != Some(digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()).as_str())
+    {
+        fail("SDK_BUNDLE_DIGEST_MISMATCH");
     }
     if let Some(previous) = lock.get("previous_bundle_digest") {
         let digest = previous.as_str().unwrap_or("");
@@ -1296,31 +1285,11 @@ fn assert_sdk_lock(root: &Path, project: &Value, require_pinned: bool) {
             fail("INVALID_SDK_BUNDLE_DIGEST");
         }
     }
-    if require_pinned {
-        if lock.get("binary_ref").and_then(Value::as_str) != Some("project-sdk") {
-            fail("INVALID_SDK_LOCK_BINARY_REF");
-        }
-        let running = std::env::current_exe().unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
-        let actual =
-            digest_bytes(&fs::read(running).unwrap_or_else(|_| fail("SDK_BINARY_MISSING")));
-        if lock.get("digest").and_then(Value::as_str) != Some(actual.as_str())
-            || lock.get("compiler_digest").and_then(Value::as_str) != Some(actual.as_str())
-        {
-            fail("SDK_BINARY_DIGEST_MISMATCH");
-        }
-        if lock.get("bundle_digest").and_then(Value::as_str) != Some(sdk_bundle_digest().as_str())
-            || lock.get("bundle_manifest_digest").and_then(Value::as_str)
-                != Some(digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()).as_str())
-        {
-            fail("SDK_BUNDLE_DIGEST_MISMATCH");
-        }
-    }
     let manifest_resources = sdk_bundle_manifest_resources();
     match lock.get("bundle_resources") {
         Some(declared) if declared == &manifest_resources => {}
         Some(_) => fail("SDK_LOCK_BUNDLE_RESOURCES_MISMATCH"),
-        None if require_pinned => fail("SDK_LOCK_BUNDLE_RESOURCES_MISSING"),
-        None => {}
+        None => fail("SDK_LOCK_BUNDLE_RESOURCES_MISSING"),
     }
 }
 
@@ -2220,7 +2189,7 @@ fn assert_artifact_matches(project: &Value, artifact: &Value) {
 fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: Option<&str>) {
     assert_project_contract(root, project);
     assert_goal_confirmed(root);
-    assert_sdk_lock(root, project, true);
+    assert_sdk_lock(root, project);
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
     if !matches!(
         stage,
@@ -3301,7 +3270,7 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_project_contract(root, &project);
     assert_declared_contracts(root, &project, true);
     assert_goal_confirmed(root);
-    assert_sdk_lock(root, &project, true);
+    assert_sdk_lock(root, &project);
     let module = project
         .get("modules")
         .and_then(Value::as_array)
@@ -6217,15 +6186,7 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
     let project = read_project(root);
     assert_project_contract(root, &project);
     assert_declared_contracts(root, &project, true);
-    let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
-    assert_sdk_lock(
-        root,
-        &project,
-        matches!(
-            stage,
-            "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
-        ),
-    );
+    assert_sdk_lock(root, &project);
     let modules = project
         .get("modules")
         .and_then(Value::as_array)
@@ -6782,14 +6743,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     ) {
         fail(format!("UNKNOWN_PROJECT_STAGE:{}", stage));
     }
-    assert_sdk_lock(
-        root,
-        &project,
-        matches!(
-            stage,
-            "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
-        ),
-    );
+    assert_sdk_lock(root, &project);
     assert_sdk_resources(
         root,
         matches!(
@@ -7077,6 +7031,91 @@ fn write_project_agent_contract(root: &Path) {
     write_if_missing(root, "AGENTS.md", PROJECT_AGENTS_TEMPLATE);
 }
 
+fn write_current_sdk_lock(root: &Path) {
+    let project = read_project(root);
+    if project.pointer("/sdk/version").and_then(Value::as_str) != Some("0.1.6") {
+        return;
+    }
+    let target = root.join(".appsdk/sdk.lock");
+    if fs::symlink_metadata(&target)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:sdk_lock");
+    }
+    let existing = if target.exists() {
+        let text = fs::read_to_string(&target).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+        let value =
+            serde_json::from_str::<Value>(&text).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+        if value.get("sdk").and_then(Value::as_str) != Some("appsdk")
+            || value.get("version").and_then(Value::as_str) != Some("0.1.6")
+            || value.get("contract_schema") != project.get("schema_version")
+        {
+            fail("INVALID_SDK_LOCK");
+        }
+        Some(value)
+    } else {
+        None
+    };
+    let current_bundle_digest = sdk_bundle_digest();
+    let mut lock = serde_json::Map::new();
+    lock.insert("sdk".into(), Value::String("appsdk".into()));
+    lock.insert("version".into(), Value::String("0.1.6".into()));
+    lock.insert(
+        "bundle_digest".into(),
+        Value::String(current_bundle_digest.clone()),
+    );
+    lock.insert(
+        "bundle_manifest_digest".into(),
+        Value::String(digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes())),
+    );
+    lock.insert("bundle_resources".into(), sdk_bundle_manifest_resources());
+    lock.insert(
+        "contract_schema".into(),
+        project
+            .get("schema_version")
+            .cloned()
+            .unwrap_or_else(|| fail("UNSUPPORTED_PROJECT_SCHEMA")),
+    );
+    if let Some(existing) = existing.as_ref() {
+        for key in ["digest", "compiler_digest"] {
+            if let Some(value) = existing.get(key).and_then(Value::as_str) {
+                if value.len() == 71
+                    && value.starts_with("sha256:")
+                    && value[7..].chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    lock.insert(key.into(), Value::String(value.into()));
+                }
+            }
+        }
+        if let Some(value) = existing.get("binary_ref").and_then(Value::as_str) {
+            lock.insert("binary_ref".into(), Value::String(value.into()));
+        }
+        let existing_bundle = existing.get("bundle_digest").and_then(Value::as_str);
+        let previous_bundle = if existing_bundle.is_some_and(|value| {
+            value.len() == 71
+                && value.starts_with("sha256:")
+                && value[7..].chars().all(|c| c.is_ascii_hexdigit())
+                && value != current_bundle_digest
+        }) {
+            existing_bundle
+        } else {
+            existing
+                .get("previous_bundle_digest")
+                .and_then(Value::as_str)
+        };
+        if let Some(value) = previous_bundle {
+            if value.len() == 71
+                && value.starts_with("sha256:")
+                && value[7..].chars().all(|c| c.is_ascii_hexdigit())
+            {
+                lock.insert("previous_bundle_digest".into(), Value::String(value.into()));
+            }
+        }
+    }
+    atomic_write_json(&target, &Value::Object(lock), "SDK_LOCK_WRITE_FAILED");
+}
+
 fn install_standard_template_reference(root: &Path) {
     let target = root.join(".appsdk/templates/minimal/AGENTS.md");
     assert_no_symlink_components(root, &target, "guidance_standard_template");
@@ -7140,12 +7179,6 @@ fn write_project_scaffold(root: &Path) {
         root,
         ".appsdk/goal.json",
         r#"{"goal_id":"goal-change-me","raw_request":"Describe the intended change before implementation.","understood_objective":"The objective will be restated and confirmed before admission.","acceptance_criteria":["The user-confirmed acceptance criteria are recorded before implementation."],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"received","confirmed_by":null,"confirmed_at":null,"created_at":"2026-01-01T00:00:00Z"}
-"#,
-    );
-    write_if_missing(
-        root,
-        ".appsdk/sdk.lock",
-        r#"{"sdk":"appsdk","version":"0.1.6","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     );
 }
@@ -7403,6 +7436,7 @@ fn init_project(root: &Path) {
         write_project_agent_contract(root);
     }
     install_bundle_resources(root);
+    write_current_sdk_lock(root);
     install_standard_template_reference(root);
     initialize_collab_peer();
     if let Err(reason) = memory::initialize_project(root) {
@@ -7467,6 +7501,7 @@ fn new_project(root: &Path) {
     write_project_scaffold(root);
     write_project_agent_contract(root);
     install_bundle_resources(root);
+    write_current_sdk_lock(root);
     install_standard_template_reference(root);
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
@@ -8185,6 +8220,7 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
     ensure_governance_layout(root);
     write_project_scaffold(root);
     install_bundle_resources(root);
+    write_current_sdk_lock(root);
     atomic_write_json(
         &reset_record,
         &serde_json::json!({

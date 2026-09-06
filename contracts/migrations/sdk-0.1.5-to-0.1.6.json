@@ -12,7 +12,7 @@
       "source": "contracts/migrations/0.1.5/governance-maps/resource-map.json",
       "source_digest": "sha256:67f189bf15330e542bc82349b78a1d7e29ec050b112ecffa165173b078d9204e",
       "target": "contracts/maps/resource-map.json",
-      "target_digest": "sha256:14a1a45658015389e52dcd51413b35f361a75fb3dd31caef3c46e403489d2ab4"
+      "target_digest": "sha256:44e8135acede8ae3bf4aa7f5aa5c4c2f62cdef5abc2ea9f8f43b873f5976f9c8"
     },
     {
       "name": "function-map.json",
@@ -20,7 +20,7 @@
       "source": "contracts/migrations/0.1.5/governance-maps/function-map.json",
       "source_digest": "sha256:69f16dfe5d056634f6164cd325dbdbdf134588890b69f101c0d9045e6a01d776",
       "target": "contracts/maps/function-map.json",
-      "target_digest": "sha256:f6a7bbadb79d633fc8c1c28eb145443b3d7b6f94e6638cde3b260ca332bab52f"
+      "target_digest": "sha256:5a89f81462ad34d831bf1da9e82d690a1f9653added723cb4a99618149a3d16e"
     },
     {
       "name": "mainline-call-map.json",
@@ -28,7 +28,7 @@
       "source": "contracts/migrations/0.1.5/governance-maps/mainline-call-map.json",
       "source_digest": "sha256:c36e4f9d5cff527d7f98b339772a53c87f420db58bb2215b6b68210e01124673",
       "target": "contracts/maps/mainline-call-map.json",
-      "target_digest": "sha256:8005b9be85f9db9a108f790ac3dce732d07a68340b8d9a91af4efda7741a01a3"
+      "target_digest": "sha256:b6c41f115941405eeef0116ef602b390d04b6080fdf284b3a1b14a47fdd97d03"
     },
     {
       "name": "verification-map.json",
@@ -36,7 +36,7 @@
       "source": "contracts/migrations/0.1.5/governance-maps/verification-map.json",
       "source_digest": "sha256:8dcc1e9444f62f7e407fa1e37a6c8d004de55587950f8e600dc5f3c711981230",
       "target": "contracts/maps/verification-map.json",
-      "target_digest": "sha256:cb1a68cca8b01ce1a2d6812088e2914f0b4e8d80c141a29a032e18b9b71bb908"
+      "target_digest": "sha256:21ae8fcd3aa3d017321e5bb5ee3a9606fdf561f9d69348802f1bcd1a12bef3a7"
     }
   ]
 }

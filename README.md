@@ -66,6 +66,7 @@ Goal clarification -> clean worktree -> reproduce -> fix candidate -> developmen
 appsdk prepare ./existing-workspace
 appsdk init ./existing-workspace --project-root new-code
 appsdk new ./my-app
+# Only for a supported legacy SDK migration:
 appsdk pin-lock --binary /path/to/appsdk
 appsdk compile
 appsdk rehydrate-frozen --module app-core

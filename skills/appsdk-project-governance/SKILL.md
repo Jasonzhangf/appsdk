@@ -138,6 +138,11 @@ auditing rules does not require running initialization or changing setup.
 
 ## Automatic Collab
 
+Persistent subagents and project-specific notification policy:
+[subagents-config.md](references/subagents-config.md). All policies live in
+`~/.appsdk/config.toml`; `appsdk config` shows effective configuration.
+`appsdk subagent start/list/status/send/close` delegates to the Collab owner.
+
 `appsdk init` attempts official `collab init` once in a live tmux peer, preserving
 the inherited environment. Successful initialization registers identity and the
 finite direct-message subscription. Do not duplicate that initialization.

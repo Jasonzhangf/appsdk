@@ -192,6 +192,46 @@ fn reset_governance_refuses_main_worktree() {
 }
 
 #[test]
+fn reset_governance_removes_declared_generated_root_without_touching_protected() {
+    let root = temp_root("reset-declared-generated-root");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let project = fs::read_to_string(&project_path).unwrap();
+    fs::write(
+        &project_path,
+        project.replace(
+            "\"generated_root\": \"generated/**\"",
+            "\"generated_root\": \"build-output/**\"",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("build-output/old-delivery")).unwrap();
+    fs::write(root.join("build-output/old-delivery/artifact.bin"), "old\n").unwrap();
+    fs::create_dir_all(root.join("protected/history")).unwrap();
+    fs::write(root.join("protected/history/keep.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(
+        reset.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reset.stdout),
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert!(!root.join("build-output").exists());
+    assert!(root.join("generated").is_dir());
+    assert!(fs::read_dir(root.join("generated"))
+        .unwrap()
+        .next()
+        .is_none());
+    assert_eq!(
+        fs::read_to_string(root.join("protected/history/keep.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn prepare_creates_template_and_init_rejects_unconfirmed_record() {
     let root = temp_root("prepare-gate");
     fs::create_dir_all(&root).unwrap();

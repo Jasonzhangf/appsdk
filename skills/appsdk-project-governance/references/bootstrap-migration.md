@@ -146,6 +146,26 @@ version/hash/ReviewRecord to imitate migration, and do not retain two active
 governance roots. The new reset record proves the reset operation only; it does
 not inherit old PASS, review, delivery, or freeze claims.
 
+### What to do with old reports and delivery output
+
+Use ownership and rebuildability, not age, to decide what is removable:
+
+| Class | Default action | Reason |
+| --- | --- | --- |
+| `.appsdk/records`, `.appsdk/transactions`, audit/migration reports | Inventory/snapshot if needed, then remove through reset | Old control truth must not leak into the new baseline. |
+| Declared `governance.generated_root`, module generated outputs | Remove through reset and regenerate | These are reproducible projections, not source or release truth. |
+| Failed transaction staging | Canonical abort/retry if current; otherwise reset | Manual deletion can hide ownership or partial publication. |
+| `active/`, `protected/`, runtime data, business source | Retain | They may be the only published or operational truth. |
+| `dist/`, `.deploy/`, `build/`, `tmp/`, custom reports/artifacts | Keep until exact disposable ownership is confirmed | AppSDK cannot infer that an external output is safe to delete. |
+
+The reset command reads the old project contract before removal and includes
+its declared generated root in the disposable set. It does not use a fixed
+project path or silently delete Active/Protected. For external outputs, the
+owner must name the exact path, establish that it is rebuildable, authorize
+cleanup, and record the result separately. Never preserve an old report by
+renaming it as a new record, and never make a new record by editing an old
+hash or receipt.
+
 ## Mid-development adoption
 
 Do not force release/freeze evidence onto unfinished work.

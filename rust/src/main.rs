@@ -8075,6 +8075,54 @@ fn pin_lock(root: &Path, binary: &Path) {
     println!("pinned {}", binary.display());
 }
 
+fn reset_generated_roots(root: &Path) -> Vec<String> {
+    let mut roots = vec!["generated".to_string()];
+    let project = project_file(root);
+    if fs::symlink_metadata(&project)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:project");
+    }
+    let Ok(text) = fs::read_to_string(&project) else {
+        return roots;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return roots;
+    };
+    let Some(declared) = value
+        .pointer("/governance/generated_root")
+        .and_then(Value::as_str)
+    else {
+        return roots;
+    };
+    let relative = declared.trim_end_matches("/**").trim_end_matches('/');
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        fail("INVALID_GOVERNANCE_ROOT:/governance/generated_root");
+    }
+    let protected = [".appsdk", ".appsdk-control", "active", "protected"];
+    if protected
+        .iter()
+        .any(|reserved| relative == *reserved || relative.starts_with(&format!("{reserved}/")))
+    {
+        fail("RESET_GENERATED_ROOT_CONFLICT");
+    }
+    assert_no_symlink_components(root, &root.join(path), "generated_root");
+    if !roots.iter().any(|existing| existing == relative) {
+        roots.push(relative.to_string());
+    }
+    roots
+}
+
 fn reset_governance(root: &Path, discard_legacy: bool) {
     if !discard_legacy {
         fail("RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
@@ -8115,7 +8163,13 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
     if !status.stdout.is_empty() {
         fail("RESET_REQUIRES_CLEAN_WORKTREE");
     }
-    for relative in [".appsdk", ".appsdk-control", "generated"] {
+    let generated_roots = reset_generated_roots(root);
+    let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
+    removed.extend(generated_roots.iter().cloned());
+    for relative in [".appsdk", ".appsdk-control"]
+        .into_iter()
+        .chain(generated_roots.iter().map(String::as_str))
+    {
         let target = root.join(relative);
         if fs::symlink_metadata(&target)
             .map(|metadata| metadata.file_type().is_symlink())
@@ -8138,7 +8192,7 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
             "reset_id": format!("reset-{}", std::process::id()),
             "mode": "discard_legacy_control_plane",
             "preserved": ["business_source", "runtime_data", "active", "protected"],
-            "removed": [".appsdk", ".appsdk-control", "generated/**"],
+            "removed": removed,
             "branch": branch,
             "created_at": Utc::now().to_rfc3339()
         }),

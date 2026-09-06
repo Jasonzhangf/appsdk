@@ -97,16 +97,27 @@ if [[ ! -x "$canonical_bin" || "$($canonical_bin version)" != "$release_version"
 fi
 
 remaining=()
+append_unique_remaining() {
+  local candidate="$1"
+  local existing
+  if ((${#remaining[@]} > 0)); then
+    for existing in "${remaining[@]}"; do
+      [[ "$existing" == "$candidate" ]] && return 0
+    done
+  fi
+  remaining+=("$candidate")
+}
+
 for managed_copy in "$canonical_bin" "$user_home/.local/bin/appsdk" "$user_home/.cargo/bin/appsdk"; do
   [[ "$managed_copy" == "$canonical_bin" ]] && {
-    remaining+=("$managed_copy")
+    append_unique_remaining "$managed_copy"
     continue
   }
-  [[ -e "$managed_copy" || -L "$managed_copy" ]] && remaining+=("$managed_copy")
+  [[ -e "$managed_copy" || -L "$managed_copy" ]] && append_unique_remaining "$managed_copy"
 done
 for legacy_copy in "$user_home"/.local/lib/appsdk/*/appsdk; do
   [[ -e "$legacy_copy" || -L "$legacy_copy" ]] || continue
-  [[ "$legacy_copy" == "$canonical_bin" ]] || remaining+=("$legacy_copy")
+  [[ "$legacy_copy" == "$canonical_bin" ]] || append_unique_remaining "$legacy_copy"
 done
 
 if [[ "${#remaining[@]}" -ne 1 || "${remaining[0]}" != "$canonical_bin" ]]; then

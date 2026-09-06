@@ -68,6 +68,35 @@ on a dirty worktree, against another worker's claim, or while inventing a
 migration record. A reset is a new governance baseline, not proof that old
 delivery or review was completed.
 
+### Legacy audit and delivery output handling
+
+Before reset, classify every old item; do not treat a filename as proof of
+current truth:
+
+- `.appsdk/records/**`, `.appsdk/transactions/**`, and AppSDK audit/migration
+  reports are legacy control-plane state. Preserve a small inventory or
+  immutable snapshot in the run note when audit history matters; then let
+  `reset-governance --discard-legacy` remove the old control plane. Do not
+  copy old PASS, hashes, receipts, or review results into the new baseline.
+- The project-declared `governance.generated_root` and module-declared
+  rebuildable outputs are disposable delivery projections. The reset command
+  removes the declared generated root (plus the standard `generated/` root)
+  without deleting business source or published state.
+- Failed transaction staging under `.appsdk/` is removed with the discarded
+  control plane. If it belongs to a still-valid current task, use that task's
+  canonical retry/abort operation before reset; never delete staging by hand.
+- Reports or outputs outside those declared roots (`dist/`, `.deploy/`,
+  `build/`, `tmp/`, custom report folders, or vendor output) are not assumed
+  disposable. Retain them or archive them until the project owner identifies
+  the exact path as rebuildable and authorizes its separate cleanup.
+- `active/`, `protected/`, runtime data, source, and human project documents
+  are retained by reset. Removing obsolete Active/Protected or historical
+  documents requires exact paths, explicit authorization, and a separate
+  cleanup record.
+
+After reset, report removed and retained classes separately. A clean directory
+is not evidence that delivery, review, install, restart, or freeze happened.
+
 ## Working loop
 
 1. Read project AGENTS and affected code/contracts. Resolve owner, scope,

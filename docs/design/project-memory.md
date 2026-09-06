@@ -94,6 +94,16 @@ entries to the categorized JSONL source, and rebuilds the SQLite/Markdown
 projection. Repeating import is idempotent. Invalid or ambiguous Markdown is
 reported, not silently converted.
 
+New marked `memory/L3/<id>.md` files are ingested automatically on query/get,
+index/export, or verify, before projection generation. The same parser and
+event writer are reused; the whole additions batch is validated first, then
+appended without recursive projection rebuilds. Filename must match the ID.
+Only IDs absent from raw history are admitted automatically, always as
+unreviewed L3 with no supplied review evidence. Existing IDs still require
+explicit import for edits. Repeated access is idempotent. SQLite absence or
+staleness does not change these rules. Global memory uses the same scope-local
+behavior. See the project-memory Skill for the minimal handwritten format.
+
 ```text
 legacy flat JSONL -> migrate -> categorized JSONL
 categorized JSONL -> index/export -> Markdown index + L1/L2/L3 details
@@ -119,7 +129,7 @@ It blocks with the migration command when migration is absent
 or unfinished, and returns the same run ID plus the last known node/step for
 resume.
 
-The Markdown bridge is intentionally explicit: `project-memory export` renders
+For existing IDs the Markdown bridge is explicit: `project-memory export` renders
 the current raw history, while `project-memory import` reads an edited detail
 back into raw history. The title index alone is not importable because it does
 not contain the detail body. This keeps the directory convenient for humans

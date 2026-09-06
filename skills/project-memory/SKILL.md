@@ -90,8 +90,34 @@ detail. It accepts only the marked AppSDK Markdown format (and the previous
 exported detail format), validates all detail files first, appends changed
 entries to the categorized JSONL source, and rebuilds the index. Repeating it
 without a Markdown change is a no-op. A detail is not a second truth store:
-the JSONL event history remains canonical, and direct Markdown edits take
-effect only through explicit `import`.
+the JSONL event history remains canonical, and direct Markdown edits
+to existing IDs take effect through explicit `import`.
+
+### Handwritten L3 additions (automatic)
+
+Write `memory/L3/<id>.md` using this format; filename and metadata ID must match:
+
+```markdown
+<!-- project-memory:v1 {"id":"cache-key-rule","category":"knowledge","tags":["cache","debug"]} -->
+
+# Cache keys include tenant
+
+Include the tenant ID in cache keys to isolate tenant data.
+<!-- project-memory:end -->
+```
+
+The next `query`, `get`, `index`, `export`, or `verify` imports new IDs into
+JSONL and SQLite automatically, even when SQLite already exists. No daemon,
+separate registration, or explicit import is needed for additions. Projection
+rebuilds also ingest pending additions before exporting. Repeated access adds
+no duplicate event. New entries are always L3/unreviewed; handwritten review
+claims are ignored. Missing category defaults to `knowledge`.
+
+For an existing ID, use `import` immediately after editing and before any
+projection rebuild. Automatic ingestion is additions-only, not conflict
+resolution between an edited detail and raw history. Invalid files fail with
+an actionable error and remain on disk; repair their format, do not delete
+memory to make a query pass. New L1/L2 files are not automatically ingested.
 
 Compatibility paths:
 
@@ -118,7 +144,8 @@ the same source digest; completed migration is idempotent. A changed source or
 an ID/content conflict is reported instead of silently replacing project
 truth.
 
-Re-entry is read-only apart from rebuilding a missing SQLite projection. Run
+Re-entry may ingest new L3 details when it reads memory and rebuild stale or
+missing SQLite projections. Run
 `project-memory reentry [project] --run <run-id>` after an interruption (the
 project path is optional and may also follow the `--run` value). It keeps the
 same run ID, reads the last note as `resume_from`, checks the migration marker,

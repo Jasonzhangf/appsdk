@@ -45,11 +45,15 @@ FAKE_CARGO
   chmod 0755 "$fake_bin/cargo"
 
   cp "$test_root/fixture" "$test_root/home/.local/bin/appsdk"
+  cp "$repo_root/rust/target/release/project-memory" "$test_root/home/.local/bin/project-memory"
   cp "$test_root/fixture" "$test_root/home/.local/lib/appsdk/0.1.6/appsdk"
   PATH="$fake_bin:/usr/bin:/bin" HOME="$test_root/home" APPSDK_TEST_FIXTURE="$test_root/fixture" \
     bash "$installer" >/dev/null
 
   [[ -x "$fake_bin/appsdk" ]] || { echo 'canonical install missing' >&2; exit 1; }
+  [[ -x "$fake_bin/project-memory" ]] || { echo 'memory install missing' >&2; exit 1; }
+  [[ "$(readlink "$test_root/home/.local/bin/project-memory")" == "$fake_bin/project-memory" ]] || exit 1
+  cmp "$repo_root/skills/project-memory/SKILL.md" "$test_root/home/.agents/skills/project-memory/SKILL.md"
   [[ "$($fake_bin/appsdk version)" == 'appsdk 0.1.6 (rust)' ]] || {
     echo 'canonical version mismatch' >&2
     exit 1

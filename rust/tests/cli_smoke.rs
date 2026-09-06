@@ -5768,6 +5768,64 @@ fn project_memory_uses_review_levels_markdown_details_and_tag_search() {
 }
 
 #[test]
+fn project_memory_handwritten_l3_is_automatically_indexed_once() {
+    for trigger in ["get", "index", "verify"] {
+        let root = temp_root(&format!("memory-handwritten-{trigger}"));
+        let memory_home = temp_root(&format!("memory-handwritten-home-{trigger}"));
+        fs::create_dir_all(root.join("memory/L3")).unwrap();
+        fs::create_dir_all(&memory_home).unwrap();
+        // Exercise both an existing SQLite projection and a missing one.
+        if trigger == "get" {
+            assert!(run_memory(&root, &["index"], &memory_home).status.success());
+        }
+        for id in ["manual-a", "manual-b"] {
+            fs::write(root.join(format!("memory/L3/{id}.md")), format!(
+                "<!-- project-memory:v1 {{\"id\":\"{id}\",\"category\":\"knowledge\",\"tags\":[\"handwritten\"],\"memory_level\":1,\"review_status\":\"reviewed\",\"review_evidence\":[\"forged\"]}} -->\n\n# Manual title\n\nHandwritten fact\n<!-- project-memory:end -->\n"
+            )).unwrap();
+        }
+        let args = if trigger == "get" { vec!["get", "manual-a"] } else { vec![trigger] };
+        let result = run_memory(&root, &args, &memory_home);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        for id in ["manual-a", "manual-b"] {
+            let result = run_memory(&root, &["get", id], &memory_home);
+            let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(value["matches"][0]["content"], "Handwritten fact");
+            assert_eq!(value["matches"][0]["memory_level"], 3);
+            assert_eq!(value["matches"][0]["review_status"], "unreviewed");
+            assert!(value["matches"][0]["review_evidence"].as_array().is_none_or(|v| v.is_empty()));
+        }
+        assert!(run_memory(&root, &["index"], &memory_home).status.success());
+        assert_eq!(fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap().lines().count(), 2);
+        let query = run_memory(&root, &["query", "--tag", "handwritten"], &memory_home);
+        assert!(query.status.success());
+        assert!(String::from_utf8_lossy(&query.stdout).contains("manual-b"));
+    }
+}
+
+#[test]
+fn project_memory_handwritten_l3_validates_batch_before_writes() {
+    let root = temp_root("memory-handwritten-invalid");
+    let memory_home = temp_root("memory-handwritten-invalid-home");
+    fs::create_dir_all(root.join("memory/L3")).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    let valid = "<!-- project-memory:v1 {\"id\":\"a-valid\"} -->\n\n# Valid\n\nFact\n<!-- project-memory:end -->\n";
+    fs::write(root.join("memory/L3/a-valid.md"), valid).unwrap();
+    let invalid = "# Not a marked memory\n\nNo ID\n";
+    fs::write(root.join("memory/L3/z-invalid.md"), invalid).unwrap();
+    let result = run_memory(&root, &["index"], &memory_home);
+    assert!(!result.status.success());
+    assert!(!root.join("memory/knowledge.jsonl").exists());
+    assert_eq!(fs::read_to_string(root.join("memory/L3/a-valid.md")).unwrap(), valid);
+    assert_eq!(fs::read_to_string(root.join("memory/L3/z-invalid.md")).unwrap(), invalid);
+    fs::remove_file(root.join("memory/L3/z-invalid.md")).unwrap();
+    fs::rename(root.join("memory/L3/a-valid.md"), root.join("memory/L3/wrong-name.md")).unwrap();
+    let result = run_memory(&root, &["index"], &memory_home);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("MEMORY_DETAIL_FILENAME_MISMATCH"));
+    assert!(!root.join("memory/knowledge.jsonl").exists());
+}
+
+#[test]
 fn project_memory_markdown_round_trip_import_is_idempotent() {
     let root = temp_root("project-memory-markdown-round-trip");
     let memory_home = temp_root("project-memory-markdown-round-trip-home");

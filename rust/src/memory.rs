@@ -366,6 +366,10 @@ fn parse_detail(path: &Path) -> Value {
 }
 
 fn read_detail_entries(root: &Path, global: bool) -> Vec<Value> {
+    read_selected_details(root, global, false)
+}
+
+fn read_selected_details(root: &Path, global: bool, l3_only: bool) -> Vec<Value> {
     let mut legacy = BTreeMap::new();
     let mut canonical = BTreeMap::new();
     let expected_levels = effective_entries_for_scope(root, global)
@@ -373,6 +377,9 @@ fn read_detail_entries(root: &Path, global: bool) -> Vec<Value> {
         .map(|entry| (entry_id(&entry), memory_level(&entry)))
         .collect::<BTreeMap<_, _>>();
     for (level, directory) in detail_directories(root, global) {
+        if l3_only && level != Some(3) {
+            continue;
+        }
         if fs::symlink_metadata(&directory)
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
@@ -403,6 +410,11 @@ fn read_detail_entries(root: &Path, global: bool) -> Vec<Value> {
             }
             let value = parse_detail(&path);
             let id = entry_id(&value);
+            if l3_only && !expected_levels.contains_key(&id)
+                && path.file_stem().and_then(|name| name.to_str()) != Some(id.as_str())
+            {
+                fail("MEMORY_DETAIL_FILENAME_MISMATCH", "name a new L3 detail <metadata-id>.md before importing it");
+            }
             if let Some(level) = level {
                 if let Some((existing_level, _)) = canonical.get(&id) {
                     let expected = expected_levels.get(&id).copied();
@@ -1335,6 +1347,7 @@ fn init_schema(connection: &Connection) {
 }
 
 fn sync_index(root: &Path, global: bool) -> Value {
+    import_new_l3(root, global);
     let path = db_path(root, global);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|_| {
@@ -1444,8 +1457,18 @@ fn generated_id(value: &Value) -> String {
 fn write_entry_with_review(
     root: &Path,
     global: bool,
+    value: Value,
+    reviewed: Option<(i64, Vec<String>)>,
+) -> Value {
+    write_entry_event(root, global, value, reviewed, true)
+}
+
+fn write_entry_event(
+    root: &Path,
+    global: bool,
     mut value: Value,
     reviewed: Option<(i64, Vec<String>)>,
+    rebuild: bool,
 ) -> Value {
     let cat = category(
         value
@@ -1524,7 +1547,7 @@ fn write_entry_with_review(
                     .all(|source| refs(existing).contains(source))
         });
     if duplicate {
-        let index = sync_index(root, global);
+        let index = if rebuild { sync_index(root, global) } else { Value::Null };
         return json!({"accepted": true, "deduplicated": true, "id": id, "category": cat, "index": index});
     }
     let path = if global {
@@ -1541,7 +1564,7 @@ fn write_entry_with_review(
     } else {
         atomic_write(&path, &(serde_json::to_string(&value).unwrap() + "\n"));
     }
-    let index = sync_index(root, global);
+    let index = if rebuild { sync_index(root, global) } else { Value::Null };
     json!({"accepted": true, "write_mode": "one_shot", "id": id, "category": cat, "memory_level": memory_level(&value), "review_status": review_status(&value), "detail_path": detail_display_path(global, &id, memory_level(&value)), "index": index})
 }
 
@@ -1549,7 +1572,33 @@ fn write_entry(root: &Path, global: bool, value: Value) -> Value {
     write_entry_with_review(root, global, value, None)
 }
 
+// Ingest additions before any projection can hide them. Existing IDs remain
+// canonical raw history; intentional edits still use the explicit import path.
+fn import_new_l3(root: &Path, global: bool) -> bool {
+    assert_memory_dir(root);
+    let existing = effective_entries_for_scope(root, global)
+        .iter().map(entry_id).collect::<BTreeSet<_>>();
+    let entries = read_selected_details(root, global, true)
+        .into_iter().filter(|entry| !existing.contains(&entry_id(entry)))
+        .collect::<Vec<_>>();
+    // Validate the whole batch before appending or regenerating any detail.
+    for entry in &entries {
+        assert_id(&entry_id(entry));
+        if entry.get("category").is_some_and(|value| !value.is_string()) {
+            fail("MEMORY_DETAIL_INVALID", "detail metadata category must be a string");
+        }
+        category(entry.get("category").and_then(Value::as_str).unwrap_or("knowledge"));
+    }
+    let changed = !entries.is_empty();
+    for mut entry in entries {
+        entry.as_object_mut().unwrap().remove("review_evidence");
+        write_entry_event(root, global, entry, None, false);
+    }
+    changed
+}
+
 fn open_scope(root: &Path, global: bool) -> Connection {
+    import_new_l3(root, global);
     let path = db_path(root, global);
     if !path.is_file() {
         let _ = sync_index(root, global);
@@ -1917,6 +1966,9 @@ fn verify(root: &Path) -> Value {
     let mut scopes = Vec::new();
     let mut ok = true;
     for global in [false, true] {
+        if import_new_l3(root, global) {
+            sync_index(root, global);
+        }
         let path = db_path(root, global);
         let expected_entries = effective_entries_for_scope(root, global);
         let expected_digest = source_digest(root, global);

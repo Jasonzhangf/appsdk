@@ -13,9 +13,10 @@ if [[ $# -eq 1 && "${1:-}" == "--help" ]]; then
   cat <<'USAGE'
 Usage: scripts/install-global-appsdk.sh
 
-Builds the Rust release, atomically installs one appsdk beside the active
-cargo executable, removes exact legacy user-local AppSDK copies, and checks
-that only the canonical managed entry remains.
+Builds the Rust release, atomically installs appsdk and project-memory beside
+the active cargo executable, removes exact legacy user-local AppSDK copies,
+and links the legacy Memory entry to its canonical executable. Updates the
+global project-memory Skill from the same release source.
 USAGE
   exit 0
 fi
@@ -34,9 +35,17 @@ fi
 cargo_bin_dir="$(dirname "$cargo_path")"
 canonical_bin="$cargo_bin_dir/appsdk"
 release_bin="$repo_root/rust/target/release/appsdk"
+memory_release="$repo_root/rust/target/release/project-memory"
+memory_bin="$cargo_bin_dir/project-memory"
 
 echo "Building AppSDK release from $repo_root"
 cargo build --release --manifest-path "$repo_root/rust/Cargo.toml"
+
+if [[ ! -x "$memory_release" ]]; then
+  echo 'error: project-memory release binary was not produced' >&2
+  exit 1
+fi
+"$memory_release" help >/dev/null
 
 if [[ ! -x "$release_bin" ]]; then
   echo "error: release binary was not produced: $release_bin" >&2
@@ -131,3 +140,26 @@ digest="${digest_line%% *}"
 printf 'Installed: %s\nVersion: %s\nSHA-256 (diagnostic): %s\n' \
   "$canonical_bin" "$release_version" "$digest"
 printf '%s\n' 'Refresh the current shell command cache with: rehash (zsh) or hash -r (bash)'
+
+# One executable owner. Preserve the old PATH entry as a link, not another build.
+stage_file="$(mktemp "$cargo_bin_dir/.project-memory-install.XXXXXX")"
+trap cleanup_stage EXIT
+cp "$memory_release" "$stage_file"
+chmod 0755 "$stage_file"
+"$stage_file" help >/dev/null
+mv -f -- "$stage_file" "$memory_bin"
+mkdir -p "$user_home/.local/bin"
+if [[ "$user_home/.local/bin/project-memory" != "$memory_bin" ]]; then
+  stage_file="$(mktemp "$user_home/.local/bin/.project-memory-link.XXXXXX")"
+  rm -f -- "$stage_file"
+  ln -s "$memory_bin" "$stage_file"
+  mv -f -- "$stage_file" "$user_home/.local/bin/project-memory"
+fi
+trap - EXIT
+mkdir -p "$user_home/.agents/skills/project-memory"
+stage_file="$(mktemp "$user_home/.agents/skills/project-memory/.skill-install.XXXXXX")"
+trap cleanup_stage EXIT
+cp "$repo_root/skills/project-memory/SKILL.md" "$stage_file"
+mv -f -- "$stage_file" "$user_home/.agents/skills/project-memory/SKILL.md"
+trap - EXIT
+printf 'Memory installed: %s (legacy PATH entry links here)\n' "$memory_bin"

@@ -563,6 +563,36 @@ exit 73
 }
 
 #[test]
+fn subagent_entry_forwards_without_governance_or_second_registry() {
+    let root = temp_root("subagent-forward");
+    fs::create_dir_all(&root).unwrap();
+    let fake = root.join("collab");
+    fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 23\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(binary())
+        .args([
+            "subagent",
+            "send",
+            "child",
+            "--subject",
+            "topic",
+            "original body with spaces",
+        ])
+        .current_dir(&root)
+        .env("PATH", &root)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "subagent\nsend\nchild\n--subject\ntopic\noriginal body with spaces\n"
+    );
+    assert!(!root.join(".appsdk").exists());
+    assert!(!root.join(".agent-collab").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_agent_contract_is_created_for_new_projects_but_never_overwrites_project_rules() {
     let created = temp_root("project-agent-contract-new");
     let created_text = created.to_str().unwrap();

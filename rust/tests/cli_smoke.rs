@@ -5981,19 +5981,35 @@ fn project_memory_handwritten_l3_is_automatically_indexed_once() {
                 "<!-- project-memory:v1 {{\"id\":\"{id}\",\"category\":\"knowledge\",\"tags\":[\"handwritten\"],\"memory_level\":1,\"review_status\":\"reviewed\",\"review_evidence\":[\"forged\"]}} -->\n\n# Manual title\n\nHandwritten fact\n<!-- project-memory:end -->\n"
             )).unwrap();
         }
-        let args = if trigger == "get" { vec!["get", "manual-a"] } else { vec![trigger] };
+        let args = if trigger == "get" {
+            vec!["get", "manual-a"]
+        } else {
+            vec![trigger]
+        };
         let result = run_memory(&root, &args, &memory_home);
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         for id in ["manual-a", "manual-b"] {
             let result = run_memory(&root, &["get", id], &memory_home);
             let value: Value = serde_json::from_slice(&result.stdout).unwrap();
             assert_eq!(value["matches"][0]["content"], "Handwritten fact");
             assert_eq!(value["matches"][0]["memory_level"], 3);
             assert_eq!(value["matches"][0]["review_status"], "unreviewed");
-            assert!(value["matches"][0]["review_evidence"].as_array().is_none_or(|v| v.is_empty()));
+            assert!(value["matches"][0]["review_evidence"]
+                .as_array()
+                .is_none_or(|v| v.is_empty()));
         }
         assert!(run_memory(&root, &["index"], &memory_home).status.success());
-        assert_eq!(fs::read_to_string(root.join("memory/knowledge.jsonl")).unwrap().lines().count(), 2);
+        assert_eq!(
+            fs::read_to_string(root.join("memory/knowledge.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
         let query = run_memory(&root, &["query", "--tag", "handwritten"], &memory_home);
         assert!(query.status.success());
         assert!(String::from_utf8_lossy(&query.stdout).contains("manual-b"));
@@ -6013,10 +6029,20 @@ fn project_memory_handwritten_l3_validates_batch_before_writes() {
     let result = run_memory(&root, &["index"], &memory_home);
     assert!(!result.status.success());
     assert!(!root.join("memory/knowledge.jsonl").exists());
-    assert_eq!(fs::read_to_string(root.join("memory/L3/a-valid.md")).unwrap(), valid);
-    assert_eq!(fs::read_to_string(root.join("memory/L3/z-invalid.md")).unwrap(), invalid);
+    assert_eq!(
+        fs::read_to_string(root.join("memory/L3/a-valid.md")).unwrap(),
+        valid
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("memory/L3/z-invalid.md")).unwrap(),
+        invalid
+    );
     fs::remove_file(root.join("memory/L3/z-invalid.md")).unwrap();
-    fs::rename(root.join("memory/L3/a-valid.md"), root.join("memory/L3/wrong-name.md")).unwrap();
+    fs::rename(
+        root.join("memory/L3/a-valid.md"),
+        root.join("memory/L3/wrong-name.md"),
+    )
+    .unwrap();
     let result = run_memory(&root, &["index"], &memory_home);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("MEMORY_DETAIL_FILENAME_MISMATCH"));

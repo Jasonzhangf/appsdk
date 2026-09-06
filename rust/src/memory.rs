@@ -410,10 +410,14 @@ fn read_selected_details(root: &Path, global: bool, l3_only: bool) -> Vec<Value>
             }
             let value = parse_detail(&path);
             let id = entry_id(&value);
-            if l3_only && !expected_levels.contains_key(&id)
+            if l3_only
+                && !expected_levels.contains_key(&id)
                 && path.file_stem().and_then(|name| name.to_str()) != Some(id.as_str())
             {
-                fail("MEMORY_DETAIL_FILENAME_MISMATCH", "name a new L3 detail <metadata-id>.md before importing it");
+                fail(
+                    "MEMORY_DETAIL_FILENAME_MISMATCH",
+                    "name a new L3 detail <metadata-id>.md before importing it",
+                );
             }
             if let Some(level) = level {
                 if let Some((existing_level, _)) = canonical.get(&id) {
@@ -1547,7 +1551,11 @@ fn write_entry_event(
                     .all(|source| refs(existing).contains(source))
         });
     if duplicate {
-        let index = if rebuild { sync_index(root, global) } else { Value::Null };
+        let index = if rebuild {
+            sync_index(root, global)
+        } else {
+            Value::Null
+        };
         return json!({"accepted": true, "deduplicated": true, "id": id, "category": cat, "index": index});
     }
     let path = if global {
@@ -1564,7 +1572,11 @@ fn write_entry_event(
     } else {
         atomic_write(&path, &(serde_json::to_string(&value).unwrap() + "\n"));
     }
-    let index = if rebuild { sync_index(root, global) } else { Value::Null };
+    let index = if rebuild {
+        sync_index(root, global)
+    } else {
+        Value::Null
+    };
     json!({"accepted": true, "write_mode": "one_shot", "id": id, "category": cat, "memory_level": memory_level(&value), "review_status": review_status(&value), "detail_path": detail_display_path(global, &id, memory_level(&value)), "index": index})
 }
 
@@ -1577,17 +1589,31 @@ fn write_entry(root: &Path, global: bool, value: Value) -> Value {
 fn import_new_l3(root: &Path, global: bool) -> bool {
     assert_memory_dir(root);
     let existing = effective_entries_for_scope(root, global)
-        .iter().map(entry_id).collect::<BTreeSet<_>>();
+        .iter()
+        .map(entry_id)
+        .collect::<BTreeSet<_>>();
     let entries = read_selected_details(root, global, true)
-        .into_iter().filter(|entry| !existing.contains(&entry_id(entry)))
+        .into_iter()
+        .filter(|entry| !existing.contains(&entry_id(entry)))
         .collect::<Vec<_>>();
     // Validate the whole batch before appending or regenerating any detail.
     for entry in &entries {
         assert_id(&entry_id(entry));
-        if entry.get("category").is_some_and(|value| !value.is_string()) {
-            fail("MEMORY_DETAIL_INVALID", "detail metadata category must be a string");
+        if entry
+            .get("category")
+            .is_some_and(|value| !value.is_string())
+        {
+            fail(
+                "MEMORY_DETAIL_INVALID",
+                "detail metadata category must be a string",
+            );
         }
-        category(entry.get("category").and_then(Value::as_str).unwrap_or("knowledge"));
+        category(
+            entry
+                .get("category")
+                .and_then(Value::as_str)
+                .unwrap_or("knowledge"),
+        );
     }
     let changed = !entries.is_empty();
     for mut entry in entries {

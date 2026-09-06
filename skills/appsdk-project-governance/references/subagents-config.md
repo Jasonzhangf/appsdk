@@ -18,6 +18,10 @@ mode = "immediate"
 [timers]
 enabled = true
 tick_interval_ms = 1000
+[keepalive]
+enabled = true
+interval_seconds = 900 # minimum 15 minutes
+max_unacked = 3 # hard maximum, not an unlimited retry setting
 [subagent]
 profile_priority = ["gcm", "oauth"]
 persistent = true
@@ -55,6 +59,7 @@ From a registered tmux parent:
 appsdk subagent start --id <unique-request-id>
 appsdk subagent list
 appsdk subagent status <id>
+appsdk subagent snapshot <id> --lines 40
 appsdk subagent send <id> --subject <topic> "<task>"
 appsdk subagent close <id>
 ```
@@ -64,6 +69,43 @@ one Codex session. Reusing an ID returns the existing record, never restarts
 it. `starting` is not `idle`: Codex may require trust/auth/approval interaction.
 Use status; do not inject automatic confirmation or keep re-sending tasks.
 All profiles failing returns a failed record with reasons and no launch.
+
+An already trusted cwd and healthy authenticated profile should start without
+new trust/auth interaction. Repeated prompts on that path are a startup bug,
+not an instruction to reinitialize credentials or accept prompts automatically.
+
+## Finite task keepalive and observation
+
+`send` creates the canonical `task-<message-id>` task in the Collab task list.
+Child `working` claims it; bind code work with `collab_task_relocate`, not a
+duplicate task registration. Complete the real task lifecycle; `ready` changes
+session availability only and never marks unfinished tasks complete.
+
+Unfinished actionable tasks are grouped by worker. Explicit idle for 15 minutes
+allows one activation; ACK it once with `collab ack <notification-id>` (MCP:
+`collab_ack`), then work or record the real blocker. Messages sent by the worker,
+fresh ACKs and positive working observations count as activity. Unknown remains
+unknown; absent/unknown/working receive no activation. Blocked/waiting tasks
+follow their declared wait, not this continuation path.
+
+Three consecutive unconfirmed attempts exhaust the durable budget. After the
+third response window, status marks `suspected_offline`; it does not claim the
+process is dead. Failed/uncertain sends count, restart does not reset the budget,
+and no process is respawned. Only an explicit parent/operator request may use
+`appsdk subagent rearm <id>`; never rearm automatically to bypass exhaustion.
+
+`status` returns observed state, task list, parent mailbox, keepalive counters
+and notification/ACK history. It never captures the screen. `snapshot` returns
+only the requested last 1..200 tmux lines and capture time, never sends a notice
+or interprets screen text as task/control truth. Snapshot may contain sensitive
+terminal output: request only when relevant, do not republish it by default.
+
+A non-tmux agent may use local project `list/status/snapshot` without registering
+a fake peer. Initialization and queries explicitly report `notification_channel:
+none`: no push channel exists for that observer. Check the mailbox in `status`
+yourself; do not wait for an automatic completion notification. This is not a
+quality gate or a reason to stop independent work. Mutating parent operations
+retain authenticated ownership checks.
 
 The child uses the injected `appsdk-subagent` MCP: `collab_init`, then
 `collab_subagent` with `action=ready, id=<id>`. The launcher forwards the live

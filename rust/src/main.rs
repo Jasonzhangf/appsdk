@@ -7392,6 +7392,11 @@ fn prepare_project(workspace: &Path) {
 fn initialize_collab_peer() {
     if env::var_os("TMUX_PANE").is_none() {
         println!("collab peer bootstrap pending: no live tmux pane");
+        println!("collab-channel {}", serde_json::json!({
+            "notification_channel":"none", "subscription_created":false,
+            "independent_work_allowed":true,
+            "next_action":"No push channel. Check subagent status (includes parent mailbox) yourself; use subagent snapshot explicitly for screen diagnostics. Do not wait for an automatic completion notification."
+        }));
         return;
     }
     let output = match Command::new("collab").arg("init").output() {

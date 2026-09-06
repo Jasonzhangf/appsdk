@@ -368,6 +368,11 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(String::from_utf8_lossy(&first.stdout).contains("collab peer bootstrap pending"));
+    let notice = String::from_utf8_lossy(&first.stdout).lines()
+        .find_map(|line| line.strip_prefix("collab-channel ").map(|body| serde_json::from_str::<serde_json::Value>(body).unwrap())).unwrap();
+    assert_eq!(notice["notification_channel"], "none");
+    assert_eq!(notice["subscription_created"], false);
+    assert_eq!(notice["independent_work_allowed"], true);
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.starts_with("# project rules\nnode_modules/\n"));
     assert_eq!(gitignore.matches("# BEGIN APPSDK MANAGED").count(), 1);

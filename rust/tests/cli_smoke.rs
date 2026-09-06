@@ -136,6 +136,62 @@ fn confirm_preparation(root: &PathBuf, project_root: &str, change_kind: &str) {
 }
 
 #[test]
+fn reset_governance_discards_only_control_plane_and_is_idempotent() {
+    let root = temp_root("reset-governance");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    fs::write(root.join(".appsdk/legacy-record.json"), "legacy\n").unwrap();
+    fs::create_dir_all(root.join("generated/old-artifact")).unwrap();
+    fs::write(root.join("generated/old-artifact/artifact.bin"), "old\n").unwrap();
+    fs::create_dir_all(root.join(".appsdk-control/runtime")).unwrap();
+    init_git(&root);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "branch", "-M", "codex/reset-test"])
+        .status()
+        .unwrap()
+        .success());
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(
+        reset.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reset.stdout),
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    assert!(!root.join(".appsdk/legacy-record.json").exists());
+    assert!(!root.join(".appsdk-control/runtime").exists());
+    assert!(!root.join("generated/old-artifact").exists());
+    assert!(run(&["reset-governance", root_text, "--discard-legacy"])
+        .status
+        .success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_governance_refuses_main_worktree() {
+    let root = temp_root("reset-main-worktree");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "branch", "-M", "main"])
+        .status()
+        .unwrap()
+        .success());
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(!reset.status.success());
+    assert!(String::from_utf8_lossy(&reset.stderr).contains("RESET_REQUIRES_NON_MAIN_WORKTREE"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn prepare_creates_template_and_init_rejects_unconfirmed_record() {
     let root = temp_root("prepare-gate");
     fs::create_dir_all(&root).unwrap();

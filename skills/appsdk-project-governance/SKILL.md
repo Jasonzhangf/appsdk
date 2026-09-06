@@ -18,6 +18,56 @@ integrity gates; do not turn every available command into a mandatory phase.
 Run project commands from project cwd. An explicit optional project path is for
 operators intentionally working elsewhere; no project-root environment variable.
 
+## One global AppSDK binary
+
+Do not copy or select AppSDK binaries by hand. The AppSDK repository's only
+supported global installation entry is:
+
+```bash
+scripts/install-global-appsdk.sh
+```
+
+It builds the release, atomically replaces the executable beside the active
+`cargo`, removes exact AppSDK-managed legacy copies, and checks that one
+managed `appsdk` remains. Run it from any directory; it resolves its own
+repository root. SHA-256 is diagnostic output only, not a fixed admission
+condition. Do not stop project development because a historical binary hash
+differs. If the version or command path is wrong, run the installer once and
+refresh the current shell cache (`rehash` in zsh or `hash -r` in bash); do not
+manually copy, rename, or leave `.local/lib/appsdk/<version>/appsdk` beside the
+canonical entry.
+
+An AppSDK binary install does not restart a daemon. Use the daemon's official
+maintenance command separately when the running process must load the new
+binary. Never start v2 or create a second global AppSDK entry as a workaround.
+
+## Reset legacy governance
+
+When an old version has left incompatible records, stale audit reports, or
+rebuildable delivery output, do not patch or hand-edit those files. In a clean
+non-`main` owner worktree, after the user explicitly authorizes discarding the
+named legacy control plane, run once:
+
+```bash
+appsdk reset-governance --discard-legacy
+appsdk init
+appsdk guide init --task governance-reset --mode bootstrap --module app-core
+appsdk guide compile
+appsdk verify
+appsdk compile
+```
+
+`reset-governance` is idempotent. It removes the old `.appsdk/` records and
+maps (including old audit/migration reports), `.appsdk-control/`, and the
+rebuildable `generated/` projection, then creates a fresh current contract and
+writes a reset record. It preserves business source, runtime data, `active/`,
+and `protected/` by default. Existing Active/Protected artifacts are not
+silently deleted; if they are obsolete, request exact paths and perform a
+separate authorized cleanup with its own evidence. Never run reset in `main`,
+on a dirty worktree, against another worker's claim, or while inventing a
+migration record. A reset is a new governance baseline, not proof that old
+delivery or review was completed.
+
 ## Working loop
 
 1. Read project AGENTS and affected code/contracts. Resolve owner, scope,

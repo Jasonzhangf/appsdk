@@ -76,8 +76,25 @@ appsdk promote --to source_implemented
 appsdk promote-module --module app-core --to architecture_stable
 appsdk freeze --module app-core
 appsdk publish-active --module app-core --version active-v1
+# 唯一全局安装入口（可从任意目录执行）
+scripts/install-global-appsdk.sh
 
 ```
+
+旧版本治理已失效或拖住开发时，在干净的非 `main` owner worktree 中，经用户明确授权后使用幂等 reset；不要手改旧 records/hash：
+
+```bash
+appsdk reset-governance --discard-legacy
+appsdk init
+appsdk guide init --task governance-reset --mode bootstrap --module app-core
+appsdk guide compile
+appsdk verify
+appsdk compile
+```
+
+reset 清除旧 `.appsdk/` 审计与迁移记录、`.appsdk-control/` 和可重建的
+`generated/`，保留业务源码、运行数据、`active/`、`protected/`。旧 Active/Protected
+若确实废弃，必须另行指定精确路径并授权清理。
 
 `appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，`appsdk init` 才允许执行。`appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；在 live tmux Agent 中还通过同环境官方 `collab init` 完成 Collab/daemon/peer/default direct-message subscription 的一次性初始化。
 

@@ -8075,6 +8075,78 @@ fn pin_lock(root: &Path, binary: &Path) {
     println!("pinned {}", binary.display());
 }
 
+fn reset_governance(root: &Path, discard_legacy: bool) {
+    if !discard_legacy {
+        fail("RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
+    }
+    assert_project_root_safe(root);
+    let reset_record = root
+        .join(".appsdk")
+        .join("records")
+        .join("reset-governance-record.json");
+
+    let branch = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or(""),
+            "branch",
+            "--show-current",
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("RESET_GIT_WORKTREE_REQUIRED"));
+    if !branch.status.success() {
+        fail("RESET_GIT_WORKTREE_REQUIRED");
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    if branch.is_empty() || branch == "main" || branch == "master" {
+        fail("RESET_REQUIRES_NON_MAIN_WORKTREE");
+    }
+    if reset_record.exists() {
+        println!("governance reset already applied");
+        return;
+    }
+    let status = Command::new("git")
+        .args(["-C", root.to_str().unwrap_or(""), "status", "--porcelain"])
+        .output()
+        .unwrap_or_else(|_| fail("RESET_GIT_WORKTREE_REQUIRED"));
+    if !status.status.success() {
+        fail("RESET_GIT_WORKTREE_REQUIRED");
+    }
+    if !status.stdout.is_empty() {
+        fail("RESET_REQUIRES_CLEAN_WORKTREE");
+    }
+    for relative in [".appsdk", ".appsdk-control", "generated"] {
+        let target = root.join(relative);
+        if fs::symlink_metadata(&target)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            fail(format!("GOVERNANCE_PATH_SYMLINK:{}", relative));
+        }
+        if target.exists() {
+            fs::remove_dir_all(&target).unwrap_or_else(|_| fail("GOVERNANCE_RESET_FAILED"));
+        }
+    }
+
+    ensure_governance_layout(root);
+    write_project_scaffold(root);
+    install_bundle_resources(root);
+    atomic_write_json(
+        &reset_record,
+        &serde_json::json!({
+            "schema_version": 1,
+            "reset_id": format!("reset-{}", std::process::id()),
+            "mode": "discard_legacy_control_plane",
+            "preserved": ["business_source", "runtime_data", "active", "protected"],
+            "removed": [".appsdk", ".appsdk-control", "generated/**"],
+            "branch": branch,
+            "created_at": Utc::now().to_rfc3339()
+        }),
+        "GOVERNANCE_RESET_RECORD_FAILED",
+    );
+    println!("governance reset applied");
+}
+
 const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.";
 
 fn is_help(value: &str) -> bool {
@@ -8089,6 +8161,9 @@ fn print_cli_help(command: Option<&str>) {
         Some("compile") => "Usage: appsdk compile [project]",
         Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
         Some("pin-lock") => "Usage: appsdk pin-lock [project] --binary <path>",
+        Some("reset-governance") => {
+            "Usage: appsdk reset-governance [project] --discard-legacy"
+        }
         Some("init") => "Usage: appsdk init [workspace] [--project-root <relative-path>]",
         Some("prepare") => "Usage: appsdk prepare [workspace]",
         Some("new") => "Usage: appsdk new [project]",
@@ -8173,6 +8248,13 @@ fn main() {
                 fail("USAGE: appsdk pin-lock [project] --binary <path>");
             }
             pin_lock(&root, Path::new(&binary));
+        }
+        Some("reset-governance") => {
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--discard-legacy") || args.next().is_some() {
+                fail("USAGE: appsdk reset-governance [project] --discard-legacy");
+            }
+            reset_governance(&root, true);
         }
         Some("compile") => {
             let root = project_root_or_cwd(&mut args);

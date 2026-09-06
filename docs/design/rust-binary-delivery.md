@@ -40,7 +40,7 @@ appsdk verify ./my-app
 ```
 
 `pin-lock` 将 binary digest 写入 `.appsdk/sdk.lock` 的 `digest` 和
-`compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；本地会生成忽略且不可作为执行入口的 `.appsdk/sdk.bin` 见证副本。后续 `verify`、`compile`、promotion、freeze 只执行当前全局 `appsdk`，并校验当前运行 binary、Bundle 和锁定摘要；干净 checkout 不依赖本地见证副本。
+`compiler_digest`，并写入可迁移的 `binary_ref: "project-sdk"`；本地会生成忽略且不可作为执行入口的 `.appsdk/sdk.bin` 见证副本。后续普通 `verify`、`compile`、promotion、freeze 不把当前运行 binary、固定 SHA、compiler digest 或 Bundle identity 当作开发准入；它们只校验项目治理合同和生命周期真相。干净 checkout 不依赖本地见证副本。
 
 `pin-lock` 也是真实 SDK 版本迁移入口。0.1.6 只接受项目 0.1.5 或已是 0.1.6，并要求执行中的 binary 与 `--binary` 字节一致。0.1.5 → 0.1.6 会先校验并快照旧 canonical maps 与 frozen ReviewRecord 哈希，再安装新 Bundle/maps，最后让 lock、project version 同步前进；旧 review 只能经精确 migration record 解析旧 map snapshot。该事务也可恢复此前已写入 0.1.6 version/lock、但尚未迁移 maps 的中断状态。禁止用旧 CLI 给新 binary 写锁，禁止手改版本、review hash 或 migration snapshot。
 
@@ -59,6 +59,26 @@ cargo build --manifest-path rust/Cargo.toml
 cargo test --manifest-path rust/Cargo.toml
 cargo build --release --manifest-path rust/Cargo.toml
 ```
+
+## Global installation
+
+全局安装只有一个入口：
+
+```bash
+scripts/install-global-appsdk.sh
+```
+
+脚本从自身位置解析仓库根目录，构建 release binary，解析当前 `cargo` 的 bin
+目录，在该目录中完成临时文件校验后原子替换 `appsdk`，再精确清理
+`~/.local/bin/appsdk`、`~/.cargo/bin/appsdk`（canonical 位置除外）和
+`~/.local/lib/appsdk/*/appsdk` 这些 AppSDK 管理的旧入口。它不会递归清理用户目录，
+也不会删除项目 build 产物、`project-memory` 或 Collab binary。
+
+安装脚本幂等执行。它只把 SHA-256 作为最终诊断输出，不使用历史 SHA 白名单作为
+运行条件；相同版本必须由同一次 release build 和唯一安装入口产生。脚本不能修改
+调用方 shell 的命令缓存，完成后在当前 zsh 执行 `rehash`，bash 执行 `hash -r`。
+新 binary 的安装也不会自动重启 AppSDK/Collab daemon；daemon 维护由各自官方维护
+命令单独完成。
 
 产物：
 

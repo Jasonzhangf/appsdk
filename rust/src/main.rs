@@ -7548,13 +7548,18 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
     )
     .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
     let lock_bundle = lock.get("bundle_digest").and_then(Value::as_str)?;
+    let lock_previous_bundle = lock.get("previous_bundle_digest").and_then(Value::as_str);
     let current_bundle = sdk_bundle_digest();
     if record_bundle == current_bundle {
         return None;
     }
+    let lock_bundle_is_valid = lock_bundle.len() == 71
+        && lock_bundle.starts_with("sha256:")
+        && lock_bundle[7..]
+            .chars()
+            .all(|byte| byte.is_ascii_hexdigit());
     if lock_bundle == record_bundle
-        || (lock_bundle == current_bundle
-            && lock.get("previous_bundle_digest").and_then(Value::as_str) == Some(record_bundle))
+        || (lock_bundle_is_valid && lock_previous_bundle == Some(record_bundle))
     {
         return Some(record_bundle.to_string());
     }
@@ -7618,7 +7623,15 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
             || (Some(canonical_target) != declared.get("target_digest")
                 && entry
                     .get("canonical_target_digest")
-                    .is_some_and(|value| !value.is_null()))
+                    .is_some_and(|value| !value.is_null())
+                // A witnessed upgrade preserves the historical canonical target.
+                // Snapshot and live custom-map bytes remain checked below.
+                && !(bundle_transition
+                    && canonical_target.as_str().is_some_and(|digest| {
+                        digest.strip_prefix("sha256:").is_some_and(|hex| {
+                            hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                    })))
             || entry.get("snapshot_path").and_then(Value::as_str)
                 != Some(expected_snapshot.as_str())
         {

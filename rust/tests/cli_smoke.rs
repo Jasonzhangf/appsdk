@@ -6494,3 +6494,100 @@ fn guidance_plan_revision_requires_reason_and_preserves_history() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn bug_command_lifecycle() {
+    let setup_check = run(&["setup-deps", "--check"]);
+    assert!(
+        setup_check.status.success(),
+        "setup-deps failed: {}",
+        String::from_utf8_lossy(&setup_check.stderr)
+    );
+    assert!(String::from_utf8_lossy(&setup_check.stdout).contains("git_bug"));
+
+    let root = temp_root("bug-lifecycle");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("README.md"), "# Bug Test\n").unwrap();
+    init_git(&root);
+
+    // Initial bug list should be empty
+    let initial_list = run_in(&root, &["bug", "list", "--json"]);
+    assert!(
+        initial_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial_list.stderr)
+    );
+    let list_json: Value = serde_json::from_slice(&initial_list.stdout).unwrap();
+    assert_eq!(list_json.as_array().unwrap().len(), 0);
+
+    // Create a new bug
+    let created = run_in(
+        &root,
+        &[
+            "bug",
+            "new",
+            "-t",
+            "Test Bug Lifecycle",
+            "-m",
+            "Testing bug lifecycle tracking",
+            "-l",
+            "test,p0",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let create_json: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let bug_id = create_json["id"].as_str().unwrap();
+    assert!(!bug_id.is_empty());
+
+    // Filter by label
+    let filtered_list = run_in(&root, &["bug", "list", "--json", "-l", "p0"]);
+    assert!(filtered_list.status.success());
+    let filtered_json: Value = serde_json::from_slice(&filtered_list.stdout).unwrap();
+    assert_eq!(filtered_json.as_array().unwrap().len(), 1);
+    assert_eq!(filtered_json[0]["title"], "Test Bug Lifecycle");
+
+    // Show bug details
+    let show = run_in(&root, &["bug", "show", bug_id, "--json"]);
+    assert!(show.status.success());
+    let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(show_json["title"], "Test Bug Lifecycle");
+
+    // Comment on bug
+    let comment = run_in(
+        &root,
+        &[
+            "bug",
+            "comment",
+            bug_id,
+            "-m",
+            "Solution verified and implemented",
+        ],
+    );
+    assert!(
+        comment.status.success(),
+        "{}",
+        String::from_utf8_lossy(&comment.stderr)
+    );
+
+    // Close bug
+    let close = run_in(&root, &["bug", "close", bug_id]);
+    assert!(
+        close.status.success(),
+        "{}",
+        String::from_utf8_lossy(&close.stderr)
+    );
+
+    // Verify closed status in list
+    let closed_list = run_in(&root, &["bug", "list", "--status", "closed", "--json"]);
+    assert!(closed_list.status.success());
+    let closed_json: Value = serde_json::from_slice(&closed_list.stdout).unwrap();
+    assert_eq!(closed_json.as_array().unwrap().len(), 1);
+    assert_eq!(closed_json[0]["status"], "closed");
+
+    fs::remove_dir_all(root).unwrap();
+}
+

@@ -16,6 +16,14 @@
     "final_clean": {"const": true},
     "isolation_mode": {"const": "isolated_worktree"},
     "scope_hash": {"type": "string"},
+    "bug_triage": {
+      "type": "object",
+      "properties": {
+        "query_executed": {"type": "string"},
+        "mode": {"enum": ["new_confirmed", "reopened", "historical_legacy"]},
+        "reopened_from_issue_id": {"type": ["string", "null"]}
+      }
+    },
     "created_at": {"type": "string"}
   }
 }

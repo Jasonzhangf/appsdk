@@ -1,6 +1,6 @@
 ---
 name: appsdk-project-governance
-description: Apply AppSDK engineering quality gates, project contracts and lifecycle evidence. Use optional Guidance for planning; keep automatic multi-worker Collab separate from quality admission.
+description: AppSDK engineering quality gates and Universal Bug Tracking (`appsdk bug <new|list|show|comment|close>`): all user inputs (features & defects) are tracked as bugs. Master triages via `appsdk bug list -q`, reopens or creates `appsdk bug new -t -m -l "P0,mod"`, manages Kanban priorities, and dispatches workers. Worker inspects `appsdk bug show`, stays focused, reports new discoveries via `appsdk bug new` without auto-fixing, reports blockers to master, and closes with `appsdk bug close <id> -m "Solution: ..."`. Dependency managed via `appsdk setup-deps [--check]`. Use optional Guidance for planning; keep automatic Collab separate from quality admission.
 ---
 
 # AppSDK Project Governance
@@ -155,6 +155,44 @@ independent work continues, while operations requiring shared ownership wait.
 Keep automatic communication and file/task collaboration enabled; a serial
 merge queue is required only when the project selects that integration mode.
 Its ownership and tested-integration protections remain mandatory.
+
+## Universal Bug Tracking & Defect Governance
+
+All user inputs—whether bug reports or new feature requests—are tracked through `appsdk bug` backed by `git-bug`.
+
+### 1. Requirements Triage & Kanban Management
+- **Master Role**:
+  - Receives user inputs / feature requests / bug reports.
+  - Queries existing issues first: `appsdk bug list -q "<keyword>" -l "<label>" --json`.
+  - If an existing related issue is found, **reopen** it and append details.
+  - If new, creates a new issue:
+    ```bash
+    appsdk bug new -t "<title>" -m "<requirements & reproduction>" -l "<priority>,<module>"
+    ```
+  - Prioritizes backlog using labels (e.g. `p0`, `p1`, `p2`) and dispatches workers based on highest priority issues within scope.
+- **Worker / Subagent Role**:
+  - Receives assigned issue and inspects its history: `appsdk bug show <id> --json`.
+  - Verifies and reproduces the defect/feature in an isolated worktree.
+  - Reports discoveries or new bugs to the bug system immediately; **does not auto-fix unrelated discoveries** to stay focused on the primary objective.
+  - If encountering a blocker:
+    - If a live Master exists: report immediately to Master for decision/triage.
+    - If no live Master exists: file a blocker bug (`-l "blocker"`), resolve the blocking issue, and then resume the primary task.
+
+### 2. Multi-Criteria Filtering
+- Master and workers filter issues to reduce noise:
+  - By status: `appsdk bug list --status <open|closed>`
+  - By label: `appsdk bug list -l <labels>`
+  - By participant/author: `appsdk bug list -p <user> -a <author>`
+  - By keyword query: `appsdk bug list -q <query>`
+  - By sort & direction: `appsdk bug list -b <creation|edit> -d <asc|desc>`
+
+### 3. Lifecycle Evidence Enforcement
+- **Architecture Gate**: `WorktreeRecord` must declare `bug_triage` (`query_executed: true`, `mode`, `reopened_from_issue_id`) verifying that existing issues were triaged before creating new work.
+- **Promotion / Closure Gate**: Closing a bug or promoting a candidate requires solution documentation in `git-bug`:
+  ```bash
+  appsdk bug close <bug_id> -m "Solution: <root cause & resolution>" --receipt-id <receipt_id>
+  ```
+- **Legacy Compatibility**: Tasks with empty, `none`, or `legacy-*` `issue_id` are exempt from retroactive bug tracking enforcement.
 
 ## Evidence and state ownership
 

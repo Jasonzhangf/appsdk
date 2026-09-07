@@ -38,6 +38,7 @@
     "design_id": {"type": "string"},
     "change_reason_comment": {"type": "string"},
     "playground_cleanup_record_id": {"type": "string"},
+    "bug_closure_verified": {"type": "boolean"},
     "created_at": {"type": "string"}
   }
 }

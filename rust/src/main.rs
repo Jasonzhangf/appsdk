@@ -4528,6 +4528,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
     }
+    assert_bug_tracker_triage_evidence(&worktree, issue_id);
     if record_str(&reproduction, "/worktree_id", &reproduction_name)
         != record_str(&worktree, "/worktree_id", &worktree_name)
         || record_str(&candidate, "/worktree_id", &candidate_name)
@@ -5498,6 +5499,7 @@ fn assert_fix_lifecycle_graph(
     {
         fail("FIX_LIFECYCLE_ORDER_INVALID");
     }
+    assert_bug_tracker_solution_evidence(root, issue_id);
 }
 
 fn assert_record_graph(
@@ -8273,6 +8275,480 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
     println!("governance reset applied");
 }
 
+fn locate_git_bug_binary() -> Result<PathBuf, String> {
+    if let Ok(path) = env::var("GIT_BUG_BIN") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    if let Ok(output) = Command::new("which").arg("git-bug").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Ok(PathBuf::from(s));
+            }
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let p = PathBuf::from(home).join(".local/bin/git-bug");
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    Err("GIT_BUG_NOT_FOUND: please run `appsdk setup-deps` to install git-bug".into())
+}
+
+fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
+    if issue_id.is_empty() || issue_id == "none" || issue_id.starts_with("legacy-") {
+        return;
+    }
+
+    if let Some(triage) = worktree.get("bug_triage") {
+        let mode = triage.get("mode").and_then(Value::as_str).unwrap_or("");
+        if mode.is_empty() {
+            fail("BUG_TRIAGE_MODE_MISSING");
+        }
+        let query = triage.get("query_executed").and_then(Value::as_str).unwrap_or("");
+        if query.is_empty() {
+            fail("BUG_TRIAGE_QUERY_MISSING");
+        }
+        if mode == "reopened" {
+            let reopened_from = triage.get("reopened_from_issue_id").and_then(Value::as_str);
+            if reopened_from.is_none() || reopened_from == Some("") {
+                fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
+            }
+        }
+    }
+}
+
+fn assert_bug_tracker_solution_evidence(root: &Path, issue_id: &str) {
+    if issue_id.is_empty() || issue_id == "none" || issue_id.starts_with("legacy-") {
+        return;
+    }
+
+    if let Ok(git_bug) = locate_git_bug_binary() {
+        let out = Command::new(&git_bug)
+            .args(["bug", "show", issue_id, "-f", "json"])
+            .current_dir(root)
+            .output();
+        if let Ok(output) = out {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(json) = serde_json::from_str::<Value>(&stdout) {
+                    let mut has_solution = false;
+                    if let Some(comments) = json.get("comments").and_then(Value::as_array) {
+                        for c in comments {
+                            if let Some(msg) = c.get("message").and_then(Value::as_str) {
+                                if msg.contains("### Solution / Resolution") || msg.contains("Solution:") {
+                                    has_solution = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !has_solution {
+                        fail(format!("BUG_TRACKER_SOLUTION_EVIDENCE_MISSING:{}", issue_id));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn setup_deps(check_only: bool) {
+    if check_only {
+        match locate_git_bug_binary() {
+            Ok(p) => {
+                let out = Command::new(&p).arg("version").output();
+                let ver = out
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "installed".into());
+                println!("{{\"git_bug\":{{\"status\":\"installed\",\"path\":\"{}\",\"version\":\"{}\"}}}}", p.display(), ver);
+            }
+            Err(e) => {
+                fail(format!("DEPENDENCY_CHECK_FAILED:{}", e));
+            }
+        }
+        return;
+    }
+
+    let home = env::var("HOME").unwrap_or_else(|_| fail("HOME_NOT_SET"));
+    let install_dir = PathBuf::from(&home).join(".local/bin");
+    fs::create_dir_all(&install_dir).unwrap_or_else(|_| fail("INSTALL_DIR_CREATE_FAILED"));
+    let git_bug_target = install_dir.join("git-bug");
+
+    let os = match env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        other => fail(format!("UNSUPPORTED_OS:{}", other)),
+    };
+    let arch = match env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => fail(format!("UNSUPPORTED_ARCH:{}", other)),
+    };
+
+    let version = "0.10.1";
+    let binary_name = format!("git-bug_{}_{}", os, arch);
+    let download_url = format!(
+        "https://github.com/git-bug/git-bug/releases/download/v{}/{}",
+        version, binary_name
+    );
+
+    println!("Downloading git-bug from {} ...", download_url);
+    let curl_status = Command::new("curl")
+        .args(["-fsSL", &download_url, "-o", git_bug_target.to_str().unwrap()])
+        .status();
+
+    let download_success = match curl_status {
+        Ok(s) if s.success() => true,
+        _ => {
+            let wget_status = Command::new("wget")
+                .args(["-qO", git_bug_target.to_str().unwrap(), &download_url])
+                .status();
+            wget_status.map(|s| s.success()).unwrap_or(false)
+        }
+    };
+
+    if !download_success {
+        fail(format!("DOWNLOAD_FAILED:{}", download_url));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(&git_bug_target) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            let _ = fs::set_permissions(&git_bug_target, perms);
+        }
+    }
+
+    println!("{{\"ok\":true,\"installed_to\":\"{}\",\"version\":\"{}\"}}", git_bug_target.display(), version);
+}
+
+fn handle_bug_command<I>(root: &Path, mut args: I)
+where
+    I: Iterator<Item = String>,
+{
+    let sub = args.next().unwrap_or_else(|| {
+        fail("USAGE: appsdk bug <new|list|show|comment|close|webui> [options]")
+    });
+
+    let git_bug = locate_git_bug_binary().unwrap_or_else(|e| fail(e));
+
+    // Auto-ensure user identity if needed
+    let user_list = Command::new(&git_bug)
+        .args(["user", "-f", "json"])
+        .current_dir(root)
+        .output();
+    if let Ok(out) = user_list {
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if stdout.is_empty() || stdout == "[]" || stdout == "null" {
+            let name_out = Command::new("git").args(["-C", root.to_str().unwrap(), "config", "user.name"]).output();
+            let email_out = Command::new("git").args(["-C", root.to_str().unwrap(), "config", "user.email"]).output();
+            let name = name_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            let email = email_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            let user_name = if name.is_empty() { "AppSDK User".to_string() } else { name };
+            let user_email = if email.is_empty() { "user@appsdk.local".to_string() } else { email };
+
+            let _ = Command::new(&git_bug)
+                .args(["user", "new", "-n", &user_name, "-e", &user_email, "--non-interactive"])
+                .current_dir(root)
+                .output();
+        }
+    }
+
+    match sub.as_str() {
+        "new" => {
+            let mut title: Option<String> = None;
+            let mut message: Option<String> = None;
+            let mut labels: Vec<String> = Vec::new();
+            let mut upstream = false;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-t" | "--title" => {
+                        title = Some(args.next().unwrap_or_else(|| fail("MISSING_TITLE_ARG")));
+                    }
+                    "-m" | "--message" => {
+                        message = Some(args.next().unwrap_or_else(|| fail("MISSING_MESSAGE_ARG")));
+                    }
+                    "-l" | "--label" => {
+                        let l = args.next().unwrap_or_else(|| fail("MISSING_LABEL_ARG"));
+                        for item in l.split(',') {
+                            let trimmed = item.trim();
+                            if !trimmed.is_empty() {
+                                labels.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                    "--upstream" => {
+                        upstream = true;
+                    }
+                    _ => fail(format!("UNKNOWN_BUG_NEW_OPTION:{}", arg)),
+                }
+            }
+
+            let title_str = title.unwrap_or_else(|| fail("USAGE: appsdk bug new -t <title> -m <message> [--label <labels>] [--upstream]"));
+            let message_str = message.unwrap_or_else(|| "".to_string());
+
+            let work_dir = if upstream {
+                let sdk_repo = PathBuf::from(env::var("APPSDK_ROOT").unwrap_or_else(|_| {
+                    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+                    format!("{}/Documents/github/appsdk", home)
+                }));
+                if !sdk_repo.exists() {
+                    fail("APPSDK_UPSTREAM_REPO_NOT_FOUND");
+                }
+                sdk_repo
+            } else {
+                root.to_path_buf()
+            };
+
+            let mut cmd = Command::new(&git_bug);
+            cmd.args(["bug", "new", "-t", &title_str, "-m", &message_str, "--non-interactive"]);
+            cmd.current_dir(&work_dir);
+
+            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                fail(format!("GIT_BUG_NEW_FAILED:{}", err.trim()));
+            }
+            let out_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let bug_id = out_str
+                .lines()
+                .next()
+                .and_then(|line| {
+                    line.split_whitespace()
+                        .find(|part| part.chars().all(|c| c.is_ascii_hexdigit()) && part.len() >= 7)
+                })
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| out_str.clone());
+
+            for l in &labels {
+                let _ = Command::new(&git_bug)
+                    .args(["bug", "label", "new", &bug_id, l])
+                    .current_dir(&work_dir)
+                    .output();
+            }
+
+            println!(
+                "{{\"ok\":true,\"id\":\"{}\",\"title\":\"{}\",\"labels\":{:?},\"upstream\":{}}}",
+                bug_id, title_str, labels, upstream
+            );
+        }
+        "list" | "ls" => {
+            let mut status: Option<String> = None;
+            let mut labels: Vec<String> = Vec::new();
+            let mut sort_by: Option<String> = None;
+            let mut direction: Option<String> = None;
+            let mut author: Option<String> = None;
+            let mut participant: Option<String> = None;
+            let mut query: Option<String> = None;
+            let mut format_json = false;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-s" | "--status" => {
+                        status = Some(args.next().unwrap_or_else(|| fail("MISSING_STATUS_ARG")));
+                    }
+                    "-l" | "--label" => {
+                        let l = args.next().unwrap_or_else(|| fail("MISSING_LABEL_ARG"));
+                        for item in l.split(',') {
+                            let trimmed = item.trim();
+                            if !trimmed.is_empty() {
+                                labels.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                    "-b" | "--by" | "--sort" => {
+                        sort_by = Some(args.next().unwrap_or_else(|| fail("MISSING_SORT_ARG")));
+                    }
+                    "-d" | "--direction" => {
+                        direction = Some(args.next().unwrap_or_else(|| fail("MISSING_DIRECTION_ARG")));
+                    }
+                    "-a" | "--author" => {
+                        author = Some(args.next().unwrap_or_else(|| fail("MISSING_AUTHOR_ARG")));
+                    }
+                    "-p" | "--participant" => {
+                        participant = Some(args.next().unwrap_or_else(|| fail("MISSING_PARTICIPANT_ARG")));
+                    }
+                    "-q" | "--query" => {
+                        query = Some(args.next().unwrap_or_else(|| fail("MISSING_QUERY_ARG")));
+                    }
+                    "-f" => {
+                        let f = args.next().unwrap_or_else(|| fail("MISSING_FORMAT_ARG"));
+                        if f == "json" {
+                            format_json = true;
+                        }
+                    }
+                    "--json" => {
+                        format_json = true;
+                    }
+                    _ => fail(format!("UNKNOWN_BUG_LIST_OPTION:{}", arg)),
+                }
+            }
+
+            let mut cmd = Command::new(&git_bug);
+            cmd.arg("bug");
+            if let Some(q) = query {
+                cmd.arg(q);
+            }
+            if let Some(s) = status {
+                cmd.args(["--status", &s]);
+            }
+            for l in &labels {
+                cmd.args(["--label", l]);
+            }
+            if let Some(b) = sort_by {
+                cmd.args(["--by", &b]);
+            }
+            if let Some(d) = direction {
+                cmd.args(["--direction", &d]);
+            }
+            if let Some(a) = author {
+                cmd.args(["--author", &a]);
+            }
+            if let Some(p) = participant {
+                cmd.args(["--participant", &p]);
+            }
+            if format_json {
+                cmd.args(["-f", "json"]);
+            }
+            cmd.current_dir(root);
+
+            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                fail(format!("GIT_BUG_LIST_FAILED:{}", err.trim()));
+            }
+            let out_str = String::from_utf8_lossy(&output.stdout);
+            print!("{}", out_str);
+        }
+        "show" => {
+            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug show <id> [--json]"));
+            let mut format_json = false;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-f" => {
+                        if args.next().as_deref() == Some("json") {
+                            format_json = true;
+                        }
+                    }
+                    "--json" => format_json = true,
+                    _ => {}
+                }
+            }
+            let mut cmd = Command::new(&git_bug);
+            cmd.args(["bug", "show", &bug_id]);
+            if format_json {
+                cmd.args(["-f", "json"]);
+            }
+            cmd.current_dir(root);
+
+            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                fail(format!("GIT_BUG_SHOW_FAILED:{}", err.trim()));
+            }
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        "comment" => {
+            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message>"));
+            let mut msg: Option<String> = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-m" | "--message" => {
+                        msg = Some(args.next().unwrap_or_else(|| fail("MISSING_COMMENT_MESSAGE")));
+                    }
+                    other => {
+                        if msg.is_none() {
+                            msg = Some(other.to_string());
+                        }
+                    }
+                }
+            }
+            let message = msg.unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message>"));
+            let mut cmd = Command::new(&git_bug);
+            cmd.args(["bug", "comment", "new", &bug_id, "-m", &message]);
+            cmd.current_dir(root);
+
+            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                fail(format!("GIT_BUG_COMMENT_FAILED:{}", err.trim()));
+            }
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        "close" => {
+            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug close <id> [-m <solution>] [--receipt-id <id>]"));
+            let mut receipt_id: Option<String> = None;
+            let mut solution: Option<String> = None;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--receipt-id" => {
+                        receipt_id = Some(args.next().unwrap_or_else(|| fail("MISSING_RECEIPT_ID_ARG")));
+                    }
+                    "-m" | "--message" | "--solution" => {
+                        solution = Some(args.next().unwrap_or_else(|| fail("MISSING_SOLUTION_ARG")));
+                    }
+                    _ => fail(format!("UNKNOWN_BUG_CLOSE_OPTION:{}", arg)),
+                }
+            }
+
+            let mut close_notes = Vec::new();
+            if let Some(sol) = solution {
+                close_notes.push(format!("### Solution / Resolution\n{}", sol));
+            }
+            if let Some(r_id) = receipt_id {
+                close_notes.push(format!("### Mainline Receipt\n{}", r_id));
+            }
+
+            if !close_notes.is_empty() {
+                let msg = close_notes.join("\n\n");
+                let mut cmd = Command::new(&git_bug);
+                cmd.args(["bug", "comment", "new", &bug_id, "-m", &msg]);
+                cmd.current_dir(root);
+                let _ = cmd.output();
+            }
+
+            let mut cmd = Command::new(&git_bug);
+            cmd.args(["bug", "status", "close", &bug_id]);
+            cmd.current_dir(root);
+
+            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                fail(format!("GIT_BUG_CLOSE_FAILED:{}", err.trim()));
+            }
+            println!("{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\"}}", bug_id);
+        }
+        "webui" => {
+            let mut port: Option<String> = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-p" | "--port" => {
+                        port = Some(args.next().unwrap_or_else(|| fail("MISSING_PORT_ARG")));
+                    }
+                    _ => fail(format!("UNKNOWN_WEBUI_OPTION:{}", arg)),
+                }
+            }
+            let mut cmd = Command::new(&git_bug);
+            cmd.arg("webui");
+            if let Some(p) = port {
+                cmd.args(["--port", &p]);
+            }
+            cmd.current_dir(root);
+            println!("Launching git-bug webui for {} ...", root.display());
+            let _ = cmd.status().unwrap_or_else(|_| fail("GIT_BUG_WEBUI_FAILED"));
+        }
+        _ => fail(format!("UNKNOWN_BUG_SUBCOMMAND:{}", sub)),
+    }
+}
+
 const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.";
 
 fn is_help(value: &str) -> bool {
@@ -8295,6 +8771,12 @@ fn print_cli_help(command: Option<&str>) {
         Some("new") => "Usage: appsdk new [project]",
         Some("memory") | Some("project-memory") => {
             "Usage: appsdk memory <entry|query|get|review|promote|migrate|import|reentry|index|export|compact|verify> [project]"
+        }
+        Some("bug") => {
+            "Usage: appsdk bug <new|list|show|comment|close|webui> [options]"
+        }
+        Some("setup-deps") => {
+            "Usage: appsdk setup-deps [--check]"
         }
         _ => CLI_USAGE,
     };
@@ -8374,6 +8856,19 @@ fn main() {
         }
         Some("guide") => guidance::run(&mut args),
         Some("memory") | Some("project-memory") => memory::run(&mut args),
+        Some("bug") => {
+            let mut root = PathBuf::from(".");
+            if let Some(first) = args.peek() {
+                if !matches!(first.as_str(), "new" | "list" | "show" | "comment" | "close" | "webui" | "help" | "--help" | "-h") && !first.starts_with('-') {
+                    root = PathBuf::from(args.next().unwrap());
+                }
+            }
+            handle_bug_command(&root, args);
+        }
+        Some("setup-deps") => {
+            let check_only = args.peek().is_some_and(|a| a == "--check");
+            setup_deps(check_only);
+        }
         Some("pin-lock") => {
             let root = project_root_or_cwd(&mut args);
             if args.next().as_deref() != Some("--binary") {

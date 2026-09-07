@@ -8792,8 +8792,12 @@ r#"# 长程任务调度与饱和执行提示词（Master 专属）
 - **上报 AppSDK 框架异常**：若执行过程中遇到 AppSDK 工具链、verify 规则或治理阻断，严禁在业务仓库内 hack 规避，必须执行：
   `appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与现场>" -l "P0,cli"`
 
-## 3. 阻塞仲裁与推进闭环
-- 当 worker 上报 blocker 阻断时，Master 必须在当周期内裁决：协助消除外部依赖、重新分工或仲裁方案，严禁让 worker 空等或搁置。
+## 3. 阻塞仲裁与推进闭环（Master 唯一责任制）
+- **长程任务提醒必查 Blocked 任务**：每次长程任务周期提醒唤醒时，Master 必须主动排查所有处于 `blocked` 状态的任务（通过 `collab task status` 或 `appsdk bug list -s open -l blocker`），介入解决阻塞问题，全力推动项目向前。
+- **无论是否 Block，Master 是唯一最终责任人**：
+  - 项目交付与推进的成败责任永远在 Master，绝不能因为任务已被标记为 `blocked` 就任由其停滞或甩锅给 Worker。
+  - 遇到 Worker 标记 block 时，Master 必须在当前周期内介入审查：若是 AppSDK 框架问题，协助提报 upstream bug；若是业务代码/测试/逻辑问题，立即要求 Worker 攻坚或由 Master 重新分解分工。
+- **严格把控 Block 门禁**：任务状态允许被标记为 `blocked`，但**仅限 AppSDK 框架级缺陷**（必须通过 `appsdk bug new --upstream` 报 bug 跟踪）。**所有非 AppSDK 的业务代码、逻辑实现、测试失败或编译错误必须由 Worker 自行解决，绝不能构成 block**；严禁因任务复杂或调试困难而挂起为 blocked。
 - 当 worker 完成任务后，督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
 
 ## 4. 任务推进目标与结束条件
@@ -8987,6 +8991,89 @@ where
     }
 }
 
+fn handle_task_command<I>(root: &Path, mut args: I)
+where
+    I: Iterator<Item = String>,
+{
+    let sub = match args.next() {
+        Some(s) => s,
+        None => {
+            let status = Command::new("collab")
+                .arg("task")
+                .current_dir(root)
+                .status()
+                .unwrap_or_else(|e| fail(format!("COLLAB_UNAVAILABLE:{}", e)));
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    };
+
+    if sub == "block" {
+        let task_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk task block <id> [--reason <text>] [--json]"));
+        let mut reason: Option<String> = None;
+        let mut format_json = false;
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--reason" | "-m" | "--next" => {
+                    reason = Some(args.next().unwrap_or_else(|| fail("MISSING_REASON_ARG")));
+                }
+                "--json" => format_json = true,
+                _ => {}
+            }
+        }
+
+        // 1. Invoke collab task block to update durable state
+        let mut block_cmd = Command::new("collab");
+        block_cmd.args(["task", "block", &task_id]);
+        if let Some(r) = &reason {
+            block_cmd.args(["--next", r]);
+        }
+        block_cmd.current_dir(root);
+        let _ = block_cmd.output();
+
+        // 2. Stop notifications / reminders for this peer/task
+        let _ = Command::new("collab").args(["notify", "close"]).current_dir(root).output();
+
+        // 3. Construct the mandatory governance reminder
+        let notice_title = format!("【AppSDK 任务阻塞门禁提醒】任务 '{}' 已标记为 blocked，提醒已停止。", task_id);
+        let notice_body = 
+r#"================================================================================
+【重要门禁与合规约束】
+1. AppSDK 的问题可以报 bug：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
+   必须立即上报 upstream 缺陷系统：
+   appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与上下文>" -l "P0,cli"
+2. 非 AppSDK 的问题需要自己解决，不能构成 block：
+   所有业务代码、逻辑实现、测试失败、编译错误与项目依赖，必须由 Worker 自行攻坚排查，
+   绝不能构成合法 block！严禁因调试复杂或任务困难而逃避搁置。
+3. 请立即核实该阻断性质：若非 AppSDK 框架缺陷，请立即恢复开发推进解决！
+================================================================================"#;
+
+        if format_json {
+            let resp = serde_json::json!({
+                "ok": true,
+                "task_id": task_id,
+                "status": "blocked",
+                "reminders_stopped": true,
+                "reason": reason,
+                "rule": "AppSDK 的问题可以报 bug，非 AppSDK 的问题需要自己解决，不能构成 block",
+                "notice": format!("{}\n{}", notice_title, notice_body)
+            });
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        } else {
+            println!("{}\n{}", notice_title, notice_body);
+        }
+    } else {
+        let mut rest_args = vec!["task".to_string(), sub];
+        rest_args.extend(args);
+        let status = Command::new("collab")
+            .args(&rest_args)
+            .current_dir(root)
+            .status()
+            .unwrap_or_else(|e| fail(format!("COLLAB_UNAVAILABLE:{}", e)));
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.";
 
 fn is_help(value: &str) -> bool {
@@ -9018,6 +9105,9 @@ fn print_cli_help(command: Option<&str>) {
         }
         Some("goal") => {
             "Usage: appsdk goal <subscribe|status|cancel|prompt> [options]\n       appsdk goal subscribe --goal <path.md> [--interval <duration>]\n       appsdk goal prompt --goal <path.md>"
+        }
+        Some("task") => {
+            "Usage: appsdk task <block|register|relocate|update|wait|deliver|close|status> [options]\n       appsdk task block <id> [--reason <text>]"
         }
         _ => CLI_USAGE,
     };
@@ -9118,6 +9208,15 @@ fn main() {
                 }
             }
             handle_goal_command(&root, args);
+        }
+        Some("task") => {
+            let mut root = PathBuf::from(".");
+            if let Some(first) = args.peek() {
+                if !matches!(first.as_str(), "block" | "register" | "relocate" | "update" | "wait" | "deliver" | "close" | "status" | "help" | "--help" | "-h") && !first.starts_with('-') {
+                    root = PathBuf::from(args.next().unwrap());
+                }
+            }
+            handle_task_command(&root, args);
         }
         Some("pin-lock") => {
             let root = project_root_or_cwd(&mut args);

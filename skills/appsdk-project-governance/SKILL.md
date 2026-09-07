@@ -174,9 +174,11 @@ All user inputs—whether bug reports or new feature requests—are tracked thro
   - Receives assigned issue and inspects its history: `appsdk bug show <id> --json`.
   - Verifies and reproduces the defect/feature in an isolated worktree.
   - Reports discoveries or new bugs to the bug system immediately; **does not auto-fix unrelated discoveries** to stay focused on the primary objective.
-  - If encountering a blocker:
-    - If a live Master exists: report immediately to Master for decision/triage.
-    - If no live Master exists: file a blocker bug (`-l "blocker"`), resolve the blocking issue, and then resume the primary task.
+  - **Blocker Handling & Block Criteria**:
+    - Task status can be marked as `blocked` (`collab task block <id>`), **but only genuine AppSDK framework defects qualify as a block** (reported via `appsdk bug new --upstream -t "[SDK Bug] ..." -l "P0,cli"`).
+    - **All non-AppSDK issues (project code bugs, logic errors, compile/test failures) must be solved by the worker itself and CANNOT constitute a block.** Workers may not mark a task blocked due to difficulty or debugging.
+    - If encountering a valid AppSDK blocker and a live Master exists: report immediately to Master with root cause and proposed fix (`collab sendmessage --to <master> --subject blocker "..."`).
+    - If blocked by AppSDK and no live Master exists: file an upstream SDK bug, resolve or work around, and resume the task.
 
 ### 2. Multi-Criteria Filtering
 - Master and workers filter issues to reduce noise:

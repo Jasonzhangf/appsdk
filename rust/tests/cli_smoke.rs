@@ -6667,4 +6667,40 @@ fn goal_subscription_and_master_prompt_lifecycle() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn task_block_governance_reminder_lifecycle() {
+    let root = temp_root("task-block");
+    fs::create_dir_all(&root).unwrap();
+
+    let block_res = run_in(
+        &root,
+        &[
+            "task",
+            "block",
+            "task-404",
+            "--reason",
+            "Waiting on upstream SDK bug fix",
+            "--json",
+        ],
+    );
+    assert!(block_res.status.success());
+    let block_json: Value = serde_json::from_slice(&block_res.stdout).unwrap();
+    assert_eq!(block_json["status"], "blocked");
+    assert_eq!(block_json["reminders_stopped"], true);
+    assert_eq!(block_json["task_id"], "task-404");
+    let rule = block_json["rule"].as_str().unwrap();
+    assert!(rule.contains("AppSDK 的问题可以报 bug"));
+    assert!(rule.contains("非 AppSDK 的问题需要自己解决，不能构成 block"));
+
+    // Also check human text output contains the prominent reminder
+    let human_res = run_in(&root, &["task", "block", "task-405"]);
+    assert!(human_res.status.success());
+    let human_text = String::from_utf8_lossy(&human_res.stdout);
+    assert!(human_text.contains("提醒已停止"));
+    assert!(human_text.contains("非 AppSDK 的问题需要自己解决，不能构成 block"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+
 

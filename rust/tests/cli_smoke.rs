@@ -7072,7 +7072,7 @@ esac
     let text = String::from_utf8_lossy(&res.stdout);
 
     // Charter, fleet rules and notification rules all travel with the wake.
-    assert!(text.contains("不要等，不要问"));
+    assert!(text.contains("不要空转，不要假装完成"));
     assert!(text.contains("最多 5 个"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab worker close"));
@@ -7410,8 +7410,7 @@ exit 44
     assert_eq!(block_json["reminders_stopped"], false);
     assert_eq!(block_json["task_id"], "task-404");
     let rule = block_json["rule"].as_str().unwrap();
-    assert!(rule.contains("AppSDK 的问题可以报 bug"));
-    assert!(rule.contains("非 AppSDK 的问题需要自己解决，不能构成 block"));
+    assert!(rule.contains("cause, owner, unblock condition"));
 
     // Also check human text output contains the prominent reminder
     let human_res = Command::new(binary())
@@ -7424,7 +7423,7 @@ exit 44
     assert!(human_res.status.success());
     let human_text = String::from_utf8_lossy(&human_res.stdout);
     assert!(human_text.contains("通知策略以 Collab 响应为准"));
-    assert!(human_text.contains("非 AppSDK 的问题需要自己解决，不能构成 block"));
+    assert!(human_text.contains("合法等待必须写清原因"));
 
     fs::write(
         &fake_collab,

@@ -21,7 +21,7 @@ tick_interval_ms = 1000
 [keepalive]
 enabled = true
 interval_seconds = 900 # minimum 15 minutes
-max_unacked = 3 # hard maximum, not an unlimited retry setting
+max_unacked = 3 # legacy delivery throttle; recv consumes notifications
 [subagent]
 profile_priority = ["gcm", "oauth"]
 persistent = true
@@ -82,9 +82,9 @@ duplicate task registration. Complete the real task lifecycle; `ready` changes
 session availability only and never marks unfinished tasks complete.
 
 Unfinished actionable tasks are grouped by worker. Explicit idle for 15 minutes
-allows one activation; ACK it once with `collab ack <notification-id>` (MCP:
-`collab_ack`), then work or record the real blocker. Messages sent by the worker,
-fresh ACKs and positive working observations count as activity. Unknown remains
+allows one activation. Read the notification with `collab recv`; reading consumes
+it atomically, so a normal follow-up ACK is not required. Messages sent by the
+worker and positive working observations count as activity. Unknown remains
 unknown; absent/unknown/working receive no activation. Blocked/waiting tasks
 follow their declared wait, not this continuation path.
 

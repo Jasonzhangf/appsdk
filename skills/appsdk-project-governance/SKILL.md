@@ -1,6 +1,16 @@
 ---
 name: appsdk-project-governance
-description: AppSDK engineering quality gates and Universal Bug Tracking (`appsdk bug <new|list|show|comment|close>`): all user inputs (features & defects) are tracked as bugs. Master triages via `appsdk bug list -q`, reopens or creates `appsdk bug new -t -m -l "P0,mod"`, manages Kanban priorities, and dispatches workers. Worker inspects `appsdk bug show`, stays focused, reports new discoveries via `appsdk bug new` without auto-fixing, reports blockers to master, and closes with `appsdk bug close <id> -m "Solution: ..."`. Dependency managed via `appsdk setup-deps [--check]`. Use optional Guidance for planning; keep automatic Collab separate from quality admission.
+description: >
+  AppSDK engineering quality gates and Universal Bug Tracking
+  (appsdk bug new/list/show/comment/close): all user inputs (features &
+  defects) are tracked as bugs. Master triages via `appsdk bug list -q`,
+  reopens or creates `appsdk bug new -t -m -l "P0,mod"`, manages Kanban
+  priorities, and dispatches workers. Worker inspects `appsdk bug show`, stays
+  focused, reports new discoveries via `appsdk bug new` without auto-fixing,
+  reports blockers to master, and closes with `appsdk bug close ID -m
+  "Solution: ..."`. Dependency managed via `appsdk setup-deps [--check]`. Use
+  optional Guidance for planning; keep automatic Collab separate from quality
+  admission.
 ---
 
 # AppSDK Project Governance
@@ -175,8 +185,8 @@ All user inputs—whether bug reports or new feature requests—are tracked thro
   - Verifies and reproduces the defect/feature in an isolated worktree.
   - Reports discoveries or new bugs to the bug system immediately; **does not auto-fix unrelated discoveries** to stay focused on the primary objective.
   - **Blocker Handling & Block Criteria**:
-    - Task status can be marked as `blocked` (`collab task block <id>`), **but only genuine AppSDK framework defects qualify as a block** (reported via `appsdk bug new --upstream -t "[SDK Bug] ..." -l "P0,cli"`).
-    - **All non-AppSDK issues (project code bugs, logic errors, compile/test failures) must be solved by the worker itself and CANNOT constitute a block.** Workers may not mark a task blocked due to difficulty or debugging.
+    - Task status can be marked as `blocked` (`collab task block <id>`) only with a concrete cause, responsible owner, unblock condition, and recovery trigger. Genuine external dependencies, resource ownership, missing credentials/approval, and cross-owner decisions may be valid waits; difficulty alone is not.
+    - AppSDK framework defects remain an upstream bug path (`appsdk bug new --upstream -t "[SDK Bug] ..." -l "P0,cli"`), but non-framework failures must first be investigated and solved in scope. If a cross-owner decision is required, report a concrete proposal to Master; Master must take over, reassign, or auditable-force-close in the same cycle.
     - If encountering a valid AppSDK blocker and a live Master exists: report immediately to Master with root cause and proposed fix (`collab sendmessage --to <master> --subject blocker "..."`).
     - If blocked by AppSDK and no live Master exists: file an upstream SDK bug, resolve or work around, and resume the task.
 

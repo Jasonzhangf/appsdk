@@ -9089,7 +9089,8 @@ THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待
 
 ## 5. 阻塞仲裁（Master 唯一责任制）
 - 每次唤醒必查 `blocked` 任务（`collab task status`），介入解决，不能任其停滞。
-- **严格把控 Block 门禁**：仅 AppSDK 框架级缺陷可以 block（必须 `appsdk bug new --upstream` 跟踪）。所有非 AppSDK 的业务代码、逻辑、测试失败或编译错误必须由 Worker 自行解决，不构成 block。
+- **合法等待用状态表达**：按原因、责任人、解除条件和恢复触发判断等待；不能空报 blocked，真正的外部依赖、资源占用、凭证/批准缺失等可以进入 waiting/blocked，但必须带恢复触发。
+- **AppSDK 框架缺陷是典型上游 blocker**：必须 `appsdk bug new --upstream` 跟踪，不能 hack 规避。非框架问题仍优先在本范围内解决；如果确实需要跨 owner 决策，提交具体方案给 master，master 必须在周期内接管、改派或强制关闭。
 - Worker 完成后督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
 
 ## 6. 结束条件
@@ -9112,9 +9113,9 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 2. **让 worker 满载**：存在可派发的工作却有 worker 空闲，就是调度失败。优先派给空闲 worker，而不是自己在 master pane 里实现。
 3. **推动闭环**：驱动测试验证，然后提交、合并、关闭 worktree。代码写完不算完成，验证并集成清理干净才算完成。
 4. **承接所有阻塞**：worker 被 block 时，解决它是你的工作。你是唯一最终责任人，常规阻塞没有可以上报并等待的对象。
-5. **不要等，不要问**：用户没有新输入不是停止条件。在既定目标下自行持续推进，想尽一切办法完成任务。
-   唯一例外是不可逆操作、发布、成本与新的未批准范围，这些仍需人类批准；只有这类外部门禁才允许
-   `collab master wake hold --reason "<门禁>" --ttl-seconds <n>`。"#;
+5. **不要空转，不要假装完成**：用户没有新输入不是停止条件，但真实等待不是失败。凡因外部依赖、资源占用、凭证/批准缺失、跨 owner 决策无法推进，必须写明原因、责任人、解除条件和恢复触发；master 周期内接管、改派或强制关闭。
+   不可逆操作、发布、成本与新的未批准范围仍需人类批准，这类外部门禁允许
+   `collab master wake hold --reason "<门禁与解除条件>" --ttl-seconds <n>`。"#;
 
 const FLEET_RULES: &str = r#"Worker / subagent 处理规则（每次唤醒都适用）：
 
@@ -9952,10 +9953,10 @@ where
 1. AppSDK 的问题可以报 bug：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
    必须立即上报 upstream 缺陷系统：
    appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与上下文>" -l "P0,cli"
-2. 非 AppSDK 的问题需要自己解决，不能构成 block：
-   所有业务代码、逻辑实现、测试失败、编译错误与项目依赖，必须由 Worker 自行攻坚排查，
-   绝不能构成合法 block！严禁因调试复杂或任务困难而逃避搁置。
-3. 请立即核实该阻断性质：若非 AppSDK 框架缺陷，请立即恢复开发推进解决！
+2. 合法等待必须写清原因、责任人、解除条件和恢复触发：
+   外部依赖、资源占用、凭证/批准缺失、跨 owner 决策等可以进入 waiting/blocked，
+   但严禁只写“blocked”而不带恢复方案，也严禁因任务难就空等。
+3. 请立即核实等待性质：无法自己解除时，把具体方案交给 master；master 必须在周期内接管、改派或强制关闭。
 ================================================================================"#;
 
         if format_json {
@@ -9966,7 +9967,7 @@ where
                 "reminders_stopped": false,
                 "reason": reason,
                 "collab_result": block_result,
-                "rule": "AppSDK 的问题可以报 bug，非 AppSDK 的问题需要自己解决，不能构成 block",
+                "rule": "blocked/waiting must include cause, owner, unblock condition, and recovery trigger; master owns resolution",
                 "notice": format!("{}\n{}", notice_title, notice_body)
             });
             println!("{}", serde_json::to_string_pretty(&resp).unwrap());

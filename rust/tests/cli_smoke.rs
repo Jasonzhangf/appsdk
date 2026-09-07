@@ -6656,6 +6656,37 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
 }
 
 #[test]
+fn guidance_plan_rejects_concurrent_writer_lock() {
+    let root = temp_root("guidance-task-lock");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+    let control_dir = root.join(".appsdk-control/guidance/task-locked");
+    fs::create_dir_all(&control_dir).unwrap();
+    fs::write(
+        control_dir.join("write.lock"),
+        format!("pid={} op=plan created=0\n", std::process::id()),
+    )
+    .unwrap();
+
+    fs::write(root.join("plan.json"), "{}").unwrap();
+    let res = run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-locked",
+        "--input",
+        "plan.json",
+    ]);
+    assert!(!res.status.success());
+    assert!(String::from_utf8_lossy(&res.stderr).contains("GUIDANCE_TASK_LOCKED"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_event_ledger_reports_bad_line_number() {
     let root = temp_root("guidance-events-line");
     let root_text = root.to_str().unwrap();

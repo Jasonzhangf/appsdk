@@ -2,8 +2,86 @@ use super::{assert_id, assert_no_symlink, canonical, fail, read_json};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(super) struct TaskLock {
+    path: PathBuf,
+}
+
+impl Drop for TaskLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub(super) fn lock_task(root: &Path, task: &str, op: &str) -> TaskLock {
+    let dir = task_dir(root, task);
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    let path = dir.join("write.lock");
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| fail("GUIDANCE_CLOCK_FAILED", "repair the host clock"))
+        .as_nanos();
+    let open_lock = || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+    };
+    let mut file = match open_lock() {
+        Ok(file) => file,
+        Err(_) if stale_lock(&path) => {
+            let _ = fs::remove_file(&path);
+            match open_lock() {
+                Ok(file) => file,
+                Err(_) => fail(
+                    format!("GUIDANCE_TASK_LOCKED:{}:{}", task, op),
+                    "wait for the other plan/update writer to finish, or remove the stale write.lock only after verifying no live owner",
+                ),
+            }
+        }
+        Err(_) => {
+            fail(
+                format!("GUIDANCE_TASK_LOCKED:{}:{}", task, op),
+                "wait for the other plan/update writer to finish, or remove the stale write.lock only after verifying no live owner",
+            );
+        }
+    };
+    writeln!(
+        file,
+        "pid={} op={} created={}",
+        std::process::id(),
+        op,
+        created
+    )
+    .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    file.sync_all()
+        .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    TaskLock { path }
+}
+
+fn stale_lock(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Some(pid) = content.lines().find_map(|line| {
+        line.strip_prefix("pid=")
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<i32>().ok())
+    }) else {
+        return true;
+    };
+    let alive = Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success());
+    !alive
+}
 
 pub(super) fn atomic_write(path: &Path, value: &Value) {
     if let Some(parent) = path.parent() {

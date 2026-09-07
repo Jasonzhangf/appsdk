@@ -16,7 +16,7 @@ mod review;
 use compiler::{compile, compiled_context_drift, current_rule_sources, load_compiled};
 use help::help;
 use intake::initialize;
-use ledger::{atomic_write, event_file, plan_file, read_events, read_plan};
+use ledger::{atomic_write, event_file, lock_task, plan_file, read_events, read_plan};
 use projector::{close, next_step, project_status, step_events};
 use review::{review as review_task, state as review_state, tour as tour_task};
 
@@ -434,6 +434,7 @@ fn scope_allowed(module: &Value, candidate: &str) -> bool {
 
 fn plan(root: &Path, task: &str, input: &str) {
     assert_owner_worktree(root);
+    let _lock = lock_task(root, task, "plan");
     let project = read_project(root);
     let compiled = load_compiled(root, &project)
         .unwrap_or_else(|| fail("GUIDANCE_NOT_COMPILED", "run appsdk guide compile"));
@@ -714,6 +715,7 @@ fn lifecycle_projection(project: &Value, selected_module: &Value) -> Value {
 
 fn update(root: &Path, task: &str, input: &str) {
     assert_owner_worktree(root);
+    let _lock = lock_task(root, task, "update");
     let project = read_project(root);
     let compiled = load_compiled(root, &project)
         .unwrap_or_else(|| fail("GUIDANCE_NOT_COMPILED", "run appsdk guide compile"));

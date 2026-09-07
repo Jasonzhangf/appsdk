@@ -8749,6 +8749,244 @@ where
     }
 }
 
+fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("EMPTY_DURATION".into());
+    }
+    if let Ok(ms) = s.parse::<u64>() {
+        return Ok(ms);
+    }
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    let num: u64 = num_part
+        .parse()
+        .map_err(|_| format!("INVALID_DURATION_NUMBER:{}", num_part))?;
+    match unit {
+        "s" | "S" => Ok(num * 1000),
+        "m" | "M" => Ok(num * 60 * 1000),
+        "h" | "H" => Ok(num * 3600 * 1000),
+        "d" | "D" => Ok(num * 86400 * 1000),
+        _ => Err(format!("UNKNOWN_DURATION_UNIT:{}", unit)),
+    }
+}
+
+fn generate_long_horizon_master_prompt(goal_path: &Path, interval_str: &str) -> String {
+    format!(
+r#"# 长程任务调度与饱和执行提示词（Master 专属）
+
+**长程任务目标文档**: `{}`
+**提醒触发周期**: 每 `{}` 循环唤醒
+
+## 1. Master 核心职责与调度定位
+- **调度收口，非业务工人**：你作为 Collab Master，是本项目的唯一调度收口，全权负责目标分解、任务依赖拓扑、架构质量把关、集成与最终验收。严禁自己承担大量具体业务实现代码。
+- **让 Subagent / Worker 任务持续饱和**：
+  - 时刻监控所有 subagent / worker 状态（通过 `collab who` 或 `appsdk subagent status`）。
+  - 一旦发现有 worker 处于 `ready` / `idle` 空闲状态，立即从目标需求待办池中拆解派发新任务，保持所有 worker 任务持续饱和。
+- **无歧义派单契约**：每个派发任务必须具备独立的写入范围与 Worktree，明确交付条件（完成 iff、产物范围、禁止篡改区）与测试条件（执行命令、期望结果、证据路径）。
+
+## 2. 全生命周期治理与 AppSDK 规范
+- **系统需求、任务与 Bug 统一纳管**：长程任务中拆解的所有子需求、阶段任务与发现的缺陷，全部统一录入缺陷跟踪系统：
+  `appsdk bug new -t "<标题>" -m "<规格与验收条件>" -l "<优先级>,<模块>"`
+- **优先查重再建档**：派单或立项前运行 `appsdk bug list -q "<关键词>" --json`。已有相关 issue 优先追加或重新激活，避免碎片化重复建档。
+- **严格把关质量门禁**：验收 worker 产物时，必须检查完整生命周期证据链（独立 clean worktree、红测复现、预审验证、架构审查 PASS、无修改源有效性验证、Mainline 凭证）。
+- **上报 AppSDK 框架异常**：若执行过程中遇到 AppSDK 工具链、verify 规则或治理阻断，严禁在业务仓库内 hack 规避，必须执行：
+  `appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与现场>" -l "P0,cli"`
+
+## 3. 阻塞仲裁与推进闭环
+- 当 worker 上报 blocker 阻断时，Master 必须在当周期内裁决：协助消除外部依赖、重新分工或仲裁方案，严禁让 worker 空等或搁置。
+- 当 worker 完成任务后，督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
+
+## 4. 任务推进目标与结束条件
+- **核心目标**：饱和 worker 产能，快速保质保量推动任务流水线。
+- **结束判定**：当且仅当目标文档中声明的所有阶段目标、代码变更、系统集成与端到端验收证据全部达到 PASS 时，长程任务宣告完成。完成时显式注销长程订阅并向主脑汇报。
+"#,
+        goal_path.display(),
+        interval_str
+    )
+}
+
+fn handle_goal_command<I>(root: &Path, mut args: I)
+where
+    I: Iterator<Item = String>,
+{
+    let sub = args.next().unwrap_or_else(|| {
+        fail("USAGE: appsdk goal <subscribe|status|cancel|prompt> [options]")
+    });
+
+    match sub.as_str() {
+        "subscribe" | "register" => {
+            let mut goal_file: Option<String> = None;
+            let mut interval_str = "10m".to_string();
+            let mut repeat_count: u32 = 100;
+            let mut ttl_seconds: u64 = 604800;
+            let mut format_json = false;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-g" | "--goal" => {
+                        goal_file = Some(args.next().unwrap_or_else(|| fail("MISSING_GOAL_ARG")));
+                    }
+                    "-i" | "--interval" | "--every" | "--period" => {
+                        interval_str = args.next().unwrap_or_else(|| fail("MISSING_INTERVAL_ARG"));
+                    }
+                    "-r" | "--repeat" | "--repeat-count" => {
+                        let r = args.next().unwrap_or_else(|| fail("MISSING_REPEAT_ARG"));
+                        repeat_count = r.parse().unwrap_or(100);
+                    }
+                    "--ttl" | "--ttl-seconds" => {
+                        let t = args.next().unwrap_or_else(|| fail("MISSING_TTL_ARG"));
+                        ttl_seconds = t.parse().unwrap_or(604800);
+                    }
+                    "--json" => format_json = true,
+                    _ => fail(format!("UNKNOWN_GOAL_SUBSCRIBE_OPTION:{}", arg)),
+                }
+            }
+
+            let raw_goal = goal_file.unwrap_or_else(|| fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>]"));
+            if !raw_goal.to_lowercase().ends_with(".md") {
+                fail(format!("GOAL_PATH_MUST_BE_MD_FILE: '{}' is not a markdown file (.md)", raw_goal));
+            }
+
+            let goal_path = if Path::new(&raw_goal).is_absolute() {
+                PathBuf::from(&raw_goal)
+            } else {
+                root.join(&raw_goal)
+            };
+
+            if !goal_path.exists() || !goal_path.is_file() {
+                fail(format!("GOAL_FILE_NOT_FOUND: '{}' does not exist or is not a file", goal_path.display()));
+            }
+
+            let every_ms = parse_duration_to_ms(&interval_str).unwrap_or_else(|e| fail(e));
+            let master_prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
+
+            let goal_slug = goal_path.file_name().and_then(|n| n.to_str()).unwrap_or("goal");
+            let collab_sub = Command::new("collab")
+                .args([
+                    "notify",
+                    "subscribe",
+                    "--event",
+                    "deadline",
+                    "--every-ms",
+                    &every_ms.to_string(),
+                    "--repeat-count",
+                    &repeat_count.to_string(),
+                    "--ttl-seconds",
+                    &ttl_seconds.to_string(),
+                    "--subject",
+                    &format!("goal:{}", goal_slug),
+                ])
+                .current_dir(root)
+                .output();
+
+            let (collab_subscribed, sub_details) = match collab_sub {
+                Ok(out) if out.status.success() => {
+                    let out_json: Option<Value> = serde_json::from_slice(&out.stdout).ok();
+                    (true, out_json)
+                }
+                _ => (false, None),
+            };
+
+            let control_dir = root.join(".appsdk-control");
+            let _ = fs::create_dir_all(&control_dir);
+            let goal_record_file = control_dir.join("long-task-goal.json");
+            let record = serde_json::json!({
+                "schema_version": 1,
+                "goal_path": goal_path.to_string_lossy(),
+                "interval": interval_str,
+                "every_ms": every_ms,
+                "repeat_count": repeat_count,
+                "ttl_seconds": ttl_seconds,
+                "collab_subscribed": collab_subscribed,
+                "collab_subscription": sub_details,
+                "registered_at": chrono::Utc::now().to_rfc3339(),
+                "active": true
+            });
+            let _ = fs::write(&goal_record_file, serde_json::to_string_pretty(&record).unwrap_or_default() + "\n");
+
+            if format_json {
+                let mut resp = record.clone();
+                resp["master_prompt"] = Value::String(master_prompt);
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+            } else {
+                println!("Long-horizon goal successfully registered:");
+                println!("- Goal file: {}", goal_path.display());
+                println!("- Periodic reminder: every {}", interval_str);
+                println!("- Collab notification status: {}", if collab_subscribed { "subscribed" } else { "daemon not running / local recorded" });
+                println!("\n{}", master_prompt);
+            }
+        }
+        "status" => {
+            let mut format_json = false;
+            while let Some(arg) = args.next() {
+                if arg == "--json" {
+                    format_json = true;
+                }
+            }
+            let goal_record_file = root.join(".appsdk-control/long-task-goal.json");
+            if !goal_record_file.exists() {
+                if format_json {
+                    println!("{{\"active\":false,\"message\":\"No active long-horizon goal registered\"}}");
+                } else {
+                    println!("No active long-horizon goal registered.");
+                }
+                return;
+            }
+            let content = fs::read_to_string(&goal_record_file).unwrap_or_default();
+            if format_json {
+                println!("{}", content.trim());
+            } else {
+                let parsed: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+                println!("Active Long-Horizon Goal:");
+                println!("- Goal: {}", parsed["goal_path"].as_str().unwrap_or("unknown"));
+                println!("- Interval: {}", parsed["interval"].as_str().unwrap_or("unknown"));
+                println!("- Registered at: {}", parsed["registered_at"].as_str().unwrap_or("unknown"));
+                println!("- Active: {}", parsed["active"].as_bool().unwrap_or(false));
+            }
+        }
+        "cancel" => {
+            let goal_record_file = root.join(".appsdk-control/long-task-goal.json");
+            if goal_record_file.exists() {
+                let _ = fs::remove_file(&goal_record_file);
+            }
+            println!("{{\"ok\":true,\"status\":\"cancelled\"}}");
+        }
+        "prompt" => {
+            let mut goal_file: Option<String> = None;
+            let mut interval_str = "10m".to_string();
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-g" | "--goal" => {
+                        goal_file = Some(args.next().unwrap_or_else(|| fail("MISSING_GOAL_ARG")));
+                    }
+                    "-i" | "--interval" | "--every" => {
+                        interval_str = args.next().unwrap_or_else(|| fail("MISSING_INTERVAL_ARG"));
+                    }
+                    _ => {}
+                }
+            }
+
+            let raw_goal = goal_file.unwrap_or_else(|| fail("USAGE: appsdk goal prompt --goal <path.md> [--interval <duration>]"));
+            if !raw_goal.to_lowercase().ends_with(".md") {
+                fail(format!("GOAL_PATH_MUST_BE_MD_FILE: '{}' is not a markdown file (.md)", raw_goal));
+            }
+            let goal_path = if Path::new(&raw_goal).is_absolute() {
+                PathBuf::from(&raw_goal)
+            } else {
+                root.join(&raw_goal)
+            };
+            if !goal_path.exists() || !goal_path.is_file() {
+                fail(format!("GOAL_FILE_NOT_FOUND: '{}' does not exist or is not a file", goal_path.display()));
+            }
+
+            let prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
+            println!("{}", prompt);
+        }
+        _ => fail(format!("UNKNOWN_GOAL_SUBCOMMAND:{}", sub)),
+    }
+}
+
 const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.";
 
 fn is_help(value: &str) -> bool {
@@ -8777,6 +9015,9 @@ fn print_cli_help(command: Option<&str>) {
         }
         Some("setup-deps") => {
             "Usage: appsdk setup-deps [--check]"
+        }
+        Some("goal") => {
+            "Usage: appsdk goal <subscribe|status|cancel|prompt> [options]\n       appsdk goal subscribe --goal <path.md> [--interval <duration>]\n       appsdk goal prompt --goal <path.md>"
         }
         _ => CLI_USAGE,
     };
@@ -8868,6 +9109,15 @@ fn main() {
         Some("setup-deps") => {
             let check_only = args.peek().is_some_and(|a| a == "--check");
             setup_deps(check_only);
+        }
+        Some("goal") => {
+            let mut root = PathBuf::from(".");
+            if let Some(first) = args.peek() {
+                if !matches!(first.as_str(), "subscribe" | "register" | "status" | "cancel" | "prompt" | "help" | "--help" | "-h") && !first.starts_with('-') {
+                    root = PathBuf::from(args.next().unwrap());
+                }
+            }
+            handle_goal_command(&root, args);
         }
         Some("pin-lock") => {
             let root = project_root_or_cwd(&mut args);

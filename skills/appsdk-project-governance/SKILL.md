@@ -194,6 +194,20 @@ All user inputs—whether bug reports or new feature requests—are tracked thro
   ```
 - **Legacy Compatibility**: Tasks with empty, `none`, or `legacy-*` `issue_id` are exempt from retroactive bug tracking enforcement.
 
+## Long-Horizon Goal Subscription & Master Saturation
+
+Register complex or long-running goals with a required markdown target and periodic reminder interval:
+
+```bash
+appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
+```
+- Path must point to an existing markdown file (`.md`).
+- Master is awakened periodically to:
+  1. Inspect worker states (`collab who` / `appsdk subagent status`); dispatch decomposed tasks to keep workers saturated whenever any worker is idle.
+  2. Enforce AppSDK lifecycle governance across all subagent tasks.
+  3. Report any upstream AppSDK framework issues via `appsdk bug new --upstream`.
+  4. Conclude only when all goal DoD conditions pass.
+
 ## Evidence and state ownership
 
 - Project AGENTS owns project facts; Skills own procedure; declared machine

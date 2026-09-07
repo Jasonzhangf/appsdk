@@ -6591,3 +6591,80 @@ fn bug_command_lifecycle() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn goal_subscription_and_master_prompt_lifecycle() {
+    let root = temp_root("goal-sub");
+    fs::create_dir_all(&root).unwrap();
+
+    // 1. Non-md file should fail
+    let non_md = root.join("goal.txt");
+    fs::write(&non_md, "some goal").unwrap();
+    let res_non_md = run_in(&root, &["goal", "subscribe", "--goal", "goal.txt"]);
+    assert!(!res_non_md.status.success());
+    assert!(String::from_utf8_lossy(&res_non_md.stderr).contains("GOAL_PATH_MUST_BE_MD_FILE"));
+
+    // 2. Non-existent md file should fail
+    let res_not_found = run_in(&root, &["goal", "subscribe", "--goal", "missing-goal.md"]);
+    assert!(!res_not_found.status.success());
+    assert!(String::from_utf8_lossy(&res_not_found.stderr).contains("GOAL_FILE_NOT_FOUND"));
+
+    // 3. Valid md goal registration with interval
+    let valid_goal = root.join("long-task.md");
+    fs::write(&valid_goal, "# Sample Long-Horizon Goal\nDeliver feature X.\n").unwrap();
+
+    let sub_res = run_in(
+        &root,
+        &[
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--json",
+        ],
+    );
+    assert!(
+        sub_res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sub_res.stderr)
+    );
+    let sub_json: Value = serde_json::from_slice(&sub_res.stdout).unwrap();
+    assert_eq!(sub_json["active"], true);
+    assert_eq!(sub_json["interval"], "5m");
+    assert_eq!(sub_json["every_ms"], 300000);
+    let prompt = sub_json["master_prompt"].as_str().unwrap();
+    assert!(prompt.contains("Master 专属"));
+    assert!(prompt.contains("饱和"));
+    assert!(prompt.contains("appsdk bug"));
+
+    // 4. Check goal status
+    let status_res = run_in(&root, &["goal", "status", "--json"]);
+    assert!(status_res.status.success());
+    let status_json: Value = serde_json::from_slice(&status_res.stdout).unwrap();
+    assert_eq!(status_json["active"], true);
+    assert_eq!(status_json["interval"], "5m");
+
+    // 5. Check standalone prompt command
+    let prompt_res = run_in(
+        &root,
+        &["goal", "prompt", "--goal", "long-task.md", "--interval", "10m"],
+    );
+    assert!(prompt_res.status.success());
+    let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
+    assert!(prompt_text.contains("长程任务目标文档"));
+    assert!(prompt_text.contains("10m"));
+
+    // 6. Cancel goal
+    let cancel_res = run_in(&root, &["goal", "cancel"]);
+    assert!(cancel_res.status.success());
+
+    let post_cancel_status = run_in(&root, &["goal", "status", "--json"]);
+    assert!(post_cancel_status.status.success());
+    let post_cancel_json: Value = serde_json::from_slice(&post_cancel_status.stdout).unwrap();
+    assert_eq!(post_cancel_json["active"], false);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+

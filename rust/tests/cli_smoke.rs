@@ -6833,7 +6833,16 @@ fn bug_command_lifecycle() {
     );
 
     // Close bug
-    let close = run_in(&root, &["bug", "close", bug_id]);
+    let close = run_in(
+        &root,
+        &[
+            "bug",
+            "close",
+            bug_id,
+            "-m",
+            "Solution verified and implemented",
+        ],
+    );
     assert!(
         close.status.success(),
         "{}",
@@ -6922,8 +6931,8 @@ fn bug_command_upstream_fallback() {
     assert_eq!(list_json.as_array().unwrap().len(), 1);
     assert_eq!(list_json[0]["title"], "Upstream Daemon Issue");
 
-    // 3. In client root, comment on upstream bug: automatically falls back to upstream
-    let comment = Command::new(binary())
+    // 3. In client root, write without --upstream must not silently target upstream
+    let local_comment = Command::new(binary())
         .args(&[
             "bug",
             "comment",
@@ -6936,15 +6945,39 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
+    assert!(!local_comment.status.success());
+    assert!(String::from_utf8_lossy(&local_comment.stderr).contains("GIT_BUG_COMMENT_FAILED"));
+
+    let comment = Command::new(binary())
+        .args(&[
+            "bug",
+            "comment",
+            bug_id,
+            "-m",
+            "Verified in client environment",
+            "--upstream",
+        ])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(
         comment.status.success(),
         "{}",
         String::from_utf8_lossy(&comment.stderr)
     );
 
-    // 4. In client root, close bug: automatically falls back to upstream
+    // 4. Close requires a solution and keeps explicit repository targeting.
     let close = Command::new(binary())
-        .args(&["bug", "close", bug_id, "-m", "Fixed and verified"])
+        .args(&[
+            "bug",
+            "close",
+            bug_id,
+            "-m",
+            "Fixed and verified",
+            "--upstream",
+        ])
         .current_dir(&client_root)
         .env("APPSDK_ROOT", &upstream_root)
         .env_remove("TMUX_PANE")
@@ -7162,6 +7195,27 @@ esac
 fn goal_subscription_and_master_prompt_lifecycle() {
     let root = temp_root("goal-sub");
     fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "notify subscribe")
+    printf '%s\n' '{"subscription_id":"goal-sub-1"}'
+    ;;
+  "notify unsubscribe")
+    printf '%s\n' '{"ok":true}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
     // 1. Non-md file should fail
     let non_md = root.join("goal.txt");
@@ -7183,9 +7237,8 @@ fn goal_subscription_and_master_prompt_lifecycle() {
     )
     .unwrap();
 
-    let sub_res = run_in(
-        &root,
-        &[
+    let sub_res = Command::new(binary())
+        .args([
             "goal",
             "subscribe",
             "--goal",
@@ -7193,8 +7246,12 @@ fn goal_subscription_and_master_prompt_lifecycle() {
             "--interval",
             "5m",
             "--json",
-        ],
-    );
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(
         sub_res.status.success(),
         "{}",
@@ -7204,6 +7261,10 @@ fn goal_subscription_and_master_prompt_lifecycle() {
     assert_eq!(sub_json["active"], true);
     assert_eq!(sub_json["interval"], "5m");
     assert_eq!(sub_json["every_ms"], 300000);
+    assert_eq!(sub_json["desired"], "subscribed");
+    assert_eq!(sub_json["observed"], "subscribed");
+    assert_eq!(sub_json["goal_id"], sub_json["goal_id"]);
+    assert!(sub_json["goal_id"].as_str().unwrap().starts_with("sha256:"));
     let prompt = sub_json["master_prompt"].as_str().unwrap();
     assert!(prompt.contains("Master 专属"));
     assert!(prompt.contains("饱和"));
@@ -7215,6 +7276,8 @@ fn goal_subscription_and_master_prompt_lifecycle() {
     let status_json: Value = serde_json::from_slice(&status_res.stdout).unwrap();
     assert_eq!(status_json["active"], true);
     assert_eq!(status_json["interval"], "5m");
+    assert_eq!(status_json["desired"], "subscribed");
+    assert_eq!(status_json["observed"], "subscribed");
 
     // 5. Check standalone prompt command
     let prompt_res = run_in(
@@ -7234,13 +7297,70 @@ fn goal_subscription_and_master_prompt_lifecycle() {
     assert!(prompt_text.contains("10m"));
 
     // 6. Cancel goal
-    let cancel_res = run_in(&root, &["goal", "cancel"]);
+    let cancel_res = Command::new(binary())
+        .args(["goal", "cancel"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(cancel_res.status.success());
 
     let post_cancel_status = run_in(&root, &["goal", "status", "--json"]);
     assert!(post_cancel_status.status.success());
     let post_cancel_json: Value = serde_json::from_slice(&post_cancel_status.stdout).unwrap();
     assert_eq!(post_cancel_json["active"], false);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_subscribe_failure_does_not_report_active() {
+    let root = temp_root("goal-sub-fail");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(
+        fake_bin.join("collab"),
+        "#!/bin/sh\nprintf '%s\\n' 'daemon stopped' >&2\nexit 44\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sub = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(sub.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&sub.stderr).contains("COLLAB_SUBSCRIBE_FAILED"));
+    let sub_json: Value = serde_json::from_slice(&sub.stdout).unwrap();
+    assert_eq!(sub_json["active"], false);
+    assert_eq!(sub_json["desired"], "subscribed_failed");
+    assert_eq!(sub_json["observed"], "collab_failed");
+
+    let status = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["active"], false);
+    assert_eq!(status_json["observed"], "collab_failed");
 
     fs::remove_dir_all(root).unwrap();
 }

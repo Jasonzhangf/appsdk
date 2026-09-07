@@ -8917,20 +8917,8 @@ where
                 cmd.output()
             };
 
-            let mut output =
+            let output =
                 run_comment(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
-            if !upstream && !output.status.success() {
-                if let Some(ref up_dir) = upstream_repo {
-                    if up_dir != root {
-                        if let Ok(up_out) = run_comment(up_dir) {
-                            if up_out.status.success() {
-                                output = up_out;
-                            }
-                        }
-                    }
-                }
-            }
-
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 fail(format!("GIT_BUG_COMMENT_FAILED:{}", err.trim()));
@@ -8965,14 +8953,17 @@ where
                     _ => fail(format!("UNKNOWN_BUG_CLOSE_OPTION:{}", arg)),
                 }
             }
-
-            let mut close_notes = Vec::new();
-            if let Some(sol) = solution {
-                close_notes.push(format!("### Solution / Resolution\n{}", sol));
-            }
-            if let Some(r_id) = receipt_id {
-                close_notes.push(format!("### Mainline Receipt\n{}", r_id));
-            }
+            let solution = solution.unwrap_or_else(|| {
+                fail("USAGE: appsdk bug close <id> -m <solution> [--receipt-id <id>] [--upstream]")
+            });
+            let close_notes = {
+                let mut notes = Vec::new();
+                notes.push(format!("### Solution / Resolution\n{}", solution));
+                if let Some(r_id) = receipt_id {
+                    notes.push(format!("### Mainline Receipt\n{}", r_id));
+                }
+                notes
+            };
 
             let upstream_repo = resolve_upstream_repo();
             let target_dir = if upstream {
@@ -9007,19 +8998,7 @@ where
                 Ok(())
             };
 
-            let res = run_close(&target_dir);
-            if !upstream && res.is_err() {
-                if let Some(ref up_dir) = upstream_repo {
-                    if up_dir != root {
-                        if run_close(up_dir).is_ok() {
-                            println!("{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\",\"upstream\":true}}", bug_id);
-                            return;
-                        }
-                    }
-                }
-            }
-
-            match res {
+            match run_close(&target_dir) {
                 Ok(_) => {
                     println!(
                         "{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\"}}",
@@ -9680,19 +9659,40 @@ where
                 .current_dir(root)
                 .output();
 
-            let (collab_subscribed, sub_details) = match collab_sub {
+            let (collab_subscribed, sub_details, sub_error) = match collab_sub {
                 Ok(out) if out.status.success() => {
                     let out_json: Option<Value> = serde_json::from_slice(&out.stdout).ok();
-                    (true, out_json)
+                    (true, out_json, None)
                 }
-                _ => (false, None),
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    (
+                        false,
+                        None,
+                        Some(format!(
+                            "COLLAB_SUBSCRIBE_FAILED:exit={}{}",
+                            out.status.code().unwrap_or(1),
+                            if stderr.is_empty() && stdout.is_empty() {
+                                String::new()
+                            } else {
+                                format!(":{}", if stderr.is_empty() { stdout } else { stderr })
+                            }
+                        )),
+                    )
+                }
+                Err(e) => (false, None, Some(format!("COLLAB_UNAVAILABLE:{}", e))),
             };
 
             let control_dir = root.join(".appsdk-control");
-            let _ = fs::create_dir_all(&control_dir);
+            fs::create_dir_all(&control_dir)
+                .unwrap_or_else(|_| fail("GOAL_CONTROL_DIR_CREATE_FAILED"));
             let goal_record_file = control_dir.join("long-task-goal.json");
             let record = serde_json::json!({
                 "schema_version": 1,
+                "goal_id": sha256(&goal_path.to_string_lossy()),
+                "desired": if collab_subscribed { "subscribed" } else { "subscribed_failed" },
+                "observed": if collab_subscribed { "subscribed" } else { "collab_failed" },
                 "goal_path": goal_path.to_string_lossy(),
                 "interval": interval_str,
                 "every_ms": every_ms,
@@ -9700,15 +9700,32 @@ where
                 "ttl_seconds": ttl_seconds,
                 "collab_subscribed": collab_subscribed,
                 "collab_subscription": sub_details,
+                "error": sub_error,
                 "registered_at": chrono::Utc::now().to_rfc3339(),
-                "active": true
+                "active": collab_subscribed
             });
-            let _ = fs::write(
+            fs::write(
                 &goal_record_file,
                 serde_json::to_string_pretty(&record).unwrap_or_default() + "\n",
-            );
+            )
+            .unwrap_or_else(|e| fail(format!("GOAL_RECORD_WRITE_FAILED:{}", e)));
 
-            if format_json {
+            if !collab_subscribed {
+                if let Some(error) = &record["error"].as_str() {
+                    eprintln!("{}", error);
+                }
+                if format_json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&record).unwrap_or_default()
+                    );
+                } else {
+                    println!(
+                        "Goal registration submitted but Collab subscription failed; local record is not active."
+                    );
+                }
+                std::process::exit(1);
+            } else if format_json {
                 let mut resp = record.clone();
                 resp["master_prompt"] = Value::String(master_prompt);
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap());
@@ -9716,14 +9733,7 @@ where
                 println!("Long-horizon goal successfully registered:");
                 println!("- Goal file: {}", goal_path.display());
                 println!("- Periodic reminder: every {}", interval_str);
-                println!(
-                    "- Collab notification status: {}",
-                    if collab_subscribed {
-                        "subscribed"
-                    } else {
-                        "daemon not running / local recorded"
-                    }
-                );
+                println!("- Collab notification status: subscribed");
                 println!("\n{}", master_prompt);
             }
         }
@@ -9745,7 +9755,22 @@ where
             }
             let content = fs::read_to_string(&goal_record_file).unwrap_or_default();
             if format_json {
-                println!("{}", content.trim());
+                let parsed: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
+                let payload = serde_json::json!({
+                    "active": parsed["active"].as_bool().unwrap_or(false),
+                    "desired": parsed["desired"].as_str().unwrap_or("unknown"),
+                    "observed": parsed["observed"].as_str().unwrap_or("unknown"),
+                    "goal_id": parsed["goal_id"].as_str(),
+                    "goal_path": parsed["goal_path"].as_str(),
+                    "interval": parsed["interval"].as_str(),
+                    "collab_subscribed": parsed["collab_subscribed"].as_bool(),
+                    "error": parsed["error"],
+                    "record": parsed,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
             } else {
                 let parsed: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
                 println!("Active Long-Horizon Goal:");
@@ -9762,12 +9787,43 @@ where
                     parsed["registered_at"].as_str().unwrap_or("unknown")
                 );
                 println!("- Active: {}", parsed["active"].as_bool().unwrap_or(false));
+                println!(
+                    "- Desired: {} | Observed: {}",
+                    parsed["desired"].as_str().unwrap_or("unknown"),
+                    parsed["observed"].as_str().unwrap_or("unknown")
+                );
+                if let Some(error) = parsed["error"].as_str() {
+                    println!("- Error: {}", error);
+                }
             }
         }
         "cancel" => {
             let goal_record_file = root.join(".appsdk-control/long-task-goal.json");
-            if goal_record_file.exists() {
-                let _ = fs::remove_file(&goal_record_file);
+            let record: Option<Value> = fs::read_to_string(&goal_record_file)
+                .ok()
+                .and_then(|content| serde_json::from_str(&content).ok());
+            let subscription_id = record
+                .as_ref()
+                .and_then(|r| r["collab_subscription"]["subscription_id"].as_str())
+                .map(str::to_owned);
+            if let Some(subscription_id) = subscription_id {
+                let cancel = Command::new("collab")
+                    .args(["notify", "unsubscribe", &subscription_id])
+                    .current_dir(root)
+                    .output();
+                match cancel {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => fail(format!(
+                        "GOAL_CANCEL_COLLAB_FAILED:exit={}:{}",
+                        out.status.code().unwrap_or(1),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )),
+                    Err(e) => fail(format!("GOAL_CANCEL_COLLAB_FAILED:{}", e)),
+                }
+            }
+            if record.is_some() {
+                fs::remove_file(&goal_record_file)
+                    .unwrap_or_else(|_| fail("GOAL_CANCEL_RECORD_REMOVE_FAILED"));
             }
             println!("{{\"ok\":true,\"status\":\"cancelled\"}}");
         }

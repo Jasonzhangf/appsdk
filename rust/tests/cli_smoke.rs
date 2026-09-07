@@ -7145,6 +7145,57 @@ fn bug_command_upstream_fallback() {
 }
 
 #[test]
+fn bug_close_comment_failure_is_explicit() {
+    let root = temp_root("bug-close-comment-failure");
+    fs::create_dir_all(&root).unwrap();
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        r#"#!/bin/sh
+case "$1 $2 $3" in
+  "user -f json")
+    printf '%s\n' '[{"id":"user-1"}]'
+    exit 0
+    ;;
+  "bug comment new")
+    echo "solution comment write failed" >&2
+    exit 2
+    ;;
+  "bug status close")
+    echo "should not close"
+    exit 0
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+
+    let res = Command::new(binary())
+        .args(["bug", "close", "abc123", "-m", "Solution verified"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!res.status.success());
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert!(stderr.contains("GIT_BUG_COMMENT_FAILED"), "{}", stderr);
+    assert!(!stderr.contains("should not close"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
     let root = temp_root("longhorizon-show");
     fs::create_dir_all(root.join(".appsdk-control")).unwrap();
@@ -7338,6 +7389,115 @@ esac
         .as_str()
         .unwrap()
         .contains("你是本项目的 master"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_show_never_masks_bug_read_failures() {
+    let root = temp_root("longhorizon-bug-read");
+    fs::create_dir_all(&root).unwrap();
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}'
+    ;;
+  "context ")
+    exit 1
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+
+    let missing = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        missing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(payload["open_bugs"].as_array().unwrap().len(), 0);
+    assert!(
+        payload["open_bugs_error"]
+            .as_str()
+            .unwrap()
+            .contains("GIT_BUG_NOT_FOUND"),
+        "{}",
+        payload["open_bugs_error"]
+    );
+
+    let text = Command::new(binary())
+        .args(["longhorizon", "show"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("开放缺陷读取失败"));
+
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "bug --status")
+    printf '%s\n' 'not-json'
+    exit 0
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let invalid = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        invalid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(payload["open_bugs"].as_array().unwrap().len(), 0);
+    assert!(
+        payload["open_bugs_error"]
+            .as_str()
+            .unwrap()
+            .contains("GIT_BUG_OPEN_JSON_INVALID"),
+        "{}",
+        payload["open_bugs_error"]
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

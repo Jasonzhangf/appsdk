@@ -8981,7 +8981,13 @@ where
                     let mut cmd = Command::new(&git_bug);
                     cmd.args(["bug", "comment", "new", &bug_id, "-m", &msg]);
                     cmd.current_dir(dir);
-                    let _ = cmd.output();
+                    let output = cmd
+                        .output()
+                        .map_err(|_| "GIT_BUG_EXECUTION_FAILED".to_string())?;
+                    if !output.status.success() {
+                        let err = String::from_utf8_lossy(&output.stderr);
+                        return Err(format!("GIT_BUG_COMMENT_FAILED:{}", err.trim()));
+                    }
                 }
 
                 let mut cmd = Command::new(&git_bug);
@@ -9265,10 +9271,10 @@ fn collab_status_all(root: &Path) -> Option<Value> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
-fn open_bugs_json(root: &Path) -> Vec<Value> {
+fn open_bugs_json(root: &Path) -> Result<Vec<Value>, String> {
     let git_bug = match locate_git_bug_binary() {
         Ok(path) => path,
-        Err(_) => return Vec::new(),
+        Err(err) => return Err(err),
     };
     let out = match Command::new(&git_bug)
         .args(["bug", "--status", "open", "-f", "json"])
@@ -9276,12 +9282,33 @@ fn open_bugs_json(root: &Path) -> Vec<Value> {
         .output()
     {
         Ok(out) if out.status.success() => out,
-        _ => return Vec::new(),
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(if err.is_empty() {
+                format!(
+                    "GIT_BUG_OPEN_READ_FAILED: exit={}",
+                    out.status.code().unwrap_or(-1)
+                )
+            } else {
+                format!("GIT_BUG_OPEN_READ_FAILED:{}", err)
+            });
+        }
+        Err(err) => {
+            return Err(format!("GIT_BUG_EXECUTION_FAILED:{}", err));
+        }
     };
-    let mut bugs: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let mut bugs: Vec<Value> = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("GIT_BUG_OPEN_JSON_INVALID:{}", e))?;
     let rank = |bug: &Value| -> u8 {
         let labels = bug["labels"].as_array().cloned().unwrap_or_default();
-        for (priority, score) in [("P0", 0u8), ("P1", 1), ("P2", 2)] {
+        for (priority, score) in [
+            ("P0", 0u8),
+            ("p0", 0),
+            ("P1", 1),
+            ("p1", 1),
+            ("P2", 2),
+            ("p2", 2),
+        ] {
             if labels.iter().any(|l| l.as_str() == Some(priority)) {
                 return score;
             }
@@ -9289,7 +9316,7 @@ fn open_bugs_json(root: &Path) -> Vec<Value> {
         3
     };
     bugs.sort_by_key(rank);
-    bugs
+    Ok(bugs)
 }
 
 /// Pull the first meaningful prose out of the goal document so one read shows
@@ -9368,7 +9395,10 @@ where
 fn longhorizon_show(root: &Path, format_json: bool) {
     let record = long_horizon_record(root);
     let status = collab_status_all(root);
-    let bugs = open_bugs_json(root);
+    let (bugs, open_bugs_error) = match open_bugs_json(root) {
+        Ok(bugs) => (bugs, None),
+        Err(err) => (Vec::new(), Some(err)),
+    };
     let role = execution_role(root, &status);
     let role_label = role.label();
     let charter = role.charter();
@@ -9440,6 +9470,7 @@ fn longhorizon_show(root: &Path, format_json: bool) {
             "idle_workers": idle_workers,
             "workers_needing_intervention": broken_workers,
             "open_bugs": bugs,
+            "open_bugs_error": open_bugs_error,
             "collab_reachable": status.is_some(),
         });
         println!(
@@ -9532,21 +9563,25 @@ fn longhorizon_show(root: &Path, format_json: bool) {
         );
     }
 
-    println!("\n开放缺陷 ({}，P0 优先):", bugs.len());
-    if bugs.is_empty() {
-        println!("- 无");
-    }
-    for bug in bugs.iter().take(10) {
-        let labels: Vec<&str> = bug["labels"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        println!(
-            "- {} [{}] {}",
-            bug["human_id"].as_str().unwrap_or("?"),
-            labels.join(","),
-            bug["title"].as_str().unwrap_or("?")
-        );
+    if let Some(err) = open_bugs_error {
+        println!("\n开放缺陷读取失败: {}", err);
+    } else {
+        println!("\n开放缺陷 ({}，P0 优先):", bugs.len());
+        if bugs.is_empty() {
+            println!("- 无");
+        }
+        for bug in bugs.iter().take(10) {
+            let labels: Vec<&str> = bug["labels"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            println!(
+                "- {} [{}] {}",
+                bug["human_id"].as_str().unwrap_or("?"),
+                labels.join(","),
+                bug["title"].as_str().unwrap_or("?")
+            );
+        }
     }
 
     println!("\n## 4. 本轮下一步\n");

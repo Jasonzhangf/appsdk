@@ -27,6 +27,7 @@
       "contracts/records/reproduction-record.schema.json",
       "contracts/records/evidence-record.schema.json",
       "contracts/records/fix-candidate-record.schema.json",
+      "contracts/records/goal-clarification-record.schema.json",
       "contracts/records/review-record.schema.json",
       "contracts/records/effectiveness-record.schema.json",
       "contracts/records/pre-review-validation-record.schema.json",

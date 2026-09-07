@@ -139,6 +139,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/fix-candidate-record.schema.json"),
     ),
     (
+        "contracts/records/goal-clarification-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/goal-clarification-record.schema.json"),
+    ),
+    (
         "contracts/records/effectiveness-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/effectiveness-record.schema.json"),

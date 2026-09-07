@@ -453,6 +453,53 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
 }
 
 #[test]
+fn bundled_goal_clarification_contract_supports_verify_and_admission() {
+    let root = temp_root("bundled-goal-clarification-contract");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let contract = "contracts/records/goal-clarification-record.schema.json";
+    let project: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
+            .unwrap();
+    assert!(project["governance"]["record_contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some(contract)));
+    assert!(root.join(contract).is_file());
+    assert!(root.join(".appsdk").join(contract).is_file());
+
+    for args in [
+        &["verify", root_text][..],
+        &["verify", "--admission", root_text][..],
+    ] {
+        let verified = run(args);
+        assert!(
+            verified.status.success(),
+            "args={args:?} stderr={}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+    }
+
+    fs::remove_file(root.join(contract)).unwrap();
+    for args in [
+        &["verify", root_text][..],
+        &["verify", "--admission", root_text][..],
+    ] {
+        let rejected = run(args);
+        assert!(!rejected.status.success(), "args={args:?}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("DECLARED_RECORD_CONTRACT_MISSING"),
+            "args={args:?} stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_automatically_attempts_collab_without_blocking_independent_work() {
     let root = temp_root("init-collab-peer");
     fs::create_dir_all(&root).unwrap();

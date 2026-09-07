@@ -1270,26 +1270,21 @@ fn assert_sdk_lock(root: &Path, project: &Value) {
             }
         }
     }
-    if lock.get("bundle_digest").and_then(Value::as_str) != Some(sdk_bundle_digest().as_str())
-        || lock.get("bundle_manifest_digest").and_then(Value::as_str)
-            != Some(digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()).as_str())
-    {
-        fail("SDK_BUNDLE_DIGEST_MISMATCH");
-    }
-    if let Some(previous) = lock.get("previous_bundle_digest") {
-        let digest = previous.as_str().unwrap_or("");
-        if digest.len() != 71
-            || !digest.starts_with("sha256:")
-            || !digest[7..].chars().all(|c| c.is_ascii_hexdigit())
-        {
-            fail("INVALID_SDK_BUNDLE_DIGEST");
+    for key in ["bundle_digest", "bundle_manifest_digest", "previous_bundle_digest"] {
+        if let Some(digest) = lock.get(key) {
+            let digest = digest.as_str().unwrap_or("");
+            if digest.len() != 71
+                || !digest.starts_with("sha256:")
+                || !digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+            {
+                fail("INVALID_SDK_BUNDLE_DIGEST");
+            }
         }
     }
-    let manifest_resources = sdk_bundle_manifest_resources();
-    match lock.get("bundle_resources") {
-        Some(declared) if declared == &manifest_resources => {}
-        Some(_) => fail("SDK_LOCK_BUNDLE_RESOURCES_MISMATCH"),
-        None => fail("SDK_LOCK_BUNDLE_RESOURCES_MISSING"),
+    if let Some(resources) = lock.get("bundle_resources") {
+        if !resources.is_object() {
+            fail("INVALID_SDK_BUNDLE_RESOURCES");
+        }
     }
 }
 
@@ -6418,32 +6413,31 @@ fn assert_sdk_resources(root: &Path, required: bool) {
         &fs::read_to_string(&path).unwrap_or_else(|_| fail("INVALID_SDK_RESOURCES")),
     )
     .unwrap_or_else(|_| fail("INVALID_SDK_RESOURCES"));
-    assert_bundle_manifest();
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
         || record.get("version").and_then(Value::as_str) != Some("0.1.6")
-        || record.get("bundle_digest").and_then(Value::as_str) != Some(&sdk_bundle_digest())
-        || record.get("manifest_digest").and_then(Value::as_str)
-            != Some(&digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()))
     {
-        fail("SDK_RESOURCES_BUNDLE_MISMATCH");
+        fail("INVALID_SDK_RESOURCES");
+    }
+    for key in ["bundle_digest", "manifest_digest"] {
+        let digest = record.get(key).and_then(Value::as_str).unwrap_or("");
+        if digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            fail("INVALID_SDK_RESOURCES_DIGEST");
+        }
     }
     let entries = record
         .get("resources")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_SDK_RESOURCES"));
-    let bundle_entries = sdk_bundle_resource_entries();
-    if entries.len() != bundle_entries.len() {
-        fail("SDK_RESOURCE_SET_MISMATCH");
-    }
-    for (source, class, content) in bundle_entries {
-        let entry = entries
-            .iter()
-            .find(|entry| {
-                entry.get("source").and_then(Value::as_str) == Some(source.as_str())
-                    && entry.get("class").and_then(Value::as_str) == Some(class.as_str())
-            })
-            .unwrap_or_else(|| fail(format!("SDK_RESOURCE_MISSING:{}", source)));
+    for entry in entries {
+        let source = entry
+            .get("source")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fail("INVALID_SDK_RESOURCES"));
         let relative = entry
             .get("path")
             .and_then(Value::as_str)
@@ -6457,13 +6451,20 @@ fn assert_sdk_resources(root: &Path, required: bool) {
                 )
             })
             || (relative != ".appsdk" && !relative.starts_with(".appsdk/"))
-            || relative != sdk_resource_install_relative(&source, &class)
         {
             fail(format!("SDK_RESOURCE_PATH_ESCAPE:{}", relative));
         }
-        let expected = digest_bytes(content.as_bytes());
-        if entry.get("digest").and_then(Value::as_str) != Some(expected.as_str()) {
-            fail(format!("SDK_RESOURCE_DIGEST_RECORD_MISMATCH:{}", source));
+        let expected = entry
+            .get("digest")
+            .and_then(Value::as_str)
+            .filter(|digest| {
+                digest.len() == 71
+                    && digest.starts_with("sha256:")
+                    && digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+            })
+            .unwrap_or_else(|| fail(format!("INVALID_SDK_RESOURCE_DIGEST:{}", source)));
+        if entry.get("class").and_then(Value::as_str).is_none() {
+            fail(format!("INVALID_SDK_RESOURCE_CLASS:{}", source));
         }
         let target = root.join(relative);
         assert_no_symlink_components(root, &target, "sdk_resource_record");

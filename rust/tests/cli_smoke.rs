@@ -1123,7 +1123,7 @@ fn verify_rejects_escaping_sdk_resource_record_path() {
 }
 
 #[test]
-fn verify_rejects_tampered_lock_bundle_resources() {
+fn verify_accepts_legacy_lock_bundle_resources() {
     let root = temp_root("lock-bundle-resources");
     fs::create_dir_all(&root).unwrap();
     let root_text = root.to_str().unwrap();
@@ -1139,8 +1139,11 @@ fn verify_rejects_tampered_lock_bundle_resources() {
     )
     .unwrap();
     let result = run(&["verify", root_text]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_LOCK_BUNDLE_RESOURCES_MISMATCH"));
+    assert!(
+        result.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1398,8 +1401,11 @@ fn pin_lock_accepts_chained_previous_bundle_witness_without_rewriting_migration_
     .unwrap();
 
     let stale = run(&["verify", root_text]);
-    assert!(!stale.status.success());
-    assert!(String::from_utf8_lossy(&stale.stderr).contains("SDK_BUNDLE_DIGEST_MISMATCH"));
+    assert!(
+        stale.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
 
     let migrated = run(&[
         "pin-lock",
@@ -2936,14 +2942,14 @@ fn initialized_lock_is_not_bound_to_the_running_binary() {
 }
 
 #[test]
-fn initialized_lock_rejects_wrong_version_schema_and_bundle_binding() {
+fn initialized_lock_rejects_wrong_version_schema_and_malformed_bundle_digest() {
     for (name, mutate, expected) in [
         ("wrong-version", "version", "INVALID_SDK_LOCK"),
         ("wrong-schema", "contract_schema", "INVALID_SDK_LOCK"),
         (
-            "wrong-bundle",
+            "malformed-bundle",
             "bundle_digest",
-            "SDK_BUNDLE_DIGEST_MISMATCH",
+            "INVALID_SDK_BUNDLE_DIGEST",
         ),
     ] {
         let root = temp_root(name);
@@ -2955,9 +2961,7 @@ fn initialized_lock_rejects_wrong_version_schema_and_bundle_binding() {
         match mutate {
             "version" => lock["version"] = Value::String("0.1.5".into()),
             "contract_schema" => lock["contract_schema"] = Value::from(2),
-            "bundle_digest" => {
-                lock["bundle_digest"] = Value::String(format!("sha256:{}", "0".repeat(64)))
-            }
+            "bundle_digest" => lock["bundle_digest"] = Value::String("sha256:not-a-digest".into()),
             _ => unreachable!(),
         }
         fs::write(

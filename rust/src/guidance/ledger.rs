@@ -1,6 +1,6 @@
-use super::{assert_id, assert_no_symlink, canonical, fail, read_json};
+use super::{assert_id, assert_no_symlink, canonical, fail};
 use serde_json::Value;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -98,8 +98,16 @@ pub(super) fn atomic_write(path: &Path, value: &Value) {
         serde_json::to_string_pretty(value).unwrap() + "\n",
     )
     .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    File::open(&staging)
+        .and_then(|file| file.sync_all())
+        .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
     fs::rename(staging, path)
         .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .unwrap_or_else(|_| fail("GUIDANCE_WRITE_FAILED", "repair project permissions"));
+    }
 }
 
 pub(super) fn append(path: &Path, value: &Value) {
@@ -138,7 +146,57 @@ pub(super) fn read_plan(root: &Path, task: &str) -> Value {
         .join(task)
         .join("plan.json");
     assert_no_symlink(root, &relative, "GUIDANCE_PLAN_SYMLINK");
-    read_json(&root.join(relative), "GUIDANCE_PLAN_NOT_FOUND")
+    let path = root.join(relative);
+    let events = read_events(root, task);
+    let journal_plan = events
+        .iter()
+        .rev()
+        .find(|event| event.get("record_type").and_then(Value::as_str) == Some("PlanRecord"))
+        .cloned();
+    if let Some(plan) = journal_plan {
+        let cache = if path.is_file() {
+            let content = fs::read_to_string(&path)
+                .unwrap_or_else(|_| fail("GUIDANCE_PLAN_NOT_FOUND", "restore the task plan"));
+            match serde_json::from_str::<Value>(&content) {
+                Ok(cache) => Some(cache),
+                Err(_) => {
+                    quarantine_plan(&path, "invalid");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let cache_matches = cache.as_ref().is_some_and(|cache| cache == &plan);
+        if cache.is_some() && !cache_matches {
+            quarantine_plan(&path, "stale");
+        }
+        if !cache_matches {
+            atomic_write(&path, &plan);
+        }
+        return plan;
+    }
+    if path.is_file() {
+        return serde_json::from_str(
+            &fs::read_to_string(&path)
+                .unwrap_or_else(|_| fail("GUIDANCE_PLAN_NOT_FOUND", "restore the task plan")),
+        )
+        .unwrap_or_else(|_| fail("GUIDANCE_PLAN_INVALID", "repair the task plan"));
+    }
+    fail(
+        "GUIDANCE_PLAN_NOT_FOUND",
+        "submit a plan before update/status",
+    )
+}
+
+fn quarantine_plan(path: &Path, kind: &str) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| fail("GUIDANCE_CLOCK_FAILED", "repair the host clock"))
+        .as_nanos();
+    let quarantine = path.with_extension(format!("{}.{}.{}", kind, std::process::id(), nonce));
+    fs::rename(path, quarantine)
+        .unwrap_or_else(|_| fail("GUIDANCE_PLAN_RECOVERY_FAILED", "preserve the plan cache"));
 }
 
 pub(super) fn read_events(root: &Path, task: &str) -> Vec<Value> {
@@ -146,20 +204,86 @@ pub(super) fn read_events(root: &Path, task: &str) -> Vec<Value> {
     if !path.is_file() {
         return Vec::new();
     }
-    let content = fs::read_to_string(path)
+    let content = fs::read_to_string(&path)
         .unwrap_or_else(|_| fail("GUIDANCE_EVENTS_INVALID", "repair the task event ledger"));
     let mut events = Vec::new();
-    for (index, line) in content.lines().enumerate() {
+    let ends_with_newline = content.ends_with('\n');
+    let mut offset = 0;
+    for (index, segment) in content.split_inclusive('\n').enumerate() {
+        let line = segment.trim_end_matches('\n').trim_end_matches('\r');
         if line.trim().is_empty() {
+            offset += segment.len();
             continue;
         }
-        let event: Value = serde_json::from_str(line).unwrap_or_else(|_| {
-            fail(
+        let event: Value = match serde_json::from_str(line) {
+            Ok(event) => event,
+            Err(_) if index + 1 == content.split('\n').count() && !ends_with_newline => {
+                quarantine_partial_tail(&path, &content[offset..]);
+                break;
+            }
+            Err(_) => fail(
                 format!("GUIDANCE_EVENTS_INVALID:line={}", index + 1),
                 "repair the task event ledger",
-            )
-        });
+            ),
+        };
         events.push(event);
+        offset += segment.len();
     }
     events
+}
+
+fn quarantine_partial_tail(path: &Path, tail: &str) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| fail("GUIDANCE_CLOCK_FAILED", "repair the host clock"))
+        .as_nanos();
+    let quarantine = path.with_extension(format!("corrupt-tail.{}.{}", std::process::id(), nonce));
+    fs::write(&quarantine, tail).unwrap_or_else(|_| {
+        fail(
+            "GUIDANCE_EVENTS_RECOVERY_FAILED",
+            "preserve the corrupt tail",
+        )
+    });
+    File::open(&quarantine)
+        .and_then(|file| file.sync_all())
+        .unwrap_or_else(|_| {
+            fail(
+                "GUIDANCE_EVENTS_RECOVERY_FAILED",
+                "preserve the corrupt tail",
+            )
+        });
+
+    let staging = path.with_extension(format!("recovered.{}.{}", std::process::id(), nonce));
+    let valid_prefix = fs::read_to_string(path).unwrap_or_else(|_| {
+        fail(
+            "GUIDANCE_EVENTS_RECOVERY_FAILED",
+            "read the task event ledger",
+        )
+    });
+    let valid_prefix = valid_prefix.strip_suffix(tail).unwrap_or_else(|| {
+        fail(
+            "GUIDANCE_EVENTS_RECOVERY_FAILED",
+            "preserve the corrupt tail",
+        )
+    });
+    fs::write(&staging, valid_prefix).unwrap_or_else(|_| {
+        fail(
+            "GUIDANCE_EVENTS_RECOVERY_FAILED",
+            "restore the valid event prefix",
+        )
+    });
+    File::open(&staging)
+        .and_then(|file| file.sync_all())
+        .and_then(|_| fs::rename(&staging, path))
+        .unwrap_or_else(|_| {
+            fail(
+                "GUIDANCE_EVENTS_RECOVERY_FAILED",
+                "restore the valid event prefix",
+            )
+        });
+    if let Some(parent) = path.parent() {
+        File::open(parent)
+            .and_then(|file| file.sync_all())
+            .unwrap_or_else(|_| fail("GUIDANCE_EVENTS_RECOVERY_FAILED", "sync the task ledger"));
+    }
 }

@@ -137,9 +137,12 @@ pub(super) fn project_status(
     }
     if let Some(task) = task {
         let path = plan_file(root, task);
-        if path.is_file() {
+        let events = read_events(root, task);
+        let has_plan_record = events
+            .iter()
+            .any(|event| event.get("record_type").and_then(Value::as_str) == Some("PlanRecord"));
+        if path.is_file() || has_plan_record {
             let plan = read_plan(root, task);
-            let events = read_events(root, task);
             let plan_hash = required_string(&plan, "plan_hash", "GUIDANCE_PLAN_INVALID");
             let current_events = step_events(&events, plan_hash);
             let tour_review = review_state(root, task);

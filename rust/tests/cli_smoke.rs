@@ -6748,6 +6748,282 @@ fn guidance_event_ledger_reports_bad_line_number() {
 }
 
 #[test]
+fn guidance_event_ledger_quarantines_partial_tail_and_continues() {
+    let root = temp_root("guidance-events-tail-recovery");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let plan_file = root.join("plan.json");
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-tail",
+        "module_id": "app-core",
+        "objective": "quarantine partial event tail",
+        "scope_paths": ["playground/experiments/input.txt"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::create_dir_all(root.join("playground/experiments")).unwrap();
+    fs::write(root.join("playground/experiments/input.txt"), "v1\n").unwrap();
+    fs::write(
+        &plan_file,
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-tail",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    let events = root.join(".appsdk-control/guidance/task-tail/events.jsonl");
+    let content = fs::read_to_string(&events).unwrap();
+    fs::write(&events, format!("{}not-json", content)).unwrap();
+
+    let status = run(&["guide", "next", root_text, "--task", "task-tail"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(payload["reason_code"], "NEXT_STEP_READY");
+    assert!(fs::read_to_string(&events).unwrap().ends_with('\n'));
+    assert!(fs::read_dir(events.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("events.corrupt-tail.")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_plan_rebuilds_from_journal_after_plan_cache_loss() {
+    let root = temp_root("guidance-plan-cache-loss");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-cache-loss",
+        "module_id": "app-core",
+        "objective": "rebuild plan from journal after crash before plan cache",
+        "scope_paths": ["playground/experiments/input.txt"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::create_dir_all(root.join("playground/experiments")).unwrap();
+    fs::write(root.join("playground/experiments/input.txt"), "v1\n").unwrap();
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-cache-loss",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    let plan_cache = root.join(".appsdk-control/guidance/task-cache-loss/plan.json");
+    assert!(plan_cache.is_file());
+    fs::remove_file(&plan_cache).unwrap();
+
+    let status = run(&["guide", "next", root_text, "--task", "task-cache-loss"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(payload["reason_code"], "NEXT_STEP_READY");
+    assert!(plan_cache.is_file());
+    let rebuilt: Value = serde_json::from_str(&fs::read_to_string(&plan_cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["task_id"], "task-cache-loss");
+    assert!(!rebuilt["plan_hash"].as_str().unwrap().is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_plan_quarantines_invalid_cache_and_rebuilds_from_journal() {
+    let root = temp_root("guidance-plan-cache-invalid");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-cache-invalid",
+        "module_id": "app-core",
+        "objective": "quarantine invalid plan cache and rebuild from journal",
+        "scope_paths": ["playground/experiments/input.txt"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::create_dir_all(root.join("playground/experiments")).unwrap();
+    fs::write(root.join("playground/experiments/input.txt"), "v1\n").unwrap();
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-cache-invalid",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    let control_dir = root.join(".appsdk-control/guidance/task-cache-invalid");
+    fs::write(control_dir.join("plan.json"), "not-json\n").unwrap();
+
+    let status = run(&["guide", "next", root_text, "--task", "task-cache-invalid"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(payload["reason_code"], "NEXT_STEP_READY");
+    let plan_cache = control_dir.join("plan.json");
+    assert!(plan_cache.is_file());
+    let rebuilt: Value = serde_json::from_str(&fs::read_to_string(&plan_cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["task_id"], "task-cache-invalid");
+    assert!(fs::read_dir(&control_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("plan.invalid.")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn guidance_plan_rebuilds_when_cache_is_stale() {
+    let root = temp_root("guidance-plan-cache-stale");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-cache-stale",
+        "module_id": "app-core",
+        "objective": "journal objective",
+        "scope_paths": ["playground/experiments/input.txt"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::create_dir_all(root.join("playground/experiments")).unwrap();
+    fs::write(root.join("playground/experiments/input.txt"), "v1\n").unwrap();
+    fs::write(
+        root.join("plan.json"),
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-cache-stale",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    let control_dir = root.join(".appsdk-control/guidance/task-cache-stale");
+    let plan_cache = control_dir.join("plan.json");
+    let mut stale =
+        serde_json::from_str::<Value>(&fs::read_to_string(&plan_cache).unwrap()).unwrap();
+    stale["objective"] = Value::String("stale objective".into());
+    stale["plan_hash"] = Value::String("sha256:stale".into());
+    fs::write(
+        &plan_cache,
+        serde_json::to_string_pretty(&stale).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let status = run(&["guide", "next", root_text, "--task", "task-cache-stale"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(payload["reason_code"], "NEXT_STEP_READY");
+    let rebuilt: Value = serde_json::from_str(&fs::read_to_string(&plan_cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["objective"], "journal objective");
+    assert!(fs::read_dir(&control_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("plan.stale.")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_scope_state_detects_content_change_without_git_status_shape_change() {
     let root = temp_root("guidance-scope-content-drift");
     let root_text = root.to_str().unwrap();

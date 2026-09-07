@@ -6909,6 +6909,63 @@ fn bug_command_upstream_fallback() {
 }
 
 #[test]
+fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
+    let root = temp_root("longhorizon-show");
+    fs::create_dir_all(root.join(".appsdk-control")).unwrap();
+
+    // Without a registered goal the briefing still teaches the contract and
+    // tells the master how to register one.
+    let bare = run_in(&root, &["longhorizon", "show"]);
+    assert!(bare.status.success(), "{}", String::from_utf8_lossy(&bare.stderr));
+    let bare_text = String::from_utf8_lossy(&bare.stdout);
+    assert!(bare_text.contains("你的主要任务不是写代码"));
+    assert!(bare_text.contains("goal subscribe"));
+
+    // A typo must not be silently swallowed as a project path.
+    let typo = run_in(&root, &["longhorizon", "bogus"]);
+    assert!(!typo.status.success());
+    assert!(String::from_utf8_lossy(&typo.stderr).contains("UNKNOWN_LONGHORIZON_SUBCOMMAND"));
+
+    let goal_file = root.join("plan.md");
+    fs::write(&goal_file, "---\ntitle: t\n---\n\n# Ship It\n\n推动目标完成。\n").unwrap();
+    fs::write(
+        root.join(".appsdk-control/long-task-goal.json"),
+        format!(
+            r#"{{"schema_version":1,"goal_path":"{}","interval":"10m","active":true,"registered_at":"2026-09-07T00:00:00Z"}}"#,
+            goal_file.display()
+        ),
+    )
+    .unwrap();
+
+    let res = run_in(&root, &["longhorizon", "show"]);
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let text = String::from_utf8_lossy(&res.stdout);
+
+    // Charter, fleet rules and notification rules all travel with the wake.
+    assert!(text.contains("不要等，不要问"));
+    assert!(text.contains("最多 5 个"));
+    assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
+    assert!(text.contains("collab worker close"));
+    assert!(text.contains("collab subagent snapshot"));
+
+    // Goal objective is read out of the markdown, past the frontmatter.
+    assert!(text.contains("# Ship It"));
+    assert!(text.contains("推动目标完成。"));
+    assert!(!text.contains("title: t"));
+
+    let json_res = run_in(&root, &["longhorizon", "show", "--json"]);
+    assert!(json_res.status.success());
+    let payload: Value = serde_json::from_slice(&json_res.stdout).unwrap();
+    assert_eq!(payload["goal"]["registered"], true);
+    assert_eq!(payload["goal"]["interval"], "10m");
+    assert!(payload["charter"].as_str().unwrap().contains("调度"));
+    assert!(payload["fleet_rules"].as_str().unwrap().contains("5 个"));
+    assert!(payload["notification_rules"].as_str().unwrap().contains("P0"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_subscription_and_master_prompt_lifecycle() {
     let root = temp_root("goal-sub");
     fs::create_dir_all(&root).unwrap();

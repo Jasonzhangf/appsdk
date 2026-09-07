@@ -8963,41 +8963,380 @@ fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
 
 fn generate_long_horizon_master_prompt(goal_path: &Path, interval_str: &str) -> String {
     format!(
-r#"# 长程任务调度与饱和执行提示词（Master 专属）
+        r#"# 长程任务调度与饱和执行提示词（Master 专属）
 
 **长程任务目标文档**: `{}`
 **提醒触发周期**: 每 `{}` 循环唤醒
 
-## 1. Master 核心职责与调度定位
-- **调度收口，非业务工人**：你作为 Collab Master，是本项目的唯一调度收口，全权负责目标分解、任务依赖拓扑、架构质量把关、集成与最终验收。严禁自己承担大量具体业务实现代码。
-- **让 Subagent / Worker 任务持续饱和**：
-  - 时刻监控所有 subagent / worker 状态（通过 `collab who` 或 `appsdk subagent status`）。
-  - 一旦发现有 worker 处于 `ready` / `idle` 空闲状态，立即从目标需求待办池中拆解派发新任务，保持所有 worker 任务持续饱和。
-- **无歧义派单契约**：每个派发任务必须具备独立的写入范围与 Worktree，明确交付条件（完成 iff、产物范围、禁止篡改区）与测试条件（执行命令、期望结果、证据路径）。
+RUN: `appsdk longhorizon show`
+THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待用户输入。
 
-## 2. 全生命周期治理与 AppSDK 规范
+## 1. 你的角色
+
+{}
+
+## 2. Worker / Subagent 处理规则
+
+{}
+
+## 3. 通知处理准则
+
+{}
+
+## 4. 全生命周期治理与 AppSDK 规范
 - **系统需求、任务与 Bug 统一纳管**：长程任务中拆解的所有子需求、阶段任务与发现的缺陷，全部统一录入缺陷跟踪系统：
   `appsdk bug new -t "<标题>" -m "<规格与验收条件>" -l "<优先级>,<模块>"`
 - **优先查重再建档**：派单或立项前运行 `appsdk bug list -q "<关键词>" --json`。已有相关 issue 优先追加或重新激活，避免碎片化重复建档。
 - **严格把关质量门禁**：验收 worker 产物时，必须检查完整生命周期证据链（独立 clean worktree、红测复现、预审验证、架构审查 PASS、无修改源有效性验证、Mainline 凭证）。
 - **上报 AppSDK 框架异常**：若执行过程中遇到 AppSDK 工具链、verify 规则或治理阻断，严禁在业务仓库内 hack 规避，必须执行：
   `appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与现场>" -l "P0,cli"`
+- **无歧义派单契约**：每个派发任务必须具备独立的写入范围与 Worktree，明确交付条件（完成 iff、产物范围、禁止篡改区）与测试条件（执行命令、期望结果、证据路径）。
 
-## 3. 阻塞仲裁与推进闭环（Master 唯一责任制）
-- **长程任务提醒必查 Blocked 任务**：每次长程任务周期提醒唤醒时，Master 必须主动排查所有处于 `blocked` 状态的任务（通过 `collab task status` 或 `appsdk bug list -s open -l blocker`），介入解决阻塞问题，全力推动项目向前。
-- **无论是否 Block，Master 是唯一最终责任人**：
-  - 项目交付与推进的成败责任永远在 Master，绝不能因为任务已被标记为 `blocked` 就任由其停滞或甩锅给 Worker。
-  - 遇到 Worker 标记 block 时，Master 必须在当前周期内介入审查：若是 AppSDK 框架问题，协助提报 upstream bug；若是业务代码/测试/逻辑问题，立即要求 Worker 攻坚或由 Master 重新分解分工。
-- **严格把控 Block 门禁**：任务状态允许被标记为 `blocked`，但**仅限 AppSDK 框架级缺陷**（必须通过 `appsdk bug new --upstream` 报 bug 跟踪）。**所有非 AppSDK 的业务代码、逻辑实现、测试失败或编译错误必须由 Worker 自行解决，绝不能构成 block**；严禁因任务复杂或调试困难而挂起为 blocked。
-- 当 worker 完成任务后，督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
+## 5. 阻塞仲裁（Master 唯一责任制）
+- 每次唤醒必查 `blocked` 任务（`collab task status`），介入解决，不能任其停滞。
+- **严格把控 Block 门禁**：仅 AppSDK 框架级缺陷可以 block（必须 `appsdk bug new --upstream` 跟踪）。所有非 AppSDK 的业务代码、逻辑、测试失败或编译错误必须由 Worker 自行解决，不构成 block。
+- Worker 完成后督促其提交 solution 并关闭缺陷：`appsdk bug close <id> -m "Solution: ..."`。
 
-## 4. 任务推进目标与结束条件
-- **核心目标**：饱和 worker 产能，快速保质保量推动任务流水线。
-- **结束判定**：当且仅当目标文档中声明的所有阶段目标、代码变更、系统集成与端到端验收证据全部达到 PASS 时，长程任务宣告完成。完成时显式注销长程订阅并向主脑汇报。
+## 6. 结束条件
+当且仅当目标文档声明的所有阶段目标、代码变更、系统集成与端到端验收证据全部 PASS 时，长程任务完成。完成时显式注销长程订阅并汇报。
 "#,
         goal_path.display(),
-        interval_str
+        interval_str,
+        MASTER_CHARTER.trim(),
+        FLEET_RULES.trim(),
+        NOTIFY_RULES.trim(),
     )
+}
+
+/// The master's standing role definition. A woken agent reconstructs its job
+/// from whatever text it is handed, so this must travel with every long-horizon
+/// wake instead of living only in the subscription output.
+const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务不是写代码，而是调度：
+
+1. **分配任务与资源**：把目标拆成边界清晰、可并行的任务并派发，调度它们达成。
+2. **让 worker 满载**：存在可派发的工作却有 worker 空闲，就是调度失败。优先派给空闲 worker，而不是自己在 master pane 里实现。
+3. **推动闭环**：驱动测试验证，然后提交、合并、关闭 worktree。代码写完不算完成，验证并集成清理干净才算完成。
+4. **承接所有阻塞**：worker 被 block 时，解决它是你的工作。你是唯一最终责任人，常规阻塞没有可以上报并等待的对象。
+5. **不要等，不要问**：用户没有新输入不是停止条件。在既定目标下自行持续推进，想尽一切办法完成任务。
+   唯一例外是不可逆操作、发布、成本与新的未批准范围，这些仍需人类批准；只有这类外部门禁才允许
+   `collab master wake hold --reason "<门禁>" --ttl-seconds <n>`。"#;
+
+const FLEET_RULES: &str = r#"Worker / subagent 处理规则（每次唤醒都适用）：
+
+1. Master 可以关闭 worker，包括它的 tmux session：`collab worker close <id> --reason "<why>" --kill-session`。关闭 managed subagent：`collab subagent close <id>`。
+2. Worker 或 subagent 不在线，允许关闭。需要产能时自己开 subagent，同时最多 5 个。默认按 `~/.appsdk/config.toml` `[subagent].runtime`：cursor 开 cursor，codex/gcm 开 Codex。一个 runtime 起不来就切另一个一次，不要循环。
+3. 任务结束必须回收资源：清理 worktree，关闭为该任务开的 subagent。默认不清理、不关闭 worker。
+4. 不工作、不响应时，关闭前先 `collab subagent snapshot <id> --lines 40` 确认异常。处理不了可以关闭：默认关 subagent、保留 worker。只有 pane 确认已死、离线或 identity 丢失才关 worker。"#;
+
+const NOTIFY_RULES: &str = r#"通知处理准则（master 和 worker 通用）：
+
+通知是打断，不是本轮的目标。读取即已消费，没有单独的 ACK 义务。
+**绝不能以 ACK、已读或一段总结结束一轮。** 处理完回到你原来的任务；没有任务就跑 `appsdk longhorizon show` 领工作。
+
+每条通知都带 `P<n> ACTION: <一个动作>`。优先级：
+- P0 人类消息、blocker 上报；`goal:` / `deadline` 唤醒 → 跑 longhorizon show 后排程。
+- P1 `task-keepalive`（继续自己的任务，或记录真实 blocker 与具体修复方案）、`worker-idle`（派活）、`worker-unresponsive`（先 snapshot 再恢复或关闭）、`subagent-status`（重派/关闭/明确留空）、`release`（恢复等这个资源的任务）。
+- P2 回执类（delivery recorded、cleanup receipt）：记下就继续干，不要被打断，也不要当成新任务。
+
+高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
+
+fn long_horizon_record(root: &Path) -> Option<Value> {
+    let file = root.join(".appsdk-control/long-task-goal.json");
+    let content = fs::read_to_string(file).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn collab_status_all(root: &Path) -> Option<Value> {
+    let out = Command::new("collab")
+        .args(["status", "--all"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+fn open_bugs_json(root: &Path) -> Vec<Value> {
+    let git_bug = match locate_git_bug_binary() {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+    let out = match Command::new(&git_bug)
+        .args(["bug", "--status", "open", "-f", "json"])
+        .current_dir(root)
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return Vec::new(),
+    };
+    let mut bugs: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let rank = |bug: &Value| -> u8 {
+        let labels = bug["labels"].as_array().cloned().unwrap_or_default();
+        for (priority, score) in [("P0", 0u8), ("P1", 1), ("P2", 2)] {
+            if labels.iter().any(|l| l.as_str() == Some(priority)) {
+                return score;
+            }
+        }
+        3
+    };
+    bugs.sort_by_key(rank);
+    bugs
+}
+
+/// Pull the first meaningful prose out of the goal document so one read shows
+/// what the project is for, without shipping the whole file into a wake.
+fn goal_objective_excerpt(goal_path: &Path, max_lines: usize, max_chars: usize) -> String {
+    let content = match fs::read_to_string(goal_path) {
+        Ok(text) => text,
+        Err(err) => return format!("(无法读取目标文档: {})", err),
+    };
+
+    let mut lines = content.lines().peekable();
+    if lines.peek() == Some(&"---") {
+        lines.next();
+        for line in lines.by_ref() {
+            if line.trim() == "---" {
+                break;
+            }
+        }
+    }
+
+    let mut picked: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || trimmed.is_empty() {
+            continue;
+        }
+        picked.push(trimmed);
+        if picked.len() >= max_lines {
+            break;
+        }
+    }
+
+    if picked.is_empty() {
+        return "(目标文档为空)".to_string();
+    }
+
+    let mut excerpt = picked.join("\n");
+    if excerpt.chars().count() > max_chars {
+        excerpt = excerpt.chars().take(max_chars).collect::<String>() + " …";
+    }
+    excerpt
+}
+
+fn handle_longhorizon_command<I>(root: &Path, mut args: I)
+where
+    I: Iterator<Item = String>,
+{
+    let sub = args.next().unwrap_or_else(|| "show".to_string());
+    match sub.as_str() {
+        "show" | "brief" => {}
+        "--json" => {
+            longhorizon_show(root, true);
+            return;
+        }
+        other => fail(format!(
+            "UNKNOWN_LONGHORIZON_SUBCOMMAND:{} (USAGE: appsdk longhorizon show [--json])",
+            other
+        )),
+    }
+
+    let mut format_json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => format_json = true,
+            other => fail(format!("UNKNOWN_LONGHORIZON_SHOW_OPTION:{}", other)),
+        }
+    }
+    longhorizon_show(root, format_json);
+}
+
+fn longhorizon_show(root: &Path, format_json: bool) {
+    let record = long_horizon_record(root);
+    let status = collab_status_all(root);
+    let bugs = open_bugs_json(root);
+
+    let goal_path = record
+        .as_ref()
+        .and_then(|r| r["goal_path"].as_str())
+        .map(PathBuf::from);
+    let objective = goal_path
+        .as_ref()
+        .map(|p| goal_objective_excerpt(p, 24, 1200))
+        .unwrap_or_else(|| "(未注册长程目标，先运行 appsdk goal subscribe --goal <path.md>)".to_string());
+
+    let empty = Vec::new();
+    let tasks = status
+        .as_ref()
+        .and_then(|s| s["tasks"].as_array())
+        .unwrap_or(&empty);
+    let workers = status
+        .as_ref()
+        .and_then(|s| s["workers"].as_array())
+        .unwrap_or(&empty);
+
+    let is_blocked = |task: &Value| {
+        matches!(
+            task["status"].as_str().unwrap_or(""),
+            "blocked" | "waiting" | "resource-waiting"
+        )
+    };
+    let blocked_tasks: Vec<&Value> = tasks.iter().filter(|t| is_blocked(t)).collect();
+    let active_tasks: Vec<&Value> = tasks.iter().filter(|t| !is_blocked(t)).collect();
+
+    // Spare capacity means a live pane holding no task. A worker whose pane is
+    // lost still owns its task, so it is an intervention item, not capacity.
+    let is_idle = |worker: &Value| {
+        worker["active_task"].is_null()
+            && worker["endpoint_live"].as_bool().unwrap_or(false)
+            && worker["identity_valid"].as_bool().unwrap_or(false)
+            && !worker["suspected_offline"].as_bool().unwrap_or(false)
+    };
+    let needs_intervention = |worker: &Value| {
+        !worker["identity_valid"].as_bool().unwrap_or(false)
+            || !worker["endpoint_live"].as_bool().unwrap_or(false)
+            || worker["suspected_offline"].as_bool().unwrap_or(false)
+    };
+    let idle_workers: Vec<&Value> = workers.iter().filter(|w| is_idle(w)).collect();
+    let broken_workers: Vec<&Value> = workers.iter().filter(|w| needs_intervention(w)).collect();
+
+    if format_json {
+            let payload = serde_json::json!({
+            "charter": MASTER_CHARTER,
+            "fleet_rules": FLEET_RULES,
+            "notification_rules": NOTIFY_RULES,
+            "goal": {
+                "registered": record.is_some(),
+                "path": goal_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                "interval": record.as_ref().and_then(|r| r["interval"].as_str()),
+                "active": record.as_ref().and_then(|r| r["active"].as_bool()),
+                "registered_at": record.as_ref().and_then(|r| r["registered_at"].as_str()),
+                "objective": objective,
+            },
+            "assigned": active_tasks,
+            "blocked": blocked_tasks,
+            "idle_workers": idle_workers,
+            "workers_needing_intervention": broken_workers,
+            "open_bugs": bugs,
+            "collab_reachable": status.is_some(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        return;
+    }
+
+    println!("{}", "=".repeat(80));
+    println!("LONG-HORIZON MASTER BRIEFING");
+    println!("{}", "=".repeat(80));
+
+    println!(
+        "\n## 0. 你的角色\n\n{}\n\n{}\n\n{}",
+        MASTER_CHARTER, FLEET_RULES, NOTIFY_RULES
+    );
+
+    println!("\n## 1. 长程目标\n");
+    match (&record, &goal_path) {
+        (Some(rec), Some(path)) => {
+            println!("- 目标文档: {}", path.display());
+            println!(
+                "- 唤醒周期: {} | 活跃: {} | 注册于: {}",
+                rec["interval"].as_str().unwrap_or("unknown"),
+                rec["active"].as_bool().unwrap_or(false),
+                rec["registered_at"].as_str().unwrap_or("unknown")
+            );
+        }
+        _ => println!("- 未注册长程目标。先运行 `appsdk goal subscribe --goal <path.md> --interval <period>`。"),
+    }
+    println!("\n目标摘要:\n{}", objective);
+
+    println!("\n## 2. 工作分配\n");
+    if status.is_none() {
+        println!("- collab daemon 不可达，无法读取任务与 worker 状态。先运行 `collab up`。");
+    }
+    println!("已分配任务 ({}):", active_tasks.len());
+    if active_tasks.is_empty() {
+        println!("- 无");
+    }
+    for task in &active_tasks {
+        println!(
+            "- {} [{}] owner={} next={}",
+            task["id"].as_str().unwrap_or("?"),
+            task["status"].as_str().unwrap_or("?"),
+            task["owner"].as_str().unwrap_or("?"),
+            task["next_step"].as_str().unwrap_or("(未记录)")
+        );
+    }
+
+    println!("\n空闲产能 ({}):", idle_workers.len());
+    if idle_workers.is_empty() {
+        println!("- 无空闲 worker");
+    }
+    for worker in &idle_workers {
+        println!(
+            "- {} agent_state={}",
+            worker["id"].as_str().unwrap_or("?"),
+            worker["agent_state"].as_str().unwrap_or("?")
+        );
+    }
+
+    println!("\n## 3. 阻塞与缺陷\n");
+    println!("Blocked / 等待中的任务 ({}):", blocked_tasks.len());
+    if blocked_tasks.is_empty() {
+        println!("- 无");
+    }
+    for task in &blocked_tasks {
+        println!(
+            "- {} [{}] owner={} next={}",
+            task["id"].as_str().unwrap_or("?"),
+            task["status"].as_str().unwrap_or("?"),
+            task["owner"].as_str().unwrap_or("?"),
+            task["next_step"].as_str().unwrap_or("(未记录)")
+        );
+    }
+
+    println!("\n需要介入的 worker ({}):", broken_workers.len());
+    if broken_workers.is_empty() {
+        println!("- 无");
+    }
+    for worker in &broken_workers {
+        println!(
+            "- {} status={} diagnostic={}",
+            worker["id"].as_str().unwrap_or("?"),
+            worker["status"].as_str().unwrap_or("?"),
+            worker["diagnostic"].as_str().unwrap_or("(无)")
+        );
+    }
+
+    println!("\n开放缺陷 ({}，P0 优先):", bugs.len());
+    if bugs.is_empty() {
+        println!("- 无");
+    }
+    for bug in bugs.iter().take(10) {
+        let labels: Vec<&str> = bug["labels"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        println!(
+            "- {} [{}] {}",
+            bug["human_id"].as_str().unwrap_or("?"),
+            labels.join(","),
+            bug["title"].as_str().unwrap_or("?")
+        );
+    }
+
+    println!("\n## 4. 本轮你欠一个决策\n");
+    println!("从以下三者中选一个并立即执行，不要以 ACK 或\"已读\"结束本轮：");
+    println!("1. 派发 ready 工作给空闲 worker（优先消除空闲产能）；");
+    println!("2. 解决一个 blocker 或介入一个失联 worker；");
+    println!("3. 用证据宣告某个阶段完成，并推动 verify / merge / close worktree。");
+    println!("\n若确为外部门禁（需人类批准的不可逆操作、发布、成本、新范围）：");
+    println!("  collab master wake hold --reason \"<门禁与解除条件>\" --ttl-seconds <n>");
 }
 
 fn handle_goal_command<I>(root: &Path, mut args: I)
@@ -9404,6 +9743,17 @@ fn main() {
                 }
             }
             handle_goal_command(&root, args);
+        }
+        Some("longhorizon") | Some("long-horizon") => {
+            let mut root = PathBuf::from(".");
+            if let Some(first) = args.peek() {
+                // Only an existing directory is a project path; anything else is
+                // a subcommand and must reach the handler so typos surface.
+                if !first.starts_with('-') && Path::new(first).is_dir() {
+                    root = PathBuf::from(args.next().unwrap());
+                }
+            }
+            handle_longhorizon_command(&root, args);
         }
         Some("task") => {
             let mut root = PathBuf::from(".");

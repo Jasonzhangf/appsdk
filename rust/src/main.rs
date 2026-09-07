@@ -4320,7 +4320,7 @@ fn verify_review_admission(root: &Path, module_id: &str) {
         .unwrap_or_else(|| fail(format!("UNKNOWN_MODULE:{}", module_id)));
     let artifact = read_module_artifact(root, &project, module_id);
     module_artifact_matches_project(module, &artifact);
-    explain_review_admission_preflight(root, module_id);
+    explain_review_admission_preflight(root, module_id, module);
     assert_pre_review_validation_gate(root, module_id, &artifact);
     verify_internal(root, true, false);
     println!(
@@ -4329,10 +4329,10 @@ fn verify_review_admission(root: &Path, module_id: &str) {
     );
 }
 
-fn explain_review_admission_preflight(root: &Path, module_id: &str) {
+fn explain_review_admission_preflight(root: &Path, module_id: &str, module: &Value) {
     let records_root = root.join(".appsdk").join("records");
     let evidence_root = records_root.join("evidence").join(module_id);
-    let required = [
+    let mut required = vec![
         (
             "fix_candidate",
             module_record_name("fix-candidate-record", module_id),
@@ -4345,18 +4345,25 @@ fn explain_review_admission_preflight(root: &Path, module_id: &str) {
             "project::whitebox_adapter",
             "run the declared development whitebox and persist its actual result",
         ),
-        (
+    ];
+    let deployment_operations = module_deployment_operations(module);
+    if deployment_operations.contains(&"install") {
+        required.push((
             "deployment_install",
             "evidence/<module>/install-1.json".to_string(),
             "project::deployment_adapter",
             "install the exact candidate artifact and persist the real receipt",
-        ),
-        (
+        ));
+    }
+    if deployment_operations.contains(&"restart") {
+        required.push((
             "deployment_restart",
             "evidence/<module>/restart-1.json".to_string(),
             "project::deployment_adapter",
             "restart the exact installed artifact and persist the real receipt",
-        ),
+        ));
+    }
+    required.extend([
         (
             "deployed_blackbox",
             "evidence/<module>/blackbox-1.json".to_string(),
@@ -4369,7 +4376,7 @@ fn explain_review_admission_preflight(root: &Path, module_id: &str) {
             "project::lifecycle_adapter",
             "bind the disjoint evidence IDs and causal timestamps after all gates pass",
         ),
-    ];
+    ]);
     let missing: Vec<Value> = required
         .iter()
         .filter(|(_, relative, _, _)| {
@@ -9090,7 +9097,7 @@ fn print_cli_help(command: Option<&str>) {
         Some("verify") => {
             "Usage: appsdk verify [project]\n       appsdk verify --admission [project]\n       appsdk verify --review-admission [project] --module <id>"
         }
-        Some("compile") => "Usage: appsdk compile [project]",
+        Some("compile") => "Usage: appsdk compile [project] [--module <id>]",
         Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
         Some("pin-lock") => "Usage: appsdk pin-lock [project] --binary <path>",
         Some("reset-governance") => {
@@ -9245,10 +9252,21 @@ fn main() {
         }
         Some("compile") => {
             let root = project_root_or_cwd(&mut args);
-            if args.next().is_some() {
-                fail("USAGE: appsdk compile [project]");
+            if args.peek().is_some_and(|value| value == "--module") {
+                args.next();
+                let module = args
+                    .next()
+                    .unwrap_or_else(|| fail("USAGE: appsdk compile [project] [--module <id>]"));
+                if args.next().is_some() {
+                    fail("USAGE: appsdk compile [project] [--module <id>]");
+                }
+                compile_module(&root, &module);
+            } else {
+                if args.next().is_some() {
+                    fail("USAGE: appsdk compile [project] [--module <id>]");
+                }
+                compile(&root);
             }
-            compile(&root);
         }
         Some("compile-module") => {
             let root = project_root_or_cwd(&mut args);

@@ -3058,6 +3058,136 @@ fn active_publish_rejects_unfrozen_module() {
 }
 
 #[test]
+fn compile_module_option_does_not_build_unrelated_modules() {
+    let root = temp_root("module-scoped-compile");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let goal_file = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+    goal["status"] = serde_json::json!("confirmed");
+    goal["confirmed_by"] = serde_json::json!("test");
+    goal["confirmed_at"] = serde_json::json!("2026-01-01T00:00:00Z");
+    fs::write(&goal_file, serde_json::to_string_pretty(&goal).unwrap()).unwrap();
+
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    let mut android_probe = project["modules"][0].clone();
+    android_probe["module_id"] = Value::from("android-probe");
+    android_probe["source_owner"] = Value::from("android-probe");
+    android_probe["owned_paths"] = serde_json::json!(["playground/android-probe/**"]);
+    android_probe["active_artifact"] = Value::from("active/lib/android-probe/**");
+    android_probe["build"]["args"] =
+        serde_json::json!(["-c", "touch android-probe-was-built && exit 42"]);
+    android_probe["artifact_paths"] = serde_json::json!(["android-probe.placeholder"]);
+
+    project["modules"][0]["module_id"] = Value::from("client-connection");
+    project["modules"][0]["source_owner"] = Value::from("client-connection");
+    project["modules"][0]["active_artifact"] = Value::from("active/lib/client-connection/**");
+    project["modules"][0]["build"]["args"] = serde_json::json!([
+        "-c",
+        "mkdir -p generated/modules/client-connection/lib && printf client > generated/modules/client-connection/lib/client.placeholder"
+    ]);
+    project["modules"][0]["artifact_paths"] = serde_json::json!(["client.placeholder"]);
+    project["modules"]
+        .as_array_mut()
+        .unwrap()
+        .push(android_probe);
+    fs::create_dir_all(root.join("playground/android-probe")).unwrap();
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap(),
+    )
+    .unwrap();
+
+    let compiled = run(&["compile", root_text, "--module", "client-connection"]);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(root
+        .join("generated/modules/client-connection/module.compiled.json")
+        .is_file());
+    let review = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "client-connection",
+    ]);
+    assert!(!review.status.success());
+    assert!(
+        String::from_utf8_lossy(&review.stderr).contains("REVIEW_ADMISSION_BLOCKED"),
+        "{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    assert!(!root.join("android-probe-was-built").exists());
+    assert!(!root
+        .join("generated/modules/android-probe/module.compiled.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn review_preflight_honors_empty_deployment_operations() {
+    for (name, operations, requires_deployment) in [
+        ("explicit-empty", Some(serde_json::json!([])), false),
+        ("legacy-omitted", None, true),
+    ] {
+        let root = temp_root(&format!("review-preflight-{name}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+
+        let project_file = root.join(".appsdk/project.json");
+        let mut project: Value =
+            serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+        if let Some(operations) = operations {
+            project["modules"][0]["deployment_operations"] = operations;
+        }
+        fs::write(
+            &project_file,
+            serde_json::to_string_pretty(&project).unwrap(),
+        )
+        .unwrap();
+
+        let goal_file = root.join(".appsdk/goal.json");
+        let mut goal: Value =
+            serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+        goal["status"] = serde_json::json!("confirmed");
+        goal["confirmed_by"] = serde_json::json!("test");
+        goal["confirmed_at"] = serde_json::json!("2026-01-01T00:00:00Z");
+        fs::write(&goal_file, serde_json::to_string_pretty(&goal).unwrap()).unwrap();
+
+        assert!(run(&["compile", root_text, "--module", "app-core"])
+            .status
+            .success());
+        let admission = run(&[
+            "verify",
+            "--review-admission",
+            root_text,
+            "--module",
+            "app-core",
+        ]);
+        assert!(!admission.status.success());
+        let stderr = String::from_utf8_lossy(&admission.stderr);
+        assert!(stderr.contains("REVIEW_ADMISSION_BLOCKED"), "{stderr}");
+        assert_eq!(
+            stderr.contains("\"kind\": \"deployment_install\""),
+            requires_deployment,
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("\"kind\": \"deployment_restart\""),
+            requires_deployment,
+            "{stderr}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn review_requires_only_declared_deployment_operations_and_binds_the_contract() {
     for operations in [serde_json::json!([]), serde_json::json!(["install"])] {
         let root = temp_root("deployment-applicability");

@@ -8055,6 +8055,51 @@ fn write_legacy_migration_step(root: &Path, source_version: &str) {
         .unwrap_or_else(|_| fail("SDK_LEGACY_MIGRATION_WRITE_FAILED"));
 }
 
+fn install_current_record_contracts(root: &Path) {
+    for (relative, property, canonical) in [
+        (
+            "contracts/records/worktree-record.schema.json",
+            "bug_triage",
+            include_str!("../../contracts/records/worktree-record.schema.json"),
+        ),
+        (
+            "contracts/records/promotion-record.schema.json",
+            "bug_closure_verified",
+            include_str!("../../contracts/records/promotion-record.schema.json"),
+        ),
+    ] {
+        let target = root.join(relative);
+        assert_no_symlink_components(root, &target, "record_contract_migration");
+        let mut current: Value = serde_json::from_str(
+            &fs::read_to_string(&target)
+                .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED")),
+        )
+        .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
+        let canonical: Value = serde_json::from_str(canonical)
+            .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+        if current == canonical {
+            continue;
+        }
+        let properties = current
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .unwrap_or_else(|| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
+        let canonical_property = canonical
+            .pointer(&format!("/properties/{property}"))
+            .cloned()
+            .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+        properties.insert(property.into(), canonical_property);
+        let mut content = serde_json::to_vec_pretty(&current)
+            .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
+        content.push(b'\n');
+        atomic_write_bytes(
+            &target,
+            &content,
+            "SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED",
+        );
+    }
+}
+
 fn pin_lock(root: &Path, binary: &Path) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -8098,6 +8143,7 @@ fn pin_lock(root: &Path, binary: &Path) {
     }
     let migrated_project = read_project(root);
     migrate_governance_maps(root, &migrated_project, "0.1.5");
+    install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String("0.1.6".into());
     let mut lock = serde_json::Map::new();

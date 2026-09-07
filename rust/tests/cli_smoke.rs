@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::env;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
@@ -1937,6 +1938,34 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
         .is_file());
     assert!(run(&["verify", partial_text]).status.success());
     fs::remove_dir_all(partial).unwrap();
+}
+
+#[test]
+fn pin_lock_migrates_stale_project_record_contracts() {
+    let root = temp_root("record-contract-migration");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let worktree = root.join("contracts/records/worktree-record.schema.json");
+    let promotion = root.join("contracts/records/promotion-record.schema.json");
+    let mut current_worktree: Value =
+        serde_json::from_str(&fs::read_to_string(&worktree).unwrap()).unwrap();
+    current_worktree["properties"].as_object_mut().unwrap().remove("bug_triage");
+    fs::write(&worktree, serde_json::to_vec_pretty(&current_worktree).unwrap()).unwrap();
+    let mut current_promotion: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion).unwrap()).unwrap();
+    current_promotion["properties"].as_object_mut().unwrap().remove("bug_closure_verified");
+    fs::write(&promotion, serde_json::to_vec_pretty(&current_promotion).unwrap()).unwrap();
+    assert!(!run(&["verify", root_text]).status.success());
+    assert!(run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap()
+    ])
+    .status
+    .success());
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6748,6 +6777,3 @@ fn task_block_governance_reminder_lifecycle() {
 
     fs::remove_dir_all(root).unwrap();
 }
-
-
-

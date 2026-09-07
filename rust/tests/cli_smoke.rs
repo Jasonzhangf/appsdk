@@ -6825,6 +6825,90 @@ fn bug_command_lifecycle() {
 }
 
 #[test]
+fn bug_command_upstream_fallback() {
+    let setup_check = run(&["setup-deps", "--check"]);
+    assert!(setup_check.status.success());
+
+    let upstream_root = temp_root("bug-upstream");
+    fs::create_dir_all(&upstream_root).unwrap();
+    fs::write(upstream_root.join("README.md"), "# Upstream SDK Repo\n").unwrap();
+    init_git(&upstream_root);
+
+    // Create a bug in upstream repo
+    let created = Command::new(binary())
+        .args(&[
+            "bug",
+            "new",
+            "-t",
+            "Upstream Daemon Issue",
+            "-m",
+            "Daemon lock issue in upstream",
+            "-l",
+            "upstream,p1",
+        ])
+        .current_dir(&upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let create_json: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let bug_id = create_json["id"].as_str().unwrap();
+
+    let client_root = temp_root("bug-client");
+    fs::create_dir_all(&client_root).unwrap();
+    fs::write(client_root.join("README.md"), "# Client Project\n").unwrap();
+    init_git(&client_root);
+
+    // 1. In client root, show bug without --upstream: automatically falls back to APPSDK_ROOT
+    let show = Command::new(binary())
+        .args(&["bug", "show", bug_id, "--json"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
+    let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(show_json["title"], "Upstream Daemon Issue");
+
+    // 2. In client root, list with -q: automatically falls back to upstream when local matches nothing
+    let list_q = Command::new(binary())
+        .args(&["bug", "list", "-q", "Daemon", "--json"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(list_q.status.success(), "{}", String::from_utf8_lossy(&list_q.stderr));
+    let list_json: Value = serde_json::from_slice(&list_q.stdout).unwrap();
+    assert_eq!(list_json.as_array().unwrap().len(), 1);
+    assert_eq!(list_json[0]["title"], "Upstream Daemon Issue");
+
+    // 3. In client root, comment on upstream bug: automatically falls back to upstream
+    let comment = Command::new(binary())
+        .args(&["bug", "comment", bug_id, "-m", "Verified in client environment"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(comment.status.success(), "{}", String::from_utf8_lossy(&comment.stderr));
+
+    // 4. In client root, close bug: automatically falls back to upstream
+    let close = Command::new(binary())
+        .args(&["bug", "close", bug_id, "-m", "Fixed and verified"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(close.status.success(), "{}", String::from_utf8_lossy(&close.stderr));
+
+    let _ = fs::remove_dir_all(upstream_root);
+    let _ = fs::remove_dir_all(client_root);
+}
+
+#[test]
 fn goal_subscription_and_master_prompt_lifecycle() {
     let root = temp_root("goal-sub");
     fs::create_dir_all(&root).unwrap();

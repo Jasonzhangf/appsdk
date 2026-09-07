@@ -8486,6 +8486,22 @@ fn setup_deps(check_only: bool) {
     println!("{{\"ok\":true,\"installed_to\":\"{}\",\"version\":\"{}\"}}", git_bug_target.display(), version);
 }
 
+fn resolve_upstream_repo() -> Option<PathBuf> {
+    if let Ok(val) = env::var("APPSDK_ROOT") {
+        let p = PathBuf::from(val);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let p = PathBuf::from(format!("{}/Documents/github/appsdk", home));
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn handle_bug_command<I>(root: &Path, mut args: I)
 where
     I: Iterator<Item = String>,
@@ -8496,27 +8512,30 @@ where
 
     let git_bug = locate_git_bug_binary().unwrap_or_else(|e| fail(e));
 
-    // Auto-ensure user identity if needed
-    let user_list = Command::new(&git_bug)
-        .args(["user", "-f", "json"])
-        .current_dir(root)
-        .output();
-    if let Ok(out) = user_list {
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if stdout.is_empty() || stdout == "[]" || stdout == "null" {
-            let name_out = Command::new("git").args(["-C", root.to_str().unwrap(), "config", "user.name"]).output();
-            let email_out = Command::new("git").args(["-C", root.to_str().unwrap(), "config", "user.email"]).output();
-            let name = name_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-            let email = email_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-            let user_name = if name.is_empty() { "AppSDK User".to_string() } else { name };
-            let user_email = if email.is_empty() { "user@appsdk.local".to_string() } else { email };
+    let ensure_identity = |target_dir: &Path| {
+        let user_list = Command::new(&git_bug)
+            .args(["user", "-f", "json"])
+            .current_dir(target_dir)
+            .output();
+        if let Ok(out) = user_list {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if stdout.is_empty() || stdout == "[]" || stdout == "null" {
+                let name_out = Command::new("git").args(["-C", target_dir.to_str().unwrap(), "config", "user.name"]).output();
+                let email_out = Command::new("git").args(["-C", target_dir.to_str().unwrap(), "config", "user.email"]).output();
+                let name = name_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                let email = email_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                let user_name = if name.is_empty() { "AppSDK User".to_string() } else { name };
+                let user_email = if email.is_empty() { "user@appsdk.local".to_string() } else { email };
 
-            let _ = Command::new(&git_bug)
-                .args(["user", "new", "-n", &user_name, "-e", &user_email, "--non-interactive"])
-                .current_dir(root)
-                .output();
+                let _ = Command::new(&git_bug)
+                    .args(["user", "new", "-n", &user_name, "-e", &user_email, "--non-interactive"])
+                    .current_dir(target_dir)
+                    .output();
+            }
         }
-    }
+    };
+
+    ensure_identity(root);
 
     match sub.as_str() {
         "new" => {
@@ -8553,17 +8572,12 @@ where
             let message_str = message.unwrap_or_else(|| "".to_string());
 
             let work_dir = if upstream {
-                let sdk_repo = PathBuf::from(env::var("APPSDK_ROOT").unwrap_or_else(|_| {
-                    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-                    format!("{}/Documents/github/appsdk", home)
-                }));
-                if !sdk_repo.exists() {
-                    fail("APPSDK_UPSTREAM_REPO_NOT_FOUND");
-                }
-                sdk_repo
+                resolve_upstream_repo().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
             } else {
                 root.to_path_buf()
             };
+
+            ensure_identity(&work_dir);
 
             let mut cmd = Command::new(&git_bug);
             cmd.args(["bug", "new", "-t", &title_str, "-m", &message_str, "--non-interactive"]);
@@ -8606,6 +8620,7 @@ where
             let mut participant: Option<String> = None;
             let mut query: Option<String> = None;
             let mut format_json = false;
+            let mut upstream = false;
 
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -8645,39 +8660,71 @@ where
                     "--json" => {
                         format_json = true;
                     }
+                    "--upstream" => {
+                        upstream = true;
+                    }
                     _ => fail(format!("UNKNOWN_BUG_LIST_OPTION:{}", arg)),
                 }
             }
 
-            let mut cmd = Command::new(&git_bug);
-            cmd.arg("bug");
-            if let Some(q) = query {
-                cmd.arg(q);
-            }
-            if let Some(s) = status {
-                cmd.args(["--status", &s]);
-            }
-            for l in &labels {
-                cmd.args(["--label", l]);
-            }
-            if let Some(b) = sort_by {
-                cmd.args(["--by", &b]);
-            }
-            if let Some(d) = direction {
-                cmd.args(["--direction", &d]);
-            }
-            if let Some(a) = author {
-                cmd.args(["--author", &a]);
-            }
-            if let Some(p) = participant {
-                cmd.args(["--participant", &p]);
-            }
-            if format_json {
-                cmd.args(["-f", "json"]);
-            }
-            cmd.current_dir(root);
+            let upstream_repo = resolve_upstream_repo();
+            let work_dir = if upstream {
+                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+            } else {
+                root.to_path_buf()
+            };
 
-            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let build_cmd = |dir: &Path| {
+                let mut cmd = Command::new(&git_bug);
+                cmd.arg("bug");
+                if let Some(ref q) = query {
+                    cmd.arg(q);
+                }
+                if let Some(ref s) = status {
+                    cmd.args(["--status", s]);
+                }
+                for l in &labels {
+                    cmd.args(["--label", l]);
+                }
+                if let Some(ref b) = sort_by {
+                    cmd.args(["--by", b]);
+                }
+                if let Some(ref d) = direction {
+                    cmd.args(["--direction", d]);
+                }
+                if let Some(ref a) = author {
+                    cmd.args(["--author", a]);
+                }
+                if let Some(ref p) = participant {
+                    cmd.args(["--participant", p]);
+                }
+                if format_json {
+                    cmd.args(["-f", "json"]);
+                }
+                cmd.current_dir(dir);
+                cmd
+            };
+
+            let mut output = build_cmd(&work_dir).output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !upstream {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let is_empty = stdout.is_empty() || (format_json && stdout == "[]");
+                if (!output.status.success() || is_empty) && query.is_some() {
+                    if let Some(ref up_dir) = upstream_repo {
+                        if up_dir != root {
+                            if let Ok(up_out) = build_cmd(up_dir).output() {
+                                if up_out.status.success() {
+                                    let up_stdout = String::from_utf8_lossy(&up_out.stdout).trim().to_string();
+                                    if !up_stdout.is_empty() && (!format_json || up_stdout != "[]") {
+                                        output = up_out;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 fail(format!("GIT_BUG_LIST_FAILED:{}", err.trim()));
@@ -8686,8 +8733,9 @@ where
             print!("{}", out_str);
         }
         "show" => {
-            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug show <id> [--json]"));
+            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug show <id> [--json] [--upstream]"));
             let mut format_json = false;
+            let mut upstream = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "-f" => {
@@ -8696,17 +8744,40 @@ where
                         }
                     }
                     "--json" => format_json = true,
+                    "--upstream" => upstream = true,
                     _ => {}
                 }
             }
-            let mut cmd = Command::new(&git_bug);
-            cmd.args(["bug", "show", &bug_id]);
-            if format_json {
-                cmd.args(["-f", "json"]);
-            }
-            cmd.current_dir(root);
+            let upstream_repo = resolve_upstream_repo();
+            let work_dir = if upstream {
+                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+            } else {
+                root.to_path_buf()
+            };
 
-            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let run_show = |dir: &Path| {
+                let mut cmd = Command::new(&git_bug);
+                cmd.args(["bug", "show", &bug_id]);
+                if format_json {
+                    cmd.args(["-f", "json"]);
+                }
+                cmd.current_dir(dir);
+                cmd.output()
+            };
+
+            let mut output = run_show(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !upstream && !output.status.success() {
+                if let Some(ref up_dir) = upstream_repo {
+                    if up_dir != root {
+                        if let Ok(up_out) = run_show(up_dir) {
+                            if up_out.status.success() {
+                                output = up_out;
+                            }
+                        }
+                    }
+                }
+            }
+
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 fail(format!("GIT_BUG_SHOW_FAILED:{}", err.trim()));
@@ -8714,12 +8785,16 @@ where
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
         "comment" => {
-            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message>"));
+            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]"));
             let mut msg: Option<String> = None;
+            let mut upstream = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "-m" | "--message" => {
                         msg = Some(args.next().unwrap_or_else(|| fail("MISSING_COMMENT_MESSAGE")));
+                    }
+                    "--upstream" => {
+                        upstream = true;
                     }
                     other => {
                         if msg.is_none() {
@@ -8728,12 +8803,35 @@ where
                     }
                 }
             }
-            let message = msg.unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message>"));
-            let mut cmd = Command::new(&git_bug);
-            cmd.args(["bug", "comment", "new", &bug_id, "-m", &message]);
-            cmd.current_dir(root);
+            let message = msg.unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]"));
+            let upstream_repo = resolve_upstream_repo();
+            let work_dir = if upstream {
+                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+            } else {
+                root.to_path_buf()
+            };
 
-            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let run_comment = |dir: &Path| {
+                ensure_identity(dir);
+                let mut cmd = Command::new(&git_bug);
+                cmd.args(["bug", "comment", "new", &bug_id, "-m", &message]);
+                cmd.current_dir(dir);
+                cmd.output()
+            };
+
+            let mut output = run_comment(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            if !upstream && !output.status.success() {
+                if let Some(ref up_dir) = upstream_repo {
+                    if up_dir != root {
+                        if let Ok(up_out) = run_comment(up_dir) {
+                            if up_out.status.success() {
+                                output = up_out;
+                            }
+                        }
+                    }
+                }
+            }
+
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 fail(format!("GIT_BUG_COMMENT_FAILED:{}", err.trim()));
@@ -8741,9 +8839,10 @@ where
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
         "close" => {
-            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug close <id> [-m <solution>] [--receipt-id <id>]"));
+            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug close <id> [-m <solution>] [--receipt-id <id>] [--upstream]"));
             let mut receipt_id: Option<String> = None;
             let mut solution: Option<String> = None;
+            let mut upstream = false;
 
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -8752,6 +8851,9 @@ where
                     }
                     "-m" | "--message" | "--solution" => {
                         solution = Some(args.next().unwrap_or_else(|| fail("MISSING_SOLUTION_ARG")));
+                    }
+                    "--upstream" => {
+                        upstream = true;
                     }
                     _ => fail(format!("UNKNOWN_BUG_CLOSE_OPTION:{}", arg)),
                 }
@@ -8765,24 +8867,55 @@ where
                 close_notes.push(format!("### Mainline Receipt\n{}", r_id));
             }
 
-            if !close_notes.is_empty() {
-                let msg = close_notes.join("\n\n");
+            let upstream_repo = resolve_upstream_repo();
+            let target_dir = if upstream {
+                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+            } else {
+                root.to_path_buf()
+            };
+
+            let run_close = |dir: &Path| -> Result<(), String> {
+                ensure_identity(dir);
+                if !close_notes.is_empty() {
+                    let msg = close_notes.join("\n\n");
+                    let mut cmd = Command::new(&git_bug);
+                    cmd.args(["bug", "comment", "new", &bug_id, "-m", &msg]);
+                    cmd.current_dir(dir);
+                    let _ = cmd.output();
+                }
+
                 let mut cmd = Command::new(&git_bug);
-                cmd.args(["bug", "comment", "new", &bug_id, "-m", &msg]);
-                cmd.current_dir(root);
-                let _ = cmd.output();
+                cmd.args(["bug", "status", "close", &bug_id]);
+                cmd.current_dir(dir);
+
+                let output = cmd.output().map_err(|_| "GIT_BUG_EXECUTION_FAILED".to_string())?;
+                if !output.status.success() {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("GIT_BUG_CLOSE_FAILED:{}", err.trim()));
+                }
+                Ok(())
+            };
+
+            let res = run_close(&target_dir);
+            if !upstream && res.is_err() {
+                if let Some(ref up_dir) = upstream_repo {
+                    if up_dir != root {
+                        if run_close(up_dir).is_ok() {
+                            println!("{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\",\"upstream\":true}}", bug_id);
+                            return;
+                        }
+                    }
+                }
             }
 
-            let mut cmd = Command::new(&git_bug);
-            cmd.args(["bug", "status", "close", &bug_id]);
-            cmd.current_dir(root);
-
-            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
-            if !output.status.success() {
-                let err = String::from_utf8_lossy(&output.stderr);
-                fail(format!("GIT_BUG_CLOSE_FAILED:{}", err.trim()));
+            match res {
+                Ok(_) => {
+                    println!("{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\"}}", bug_id);
+                }
+                Err(e) => {
+                    fail(e);
+                }
             }
-            println!("{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\"}}", bug_id);
         }
         "webui" => {
             let mut port: Option<String> = None;

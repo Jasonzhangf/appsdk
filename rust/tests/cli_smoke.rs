@@ -369,8 +369,13 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(String::from_utf8_lossy(&first.stdout).contains("collab peer bootstrap pending"));
-    let notice = String::from_utf8_lossy(&first.stdout).lines()
-        .find_map(|line| line.strip_prefix("collab-channel ").map(|body| serde_json::from_str::<serde_json::Value>(body).unwrap())).unwrap();
+    let notice = String::from_utf8_lossy(&first.stdout)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("collab-channel ")
+                .map(|body| serde_json::from_str::<serde_json::Value>(body).unwrap())
+        })
+        .unwrap();
     assert_eq!(notice["notification_channel"], "none");
     assert_eq!(notice["subscription_created"], false);
     assert_eq!(notice["independent_work_allowed"], true);
@@ -653,20 +658,13 @@ fn collab_entry_forwards_without_governance_or_second_registry() {
     fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 42\n").unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(binary())
-        .args([
-            "collab",
-            "status",
-            "--all",
-        ])
+        .args(["collab", "status", "--all"])
         .current_dir(&root)
         .env("PATH", &root)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(42));
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "status\n--all\n"
-    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "status\n--all\n");
     assert!(!root.join(".appsdk").exists());
     assert!(!root.join(".agent-collab").exists());
     fs::remove_dir_all(root).unwrap();
@@ -1976,12 +1974,26 @@ fn pin_lock_migrates_stale_project_record_contracts() {
     let promotion = root.join("contracts/records/promotion-record.schema.json");
     let mut current_worktree: Value =
         serde_json::from_str(&fs::read_to_string(&worktree).unwrap()).unwrap();
-    current_worktree["properties"].as_object_mut().unwrap().remove("bug_triage");
-    fs::write(&worktree, serde_json::to_vec_pretty(&current_worktree).unwrap()).unwrap();
+    current_worktree["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bug_triage");
+    fs::write(
+        &worktree,
+        serde_json::to_vec_pretty(&current_worktree).unwrap(),
+    )
+    .unwrap();
     let mut current_promotion: Value =
         serde_json::from_str(&fs::read_to_string(&promotion).unwrap()).unwrap();
-    current_promotion["properties"].as_object_mut().unwrap().remove("bug_closure_verified");
-    fs::write(&promotion, serde_json::to_vec_pretty(&current_promotion).unwrap()).unwrap();
+    current_promotion["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bug_closure_verified");
+    fs::write(
+        &promotion,
+        serde_json::to_vec_pretty(&current_promotion).unwrap(),
+    )
+    .unwrap();
     assert!(!run(&["verify", root_text]).status.success());
     assert!(run(&[
         "pin-lock",
@@ -2863,7 +2875,6 @@ fn verify_allows_pending_clarification_but_compile_rejects_it() {
     fs::remove_dir_all(root).unwrap();
 }
 
-
 #[test]
 fn development_dependencies_require_current_artifacts_and_freeze_order() {
     let root = temp_root("development-dependencies");
@@ -2889,23 +2900,35 @@ fn development_dependencies_require_current_artifacts_and_freeze_order() {
     fs::create_dir_all(root.join("playground/edge")).unwrap();
     fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
     pin_test_lock(root_text);
-    assert!(run(&["promote", root_text, "--to", "source_implemented"]).status.success());
-    assert!(run(&["promote", root_text, "--to", "contract_bound"]).status.success());
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
     project = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
     let compiled = run(&["compile", root_text]);
-    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
     let core_path = root.join("generated/modules/app-core/module.compiled.json");
     let edge_path = root.join("generated/modules/app-edge/module.compiled.json");
     let core: Value = serde_json::from_slice(&fs::read(&core_path).unwrap()).unwrap();
     let edge: Value = serde_json::from_slice(&fs::read(&edge_path).unwrap()).unwrap();
-    assert_eq!(edge["dependency_hashes"][0]["artifact_hash"], core["artifact_hash"]);
+    assert_eq!(
+        edge["dependency_hashes"][0]["artifact_hash"],
+        core["artifact_hash"]
+    );
     fs::write(root.join("playground/experiments/changed.txt"), "changed").unwrap();
     let stale = run(&["compile-module", root_text, "--module", "app-edge"]);
     assert!(!stale.status.success());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("MODULE_DEPENDENCY_ARTIFACT_STALE"));
     assert!(run(&["compile", root_text]).status.success());
     let current: Value = serde_json::from_slice(&fs::read(&core_path).unwrap()).unwrap();
-    let library = root.join("generated/modules/app-core/lib")
+    let library = root
+        .join("generated/modules/app-core/lib")
         .join(current["artifacts"][0]["path"].as_str().unwrap());
     fs::write(library, "tampered dependency bytes").unwrap();
     let tampered = run(&["compile-module", root_text, "--module", "app-edge"]);
@@ -2924,8 +2947,11 @@ fn development_dependencies_require_current_artifacts_and_freeze_order() {
     init_git(&root);
     let freeze = run(&["freeze", root_text, "--module", "app-edge"]);
     assert!(!freeze.status.success());
-    assert!(String::from_utf8_lossy(&freeze.stderr).contains("MODULE_DEPENDENCY_NOT_FROZEN"),
-        "{}", String::from_utf8_lossy(&freeze.stderr));
+    assert!(
+        String::from_utf8_lossy(&freeze.stderr).contains("MODULE_DEPENDENCY_NOT_FROZEN"),
+        "{}",
+        String::from_utf8_lossy(&freeze.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -6850,7 +6876,11 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let create_json: Value = serde_json::from_slice(&created.stdout).unwrap();
     let bug_id = create_json["id"].as_str().unwrap();
 
@@ -6867,7 +6897,11 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
     let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(show_json["title"], "Upstream Daemon Issue");
 
@@ -6879,20 +6913,34 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(list_q.status.success(), "{}", String::from_utf8_lossy(&list_q.stderr));
+    assert!(
+        list_q.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list_q.stderr)
+    );
     let list_json: Value = serde_json::from_slice(&list_q.stdout).unwrap();
     assert_eq!(list_json.as_array().unwrap().len(), 1);
     assert_eq!(list_json[0]["title"], "Upstream Daemon Issue");
 
     // 3. In client root, comment on upstream bug: automatically falls back to upstream
     let comment = Command::new(binary())
-        .args(&["bug", "comment", bug_id, "-m", "Verified in client environment"])
+        .args(&[
+            "bug",
+            "comment",
+            bug_id,
+            "-m",
+            "Verified in client environment",
+        ])
         .current_dir(&client_root)
         .env("APPSDK_ROOT", &upstream_root)
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(comment.status.success(), "{}", String::from_utf8_lossy(&comment.stderr));
+    assert!(
+        comment.status.success(),
+        "{}",
+        String::from_utf8_lossy(&comment.stderr)
+    );
 
     // 4. In client root, close bug: automatically falls back to upstream
     let close = Command::new(binary())
@@ -6902,7 +6950,11 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(close.status.success(), "{}", String::from_utf8_lossy(&close.stderr));
+    assert!(
+        close.status.success(),
+        "{}",
+        String::from_utf8_lossy(&close.stderr)
+    );
 
     let _ = fs::remove_dir_all(upstream_root);
     let _ = fs::remove_dir_all(client_root);
@@ -6912,11 +6964,42 @@ fn bug_command_upstream_fallback() {
 fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
     let root = temp_root("longhorizon-show");
     fs::create_dir_all(root.join(".appsdk-control")).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","active_task":null,"endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"waiting"}],"tasks":[],"subagents":[]}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer"},"tasks":[],"inbox":{"unread":0}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
     // Without a registered goal the briefing still teaches the contract and
     // tells the master how to register one.
-    let bare = run_in(&root, &["longhorizon", "show"]);
-    assert!(bare.status.success(), "{}", String::from_utf8_lossy(&bare.stderr));
+    let bare = Command::new(binary())
+        .args(["longhorizon", "show"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        bare.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
     let bare_text = String::from_utf8_lossy(&bare.stdout);
     assert!(bare_text.contains("你的主要任务不是写代码"));
     assert!(bare_text.contains("goal subscribe"));
@@ -6927,7 +7010,11 @@ fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
     assert!(String::from_utf8_lossy(&typo.stderr).contains("UNKNOWN_LONGHORIZON_SUBCOMMAND"));
 
     let goal_file = root.join("plan.md");
-    fs::write(&goal_file, "---\ntitle: t\n---\n\n# Ship It\n\n推动目标完成。\n").unwrap();
+    fs::write(
+        &goal_file,
+        "---\ntitle: t\n---\n\n# Ship It\n\n推动目标完成。\n",
+    )
+    .unwrap();
     fs::write(
         root.join(".appsdk-control/long-task-goal.json"),
         format!(
@@ -6937,8 +7024,18 @@ fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
     )
     .unwrap();
 
-    let res = run_in(&root, &["longhorizon", "show"]);
-    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let res = Command::new(binary())
+        .args(["longhorizon", "show"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        res.status.success(),
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
     let text = String::from_utf8_lossy(&res.stdout);
 
     // Charter, fleet rules and notification rules all travel with the wake.
@@ -6953,14 +7050,110 @@ fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
     assert!(text.contains("推动目标完成。"));
     assert!(!text.contains("title: t"));
 
-    let json_res = run_in(&root, &["longhorizon", "show", "--json"]);
+    let json_res = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(json_res.status.success());
     let payload: Value = serde_json::from_slice(&json_res.stdout).unwrap();
+    assert_eq!(payload["role"], "master");
     assert_eq!(payload["goal"]["registered"], true);
     assert_eq!(payload["goal"]["interval"], "10m");
     assert!(payload["charter"].as_str().unwrap().contains("调度"));
     assert!(payload["fleet_rules"].as_str().unwrap().contains("5 个"));
-    assert!(payload["notification_rules"].as_str().unwrap().contains("P0"));
+    assert!(payload["notification_rules"]
+        .as_str()
+        .unwrap()
+        .contains("P0"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_show_never_upgrades_worker_or_unknown_to_master() {
+    let root = temp_root("longhorizon-role-projection");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"worker-peer","role":"worker","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"}],"subagents":[]}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"worker-peer"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let worker = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        worker.status.success(),
+        "{}",
+        String::from_utf8_lossy(&worker.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&worker.stdout).unwrap();
+    assert_eq!(payload["role"], "worker");
+    assert!(!payload["charter"]
+        .as_str()
+        .unwrap()
+        .contains("你是本项目的 master"));
+    assert!(payload["charter"].as_str().unwrap().contains("独立 worker"));
+
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    printf '%s\n' '{"workers":[],"tasks":[],"subagents":[]}'
+    ;;
+  "context ")
+    exit 1
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let unknown = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        unknown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&unknown.stdout).unwrap();
+    assert_eq!(payload["role"], "unknown");
+    assert!(payload["charter"].as_str().unwrap().contains("身份未验证"));
+    assert!(!payload["charter"]
+        .as_str()
+        .unwrap()
+        .contains("你是本项目的 master"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -6984,7 +7177,11 @@ fn goal_subscription_and_master_prompt_lifecycle() {
 
     // 3. Valid md goal registration with interval
     let valid_goal = root.join("long-task.md");
-    fs::write(&valid_goal, "# Sample Long-Horizon Goal\nDeliver feature X.\n").unwrap();
+    fs::write(
+        &valid_goal,
+        "# Sample Long-Horizon Goal\nDeliver feature X.\n",
+    )
+    .unwrap();
 
     let sub_res = run_in(
         &root,
@@ -7022,7 +7219,14 @@ fn goal_subscription_and_master_prompt_lifecycle() {
     // 5. Check standalone prompt command
     let prompt_res = run_in(
         &root,
-        &["goal", "prompt", "--goal", "long-task.md", "--interval", "10m"],
+        &[
+            "goal",
+            "prompt",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "10m",
+        ],
     );
     assert!(prompt_res.status.success());
     let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
@@ -7045,33 +7249,78 @@ fn goal_subscription_and_master_prompt_lifecycle() {
 fn task_block_governance_reminder_lifecycle() {
     let root = temp_root("task-block");
     fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+if [ "$1" = "task" ] && [ "$2" = "block" ] && [ "$3" = "task-404" ]; then
+  printf '%s\n' '{"ok":true,"task_id":"task-404","status":"blocked"}'
+  exit 0
+fi
+if [ "$1" = "task" ] && [ "$2" = "block" ] && [ "$3" = "task-405" ]; then
+  printf '%s\n' '{"ok":true,"task_id":"task-405","status":"blocked"}'
+  exit 0
+fi
+printf '%s\n' 'task not found'
+exit 44
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let block_res = run_in(
-        &root,
-        &[
+    let block_res = Command::new(binary())
+        .args([
             "task",
             "block",
             "task-404",
             "--reason",
             "Waiting on upstream SDK bug fix",
             "--json",
-        ],
-    );
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(block_res.status.success());
     let block_json: Value = serde_json::from_slice(&block_res.stdout).unwrap();
     assert_eq!(block_json["status"], "blocked");
-    assert_eq!(block_json["reminders_stopped"], true);
+    assert_eq!(block_json["reminders_stopped"], false);
     assert_eq!(block_json["task_id"], "task-404");
     let rule = block_json["rule"].as_str().unwrap();
     assert!(rule.contains("AppSDK 的问题可以报 bug"));
     assert!(rule.contains("非 AppSDK 的问题需要自己解决，不能构成 block"));
 
     // Also check human text output contains the prominent reminder
-    let human_res = run_in(&root, &["task", "block", "task-405"]);
+    let human_res = Command::new(binary())
+        .args(["task", "block", "task-405"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(human_res.status.success());
     let human_text = String::from_utf8_lossy(&human_res.stdout);
-    assert!(human_text.contains("提醒已停止"));
+    assert!(human_text.contains("通知策略以 Collab 响应为准"));
     assert!(human_text.contains("非 AppSDK 的问题需要自己解决，不能构成 block"));
+
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\nprintf '%s\\n' 'task not found' >&2\nexit 44\n",
+    )
+    .unwrap();
+    let failed = Command::new(binary())
+        .args(["task", "block", "task-404", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(44));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("COLLAB_TASK_BLOCK_FAILED"));
+    assert!(!String::from_utf8_lossy(&failed.stdout).contains("\"ok\":true"));
 
     fs::remove_dir_all(root).unwrap();
 }

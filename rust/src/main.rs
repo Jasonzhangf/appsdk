@@ -1275,7 +1275,11 @@ fn assert_sdk_lock(root: &Path, project: &Value) {
             }
         }
     }
-    for key in ["bundle_digest", "bundle_manifest_digest", "previous_bundle_digest"] {
+    for key in [
+        "bundle_digest",
+        "bundle_manifest_digest",
+        "previous_bundle_digest",
+    ] {
         if let Some(digest) = lock.get(key) {
             let digest = digest.as_str().unwrap_or("");
             if digest.len() != 71
@@ -1795,7 +1799,8 @@ fn module_dependency_hashes(
                     module_id, dependency_id
                 ))
             });
-        let dependency_frozen = dependency_module.get("stage").and_then(Value::as_str) == Some("frozen");
+        let dependency_frozen =
+            dependency_module.get("stage").and_then(Value::as_str) == Some("frozen");
         if module.get("stage").and_then(Value::as_str) == Some("frozen") && !dependency_frozen {
             fail(format!(
                 "MODULE_DEPENDENCY_NOT_FROZEN:{}:{}",
@@ -1804,10 +1809,16 @@ fn module_dependency_hashes(
         }
         // Dependency-first declaration is also the recursion bound for freshness
         // checks invoked directly by review admission, before project verification.
-        let position = |id: &str| modules.iter().position(|entry|
-            entry.get("module_id").and_then(Value::as_str) == Some(id));
+        let position = |id: &str| {
+            modules
+                .iter()
+                .position(|entry| entry.get("module_id").and_then(Value::as_str) == Some(id))
+        };
         if position(dependency_id) >= position(module_id) {
-            fail(format!("MODULE_DEPENDENCY_ORDER:{}:{}", module_id, dependency_id));
+            fail(format!(
+                "MODULE_DEPENDENCY_ORDER:{}:{}",
+                module_id, dependency_id
+            ));
         }
         let artifact_file = module_artifact_file(root, project, dependency_id);
         if !artifact_file.is_file() {
@@ -1826,7 +1837,10 @@ fn module_dependency_hashes(
         if !dependency_frozen {
             let current = build_module_artifact(root, project, dependency_module, dependency_id);
             if record_str(&current, "/artifact_hash", "dependency-artifact") != hash {
-                fail(format!("MODULE_DEPENDENCY_ARTIFACT_STALE:{}:{}", module_id, dependency_id));
+                fail(format!(
+                    "MODULE_DEPENDENCY_ARTIFACT_STALE:{}:{}",
+                    module_id, dependency_id
+                ));
             }
         }
         entries.push(serde_json::json!({"module_id": dependency_id, "artifact_hash": hash}));
@@ -7424,11 +7438,14 @@ fn prepare_project(workspace: &Path) {
 fn initialize_collab_peer() {
     if env::var_os("TMUX_PANE").is_none() {
         println!("collab peer bootstrap pending: no live tmux pane");
-        println!("collab-channel {}", serde_json::json!({
-            "notification_channel":"none", "subscription_created":false,
-            "independent_work_allowed":true,
-            "next_action":"No push channel. Check subagent status (includes parent mailbox) yourself; use subagent snapshot explicitly for screen diagnostics. Do not wait for an automatic completion notification."
-        }));
+        println!(
+            "collab-channel {}",
+            serde_json::json!({
+                "notification_channel":"none", "subscription_created":false,
+                "independent_work_allowed":true,
+                "next_action":"No push channel. Check subagent status (includes parent mailbox) yourself; use subagent snapshot explicitly for screen diagnostics. Do not wait for an automatic completion notification."
+            })
+        );
         return;
     }
     let output = match Command::new("collab").arg("init").output() {
@@ -8367,7 +8384,10 @@ fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
         if mode.is_empty() {
             fail("BUG_TRIAGE_MODE_MISSING");
         }
-        let query = triage.get("query_executed").and_then(Value::as_str).unwrap_or("");
+        let query = triage
+            .get("query_executed")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if query.is_empty() {
             fail("BUG_TRIAGE_QUERY_MISSING");
         }
@@ -8398,7 +8418,9 @@ fn assert_bug_tracker_solution_evidence(root: &Path, issue_id: &str) {
                     if let Some(comments) = json.get("comments").and_then(Value::as_array) {
                         for c in comments {
                             if let Some(msg) = c.get("message").and_then(Value::as_str) {
-                                if msg.contains("### Solution / Resolution") || msg.contains("Solution:") {
+                                if msg.contains("### Solution / Resolution")
+                                    || msg.contains("Solution:")
+                                {
                                     has_solution = true;
                                     break;
                                 }
@@ -8406,7 +8428,10 @@ fn assert_bug_tracker_solution_evidence(root: &Path, issue_id: &str) {
                         }
                     }
                     if !has_solution {
-                        fail(format!("BUG_TRACKER_SOLUTION_EVIDENCE_MISSING:{}", issue_id));
+                        fail(format!(
+                            "BUG_TRACKER_SOLUTION_EVIDENCE_MISSING:{}",
+                            issue_id
+                        ));
                     }
                 }
             }
@@ -8456,7 +8481,12 @@ fn setup_deps(check_only: bool) {
 
     println!("Downloading git-bug from {} ...", download_url);
     let curl_status = Command::new("curl")
-        .args(["-fsSL", &download_url, "-o", git_bug_target.to_str().unwrap()])
+        .args([
+            "-fsSL",
+            &download_url,
+            "-o",
+            git_bug_target.to_str().unwrap(),
+        ])
         .status();
 
     let download_success = match curl_status {
@@ -8483,7 +8513,11 @@ fn setup_deps(check_only: bool) {
         }
     }
 
-    println!("{{\"ok\":true,\"installed_to\":\"{}\",\"version\":\"{}\"}}", git_bug_target.display(), version);
+    println!(
+        "{{\"ok\":true,\"installed_to\":\"{}\",\"version\":\"{}\"}}",
+        git_bug_target.display(),
+        version
+    );
 }
 
 fn resolve_upstream_repo() -> Option<PathBuf> {
@@ -8506,9 +8540,9 @@ fn handle_bug_command<I>(root: &Path, mut args: I)
 where
     I: Iterator<Item = String>,
 {
-    let sub = args.next().unwrap_or_else(|| {
-        fail("USAGE: appsdk bug <new|list|show|comment|close|webui> [options]")
-    });
+    let sub = args
+        .next()
+        .unwrap_or_else(|| fail("USAGE: appsdk bug <new|list|show|comment|close|webui> [options]"));
 
     let git_bug = locate_git_bug_binary().unwrap_or_else(|e| fail(e));
 
@@ -8520,15 +8554,41 @@ where
         if let Ok(out) = user_list {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if stdout.is_empty() || stdout == "[]" || stdout == "null" {
-                let name_out = Command::new("git").args(["-C", target_dir.to_str().unwrap(), "config", "user.name"]).output();
-                let email_out = Command::new("git").args(["-C", target_dir.to_str().unwrap(), "config", "user.email"]).output();
-                let name = name_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-                let email = email_out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-                let user_name = if name.is_empty() { "AppSDK User".to_string() } else { name };
-                let user_email = if email.is_empty() { "user@appsdk.local".to_string() } else { email };
+                let name_out = Command::new("git")
+                    .args(["-C", target_dir.to_str().unwrap(), "config", "user.name"])
+                    .output();
+                let email_out = Command::new("git")
+                    .args(["-C", target_dir.to_str().unwrap(), "config", "user.email"])
+                    .output();
+                let name = name_out
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                let email = email_out
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                let user_name = if name.is_empty() {
+                    "AppSDK User".to_string()
+                } else {
+                    name
+                };
+                let user_email = if email.is_empty() {
+                    "user@appsdk.local".to_string()
+                } else {
+                    email
+                };
 
                 let _ = Command::new(&git_bug)
-                    .args(["user", "new", "-n", &user_name, "-e", &user_email, "--non-interactive"])
+                    .args([
+                        "user",
+                        "new",
+                        "-n",
+                        &user_name,
+                        "-e",
+                        &user_email,
+                        "--non-interactive",
+                    ])
                     .current_dir(target_dir)
                     .output();
             }
@@ -8568,7 +8628,11 @@ where
                 }
             }
 
-            let title_str = title.unwrap_or_else(|| fail("USAGE: appsdk bug new -t <title> -m <message> [--label <labels>] [--upstream]"));
+            let title_str = title.unwrap_or_else(|| {
+                fail(
+                    "USAGE: appsdk bug new -t <title> -m <message> [--label <labels>] [--upstream]",
+                )
+            });
             let message_str = message.unwrap_or_else(|| "".to_string());
 
             let work_dir = if upstream {
@@ -8580,10 +8644,20 @@ where
             ensure_identity(&work_dir);
 
             let mut cmd = Command::new(&git_bug);
-            cmd.args(["bug", "new", "-t", &title_str, "-m", &message_str, "--non-interactive"]);
+            cmd.args([
+                "bug",
+                "new",
+                "-t",
+                &title_str,
+                "-m",
+                &message_str,
+                "--non-interactive",
+            ]);
             cmd.current_dir(&work_dir);
 
-            let output = cmd.output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let output = cmd
+                .output()
+                .unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
                 fail(format!("GIT_BUG_NEW_FAILED:{}", err.trim()));
@@ -8640,13 +8714,17 @@ where
                         sort_by = Some(args.next().unwrap_or_else(|| fail("MISSING_SORT_ARG")));
                     }
                     "-d" | "--direction" => {
-                        direction = Some(args.next().unwrap_or_else(|| fail("MISSING_DIRECTION_ARG")));
+                        direction =
+                            Some(args.next().unwrap_or_else(|| fail("MISSING_DIRECTION_ARG")));
                     }
                     "-a" | "--author" => {
                         author = Some(args.next().unwrap_or_else(|| fail("MISSING_AUTHOR_ARG")));
                     }
                     "-p" | "--participant" => {
-                        participant = Some(args.next().unwrap_or_else(|| fail("MISSING_PARTICIPANT_ARG")));
+                        participant = Some(
+                            args.next()
+                                .unwrap_or_else(|| fail("MISSING_PARTICIPANT_ARG")),
+                        );
                     }
                     "-q" | "--query" => {
                         query = Some(args.next().unwrap_or_else(|| fail("MISSING_QUERY_ARG")));
@@ -8669,7 +8747,9 @@ where
 
             let upstream_repo = resolve_upstream_repo();
             let work_dir = if upstream {
-                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+                upstream_repo
+                    .clone()
+                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
             } else {
                 root.to_path_buf()
             };
@@ -8705,7 +8785,9 @@ where
                 cmd
             };
 
-            let mut output = build_cmd(&work_dir).output().unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let mut output = build_cmd(&work_dir)
+                .output()
+                .unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
             if !upstream {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let is_empty = stdout.is_empty() || (format_json && stdout == "[]");
@@ -8714,8 +8796,10 @@ where
                         if up_dir != root {
                             if let Ok(up_out) = build_cmd(up_dir).output() {
                                 if up_out.status.success() {
-                                    let up_stdout = String::from_utf8_lossy(&up_out.stdout).trim().to_string();
-                                    if !up_stdout.is_empty() && (!format_json || up_stdout != "[]") {
+                                    let up_stdout =
+                                        String::from_utf8_lossy(&up_out.stdout).trim().to_string();
+                                    if !up_stdout.is_empty() && (!format_json || up_stdout != "[]")
+                                    {
                                         output = up_out;
                                     }
                                 }
@@ -8733,7 +8817,9 @@ where
             print!("{}", out_str);
         }
         "show" => {
-            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug show <id> [--json] [--upstream]"));
+            let bug_id = args
+                .next()
+                .unwrap_or_else(|| fail("USAGE: appsdk bug show <id> [--json] [--upstream]"));
             let mut format_json = false;
             let mut upstream = false;
             while let Some(arg) = args.next() {
@@ -8750,7 +8836,9 @@ where
             }
             let upstream_repo = resolve_upstream_repo();
             let work_dir = if upstream {
-                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+                upstream_repo
+                    .clone()
+                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
             } else {
                 root.to_path_buf()
             };
@@ -8765,7 +8853,8 @@ where
                 cmd.output()
             };
 
-            let mut output = run_show(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let mut output =
+                run_show(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
             if !upstream && !output.status.success() {
                 if let Some(ref up_dir) = upstream_repo {
                     if up_dir != root {
@@ -8785,13 +8874,18 @@ where
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
         "comment" => {
-            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]"));
+            let bug_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]")
+            });
             let mut msg: Option<String> = None;
             let mut upstream = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "-m" | "--message" => {
-                        msg = Some(args.next().unwrap_or_else(|| fail("MISSING_COMMENT_MESSAGE")));
+                        msg = Some(
+                            args.next()
+                                .unwrap_or_else(|| fail("MISSING_COMMENT_MESSAGE")),
+                        );
                     }
                     "--upstream" => {
                         upstream = true;
@@ -8803,10 +8897,14 @@ where
                     }
                 }
             }
-            let message = msg.unwrap_or_else(|| fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]"));
+            let message = msg.unwrap_or_else(|| {
+                fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]")
+            });
             let upstream_repo = resolve_upstream_repo();
             let work_dir = if upstream {
-                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+                upstream_repo
+                    .clone()
+                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
             } else {
                 root.to_path_buf()
             };
@@ -8819,7 +8917,8 @@ where
                 cmd.output()
             };
 
-            let mut output = run_comment(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let mut output =
+                run_comment(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
             if !upstream && !output.status.success() {
                 if let Some(ref up_dir) = upstream_repo {
                     if up_dir != root {
@@ -8839,7 +8938,11 @@ where
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
         "close" => {
-            let bug_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk bug close <id> [-m <solution>] [--receipt-id <id>] [--upstream]"));
+            let bug_id = args.next().unwrap_or_else(|| {
+                fail(
+                    "USAGE: appsdk bug close <id> [-m <solution>] [--receipt-id <id>] [--upstream]",
+                )
+            });
             let mut receipt_id: Option<String> = None;
             let mut solution: Option<String> = None;
             let mut upstream = false;
@@ -8847,10 +8950,14 @@ where
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--receipt-id" => {
-                        receipt_id = Some(args.next().unwrap_or_else(|| fail("MISSING_RECEIPT_ID_ARG")));
+                        receipt_id = Some(
+                            args.next()
+                                .unwrap_or_else(|| fail("MISSING_RECEIPT_ID_ARG")),
+                        );
                     }
                     "-m" | "--message" | "--solution" => {
-                        solution = Some(args.next().unwrap_or_else(|| fail("MISSING_SOLUTION_ARG")));
+                        solution =
+                            Some(args.next().unwrap_or_else(|| fail("MISSING_SOLUTION_ARG")));
                     }
                     "--upstream" => {
                         upstream = true;
@@ -8869,7 +8976,9 @@ where
 
             let upstream_repo = resolve_upstream_repo();
             let target_dir = if upstream {
-                upstream_repo.clone().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+                upstream_repo
+                    .clone()
+                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
             } else {
                 root.to_path_buf()
             };
@@ -8888,7 +8997,9 @@ where
                 cmd.args(["bug", "status", "close", &bug_id]);
                 cmd.current_dir(dir);
 
-                let output = cmd.output().map_err(|_| "GIT_BUG_EXECUTION_FAILED".to_string())?;
+                let output = cmd
+                    .output()
+                    .map_err(|_| "GIT_BUG_EXECUTION_FAILED".to_string())?;
                 if !output.status.success() {
                     let err = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("GIT_BUG_CLOSE_FAILED:{}", err.trim()));
@@ -8910,7 +9021,10 @@ where
 
             match res {
                 Ok(_) => {
-                    println!("{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\"}}", bug_id);
+                    println!(
+                        "{{\"ok\":true,\"bug_id\":\"{}\",\"status\":\"closed\"}}",
+                        bug_id
+                    );
                 }
                 Err(e) => {
                     fail(e);
@@ -8934,7 +9048,9 @@ where
             }
             cmd.current_dir(root);
             println!("Launching git-bug webui for {} ...", root.display());
-            let _ = cmd.status().unwrap_or_else(|_| fail("GIT_BUG_WEBUI_FAILED"));
+            let _ = cmd
+                .status()
+                .unwrap_or_else(|_| fail("GIT_BUG_WEBUI_FAILED"));
         }
         _ => fail(format!("UNKNOWN_BUG_SUBCOMMAND:{}", sub)),
     }
@@ -9039,6 +9155,117 @@ const NOTIFY_RULES: &str = r#"通知处理准则（master 和 worker 通用）�
 - P2 回执类（delivery recorded、cleanup receipt）：记下就继续干，不要被打断，也不要当成新任务。
 
 高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
+
+const WORKER_CHARTER: &str = r#"你是独立 worker。你的职责是完成自己已承诺任务：
+
+1. 在分配范围内实现、测试、交付和清理，不接管全局调度，也不修改他人的任务/worktree。
+2. 对 master 的合作请求按当前所有权和产能明确接受、协商或拒绝，不静默忽略。
+3. 遇到 blocker 先调查，再向 live master 上报根因、已尝试动作、提案和需要的决策。
+4. 没有可继续推进的运行条件是等待原因，不是空转；等待必须带解除条件和恢复触发。"#;
+
+const SUBAGENT_CHARTER: &str = r#"你是 managed subagent。你的职责是执行 parent 分配的任务：
+
+1. 只修改 assignment 声明的 scope/worktree，不自行扩大任务，不管理其他 worker。
+2. 完成后向 parent/master 返回结构化交付证据；持久会话回到 managed idle，临时会话按策略回收。
+3. 发现新事项上报，不自动修复范围外问题。
+4. 没有任务时不要进入全局 backlog；回报 parent 并等待确认。"#;
+
+const UNKNOWN_CHARTER: &str = r#"身份未验证。当前不能获得 master、独立 worker 或 managed subagent 的任何执行能力。
+
+1. 先确认自己是哪个已注册 pane：`collab context`。
+2. 若身份仍不可验证，只允许恢复绑定/注册，不允许派单、关闭其他 peer 或接管全局 backlog。
+3. 不要因命令可运行就把当前会话当成 master；root 不是 Collab master。"#;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionRole {
+    Master,
+    Worker,
+    ManagedSubagent,
+    Unknown,
+}
+
+impl ExecutionRole {
+    fn label(self) -> &'static str {
+        match self {
+            ExecutionRole::Master => "MASTER",
+            ExecutionRole::Worker => "WORKER",
+            ExecutionRole::ManagedSubagent => "SUBAGENT",
+            ExecutionRole::Unknown => "UNKNOWN",
+        }
+    }
+
+    fn role(self) -> &'static str {
+        match self {
+            ExecutionRole::Master => "master",
+            ExecutionRole::Worker => "worker",
+            ExecutionRole::ManagedSubagent => "managed-subagent",
+            ExecutionRole::Unknown => "unknown",
+        }
+    }
+
+    fn charter(self) -> &'static str {
+        match self {
+            ExecutionRole::Master => MASTER_CHARTER,
+            ExecutionRole::Worker => WORKER_CHARTER,
+            ExecutionRole::ManagedSubagent => SUBAGENT_CHARTER,
+            ExecutionRole::Unknown => UNKNOWN_CHARTER,
+        }
+    }
+
+    fn fleet_rules(self) -> &'static str {
+        match self {
+            ExecutionRole::Master => FLEET_RULES,
+            ExecutionRole::Worker | ExecutionRole::ManagedSubagent | ExecutionRole::Unknown => "",
+        }
+    }
+}
+
+fn collab_context(root: &Path) -> Option<Value> {
+    let out = Command::new("collab")
+        .arg("context")
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// The role must come from verified Collab identity. If context or status does
+/// not prove the current peer, AppSDK must not fall back to a master brief.
+fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRole {
+    let peer = collab_context(root)
+        .and_then(|context| context["identity"]["worker_id"].as_str().map(str::to_owned));
+    let Some(peer) = peer else {
+        return ExecutionRole::Unknown;
+    };
+
+    if let Some(status) = status.as_ref() {
+        if let Some(subagents) = status["subagents"].as_array() {
+            if subagents.iter().any(|sub| {
+                sub["peer"].as_str() == Some(peer.as_str())
+                    && sub["status"].as_str().unwrap_or("") != "closed"
+            }) {
+                return ExecutionRole::ManagedSubagent;
+            }
+        }
+        if let Some(workers) = status["workers"].as_array() {
+            if let Some(worker) = workers
+                .iter()
+                .find(|worker| worker["id"].as_str() == Some(peer.as_str()))
+            {
+                return match worker["role"].as_str() {
+                    Some("master") => ExecutionRole::Master,
+                    Some("worker") => ExecutionRole::Worker,
+                    _ => ExecutionRole::Unknown,
+                };
+            }
+        }
+    }
+
+    ExecutionRole::Unknown
+}
 
 fn long_horizon_record(root: &Path) -> Option<Value> {
     let file = root.join(".appsdk-control/long-task-goal.json");
@@ -9162,6 +9389,10 @@ fn longhorizon_show(root: &Path, format_json: bool) {
     let record = long_horizon_record(root);
     let status = collab_status_all(root);
     let bugs = open_bugs_json(root);
+    let role = execution_role(root, &status);
+    let role_label = role.label();
+    let charter = role.charter();
+    let fleet_rules = role.fleet_rules();
 
     let goal_path = record
         .as_ref()
@@ -9170,7 +9401,9 @@ fn longhorizon_show(root: &Path, format_json: bool) {
     let objective = goal_path
         .as_ref()
         .map(|p| goal_objective_excerpt(p, 24, 1200))
-        .unwrap_or_else(|| "(未注册长程目标，先运行 appsdk goal subscribe --goal <path.md>)".to_string());
+        .unwrap_or_else(|| {
+            "(未注册长程目标，先运行 appsdk goal subscribe --goal <path.md>)".to_string()
+        });
 
     let empty = Vec::new();
     let tasks = status
@@ -9208,9 +9441,11 @@ fn longhorizon_show(root: &Path, format_json: bool) {
     let broken_workers: Vec<&Value> = workers.iter().filter(|w| needs_intervention(w)).collect();
 
     if format_json {
-            let payload = serde_json::json!({
-            "charter": MASTER_CHARTER,
-            "fleet_rules": FLEET_RULES,
+        let payload = serde_json::json!({
+            "role": role.role(),
+            "role_label": role_label,
+            "charter": charter,
+            "fleet_rules": fleet_rules,
             "notification_rules": NOTIFY_RULES,
             "goal": {
                 "registered": record.is_some(),
@@ -9227,18 +9462,22 @@ fn longhorizon_show(root: &Path, format_json: bool) {
             "open_bugs": bugs,
             "collab_reachable": status.is_some(),
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return;
     }
 
     println!("{}", "=".repeat(80));
-    println!("LONG-HORIZON MASTER BRIEFING");
+    println!("LONG-HORIZON {} BRIEFING", role_label);
     println!("{}", "=".repeat(80));
 
-    println!(
-        "\n## 0. 你的角色\n\n{}\n\n{}\n\n{}",
-        MASTER_CHARTER, FLEET_RULES, NOTIFY_RULES
-    );
+    println!("\n## 0. 你的角色\n\n{}", charter);
+    if !fleet_rules.is_empty() {
+        println!("\n{}", fleet_rules);
+    }
+    println!("\n{}", NOTIFY_RULES);
 
     println!("\n## 1. 长程目标\n");
     match (&record, &goal_path) {
@@ -9330,22 +9569,39 @@ fn longhorizon_show(root: &Path, format_json: bool) {
         );
     }
 
-    println!("\n## 4. 本轮你欠一个决策\n");
-    println!("从以下三者中选一个并立即执行，不要以 ACK 或\"已读\"结束本轮：");
-    println!("1. 派发 ready 工作给空闲 worker（优先消除空闲产能）；");
-    println!("2. 解决一个 blocker 或介入一个失联 worker；");
-    println!("3. 用证据宣告某个阶段完成，并推动 verify / merge / close worktree。");
-    println!("\n若确为外部门禁（需人类批准的不可逆操作、发布、成本、新范围）：");
-    println!("  collab master wake hold --reason \"<门禁与解除条件>\" --ttl-seconds <n>");
+    println!("\n## 4. 本轮下一步\n");
+    match role {
+        ExecutionRole::Master => {
+            println!("从以下三者中选一个并立即执行，不要以 ACK 或\"已读\"结束本轮：");
+            println!("1. 派发 ready 工作给空闲 worker（优先消除空闲产能）；");
+            println!("2. 解决一个 blocker 或介入一个失联 worker；");
+            println!("3. 用证据宣告某个阶段完成，并推动 verify / merge / close worktree。");
+            println!("\n若确为外部门禁（需人类批准的不可逆操作、发布、成本、新范围）：");
+            println!("  collab master wake hold --reason \"<门禁与解除条件>\" --ttl-seconds <n>");
+        }
+        ExecutionRole::Worker => {
+            println!(
+                "继续当前已拥有的任务；运行 `collab context` 查看自己的 task/scope 后执行下一步。"
+            );
+            println!("不在任务范围内不要尝试全局调度或关闭其他 worker。");
+        }
+        ExecutionRole::ManagedSubagent => {
+            println!("回到 parent 分配的 assignment；完成后向 parent/master 返回证据，不进入全局 backlog。");
+        }
+        ExecutionRole::Unknown => {
+            println!("身份未验证；先运行 `collab context` 确认当前 pane/peer，恢复绑定后再做正常任务动作。");
+            println!("当前会话不获得 master 权力，不派单、不关闭其他 peer。");
+        }
+    }
 }
 
 fn handle_goal_command<I>(root: &Path, mut args: I)
 where
     I: Iterator<Item = String>,
 {
-    let sub = args.next().unwrap_or_else(|| {
-        fail("USAGE: appsdk goal <subscribe|status|cancel|prompt> [options]")
-    });
+    let sub = args
+        .next()
+        .unwrap_or_else(|| fail("USAGE: appsdk goal <subscribe|status|cancel|prompt> [options]"));
 
     match sub.as_str() {
         "subscribe" | "register" => {
@@ -9376,9 +9632,14 @@ where
                 }
             }
 
-            let raw_goal = goal_file.unwrap_or_else(|| fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>]"));
+            let raw_goal = goal_file.unwrap_or_else(|| {
+                fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>]")
+            });
             if !raw_goal.to_lowercase().ends_with(".md") {
-                fail(format!("GOAL_PATH_MUST_BE_MD_FILE: '{}' is not a markdown file (.md)", raw_goal));
+                fail(format!(
+                    "GOAL_PATH_MUST_BE_MD_FILE: '{}' is not a markdown file (.md)",
+                    raw_goal
+                ));
             }
 
             let goal_path = if Path::new(&raw_goal).is_absolute() {
@@ -9388,13 +9649,19 @@ where
             };
 
             if !goal_path.exists() || !goal_path.is_file() {
-                fail(format!("GOAL_FILE_NOT_FOUND: '{}' does not exist or is not a file", goal_path.display()));
+                fail(format!(
+                    "GOAL_FILE_NOT_FOUND: '{}' does not exist or is not a file",
+                    goal_path.display()
+                ));
             }
 
             let every_ms = parse_duration_to_ms(&interval_str).unwrap_or_else(|e| fail(e));
             let master_prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
 
-            let goal_slug = goal_path.file_name().and_then(|n| n.to_str()).unwrap_or("goal");
+            let goal_slug = goal_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("goal");
             let collab_sub = Command::new("collab")
                 .args([
                     "notify",
@@ -9436,7 +9703,10 @@ where
                 "registered_at": chrono::Utc::now().to_rfc3339(),
                 "active": true
             });
-            let _ = fs::write(&goal_record_file, serde_json::to_string_pretty(&record).unwrap_or_default() + "\n");
+            let _ = fs::write(
+                &goal_record_file,
+                serde_json::to_string_pretty(&record).unwrap_or_default() + "\n",
+            );
 
             if format_json {
                 let mut resp = record.clone();
@@ -9446,7 +9716,14 @@ where
                 println!("Long-horizon goal successfully registered:");
                 println!("- Goal file: {}", goal_path.display());
                 println!("- Periodic reminder: every {}", interval_str);
-                println!("- Collab notification status: {}", if collab_subscribed { "subscribed" } else { "daemon not running / local recorded" });
+                println!(
+                    "- Collab notification status: {}",
+                    if collab_subscribed {
+                        "subscribed"
+                    } else {
+                        "daemon not running / local recorded"
+                    }
+                );
                 println!("\n{}", master_prompt);
             }
         }
@@ -9472,9 +9749,18 @@ where
             } else {
                 let parsed: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
                 println!("Active Long-Horizon Goal:");
-                println!("- Goal: {}", parsed["goal_path"].as_str().unwrap_or("unknown"));
-                println!("- Interval: {}", parsed["interval"].as_str().unwrap_or("unknown"));
-                println!("- Registered at: {}", parsed["registered_at"].as_str().unwrap_or("unknown"));
+                println!(
+                    "- Goal: {}",
+                    parsed["goal_path"].as_str().unwrap_or("unknown")
+                );
+                println!(
+                    "- Interval: {}",
+                    parsed["interval"].as_str().unwrap_or("unknown")
+                );
+                println!(
+                    "- Registered at: {}",
+                    parsed["registered_at"].as_str().unwrap_or("unknown")
+                );
                 println!("- Active: {}", parsed["active"].as_bool().unwrap_or(false));
             }
         }
@@ -9501,9 +9787,14 @@ where
                 }
             }
 
-            let raw_goal = goal_file.unwrap_or_else(|| fail("USAGE: appsdk goal prompt --goal <path.md> [--interval <duration>]"));
+            let raw_goal = goal_file.unwrap_or_else(|| {
+                fail("USAGE: appsdk goal prompt --goal <path.md> [--interval <duration>]")
+            });
             if !raw_goal.to_lowercase().ends_with(".md") {
-                fail(format!("GOAL_PATH_MUST_BE_MD_FILE: '{}' is not a markdown file (.md)", raw_goal));
+                fail(format!(
+                    "GOAL_PATH_MUST_BE_MD_FILE: '{}' is not a markdown file (.md)",
+                    raw_goal
+                ));
             }
             let goal_path = if Path::new(&raw_goal).is_absolute() {
                 PathBuf::from(&raw_goal)
@@ -9511,7 +9802,10 @@ where
                 root.join(&raw_goal)
             };
             if !goal_path.exists() || !goal_path.is_file() {
-                fail(format!("GOAL_FILE_NOT_FOUND: '{}' does not exist or is not a file", goal_path.display()));
+                fail(format!(
+                    "GOAL_FILE_NOT_FOUND: '{}' does not exist or is not a file",
+                    goal_path.display()
+                ));
             }
 
             let prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
@@ -9538,7 +9832,9 @@ where
     };
 
     if sub == "block" {
-        let task_id = args.next().unwrap_or_else(|| fail("USAGE: appsdk task block <id> [--reason <text>] [--json]"));
+        let task_id = args
+            .next()
+            .unwrap_or_else(|| fail("USAGE: appsdk task block <id> [--reason <text>] [--json]"));
         let mut reason: Option<String> = None;
         let mut format_json = false;
 
@@ -9559,15 +9855,43 @@ where
             block_cmd.args(["--next", r]);
         }
         block_cmd.current_dir(root);
-        let _ = block_cmd.output();
+        let block_out = match block_cmd.output() {
+            Ok(out) => out,
+            Err(e) => fail(format!("COLLAB_UNAVAILABLE:{}", e)),
+        };
+        if !block_out.status.success() {
+            let code = block_out.status.code().unwrap_or(1);
+            let stderr = String::from_utf8_lossy(&block_out.stderr)
+                .trim()
+                .to_string();
+            let stdout = String::from_utf8_lossy(&block_out.stdout)
+                .trim()
+                .to_string();
+            eprintln!(
+                "COLLAB_TASK_BLOCK_FAILED:exit={}{}{}",
+                code,
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", stderr)
+                },
+                if stdout.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", stdout)
+                }
+            );
+            std::process::exit(code);
+        }
+        let block_result = String::from_utf8_lossy(&block_out.stdout)
+            .trim()
+            .to_string();
 
-        // 2. Stop notifications / reminders for this peer/task
-        let _ = Command::new("collab").args(["notify", "close"]).current_dir(root).output();
-
-        // 3. Construct the mandatory governance reminder
-        let notice_title = format!("【AppSDK 任务阻塞门禁提醒】任务 '{}' 已标记为 blocked，提醒已停止。", task_id);
-        let notice_body = 
-r#"================================================================================
+        // 2. Construct the mandatory governance reminder. Blocking a task does
+        // not implicitly close all notifications; only the underlying Collab
+        // command may change precise subscription policy.
+        let notice_title = format!("【AppSDK 任务阻塞门禁提醒】任务 '{}' 已调用 collab task block，通知策略以 Collab 响应为准。", task_id);
+        let notice_body = r#"================================================================================
 【重要门禁与合规约束】
 1. AppSDK 的问题可以报 bug：若阻断由 AppSDK 框架缺陷导致（CLI 异常、verify 误报、准入阻断），
    必须立即上报 upstream 缺陷系统：
@@ -9583,14 +9907,25 @@ r#"=============================================================================
                 "ok": true,
                 "task_id": task_id,
                 "status": "blocked",
-                "reminders_stopped": true,
+                "reminders_stopped": false,
                 "reason": reason,
+                "collab_result": block_result,
                 "rule": "AppSDK 的问题可以报 bug，非 AppSDK 的问题需要自己解决，不能构成 block",
                 "notice": format!("{}\n{}", notice_title, notice_body)
             });
             println!("{}", serde_json::to_string_pretty(&resp).unwrap());
         } else {
-            println!("{}\n{}", notice_title, notice_body);
+            println!(
+                "{}\n{}\n{}{}",
+                notice_title,
+                notice_body,
+                if block_result.is_empty() {
+                    String::new()
+                } else {
+                    "\nCollab result:\n".to_string()
+                },
+                block_result
+            );
         }
     } else {
         let mut rest_args = vec!["task".to_string(), sub];
@@ -9725,7 +10060,19 @@ fn main() {
         Some("bug") => {
             let mut root = PathBuf::from(".");
             if let Some(first) = args.peek() {
-                if !matches!(first.as_str(), "new" | "list" | "show" | "comment" | "close" | "webui" | "help" | "--help" | "-h") && !first.starts_with('-') {
+                if !matches!(
+                    first.as_str(),
+                    "new"
+                        | "list"
+                        | "show"
+                        | "comment"
+                        | "close"
+                        | "webui"
+                        | "help"
+                        | "--help"
+                        | "-h"
+                ) && !first.starts_with('-')
+                {
                     root = PathBuf::from(args.next().unwrap());
                 }
             }
@@ -9738,7 +10085,18 @@ fn main() {
         Some("goal") => {
             let mut root = PathBuf::from(".");
             if let Some(first) = args.peek() {
-                if !matches!(first.as_str(), "subscribe" | "register" | "status" | "cancel" | "prompt" | "help" | "--help" | "-h") && !first.starts_with('-') {
+                if !matches!(
+                    first.as_str(),
+                    "subscribe"
+                        | "register"
+                        | "status"
+                        | "cancel"
+                        | "prompt"
+                        | "help"
+                        | "--help"
+                        | "-h"
+                ) && !first.starts_with('-')
+                {
                     root = PathBuf::from(args.next().unwrap());
                 }
             }
@@ -9758,7 +10116,21 @@ fn main() {
         Some("task") => {
             let mut root = PathBuf::from(".");
             if let Some(first) = args.peek() {
-                if !matches!(first.as_str(), "block" | "register" | "relocate" | "update" | "wait" | "deliver" | "close" | "status" | "help" | "--help" | "-h") && !first.starts_with('-') {
+                if !matches!(
+                    first.as_str(),
+                    "block"
+                        | "register"
+                        | "relocate"
+                        | "update"
+                        | "wait"
+                        | "deliver"
+                        | "close"
+                        | "status"
+                        | "help"
+                        | "--help"
+                        | "-h"
+                ) && !first.starts_with('-')
+                {
                     root = PathBuf::from(args.next().unwrap());
                 }
             }

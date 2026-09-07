@@ -9185,14 +9185,19 @@ where
 
 fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();
-    // Collab owns configuration interpretation and subagent runtime truth.
+    // Collab owns configuration interpretation, coordination, and subagent runtime truth.
     // Forward argv/environment unchanged; do not create an AppSDK registry.
     if argv
         .first()
-        .is_some_and(|arg| arg == "subagent" || arg == "config")
+        .is_some_and(|arg| arg == "subagent" || arg == "config" || arg == "collab")
     {
+        let collab_args: &[String] = if argv[0] == "collab" {
+            &argv[1..]
+        } else {
+            &argv[..]
+        };
         let status = Command::new("collab")
-            .args(&argv)
+            .args(collab_args)
             .status()
             .unwrap_or_else(|error| fail(format!("COLLAB_UNAVAILABLE:{error}")));
         std::process::exit(status.code().unwrap_or(1));

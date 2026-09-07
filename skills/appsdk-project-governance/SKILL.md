@@ -198,6 +198,19 @@ All user inputs—whether bug reports or new feature requests—are tracked thro
 
 ## Long-Horizon Goal Subscription & Master Saturation
 
+`collab init` / `whoami` returns `role_brief`; treat it as the active contract.
+Master dispatches rather than codes: split and assign work, allocate resources,
+keep workers loaded, own blockers, and drive verify/merge/cleanup/close.
+Independent worker owns its task end to end and evaluates master collaboration
+requests against current ownership/capacity—accept non-conflicting work or
+negotiate explicitly. Managed subagent executes its assigned scope and reports
+evidence to parent/master. On trouble, worker/subagent first investigates, then
+reports root cause, attempts, proposed fix, and exact decision needed.
+
+Notifications are interrupts, not completion. Follow the `P0/P1/P2 ACTION`,
+then resume current work; with no task, run `appsdk longhorizon show`. Never end
+on ACK, read, or summary.
+
 Register complex or long-running goals with a required markdown target and periodic reminder interval:
 
 ```bash

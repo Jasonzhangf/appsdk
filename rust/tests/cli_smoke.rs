@@ -6656,6 +6656,65 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
 }
 
 #[test]
+fn guidance_scope_state_detects_content_change_without_git_status_shape_change() {
+    let root = temp_root("guidance-scope-content-drift");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    let scope_dir = root.join("playground/experiments");
+    fs::create_dir_all(&scope_dir).unwrap();
+    fs::write(scope_dir.join("input.txt"), "v1\n").unwrap();
+    init_git(&root);
+
+    let plan_file = root.join("plan.json");
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-content-drift",
+        "module_id": "app-core",
+        "objective": "detect same-path file content changes",
+        "scope_paths": ["playground/experiments/input.txt"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::write(
+        &plan_file,
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-content-drift",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    fs::write(scope_dir.join("input.txt"), "v2\n").unwrap();
+    let status = run(&["guide", "next", root_text, "--task", "task-content-drift"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(payload["reason_code"], "GUIDANCE_CONTEXT_DRIFT:source");
+    assert_eq!(payload["next"]["revision_reason"], "source_drift");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_plan_revision_requires_reason_and_preserves_history() {
     let root = temp_root("guidance-plan-revision");
     let root_text = root.to_str().unwrap();

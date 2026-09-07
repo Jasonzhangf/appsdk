@@ -318,28 +318,61 @@ fn git(root: &Path, args: &[&str], code: &str) -> String {
     String::from_utf8_lossy(&result.stdout).trim().to_string()
 }
 
+fn scope_entry_state(path: &Path, out: &mut Vec<(String, String)>) {
+    let rel = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            let mut entries = fs::read_dir(path)
+                .unwrap_or_else(|_| {
+                    fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|_| {
+                    fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
+                });
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                scope_entry_state(&entry.path(), out);
+            }
+            out.push((format!("{}/", rel), "dir".into()));
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = fs::read_link(path)
+                .unwrap_or_else(|_| {
+                    fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
+                })
+                .to_string_lossy()
+                .to_string();
+            out.push((rel, format!("symlink:{}", target)));
+        }
+        Ok(_) => {
+            let bytes = fs::read(path).unwrap_or_else(|_| {
+                fail("GUIDANCE_SCOPE_READ_FAILED", "restore the declared scope")
+            });
+            out.push((rel, digest_bytes(&bytes)));
+        }
+        Err(_) => {
+            out.push((rel, "missing".into()));
+        }
+    }
+}
+
 fn scope_state(root: &Path, paths: &[String]) -> String {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(root)
-        .args(["status", "--porcelain=v1", "--untracked-files=all", "--"]);
-    for path in paths {
-        command.arg(path);
+    let mut entries = Vec::new();
+    for raw in paths {
+        let relative = safe_relative(normalize_surface(raw), "GUIDANCE_SCOPE_PATH_ESCAPE");
+        scope_entry_state(&root.join(relative), &mut entries);
     }
-    let result = command.output().unwrap_or_else(|_| {
-        fail(
-            "GUIDANCE_SOURCE_GIT_UNAVAILABLE",
-            "run guidance in a Git owner worktree",
-        )
-    });
-    if !result.status.success() {
-        fail(
-            "GUIDANCE_SOURCE_GIT_UNAVAILABLE",
-            "run guidance in a Git owner worktree",
-        );
+    entries.sort();
+    entries.dedup();
+    let mut state = String::new();
+    for (rel, digest) in entries {
+        state.push_str(&format!("{rel}={digest}\n"));
     }
-    digest_bytes(&result.stdout)
+    digest_bytes(state.as_bytes())
 }
 
 fn rule_context(

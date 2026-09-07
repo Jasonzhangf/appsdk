@@ -6656,6 +6656,67 @@ fn guidance_detects_declared_rule_source_drift_and_symlink() {
 }
 
 #[test]
+fn guidance_event_ledger_reports_bad_line_number() {
+    let root = temp_root("guidance-events-line");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    assert!(run(&["guide", "compile", root_text]).status.success());
+    init_git(&root);
+
+    let plan_file = root.join("plan.json");
+    let proposal = serde_json::json!({
+        "schema_version": 1,
+        "mode": "develop",
+        "goal_id": "goal-change-me",
+        "task_id": "task-events",
+        "module_id": "app-core",
+        "objective": "line number for corrupted ledger",
+        "scope_paths": ["playground/experiments/input.txt"],
+        "steps": [{
+            "step_id": "step-1",
+            "node_id": "requirements",
+            "action": "analyze requirements",
+            "owner": "app-core",
+            "expected_evidence": ["requirements"]
+        }]
+    });
+    fs::create_dir_all(root.join("playground/experiments")).unwrap();
+    fs::write(root.join("playground/experiments/input.txt"), "v1\n").unwrap();
+    fs::write(
+        &plan_file,
+        serde_json::to_string_pretty(&proposal).unwrap() + "\n",
+    )
+    .unwrap();
+    assert!(run(&[
+        "guide",
+        "plan",
+        root_text,
+        "--task",
+        "task-events",
+        "--input",
+        "plan.json",
+    ])
+    .status
+    .success());
+
+    let events = root.join(".appsdk-control/guidance/task-events/events.jsonl");
+    let mut content = fs::read_to_string(&events).unwrap();
+    content.push_str("not-json\n");
+    fs::write(&events, content).unwrap();
+
+    let status = run(&["guide", "next", root_text, "--task", "task-events"]);
+    assert!(!status.status.success());
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("GUIDANCE_EVENTS_INVALID:line=2"),
+        "{}",
+        stderr
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn guidance_scope_state_detects_content_change_without_git_status_shape_change() {
     let root = temp_root("guidance-scope-content-drift");
     let root_text = root.to_str().unwrap();

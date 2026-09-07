@@ -68,13 +68,20 @@ pub(super) fn read_events(root: &Path, task: &str) -> Vec<Value> {
     if !path.is_file() {
         return Vec::new();
     }
-    fs::read_to_string(path)
-        .unwrap_or_else(|_| fail("GUIDANCE_EVENTS_INVALID", "repair the task event ledger"))
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|_| fail("GUIDANCE_EVENTS_INVALID", "repair the task event ledger"))
-        })
-        .collect()
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|_| fail("GUIDANCE_EVENTS_INVALID", "repair the task event ledger"));
+    let mut events = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(line).unwrap_or_else(|_| {
+            fail(
+                format!("GUIDANCE_EVENTS_INVALID:line={}", index + 1),
+                "repair the task event ledger",
+            )
+        });
+        events.push(event);
+    }
+    events
 }

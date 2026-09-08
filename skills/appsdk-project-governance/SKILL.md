@@ -129,6 +129,77 @@ is not evidence that delivery, review, install, restart, or freeze happened.
 7. Deliver within authorization. Report test, review, merge, install, publish
    and resource cleanup as separate achieved states.
 
+## Mainline delivery gate
+
+Every AppSDK or runtime change uses this order:
+
+```text
+clean playground worktree
+  -> candidate tests/build
+  -> independent review
+  -> clean main integration
+  -> main tests/build
+  -> push + remote receipt
+  -> official global install
+  -> exact service-scoped restart
+  -> deployed public-entrypoint replay
+  -> task/worktree cleanup and close
+```
+
+These are separate evidence states. A candidate, review PASS, local merge,
+remote push, installed binary, daemon restart, live replay, or cleanup receipt
+does not imply any other state. Never install or restart from a worker branch.
+
+### Required delivery procedure
+
+1. Create `playground/<slug>` from current `origin/main`. The worker never
+   edits `main` or shares a worktree.
+2. Run focused tests, relevant full suite, formatter, diff check, and release
+   build. Record the candidate commit, tree, artifact, and exact commands.
+3. Use an independent review and replay the unchanged-source effectiveness
+   case. Review PASS is required before integration.
+4. Integrate only into a clean local `main`. If tracked or untracked user
+   changes exist, stop and report exact paths; never reset, restore, stash,
+   overwrite, or silently absorb them.
+5. Re-run affected tests, full tests, formatter, diff check, and release build
+   on the exact merged commit. Record the merge commit and artifact hash.
+6. Push only that tested main commit. Verify remote truth with
+   `git ls-remote <remote> <ref>`; a local tracking ref is not publication.
+7. Install through the canonical AppSDK entry point:
+
+   ```bash
+   scripts/install-global-appsdk.sh
+   appsdk --version
+   shasum -a 256 "$(command -v appsdk)"
+   ```
+
+   Preserve source commit, installed path, version, and digest. Do not copy a
+   binary by hand or leave a second global SDK entry.
+8. Restart only affected services with their official service-scoped command.
+   For Collab, use exactly:
+
+   ```bash
+   env -u TMUX_PANE collab down
+   env -u TMUX_PANE collab up
+   ```
+
+   Run this once per exact project root. Record old/new PID, socket, binary
+   path, and digest. Never use `pkill`, `killall`, `xargs kill`, or broad PID
+   commands.
+9. Run the deployed public-entrypoint replay and negative path. For Collab,
+   verify `collab who`, `collab context`, `collab task status`, `collab inbox`,
+   one real notification/consume path, and single-daemon identity after
+   restart. Source tests are not live replay evidence.
+10. Only after remote receipt, install/restart, and replay pass may the owner
+    release its claim and clean its own worktree through the official task
+    close operation. Cleanup records the removed path and receipt; it never
+    deletes another task's worktree, mailbox, journal, or token.
+
+If a gate fails, preserve the exact error and leave the task explicitly
+blocked with owner, unblock condition, next check, and recovery trigger. Never
+report deployed from a candidate branch, merged from a local-only ref, or
+complete from tests without mainline, install, restart, and replay evidence.
+
 ## Optional Guidance
 
 Use `appsdk guide status/init/plan/update/next/close` when the user/project

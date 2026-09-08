@@ -9068,7 +9068,7 @@ fn generate_long_horizon_master_prompt(goal_path: &Path, interval_str: &str) -> 
         r#"# 长程任务调度与饱和执行提示词（Master 专属）
 
 **长程任务目标文档**: `{}`
-**提醒触发方式**: 一次性 deadline，延迟 `{}` 后唤醒；Collab 未提供自动续期
+**提醒触发周期**: 每 `{}` 触发一次；Collab 使用有限次数订阅，不自动续期
 
 RUN: `appsdk longhorizon show`
 THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待用户输入。
@@ -9622,19 +9622,28 @@ fn goal_subscription_by_subject(
         .get("subscriptions")
         .and_then(Value::as_array)
         .ok_or_else(|| "GOAL_RECONCILE_RESPONSE_MISSING_SUBSCRIPTIONS".to_string())?;
-    let match_record = subscriptions.iter().find_map(|subscription| {
-        let id = subscription
-            .get("id")
-            .and_then(Value::as_str)
-            .or_else(|| subscription.get("subscription_id").and_then(Value::as_str))
-            .filter(|id| !id.trim().is_empty())?;
-        let status = subscription.get("status").and_then(Value::as_str)?;
-        let event = subscription.get("event").and_then(Value::as_str)?;
-        let remote_subject = subscription.get("subject").and_then(Value::as_str)?;
-        (event == "deadline" && remote_subject == subject && status == "armed")
-            .then(|| (id.to_string(), status.to_string(), subscription.clone()))
-    });
-    Ok(match_record)
+    let matches: Vec<(String, String, Value)> = subscriptions
+        .iter()
+        .filter_map(|subscription| {
+            let id = subscription
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| subscription.get("subscription_id").and_then(Value::as_str))
+                .filter(|id| !id.trim().is_empty())?;
+            let status = subscription.get("status").and_then(Value::as_str)?;
+            let event = subscription.get("event").and_then(Value::as_str)?;
+            let remote_subject = subscription.get("subject").and_then(Value::as_str)?;
+            (event == "deadline" && remote_subject == subject && status == "armed")
+                .then(|| (id.to_string(), status.to_string(), subscription.clone()))
+        })
+        .collect();
+    if matches.len() > 1 {
+        return Err(format!(
+            "GOAL_RECONCILE_SUBJECT_AMBIGUOUS:{} armed deadline subscriptions match",
+            matches.len()
+        ));
+    }
+    Ok(matches.into_iter().next())
 }
 
 fn goal_fail(format_json: bool, error: &str, record: Option<&Value>) -> ! {
@@ -10027,7 +10036,7 @@ where
         "subscribe" | "register" => {
             let mut goal_file: Option<String> = None;
             let mut interval_str = "10m".to_string();
-            let mut repeat_count: u32 = 1;
+            let mut repeat_count: u32 = 100;
             let mut ttl_seconds: u64 = 604800;
             let mut format_json = false;
 
@@ -10055,8 +10064,8 @@ where
             let raw_goal = goal_file.unwrap_or_else(|| {
                 fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>]")
             });
-            if repeat_count != 1 {
-                fail("GOAL_PERIODIC_UNSUPPORTED: Collab provides one-shot deadline notifications only; use --repeat 1");
+            if !(1..=100).contains(&repeat_count) {
+                fail("GOAL_REPEAT_COUNT_INVALID: Collab supports repeat counts from 1 through 100");
             }
             if !raw_goal.to_lowercase().ends_with(".md") {
                 fail(format!(
@@ -10109,11 +10118,7 @@ where
                     goal_fail(format_json, &error, None)
                 }
             };
-            let goal_slug = canonical_goal_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("goal");
-            let goal_subject = format!("goal:{}", goal_slug);
+            let goal_subject = format!("goal:{}", goal_id);
             if let Some(existing) = existing.as_ref() {
                 if existing["desired"].as_str() == Some("subscribed") {
                     match goal_subscription_by_subject(root, &goal_subject) {
@@ -10183,8 +10188,8 @@ where
                 "interval": interval_str,
                 "every_ms": every_ms,
                 "trigger_ms": trigger_ms,
-                "repeat_count": 1,
-                "schedule": "one_shot",
+                "repeat_count": repeat_count,
+                "schedule": "periodic",
                 "ttl_seconds": ttl_seconds,
                 "owner": owner,
                 "subject": goal_subject,
@@ -10208,8 +10213,10 @@ where
                     "subscribe",
                     "--event",
                     "deadline",
-                    "--trigger-ms",
-                    &trigger_ms.to_string(),
+                    "--every-ms",
+                    &every_ms.to_string(),
+                    "--repeat-count",
+                    &repeat_count.to_string(),
                     "--ttl-seconds",
                     &ttl_seconds.to_string(),
                     "--subject",
@@ -10697,10 +10704,19 @@ where
             if format_json {
                 println!(
                     "{}",
-                    serde_json::json!({"ok":true,"status":"cancelled","subscription_id":subscription_id})
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "cancelled",
+                        "subscription_id": goal_record_subscription_id(&record),
+                        "revision": record["revision"],
+                        "cancel_receipt": record["cancel_receipt"],
+                        "record": record,
+                    })
                 );
             } else {
-                println!("Goal subscription cancelled: {}", subscription_id);
+                let final_id =
+                    goal_record_subscription_id(&record).unwrap_or_else(|| subscription_id.clone());
+                println!("Goal subscription cancelled: {}", final_id);
             }
         }
         "prompt" => {

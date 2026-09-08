@@ -7790,10 +7790,22 @@ fn goal_subscription_and_master_prompt_lifecycle() {
         r#"#!/bin/sh
 case "$1 $2" in
   "notify subscribe")
+    printf '%s\n' "$*" > notify-args
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--subject" ]; then printf '%s' "$2" > goal-subject; fi
+      shift
+    done
     printf '%s\n' '{"subscription_id":"goal-sub-1"}'
     ;;
   "notify status")
-    printf '%s\n' '{"subscriptions":[{"id":"goal-sub-1","status":"armed","event":"deadline","subject":"goal:long-task.md"}]}'
+    subject=$(/bin/cat goal-subject 2>/dev/null || printf '%s' 'missing-subject')
+    if [ "${RECONCILE_CANCEL:-}" = "1" ]; then
+      printf '%s\n' "{\"subscriptions\":[{\"id\":\"goal-sub-2\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
+    elif [ "${DUPLICATE_SUBJECT:-}" = "1" ]; then
+      printf '%s\n' "{\"subscriptions\":[{\"id\":\"goal-sub-1\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"},{\"id\":\"goal-sub-2\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
+    else
+      printf '%s\n' "{\"subscriptions\":[{\"id\":\"goal-sub-1\",\"status\":\"armed\",\"event\":\"deadline\",\"subject\":\"$subject\"}]}"
+    fi
     ;;
   "status --all")
     printf '%s\n' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[]}'
@@ -7802,6 +7814,11 @@ case "$1 $2" in
     printf '%s\n' '{"identity":{"worker_id":"master-peer"}}'
     ;;
   "notify unsubscribe")
+    if [ "${RECONCILE_CANCEL:-}" = "1" ]; then
+      if [ "$3" = "goal-sub-1" ]; then exit 44; fi
+      printf '%s\n' '{"subscription_id":"goal-sub-2","status":"cancelled"}'
+      exit 0
+    fi
     printf '%s\n' '{"subscription_id":"goal-sub-1","status":"cancelled"}'
     ;;
   *)
@@ -7832,24 +7849,6 @@ esac
         "# Sample Long-Horizon Goal\nDeliver feature X.\n",
     )
     .unwrap();
-
-    let periodic = Command::new(binary())
-        .args([
-            "goal",
-            "subscribe",
-            "--goal",
-            "long-task.md",
-            "--repeat",
-            "2",
-            "--json",
-        ])
-        .current_dir(&root)
-        .env("PATH", &fake_bin)
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap();
-    assert_eq!(periodic.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&periodic.stderr).contains("GOAL_PERIODIC_UNSUPPORTED"));
 
     let sub_res = Command::new(binary())
         .args([
@@ -7883,9 +7882,27 @@ esac
     assert!(prompt.contains("Master 专属"));
     assert!(prompt.contains("饱和"));
     assert!(prompt.contains("appsdk bug"));
-    assert_eq!(sub_json["schedule"], "one_shot");
-    assert_eq!(sub_json["repeat_count"], 1);
-    assert!(prompt.contains("一次性 deadline"));
+    assert_eq!(sub_json["schedule"], "periodic");
+    assert_eq!(sub_json["repeat_count"], 100);
+    assert!(sub_json["subject"]
+        .as_str()
+        .unwrap()
+        .starts_with("goal:sha256:"));
+    assert!(prompt.contains("有限次数订阅"));
+    let notify_args = fs::read_to_string(root.join("notify-args")).unwrap();
+    assert!(notify_args.contains("--every-ms 300000"));
+    assert!(notify_args.contains("--repeat-count 100"));
+
+    let duplicate = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("DUPLICATE_SUBJECT", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(duplicate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("GOAL_RECONCILE_SUBJECT_AMBIGUOUS"));
 
     // 4. Check goal status
     let status_res = Command::new(binary())
@@ -7939,17 +7956,19 @@ esac
     let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
     assert!(prompt_text.contains("长程任务目标文档"));
     assert!(prompt_text.contains("10m"));
-    assert!(prompt_text.contains("一次性 deadline"));
+    assert!(prompt_text.contains("提醒触发周期"));
 
     // 6. Cancel goal
     let cancel_res = Command::new(binary())
         .args(["goal", "cancel"])
         .current_dir(&root)
         .env("PATH", &fake_bin)
+        .env("RECONCILE_CANCEL", "1")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
     assert!(cancel_res.status.success());
+    assert!(String::from_utf8_lossy(&cancel_res.stdout).contains("goal-sub-2"));
 
     let cancel_again = Command::new(binary())
         .args(["goal", "cancel", "--json"])
@@ -7971,6 +7990,7 @@ esac
     assert_eq!(post_cancel_json["active"], false);
     assert_eq!(post_cancel_json["desired"], "unsubscribed");
     assert_eq!(post_cancel_json["observed"], "cancelled");
+    assert_eq!(post_cancel_json["subscription_id"], "goal-sub-2");
     assert!(post_cancel_json["record"]["cancel_receipt"].is_object());
 
     fs::remove_dir_all(root).unwrap();
@@ -8241,6 +8261,32 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(payload["error"], "GOAL_RECORD_NOT_FOUND");
     assert!(!lock_path.exists());
+
+    fs::write(&lock_path, "").unwrap();
+    let empty_lock = run_in(&root, &["goal", "status", "--json"]);
+    assert_eq!(empty_lock.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&empty_lock.stderr).contains("GOAL_LOCK_METADATA_INVALID"));
+    fs::write(&lock_path, "pid=").unwrap();
+    let truncated_lock = run_in(&root, &["goal", "status", "--json"]);
+    assert_eq!(truncated_lock.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&truncated_lock.stderr).contains("GOAL_LOCK_METADATA_INVALID"));
+    fs::remove_file(&lock_path).unwrap();
+
+    let mut live_owner = Command::new("/bin/sh")
+        .args(["-c", "sleep 2"])
+        .spawn()
+        .unwrap();
+    fs::write(
+        &lock_path,
+        format!("pid={} owner=live-owner\n", live_owner.id()),
+    )
+    .unwrap();
+    let reused_pid = run_in(&root, &["goal", "status", "--json"]);
+    assert_eq!(reused_pid.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&reused_pid.stderr).contains("GOAL_LOCK_BUSY"));
+    live_owner.kill().unwrap();
+    live_owner.wait().unwrap();
+    fs::remove_file(&lock_path).unwrap();
 
     fs::remove_dir_all(root).unwrap();
 }

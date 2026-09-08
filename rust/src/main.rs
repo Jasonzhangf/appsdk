@@ -9530,6 +9530,24 @@ fn goal_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn join_goal_output_reader(reader: Option<thread::JoinHandle<Vec<u8>>>) {
+    if let Some(reader) = reader {
+        let _ = reader.join();
+    }
+}
+
+fn detach_goal_output_readers(
+    stdout_reader: Option<thread::JoinHandle<Vec<u8>>>,
+    stderr_reader: Option<thread::JoinHandle<Vec<u8>>>,
+) {
+    // A killed command may have descendants holding inherited pipe writers;
+    // join them off the timeout path after those writers close.
+    let _ = thread::spawn(move || {
+        join_goal_output_reader(stdout_reader);
+        join_goal_output_reader(stderr_reader);
+    });
+}
+
 fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
     const TIMEOUT: Duration = Duration::from_secs(10);
     let mut child = command
@@ -9537,18 +9555,30 @@ fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("GOAL_COLLAB_COMMAND_UNAVAILABLE:{}", error))?;
+    let stdout_reader = child.stdout.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut stdout = Vec::new();
+            let _ = pipe.read_to_end(&mut stdout);
+            stdout
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut stderr = Vec::new();
+            let _ = pipe.read_to_end(&mut stderr);
+            stderr
+        })
+    });
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_end(&mut stdout);
-                }
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_end(&mut stderr);
-                }
+                let stdout = stdout_reader
+                    .and_then(|reader| reader.join().ok())
+                    .unwrap_or_default();
+                let stderr = stderr_reader
+                    .and_then(|reader| reader.join().ok())
+                    .unwrap_or_default();
                 return Ok(Output {
                     status,
                     stdout,
@@ -9559,11 +9589,13 @@ fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                detach_goal_output_readers(stdout_reader, stderr_reader);
                 return Err("GOAL_COLLAB_COMMAND_TIMEOUT".into());
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                detach_goal_output_readers(stdout_reader, stderr_reader);
                 return Err(format!("GOAL_COLLAB_COMMAND_WAIT_FAILED:{}", error));
             }
         }

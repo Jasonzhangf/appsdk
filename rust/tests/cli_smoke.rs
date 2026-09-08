@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_appsdk"))
@@ -8027,6 +8028,107 @@ esac
     assert_eq!(post_cancel_json["observed"], "cancelled");
     assert_eq!(post_cancel_json["subscription_id"], "goal-sub-2");
     assert!(post_cancel_json["record"]["cancel_receipt"].is_object());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_subscribe_drains_large_collab_output_without_timeout() {
+    let root = temp_root("goal-large-collab-output");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    (
+      printf '%s' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[],"padding":"'
+      /bin/dd if=/dev/zero bs=4194304 count=1 2>/dev/null | /usr/bin/tr '\0' 'x'
+      printf '%s\n' '"}'
+    ) &
+    (
+      /bin/dd if=/dev/zero bs=4194304 count=1 2>/dev/null | /usr/bin/tr '\0' 'e' >&2
+    ) &
+    wait
+    ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer"}}' ;;
+  "notify subscribe") printf '%s\n' '{"subscription_id":"large-output-sub"}' ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let started = Instant::now();
+    let result = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "large Collab output took {:?}: {}",
+        started.elapsed(),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["active"], true);
+    assert_eq!(payload["subscription_id"], "large-output-sub");
+    assert_eq!(payload["observed"], "subscribed");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_subscribe_timeout_keeps_explicit_timeout_error() {
+    let root = temp_root("goal-collab-timeout");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") /bin/sleep 11 ;;\n  *) exit 64 ;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let started = Instant::now();
+    let result = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(10),
+        "command returned before its timeout: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(12),
+        "timeout handling exceeded its bound: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("COLLAB_STATUS_UNAVAILABLE:GOAL_COLLAB_COMMAND_TIMEOUT"));
 
     fs::remove_dir_all(root).unwrap();
 }

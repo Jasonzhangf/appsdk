@@ -8219,6 +8219,19 @@ esac
     assert_eq!(cancel_json["subscription_id"], "sub-exact");
     assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
 
+    let resubscribe = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(resubscribe.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&resubscribe.stderr)
+        .contains("GOAL_CANCEL_PENDING_RECONCILIATION_REQUIRED"));
+    let resubscribe_json: Value = serde_json::from_slice(&resubscribe.stdout).unwrap();
+    assert_eq!(resubscribe_json["desired"], "cancel_pending");
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -8240,6 +8253,16 @@ case "$1 $2" in
   "notify status")
     if [ "${STATUS_EXPIRED:-}" = "1" ]; then
       printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"expired","event":"deadline","subject":"goal:sha256:legacy"}]}'
+    elif [ "${DEDUPE_SUBJECT:-}" = "1" ]; then
+      count=$((`/bin/cat status-count 2>/dev/null || printf '0'` + 1))
+      printf '%s' "$count" > status-count
+      if [ "$count" = "1" ]; then
+        printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"armed","event":"deadline","subject":"goal:legacy-retained"}]}'
+      elif [ "$count" = "2" ]; then
+        printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"armed","event":"deadline","subject":"goal:long-task.md"}]}'
+      else
+        printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"armed","event":"deadline","subject":"goal:sha256:current"}]}'
+      fi
     elif [ "${LEGACY_SUBJECT:-}" = "1" ]; then
       printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"armed","event":"deadline","subject":"goal:long-task.md"}]}'
     else
@@ -8299,6 +8322,38 @@ esac
     let reconciled: Value = serde_json::from_slice(&reconciled.stdout).unwrap();
     assert_eq!(reconciled["subject"], "goal:long-task.md");
     assert_eq!(reconciled["subscription_id"], "sub-periodic");
+
+    let mut dedupe_record: Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    dedupe_record["subject"] = Value::String("goal:legacy-retained".into());
+    dedupe_record["subscription_id"] = Value::Null;
+    dedupe_record["collab_subscription"] = Value::Null;
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&dedupe_record).unwrap(),
+    )
+    .unwrap();
+    let dedupe = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("DEDUPE_SUBJECT", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        dedupe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dedupe.stderr)
+    );
+    let dedupe: Value = serde_json::from_slice(&dedupe.stdout).unwrap();
+    assert_eq!(dedupe["subscription_id"], "sub-periodic");
+    assert_eq!(dedupe["subject"], "goal:legacy-retained");
+    let status_calls: u32 = fs::read_to_string(root.join("status-count"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(status_calls >= 3, "subject candidates were not all queried");
 
     let expired = Command::new(binary())
         .args(["goal", "status", "--json"])
@@ -8365,6 +8420,24 @@ esac
         assert_eq!(invalid.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&invalid.stderr).contains(expected));
     }
+
+    let overflow = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "18446744073709551615s",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(overflow.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&overflow.stderr)
+        .contains("GOAL_DURATION_OVERFLOW:18446744073709551615s"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -8453,11 +8526,16 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     let recovery_receipt = fs::read_dir(&control_dir)
         .unwrap()
         .flatten()
-        .find(|entry| {
-            entry
+        .find_map(|entry| {
+            if !entry
                 .file_name()
                 .to_string_lossy()
                 .starts_with("long-task-goal.lock.recovery.")
+            {
+                return None;
+            }
+            let receipt: Value = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            (receipt["reason"] == "empty metadata").then_some(entry)
         })
         .expect("empty lock recovery receipt");
     let recovery_receipt: Value =

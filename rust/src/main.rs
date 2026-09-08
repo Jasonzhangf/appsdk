@@ -9058,13 +9058,15 @@ fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
     let num: u64 = num_part
         .parse()
         .map_err(|_| format!("INVALID_DURATION_NUMBER:{}", num_part))?;
-    match unit {
-        "s" | "S" => Ok(num * 1000),
-        "m" | "M" => Ok(num * 60 * 1000),
-        "h" | "H" => Ok(num * 3600 * 1000),
-        "d" | "D" => Ok(num * 86400 * 1000),
+    let multiplier = match unit {
+        "s" | "S" => Ok(1_000_u64),
+        "m" | "M" => Ok(60_000_u64),
+        "h" | "H" => Ok(3_600_000_u64),
+        "d" | "D" => Ok(86_400_000_u64),
         _ => Err(format!("UNKNOWN_DURATION_UNIT:{}", unit)),
-    }
+    }?;
+    num.checked_mul(multiplier)
+        .ok_or_else(|| format!("GOAL_DURATION_OVERFLOW:{}", s))
 }
 
 fn generate_long_horizon_master_prompt(goal_path: &Path, interval_str: &str) -> String {
@@ -9788,12 +9790,24 @@ fn goal_subscription_by_subject_candidates(
     record: Option<&Value>,
     canonical_subject: &str,
 ) -> Result<Option<(String, String, Value, String)>, String> {
+    let mut matches: Vec<(String, String, Value, String)> = Vec::new();
     for subject in goal_subject_candidates(record, canonical_subject) {
         if let Some((id, status, remote_record)) = goal_subscription_by_subject(root, &subject)? {
-            return Ok(Some((id, status, remote_record, subject)));
+            if !matches
+                .iter()
+                .any(|(matched_id, _, _, _)| matched_id == &id)
+            {
+                matches.push((id, status, remote_record, subject));
+            }
         }
     }
-    Ok(None)
+    if matches.len() > 1 {
+        return Err(format!(
+            "GOAL_RECONCILE_SUBJECT_AMBIGUOUS:{} distinct armed deadline subscriptions match retained or canonical subjects",
+            matches.len()
+        ));
+    }
+    Ok(matches.into_iter().next())
 }
 
 fn goal_fail(format_json: bool, error: &str, record: Option<&Value>) -> ! {
@@ -10283,7 +10297,34 @@ where
             };
             let goal_subject = format!("goal:{}", goal_id);
             if let Some(existing) = existing.as_ref() {
-                if existing["desired"].as_str() == Some("subscribed") {
+                if existing["desired"].as_str() == Some("cancel_pending") {
+                    match goal_subscription_by_subject_candidates(
+                        root,
+                        Some(existing),
+                        &goal_subject,
+                    ) {
+                        Ok(Some((subscription_id, _, _, matched_subject))) => {
+                            let error = format!(
+                                "GOAL_CANCEL_PENDING_RECONCILIATION_REQUIRED: armed subscription {} remains under subject {}; rerun goal cancel before subscribing",
+                                subscription_id, matched_subject
+                            );
+                            drop(_goal_lock);
+                            goal_fail(format_json, &error, Some(existing));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let error =
+                                format!("GOAL_CANCEL_PENDING_RECONCILIATION_FAILED:{}", error);
+                            drop(_goal_lock);
+                            goal_fail(format_json, &error, Some(existing));
+                        }
+                    }
+                }
+                if matches!(
+                    existing["desired"].as_str(),
+                    Some("subscribed" | "recovery_required")
+                ) {
+                    let recovering = existing["desired"].as_str() == Some("recovery_required");
                     match goal_subscription_by_subject_candidates(
                         root,
                         Some(existing),
@@ -10302,6 +10343,7 @@ where
                                 response["subscription_id"] = Value::String(subscription_id);
                                 response["collab_subscription"] = remote_record;
                                 response["remote_state"] = Value::String(remote_status);
+                                response["desired"] = Value::String("subscribed".into());
                                 response["observed"] = Value::String("subscribed".into());
                                 response["active"] = Value::Bool(true);
                                 response["error"] = Value::Null;
@@ -10310,6 +10352,10 @@ where
                                 );
                                 response["idempotent"] = Value::Bool(true);
                                 response["master_prompt"] = Value::String(master_prompt);
+                                if recovering {
+                                    response["recovered_at"] =
+                                        Value::String(chrono::Utc::now().to_rfc3339());
+                                }
                                 if retained_subject.as_deref() != Some(matched_subject.as_str()) {
                                     response["subject_migration"] = serde_json::json!({
                                         "from": retained_subject,
@@ -10342,6 +10388,7 @@ where
                                 Some(existing),
                             );
                         }
+                        Ok(None) if recovering => {}
                         Ok(None) => {
                             let mut recovery = existing.clone();
                             goal_mark_recovery_required(

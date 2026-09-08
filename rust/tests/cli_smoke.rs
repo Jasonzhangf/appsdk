@@ -7792,8 +7792,11 @@ case "$1 $2" in
   "notify subscribe")
     printf '%s\n' '{"subscription_id":"goal-sub-1"}'
     ;;
+  "notify status")
+    printf '%s\n' '{"subscriptions":[{"id":"goal-sub-1","status":"armed"}]}'
+    ;;
   "notify unsubscribe")
-    printf '%s\n' '{"ok":true}'
+    printf '%s\n' '{"subscription_id":"goal-sub-1","status":"cancelled"}'
     ;;
   *)
     exit 64
@@ -7858,7 +7861,13 @@ esac
     assert!(prompt.contains("appsdk bug"));
 
     // 4. Check goal status
-    let status_res = run_in(&root, &["goal", "status", "--json"]);
+    let status_res = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(status_res.status.success());
     let status_json: Value = serde_json::from_slice(&status_res.stdout).unwrap();
     assert_eq!(status_json["active"], true);
@@ -7934,8 +7943,8 @@ fn goal_subscribe_failure_does_not_report_active() {
     assert!(String::from_utf8_lossy(&sub.stderr).contains("COLLAB_SUBSCRIBE_FAILED"));
     let sub_json: Value = serde_json::from_slice(&sub.stdout).unwrap();
     assert_eq!(sub_json["active"], false);
-    assert_eq!(sub_json["desired"], "subscribed_failed");
-    assert_eq!(sub_json["observed"], "collab_failed");
+    assert_eq!(sub_json["desired"], "subscribed");
+    assert_eq!(sub_json["observed"], "unknown");
 
     let status = Command::new(binary())
         .args(["goal", "status", "--json"])
@@ -7947,8 +7956,180 @@ fn goal_subscribe_failure_does_not_report_active() {
     assert!(status.status.success());
     let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status_json["active"], false);
-    assert_eq!(status_json["observed"], "collab_failed");
+    assert_eq!(status_json["observed"], "unknown");
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_lifecycle_rejects_invalid_subscription_and_preserves_pending_cancel() {
+    let root = temp_root("goal-invalid-response");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "notify subscribe")
+    printf '%s\n' 'not-json'
+    ;;
+  "notify status")
+    printf '%s\n' 'also-not-json'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let subscribed = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(subscribed.status.code(), Some(1));
+    let subscribe_json: Value = serde_json::from_slice(&subscribed.stdout).unwrap();
+    assert_eq!(subscribe_json["active"], false);
+    assert_eq!(subscribe_json["desired"], "subscribed");
+    assert_eq!(subscribe_json["observed"], "unknown");
+    assert!(subscribe_json["error"]
+        .as_str()
+        .unwrap()
+        .contains("COLLAB_SUBSCRIBE_RESPONSE_INVALID"));
+
+    let status = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["active"], false);
+    assert_eq!(status_json["observed"], "unknown");
+
+    let cancel = Command::new(binary())
+        .args(["goal", "cancel", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(cancel.status.code(), Some(1));
+    let cancel_json: Value = serde_json::from_slice(&cancel.stdout).unwrap();
+    assert_eq!(cancel_json["desired"], "cancel_pending");
+    assert_eq!(cancel_json["observed"], "unknown");
+    assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_cancel_failure_keeps_exact_subscription_record() {
+    let root = temp_root("goal-cancel-failure");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "notify subscribe")
+    printf '%s\n' '{"subscription":{"id":"sub-exact","status":"armed"}}'
+    ;;
+  "notify status")
+    printf '%s\n' '{"subscriptions":[{"id":"sub-exact","status":"armed"}]}'
+    ;;
+  "notify unsubscribe")
+    printf '%s\n' 'unsubscribe failed' >&2
+    exit 44
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let subscribed = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(subscribed.status.success());
+    let cancel = Command::new(binary())
+        .args(["goal", "cancel", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(cancel.status.code(), Some(1));
+    let cancel_json: Value = serde_json::from_slice(&cancel.stdout).unwrap();
+    assert_eq!(cancel_json["desired"], "cancel_pending");
+    assert_eq!(cancel_json["observed"], "unknown");
+    assert_eq!(cancel_json["subscription_id"], "sub-exact");
+    assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_subscribe_persistence_failure_prevents_remote_registration() {
+    let root = temp_root("goal-persistence-failure");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let control_dir = root.join(".appsdk-control");
+    fs::create_dir_all(&control_dir).unwrap();
+    fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let marker = root.join("remote-called");
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{{\"subscription_id\":\"orphan\"}}'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["active"], false);
+    assert_eq!(payload["desired"], "subscribed");
+    assert_eq!(payload["observed"], "pending");
+    assert!(payload["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_RECORD_WRITE_FAILED"));
+    assert!(!marker.exists());
+
+    fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o755)).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 

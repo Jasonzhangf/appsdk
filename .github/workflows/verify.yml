@@ -5,7 +5,14 @@ on:
   pull_request:
 
 jobs:
-  verify:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
+
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,8 +20,16 @@ jobs:
       - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
       - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
-      - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
       - run: cargo test --manifest-path rust/Cargo.toml
+
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
+      - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
+      - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: cargo build --release --manifest-path rust/Cargo.toml
       - run: rust/target/release/appsdk verify-sdk-source-registry .
       - run: |

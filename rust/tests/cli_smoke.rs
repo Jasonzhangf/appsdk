@@ -8134,6 +8134,59 @@ fn goal_subscribe_timeout_keeps_explicit_timeout_error() {
 }
 
 #[test]
+fn goal_subscribe_bounds_descendant_pipe_drain_and_preserves_error_state() {
+    let root = temp_root("goal-descendant-pipe-drain");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[]}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer"}}' ;;
+  "notify subscribe")
+    /bin/sleep 20 &
+    printf '%s\n' '{"subscription_id":"descendant-drain-sub"}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let started = Instant::now();
+    let result = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(13),
+        "descendant pipe drain exceeded bound: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(result.status.code(), Some(1));
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["active"], false);
+    assert_eq!(payload["desired"], "subscribed");
+    assert_eq!(payload["observed"], "unknown");
+    assert!(payload["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"));
+    assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_subscribe_failure_does_not_report_active() {
     let root = temp_root("goal-sub-fail");
     fs::create_dir_all(&root).unwrap();

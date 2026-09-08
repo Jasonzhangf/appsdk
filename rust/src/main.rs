@@ -9548,6 +9548,50 @@ fn detach_goal_output_readers(
     });
 }
 
+fn join_goal_output_reader_until(
+    reader: thread::JoinHandle<Vec<u8>>,
+    deadline: Instant,
+) -> Result<Vec<u8>, thread::JoinHandle<Vec<u8>>> {
+    let reader = reader;
+    while !reader.is_finished() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(reader);
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+    Ok(reader.join().ok().unwrap_or_default())
+}
+
+fn drain_goal_output_readers(
+    stdout_reader: Option<thread::JoinHandle<Vec<u8>>>,
+    stderr_reader: Option<thread::JoinHandle<Vec<u8>>>,
+) -> Result<(Vec<u8>, Vec<u8>), ()> {
+    const DRAIN_GRACE: Duration = Duration::from_secs(2);
+    let deadline = Instant::now() + DRAIN_GRACE;
+    let stdout = match stdout_reader {
+        Some(reader) => match join_goal_output_reader_until(reader, deadline) {
+            Ok(stdout) => stdout,
+            Err(reader) => {
+                detach_goal_output_readers(Some(reader), stderr_reader);
+                return Err(());
+            }
+        },
+        None => Vec::new(),
+    };
+    let stderr = match stderr_reader {
+        Some(reader) => match join_goal_output_reader_until(reader, deadline) {
+            Ok(stderr) => stderr,
+            Err(reader) => {
+                detach_goal_output_readers(None, Some(reader));
+                return Err(());
+            }
+        },
+        None => Vec::new(),
+    };
+    Ok((stdout, stderr))
+}
+
 fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
     const TIMEOUT: Duration = Duration::from_secs(10);
     let mut child = command
@@ -9573,17 +9617,14 @@ fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = stdout_reader
-                    .and_then(|reader| reader.join().ok())
-                    .unwrap_or_default();
-                let stderr = stderr_reader
-                    .and_then(|reader| reader.join().ok())
-                    .unwrap_or_default();
-                return Ok(Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
+                return match drain_goal_output_readers(stdout_reader, stderr_reader) {
+                    Ok((stdout, stderr)) => Ok(Output {
+                        status,
+                        stdout,
+                        stderr,
+                    }),
+                    Err(()) => Err("GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT".into()),
+                };
             }
             Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {

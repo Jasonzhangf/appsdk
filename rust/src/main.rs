@@ -5120,6 +5120,13 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
             fail("INVALID_BUG_TRIAGE");
         }
         observed_worktree["bug_triage"] = observed_bug_triage.clone();
+        observed_worktree["bug_triage_query_binding"] =
+            Value::String(sha256(&canonical(&serde_json::json!({
+                "issue_id": worktree_issue,
+                "query": observed_bug_triage["query"],
+                "mode": observed_bug_triage["mode"],
+                "reopened_from_issue_id": observed_bug_triage["reopened_from_issue_id"]
+            }))));
     }
     let mut observed_reproduction = reproduction.clone();
     observed_reproduction["reproduction_id"] = Value::String(reproduction_id);

@@ -2,6 +2,12 @@
 
 String requirements are only declarations. A closed lifecycle requires records with evidence, producer, scope, identity, and freshness.
 
+The lifecycle producer treats `bug_triage.query_executed: true` as a typed caller
+attestation. It independently validates the supported mode and exact issue-ID
+tokens, rejects mismatched or duplicate identities, and records
+`bug_triage_query_binding` as the SHA-256 binding of issue ID, query, mode, and
+reopen source. Empty, `none`, and `legacy-*` issue IDs remain exempt.
+
 ## Records
 
 - `GoalClarificationRecord`: raw request, restated objective, acceptance criteria, non-goals, assumptions, ambiguities, questions, scope, confirmation, and admission status;

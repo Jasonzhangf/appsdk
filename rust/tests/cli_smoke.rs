@@ -3916,6 +3916,9 @@ esac
         produced_evidence["producer"],
         serde_json::json!({"adapter":"appsdk","identity":"appsdk-lifecycle-record-producer"})
     );
+    assert!(produced_worktree["bug_triage_query_binding"]
+        .as_str()
+        .is_some_and(|binding| binding.starts_with("sha256:")));
     assert_eq!(produced_evidence["exit_status"], 1);
     let repeated = produce(&input_path);
     assert!(!repeated.status.success());
@@ -3927,6 +3930,34 @@ esac
     );
     fs::remove_file(input_path).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worktree_schema_requires_triage_only_for_non_legacy_issue_ids() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../contracts/records/worktree-record.schema.json"
+    ))
+    .unwrap();
+    let required = schema["required"].as_array().unwrap();
+    assert!(!required.iter().any(|value| value == "bug_triage"));
+    assert!(!required
+        .iter()
+        .any(|value| value == "bug_triage_query_binding"));
+    let conditional = schema["allOf"].as_array().unwrap().iter().find(|rule| {
+        rule.get("if")
+            .and_then(|condition| condition.get("properties"))
+            .and_then(|properties| properties.get("issue_id"))
+            .and_then(|issue_id| issue_id.get("not"))
+            .and_then(|not| not.get("pattern"))
+            .and_then(Value::as_str)
+            .is_some_and(|pattern| pattern == "^(?:none$|legacy-)")
+    });
+    let conditional = conditional.expect("missing non-legacy issue conditional");
+    let then_required = conditional["then"]["required"].as_array().unwrap();
+    assert!(then_required.iter().any(|value| value == "bug_triage"));
+    assert!(then_required
+        .iter()
+        .any(|value| value == "bug_triage_query_binding"));
 }
 
 #[test]

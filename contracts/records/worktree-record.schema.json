@@ -3,6 +3,21 @@
   "$id": "https://appsdk.local/contracts/records/worktree-record.schema.json",
   "type": "object",
   "required": ["worktree_id", "issue_id", "module_id", "base_ref", "base_commit", "branch", "head_commit", "initial_clean", "final_clean", "isolation_mode", "scope_hash", "created_at"],
+  "allOf": [
+    {
+      "if": {
+        "required": ["issue_id"],
+        "properties": {
+          "issue_id": {
+            "type": "string",
+            "minLength": 1,
+            "not": {"pattern": "^(?:none$|legacy-)"}
+          }
+        }
+      },
+      "then": {"required": ["bug_triage", "bug_triage_query_binding"]}
+    }
+  ],
   "properties": {
     "worktree_id": {"type": "string"},
     "milestone_id": {"type": "string"},
@@ -26,6 +41,7 @@
         "reopened_from_issue_id": {"type": ["string", "null"]}
       }
     },
+    "bug_triage_query_binding": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "created_at": {"type": "string"}
   }
 }

@@ -11365,9 +11365,8 @@ fn join_goal_output_reader_until(
 fn drain_goal_output_readers(
     stdout_reader: Option<thread::JoinHandle<Vec<u8>>>,
     stderr_reader: Option<thread::JoinHandle<Vec<u8>>>,
+    deadline: Instant,
 ) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    const DRAIN_GRACE: Duration = Duration::from_secs(120);
-    let deadline = Instant::now() + DRAIN_GRACE;
     let stdout = match stdout_reader {
         Some(reader) => match join_goal_output_reader_until(reader, deadline) {
             Ok(stdout) => stdout,
@@ -11392,12 +11391,36 @@ fn drain_goal_output_readers(
 }
 
 // Collab may queue a command behind an active daemon batch. Keep every goal
-// lifecycle call bounded, while allowing the declared 120-second batch
-// window to complete before reporting an explicit timeout.
+// lifecycle call within one declared 120-second batch budget. The environment
+// override is an explicit operator/test setting for exercising the same bound.
 const GOAL_COLLAB_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+const GOAL_COLLAB_TIMEOUT_ENV: &str = "APPSDK_GOAL_COLLAB_TIMEOUT_MS";
+
+fn configured_goal_timeout(default: Duration) -> Result<Duration, String> {
+    let Some(raw) = env::var_os(GOAL_COLLAB_TIMEOUT_ENV) else {
+        return Ok(default);
+    };
+    let raw = raw.to_str().ok_or_else(|| {
+        format!(
+            "GOAL_COLLAB_TIMEOUT_CONFIG_INVALID:{}",
+            GOAL_COLLAB_TIMEOUT_ENV
+        )
+    })?;
+    let milliseconds = raw
+        .parse::<u64>()
+        .map_err(|_| format!("GOAL_COLLAB_TIMEOUT_CONFIG_INVALID:{}", raw))?;
+    if milliseconds == 0 {
+        return Err(format!(
+            "GOAL_COLLAB_TIMEOUT_CONFIG_INVALID:{} must be greater than zero",
+            raw
+        ));
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
 
 fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    let timeout = configured_goal_timeout(timeout)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -11418,10 +11441,11 @@ fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Ou
         })
     });
     let started = Instant::now();
+    let deadline = started + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                return match drain_goal_output_readers(stdout_reader, stderr_reader) {
+                return match drain_goal_output_readers(stdout_reader, stderr_reader, deadline) {
                     Ok((stdout, stderr)) => Ok(Output {
                         status,
                         stdout,
@@ -11430,7 +11454,7 @@ fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Ou
                     Err(()) => Err("GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT".into()),
                 };
             }
-            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();

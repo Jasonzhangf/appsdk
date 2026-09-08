@@ -9301,6 +9301,27 @@ fn collab_status_all(root: &Path) -> Result<Value, String> {
         .map_err(|error| format!("COLLAB_STATUS_JSON_INVALID:{}", error))
 }
 
+fn collab_master_status(root: &Path) -> Result<Value, String> {
+    let mut command = Command::new("collab");
+    command.args(["master", "status"]).current_dir(root);
+    let out = run_goal_collab_command(command)
+        .map_err(|error| format!("GOAL_OWNER_MASTER_STATUS_UNAVAILABLE:{}", error))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!(
+            "GOAL_OWNER_MASTER_STATUS_FAILED:exit={}{}",
+            out.status.code().unwrap_or(1),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", detail)
+            }
+        ));
+    }
+    serde_json::from_slice(&out.stdout)
+        .map_err(|error| format!("GOAL_OWNER_MASTER_STATUS_JSON_INVALID:{}", error))
+}
+
 fn goal_record_subscription_id(record: &Value) -> Option<String> {
     record
         .get("subscription_id")
@@ -9661,13 +9682,58 @@ fn verified_goal_master(root: &Path) -> Result<String, String> {
         .as_str()
         .filter(|owner| !owner.trim().is_empty())
         .ok_or_else(|| "GOAL_OWNER_IDENTITY_MISSING".to_string())?;
-    let is_master = status["workers"].as_array().is_some_and(|workers| {
-        workers.iter().any(|worker| {
-            worker["id"].as_str() == Some(owner) && worker["role"].as_str() == Some("master")
+
+    let worker = status["workers"]
+        .as_array()
+        .and_then(|workers| {
+            workers
+                .iter()
+                .find(|worker| worker["id"].as_str() == Some(owner))
         })
-    });
-    if !is_master {
-        return Err("GOAL_ROLE_GATE_FAILED:verified Collab owner is not master".into());
+        .ok_or_else(|| "GOAL_OWNER_WORKER_MISSING".to_string())?;
+    if worker["endpoint_live"].as_bool() == Some(false) {
+        return Err("GOAL_OWNER_NOT_LIVE:verified Collab owner endpoint is not live".into());
+    }
+    if worker["identity_valid"].as_bool() == Some(false) {
+        return Err("GOAL_OWNER_IDENTITY_INVALID:verified Collab owner identity is invalid".into());
+    }
+    if worker["suspected_offline"].as_bool() == Some(true) {
+        return Err(
+            "GOAL_OWNER_SUSPECTED_OFFLINE:verified Collab owner is suspected offline".into(),
+        );
+    }
+
+    let master_status = collab_master_status(root)?;
+    let master = master_status
+        .get("master")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| "GOAL_OWNER_MASTER_IDENTITY_MISSING".to_string())?;
+    let master_owner = master["worker_id"]
+        .as_str()
+        .filter(|worker_id| !worker_id.trim().is_empty())
+        .ok_or_else(|| "GOAL_OWNER_MASTER_IDENTITY_MISSING".to_string())?;
+    if master["endpoint_live"].as_bool() != Some(true) {
+        return Err("GOAL_OWNER_MASTER_NOT_LIVE".into());
+    }
+    let master_pane = master["pane"]
+        .as_str()
+        .filter(|pane| !pane.trim().is_empty())
+        .ok_or_else(|| "GOAL_OWNER_MASTER_PANE_MISSING".to_string())?;
+    let context_pane = context["identity"]["pane"]
+        .as_str()
+        .filter(|pane| !pane.trim().is_empty())
+        .ok_or_else(|| "GOAL_OWNER_CONTEXT_PANE_MISSING".to_string())?;
+    if master_owner != owner {
+        return Err(format!(
+            "GOAL_OWNER_IDENTITY_MISMATCH:context={} master={}",
+            owner, master_owner
+        ));
+    }
+    if master_pane != context_pane {
+        return Err(format!(
+            "GOAL_OWNER_PANE_MISMATCH:context={} master={}",
+            context_pane, master_pane
+        ));
     }
     Ok(owner.to_string())
 }

@@ -7496,10 +7496,13 @@ fn longhorizon_show_briefs_role_fleet_and_notification_rules() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","active_task":null,"endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"waiting"}],"tasks":[],"subagents":[]}'
+    printf '%s\n' '{"workers":[{"id":"master-peer","active_task":null,"endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"waiting"}],"tasks":[],"subagents":[]}'
+    ;;
+  "master status")
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer"},"tasks":[],"inbox":{"unread":0}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"},"tasks":[],"inbox":{"unread":0}}'
     ;;
   *)
     exit 64
@@ -7678,6 +7681,71 @@ esac
         .as_str()
         .unwrap()
         .contains("你是本项目的 master"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_show_requires_authoritative_master_identity() {
+    let root = temp_root("longhorizon-master-authority");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    case "${ROLE_CASE:-master}" in
+      worker) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      subagent) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[{"peer":"current-peer","status":"working"}]}' ;;
+      *) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+    esac
+    ;;
+  "master status")
+    case "${ROLE_CASE:-master}" in
+      master) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true,"pane":"%42"}}' ;;
+      mismatch) printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true,"pane":"%42"}}' ;;
+      pane-mismatch) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true,"pane":"%43"}}' ;;
+      *) exit 44 ;;
+    esac
+    ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","pane":"%42"}}' ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run = |case_name: &str| {
+        Command::new(binary())
+            .args(["longhorizon", "show", "--json"])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env("ROLE_CASE", case_name)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+    for (case_name, expected_role) in [
+        ("master", "master"),
+        ("worker", "worker"),
+        ("subagent", "managed-subagent"),
+        ("missing", "unknown"),
+        ("mismatch", "worker"),
+        ("pane-mismatch", "unknown"),
+    ] {
+        let result = run(case_name);
+        assert!(
+            result.status.success(),
+            "case={case_name} stderr={}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(payload["role"], expected_role, "case={case_name}");
+    }
 
     fs::remove_dir_all(root).unwrap();
 }

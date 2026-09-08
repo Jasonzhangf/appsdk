@@ -7793,7 +7793,13 @@ case "$1 $2" in
     printf '%s\n' '{"subscription_id":"goal-sub-1"}'
     ;;
   "notify status")
-    printf '%s\n' '{"subscriptions":[{"id":"goal-sub-1","status":"armed"}]}'
+    printf '%s\n' '{"subscriptions":[{"id":"goal-sub-1","status":"armed","event":"deadline","subject":"goal:long-task.md"}]}'
+    ;;
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[]}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer"}}'
     ;;
   "notify unsubscribe")
     printf '%s\n' '{"subscription_id":"goal-sub-1","status":"cancelled"}'
@@ -7876,17 +7882,20 @@ esac
     assert_eq!(status_json["observed"], "subscribed");
 
     // 5. Check standalone prompt command
-    let prompt_res = run_in(
-        &root,
-        &[
+    let prompt_res = Command::new(binary())
+        .args([
             "goal",
             "prompt",
             "--goal",
             "long-task.md",
             "--interval",
             "10m",
-        ],
-    );
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(prompt_res.status.success());
     let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
     assert!(prompt_text.contains("长程任务目标文档"));
@@ -7906,6 +7915,9 @@ esac
     assert!(post_cancel_status.status.success());
     let post_cancel_json: Value = serde_json::from_slice(&post_cancel_status.stdout).unwrap();
     assert_eq!(post_cancel_json["active"], false);
+    assert_eq!(post_cancel_json["desired"], "unsubscribed");
+    assert_eq!(post_cancel_json["observed"], "cancelled");
+    assert!(post_cancel_json["record"]["cancel_receipt"].is_object());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -7919,7 +7931,7 @@ fn goal_subscribe_failure_does_not_report_active() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\nprintf '%s\\n' 'daemon stopped' >&2\nexit 44\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\"}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\"}}' ;;\n  *) printf '%s\\n' 'daemon stopped' >&2; exit 44 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -7978,6 +7990,12 @@ case "$1 $2" in
     ;;
   "notify status")
     printf '%s\n' 'also-not-json'
+    ;;
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[]}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer"}}'
     ;;
   *)
     exit 64
@@ -8049,7 +8067,13 @@ case "$1 $2" in
     printf '%s\n' '{"subscription":{"id":"sub-exact","status":"armed"}}'
     ;;
   "notify status")
-    printf '%s\n' '{"subscriptions":[{"id":"sub-exact","status":"armed"}]}'
+    printf '%s\n' '{"subscriptions":[{"id":"sub-exact","status":"armed","event":"deadline","subject":"goal:long-task.md"}]}'
+    ;;
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[]}'
+    ;;
+  "context ")
+    printf '%s\n' '{"identity":{"worker_id":"master-peer"}}'
     ;;
   "notify unsubscribe")
     printf '%s\n' 'unsubscribe failed' >&2
@@ -8090,21 +8114,27 @@ esac
 }
 
 #[test]
-fn goal_subscribe_persistence_failure_prevents_remote_registration() {
+fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     let root = temp_root("goal-persistence-failure");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
     let control_dir = root.join(".appsdk-control");
     fs::create_dir_all(&control_dir).unwrap();
-    fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o555)).unwrap();
     let fake_bin = root.join("fake-bin");
     fs::create_dir_all(&fake_bin).unwrap();
     let marker = root.join("remote-called");
+    let fake_touch = fake_bin.join("touch");
+    fs::write(
+        &fake_touch,
+        "#!/bin/sh\n/bin/chmod a-w .appsdk-control\n/usr/bin/touch \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_touch, fs::Permissions::from_mode(0o755)).unwrap();
     let fake_collab = fake_bin.join("collab");
     fs::write(
         &fake_collab,
         format!(
-            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{{\"subscription_id\":\"orphan\"}}'\n",
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\"}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\"}}}}' ;;\n  *) touch '{}' ; printf '%s\\n' '{{\"subscription_id\":\"orphan\"}}' ;;\nesac\n",
             marker.display()
         ),
     )
@@ -8122,12 +8152,13 @@ fn goal_subscribe_persistence_failure_prevents_remote_registration() {
     let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(payload["active"], false);
     assert_eq!(payload["desired"], "subscribed");
-    assert_eq!(payload["observed"], "pending");
+    assert_eq!(payload["observed"], "unknown");
     assert!(payload["error"]
         .as_str()
         .unwrap()
         .contains("GOAL_RECORD_WRITE_FAILED"));
-    assert!(!marker.exists());
+    assert_eq!(payload["subscription_id"], "orphan");
+    assert!(marker.exists());
 
     fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o755)).unwrap();
     fs::remove_dir_all(root).unwrap();

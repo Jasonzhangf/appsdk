@@ -9243,7 +9243,9 @@ fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRole {
             {
                 return match worker["role"].as_str() {
                     Some("master") => ExecutionRole::Master,
-                    Some("worker") => ExecutionRole::Worker,
+                    // Collab calls independent peers `peer`; AppSDK exposes
+                    // that verified identity as the worker execution view.
+                    Some("peer") | Some("worker") => ExecutionRole::Worker,
                     _ => ExecutionRole::Unknown,
                 };
             }

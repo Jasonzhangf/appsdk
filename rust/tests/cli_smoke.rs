@@ -7595,7 +7595,7 @@ fn longhorizon_show_never_upgrades_worker_or_unknown_to_master() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    printf '%s\n' '{"workers":[{"id":"worker-peer","role":"worker","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"}],"subagents":[]}'
+    printf '%s\n' '{"workers":[{"id":"worker-peer","role":"peer","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"}],"subagents":[]}'
     ;;
   "context ")
     printf '%s\n' '{"identity":{"worker_id":"worker-peer"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'

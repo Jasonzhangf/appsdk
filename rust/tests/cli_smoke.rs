@@ -8102,6 +8102,64 @@ esac
 }
 
 #[test]
+fn goal_owner_gate_rejects_missing_worker_liveness_fields() {
+    let root = temp_root("goal-owner-gate-missing-fields");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    case "${STATUS_VARIANT:-complete}" in
+      endpoint) printf '%s\n' '{"workers":[{"id":"master-peer","identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      identity) printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      offline) printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true}],"tasks":[],"subagents":[]}' ;;
+      *) printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+    esac
+    ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}' ;;
+  "notify subscribe") printf '%s\n' '{"subscription_id":"missing-fields-sub"}' ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run = |variant: &str| {
+        Command::new(binary())
+            .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env("STATUS_VARIANT", variant)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    for (variant, expected) in [
+        ("endpoint", "GOAL_OWNER_NOT_LIVE"),
+        ("identity", "GOAL_OWNER_IDENTITY_INVALID"),
+        ("offline", "GOAL_OWNER_SUSPECTED_OFFLINE"),
+    ] {
+        let result = run(variant);
+        assert_eq!(result.status.code(), Some(1), "variant={variant}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(expected),
+            "variant={variant} stderr={}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_subscribe_drains_large_collab_output_without_timeout() {
     let root = temp_root("goal-large-collab-output");
     fs::create_dir_all(&root).unwrap();

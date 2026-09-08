@@ -9691,13 +9691,13 @@ fn verified_goal_master(root: &Path) -> Result<String, String> {
                 .find(|worker| worker["id"].as_str() == Some(owner))
         })
         .ok_or_else(|| "GOAL_OWNER_WORKER_MISSING".to_string())?;
-    if worker["endpoint_live"].as_bool() == Some(false) {
+    if worker["endpoint_live"].as_bool() != Some(true) {
         return Err("GOAL_OWNER_NOT_LIVE:verified Collab owner endpoint is not live".into());
     }
-    if worker["identity_valid"].as_bool() == Some(false) {
+    if worker["identity_valid"].as_bool() != Some(true) {
         return Err("GOAL_OWNER_IDENTITY_INVALID:verified Collab owner identity is invalid".into());
     }
-    if worker["suspected_offline"].as_bool() == Some(true) {
+    if worker["suspected_offline"].as_bool() != Some(false) {
         return Err(
             "GOAL_OWNER_SUSPECTED_OFFLINE:verified Collab owner is suspected offline".into(),
         );

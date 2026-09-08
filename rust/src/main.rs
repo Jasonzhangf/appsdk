@@ -9214,11 +9214,9 @@ impl ExecutionRole {
 }
 
 fn collab_context(root: &Path) -> Option<Value> {
-    let out = Command::new("collab")
-        .arg("context")
-        .current_dir(root)
-        .output()
-        .ok()?;
+    let mut command = Command::new("collab");
+    command.arg("context").current_dir(root);
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -9283,7 +9281,7 @@ fn long_horizon_record(root: &Path) -> Result<Option<Value>, String> {
 fn collab_status_all(root: &Path) -> Result<Value, String> {
     let mut command = Command::new("collab");
     command.args(["status", "--all"]).current_dir(root);
-    let out = run_goal_collab_command(command)
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
         .map_err(|error| format!("COLLAB_STATUS_UNAVAILABLE:{}", error))?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -9304,7 +9302,7 @@ fn collab_status_all(root: &Path) -> Result<Value, String> {
 fn collab_master_status(root: &Path) -> Result<Value, String> {
     let mut command = Command::new("collab");
     command.args(["master", "status"]).current_dir(root);
-    let out = run_goal_collab_command(command)
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
         .map_err(|error| format!("GOAL_OWNER_MASTER_STATUS_UNAVAILABLE:{}", error))?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -9613,8 +9611,10 @@ fn drain_goal_output_readers(
     Ok((stdout, stderr))
 }
 
-fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
-    const TIMEOUT: Duration = Duration::from_secs(10);
+const GOAL_COLLAB_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -9647,7 +9647,7 @@ fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
                     Err(()) => Err("GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT".into()),
                 };
             }
-            Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -9664,11 +9664,30 @@ fn run_goal_collab_command(mut command: Command) -> Result<Output, String> {
     }
 }
 
+#[cfg(test)]
+mod goal_collab_command_tests {
+    use super::*;
+
+    #[test]
+    fn injected_timeout_returns_explicit_error_without_long_wait() {
+        let started = Instant::now();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("1");
+        let result = run_goal_collab_command(command, Duration::from_millis(100));
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT"
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}
+
 fn verified_goal_master(root: &Path) -> Result<String, String> {
     let status = collab_status_all(root)?;
     let mut context_command = Command::new("collab");
     context_command.args(["context"]).current_dir(root);
-    let context_output = run_goal_collab_command(context_command)
+    let context_output = run_goal_collab_command(context_command, GOAL_COLLAB_READ_TIMEOUT)
         .map_err(|error| format!("GOAL_OWNER_CONTEXT_UNAVAILABLE:{}", error))?;
     if !context_output.status.success() {
         return Err(format!(
@@ -9786,7 +9805,7 @@ fn goal_cancel_subscription(root: &Path, subscription_id: &str) -> Result<Value,
     command
         .args(["notify", "unsubscribe", subscription_id])
         .current_dir(root);
-    let out = run_goal_collab_command(command).map_err(|error| {
+    let out = run_goal_collab_command(command, GOAL_COLLAB_WRITE_TIMEOUT).map_err(|error| {
         if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {
             error
         } else {
@@ -9810,7 +9829,7 @@ fn goal_cancel_subscription(root: &Path, subscription_id: &str) -> Result<Value,
 fn goal_subscription_status(root: &Path, subscription_id: &str) -> Result<(String, Value), String> {
     let mut command = Command::new("collab");
     command.args(["notify", "status"]).current_dir(root);
-    let out = run_goal_collab_command(command)
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
         .map_err(|error| format!("GOAL_STATUS_COLLAB_UNAVAILABLE:{}", error))?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -9857,7 +9876,7 @@ fn goal_subscription_by_subject(
 ) -> Result<Option<(String, String, Value)>, String> {
     let mut command = Command::new("collab");
     command.args(["notify", "status"]).current_dir(root);
-    let out = run_goal_collab_command(command)
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
         .map_err(|error| format!("GOAL_RECONCILE_COLLAB_UNAVAILABLE:{}", error))?;
     if !out.status.success() {
         return Err(format!(
@@ -10622,7 +10641,7 @@ where
                     &goal_subject,
                 ])
                 .current_dir(root);
-            let collab_sub = run_goal_collab_command(collab_command);
+            let collab_sub = run_goal_collab_command(collab_command, GOAL_COLLAB_WRITE_TIMEOUT);
 
             let (collab_subscribed, sub_details, subscription_id, sub_error) = match collab_sub {
                 Ok(out) if out.status.success() => {

@@ -8262,6 +8262,64 @@ fn goal_subscribe_timeout_keeps_explicit_timeout_error() {
 }
 
 #[test]
+fn goal_subscribe_allows_slow_collab_write_within_write_budget() {
+    let root = temp_root("goal-slow-subscribe-write");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}' ;;
+  "notify subscribe")
+    /bin/sleep 20
+    printf '%s\n' '{"subscription_id":"slow-subscribe-write"}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let started = Instant::now();
+    let result = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(19),
+        "slow Collab write returned too early: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "slow Collab write exceeded write budget: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["active"], true);
+    assert_eq!(payload["observed"], "subscribed");
+    assert_eq!(payload["subscription_id"], "slow-subscribe-write");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_subscribe_bounds_descendant_pipe_drain_and_preserves_error_state() {
     let root = temp_root("goal-descendant-pipe-drain");
     fs::create_dir_all(&root).unwrap();

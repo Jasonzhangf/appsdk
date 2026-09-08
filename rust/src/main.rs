@@ -3649,6 +3649,736 @@ fn write_record(root: &Path, name: &str, record: &Value) {
     atomic_write_json(&target, record, &format!("RECORD_WRITE_FAILED:{}", name));
 }
 
+fn producer_input_path(root: &Path, raw: &str) -> PathBuf {
+    if raw.is_empty() {
+        fail("PRODUCER_INPUT_MISSING");
+    }
+    let path = Path::new(raw);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    if fs::symlink_metadata(&full)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("PRODUCER_INPUT_SYMLINK");
+    }
+    if !full.is_file() {
+        fail("PRODUCER_INPUT_NOT_FILE");
+    }
+    full
+}
+
+fn producer_string(record: &Value, path: &str, error: &str) -> String {
+    record
+        .pointer(path)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fail(error))
+}
+
+fn producer_bool(record: &Value, path: &str, error: &str) {
+    if record.pointer(path) != Some(&Value::Bool(true)) {
+        fail(error);
+    }
+}
+
+fn producer_command_dir(root: &Path, raw: &str) -> Result<PathBuf, &'static str> {
+    let path = Path::new(raw);
+    if raw.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("INVALID_BASELINE_COMMAND_DIRECTORY");
+    }
+    let full = root.join(path);
+    assert_no_symlink_components(root, &full, "baseline_command");
+    if !full.is_dir() {
+        return Err("INVALID_BASELINE_COMMAND_DIRECTORY");
+    }
+    Ok(full)
+}
+
+fn producer_command(record: &Value) -> (String, Vec<String>, String, i32, String) {
+    let command = record
+        .get("command")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("BASELINE_COMMAND_MISSING"));
+    let program = command
+        .get("program")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+        .unwrap_or_else(|| fail("INVALID_BASELINE_COMMAND"))
+        .to_string();
+    let args = command
+        .get("args")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_BASELINE_COMMAND"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| fail("INVALID_BASELINE_COMMAND"))
+        })
+        .collect::<Vec<_>>();
+    let working_directory = command
+        .get("working_directory")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail("INVALID_BASELINE_COMMAND"))
+        .to_string();
+    let expected_status = command
+        .get("expected_exit_status")
+        .and_then(Value::as_i64)
+        .filter(|value| (-255..=255).contains(value) && *value != 0)
+        .unwrap_or_else(|| fail("INVALID_BASELINE_COMMAND_STATUS"))
+        as i32;
+    let expected_error_token = command
+        .get("expected_error_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail("BASELINE_ERROR_TOKEN_MISSING"))
+        .to_string();
+    (
+        program,
+        args,
+        working_directory,
+        expected_status,
+        expected_error_token,
+    )
+}
+
+fn producer_baseline_worktree(root: &Path, base_commit: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
+        .as_nanos();
+    let parent = root.join(".appsdk-control");
+    let path = parent.join(format!(
+        "producer-baseline-{}-{}",
+        std::process::id(),
+        nonce
+    ));
+    assert_no_symlink_components(root, &parent, "producer_baseline");
+    fs::create_dir_all(&parent).unwrap_or_else(|_| fail("BASELINE_WORKTREE_CREATE_FAILED"));
+    let output = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "worktree",
+            "add",
+            "--detach",
+            path.to_str().unwrap_or("."),
+            base_commit,
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("BASELINE_WORKTREE_CREATE_FAILED"));
+    if !output.status.success() {
+        fail("BASELINE_WORKTREE_CREATE_FAILED");
+    }
+    path
+}
+
+fn remove_producer_baseline_worktree(root: &Path, path: &Path) {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "worktree",
+            "remove",
+            "--force",
+            path.to_str().unwrap_or("."),
+        ])
+        .output()
+        .unwrap_or_else(|_| fail("BASELINE_WORKTREE_CLEANUP_FAILED"));
+    if !output.status.success() {
+        fail("BASELINE_WORKTREE_CLEANUP_FAILED");
+    }
+}
+
+fn producer_baseline_git_value(root: &Path, args: &[&str]) -> Result<String, &'static str> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|_| "PRODUCER_VCS_UNAVAILABLE")?;
+    if !output.status.success() {
+        return Err("PRODUCER_VCS_UNAVAILABLE");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+fn producer_try_advisory_lock(file: &fs::File) -> Result<(), &'static str> {
+    const LOCK_EX: c_int = 2;
+    const LOCK_NB: c_int = 4;
+    unsafe extern "C" {
+        fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if result == 0 {
+        return Ok(());
+    }
+    if std::io::Error::last_os_error().kind() == ErrorKind::WouldBlock {
+        Err("PRODUCER_BUSY")
+    } else {
+        Err("PRODUCER_LOCK_FAILED")
+    }
+}
+
+#[cfg(not(unix))]
+fn producer_try_advisory_lock(_file: &fs::File) -> Result<(), &'static str> {
+    Ok(())
+}
+
+fn producer_lock(root: &Path) -> fs::File {
+    let control_dir = root.join(".appsdk-control");
+    assert_no_symlink_components(root, &control_dir, "producer_lock");
+    fs::create_dir_all(&control_dir).unwrap_or_else(|_| fail("PRODUCER_LOCK_FAILED"));
+    let path = control_dir.join("lifecycle-record-producer.lock");
+    assert_no_symlink_components(root, &path, "producer_lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .unwrap_or_else(|_| fail("PRODUCER_LOCK_FAILED"));
+    producer_try_advisory_lock(&file).unwrap_or_else(|error| fail(error));
+    file
+}
+
+fn producer_scope_hash(root: &Path, project: &Value, module: &Value, module_id: &str) -> String {
+    let source_hash = hash_module_paths(root, project, module, module_id, "owned_paths");
+    let contract_hash = hash_module_paths(root, project, module, module_id, "contract_paths");
+    sha256(&canonical(&serde_json::json!({
+        "module_id": module_id,
+        "source_hash": source_hash,
+        "contract_hash": contract_hash
+    })))
+}
+
+fn producer_record_targets(
+    root: &Path,
+    module_id: &str,
+    input: &Value,
+    baseline_id: &str,
+) -> Vec<(PathBuf, Value)> {
+    let records = root.join(".appsdk").join("records");
+    let evidence_dir = records.join("evidence").join(module_id);
+    let worktree = input
+        .get("worktree")
+        .cloned()
+        .unwrap_or_else(|| fail("PRODUCER_WORKTREE_MISSING"));
+    let reproduction = input
+        .get("reproduction")
+        .cloned()
+        .unwrap_or_else(|| fail("PRODUCER_REPRODUCTION_MISSING"));
+    let baseline = input
+        .get("baseline_evidence")
+        .cloned()
+        .unwrap_or_else(|| fail("PRODUCER_BASELINE_EVIDENCE_MISSING"));
+    vec![
+        (
+            records.join(module_record_name("worktree-record", module_id)),
+            worktree,
+        ),
+        (
+            records.join(module_record_name("reproduction-record", module_id)),
+            reproduction,
+        ),
+        (evidence_dir.join(format!("{}.json", baseline_id)), baseline),
+    ]
+}
+
+fn producer_stable_id(prefix: &str, value: &Value) -> String {
+    let digest = sha256(&canonical(value));
+    format!(
+        "{}-{}",
+        prefix,
+        digest.strip_prefix("sha256:").unwrap_or(&digest)
+    )
+}
+
+fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    let _producer_lock = producer_lock(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    let goal = read_goal(root);
+    let input_file = producer_input_path(root, input_path);
+    let input: Value = serde_json::from_str(
+        &fs::read_to_string(input_file).unwrap_or_else(|_| fail("PRODUCER_INPUT_READ_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_PRODUCER_INPUT"));
+    if !input.is_object() {
+        fail("INVALID_PRODUCER_INPUT");
+    }
+    if producer_string(&input, "/goal_id", "PRODUCER_GOAL_MISSING")
+        != producer_string(&goal, "/goal_id", "INVALID_GOAL_CLARIFICATION_RECORD")
+    {
+        fail("PRODUCER_GOAL_MISMATCH");
+    }
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    let stage = producer_string(module, "/stage", "INVALID_MODULE_CONTRACT");
+    if stage == "frozen" || stage == "retired" {
+        fail(format!("PRODUCER_MODULE_STAGE_FORBIDDEN:{}", stage));
+    }
+    let worktree = input
+        .get("worktree")
+        .unwrap_or_else(|| fail("PRODUCER_WORKTREE_MISSING"));
+    let reproduction = input
+        .get("reproduction")
+        .unwrap_or_else(|| fail("PRODUCER_REPRODUCTION_MISSING"));
+    let baseline = input
+        .get("baseline_evidence")
+        .unwrap_or_else(|| fail("PRODUCER_BASELINE_EVIDENCE_MISSING"));
+    // These paths are module-stable, so reject a repeated producer call before
+    // any later clean-worktree gate can mask the idempotent result.
+    let records_root = root.join(".appsdk").join("records");
+    for target in [
+        records_root.join(module_record_name("worktree-record", module_id)),
+        records_root.join(module_record_name("reproduction-record", module_id)),
+    ] {
+        assert_no_symlink_components(root, &target, "record_control");
+        if target.exists() {
+            fail(format!(
+                "LIFECYCLE_RECORD_EXISTS:{}",
+                target.strip_prefix(root).unwrap_or(&target).display()
+            ));
+        }
+    }
+    let expected_scope_hash = producer_scope_hash(root, &project, module, module_id);
+    for path in [
+        "/worktree_id",
+        "/issue_id",
+        "/module_id",
+        "/base_ref",
+        "/base_commit",
+        "/branch",
+        "/head_commit",
+        "/scope_hash",
+    ] {
+        producer_string(worktree, path, "INVALID_WORKTREE_RECORD");
+    }
+    producer_bool(worktree, "/initial_clean", "WORKTREE_INITIAL_NOT_CLEAN");
+    producer_bool(worktree, "/final_clean", "WORKTREE_FINAL_NOT_CLEAN");
+    if producer_string(worktree, "/module_id", "INVALID_WORKTREE_RECORD") != module_id
+        || producer_string(worktree, "/isolation_mode", "INVALID_WORKTREE_RECORD")
+            != "isolated_worktree"
+    {
+        fail("PRODUCER_MODULE_MISMATCH");
+    }
+    if producer_string(worktree, "/scope_hash", "INVALID_WORKTREE_RECORD") != expected_scope_hash {
+        fail(format!(
+            "PRODUCER_SCOPE_MISMATCH:expected={}",
+            expected_scope_hash
+        ));
+    }
+    let worktree_issue = producer_string(worktree, "/issue_id", "INVALID_WORKTREE_RECORD");
+    if !worktree_issue.is_empty()
+        && worktree_issue != "none"
+        && !worktree_issue.starts_with("legacy-")
+        && worktree.get("bug_triage").is_none()
+    {
+        fail("BUG_TRIAGE_MISSING");
+    }
+    assert_bug_tracker_triage_evidence(worktree, &worktree_issue);
+    if goal
+        .get("issue_id")
+        .and_then(Value::as_str)
+        .is_some_and(|issue| issue != worktree_issue)
+    {
+        fail("PRODUCER_GOAL_ISSUE_MISMATCH");
+    }
+    if producer_string(worktree, "/base_commit", "INVALID_WORKTREE_RECORD")
+        == producer_string(worktree, "/head_commit", "INVALID_WORKTREE_RECORD")
+    {
+        // A baseline-only candidate is valid for SDK smoke tests and for an
+        // adapter that has not committed source changes yet; the later
+        // FixCandidate gate still binds the actual candidate commit.
+    }
+    let current_branch = git_value(
+        root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        "PRODUCER_BRANCH_UNAVAILABLE",
+    );
+    if matches!(current_branch.as_str(), "main" | "master" | "v4-cordis") {
+        fail("PRODUCER_PROTECTED_BRANCH");
+    }
+    if current_branch != producer_string(worktree, "/branch", "INVALID_WORKTREE_RECORD") {
+        fail("PRODUCER_BRANCH_MISMATCH");
+    }
+    let worktree_list = git_value(
+        root,
+        &["worktree", "list", "--porcelain"],
+        "PRODUCER_WORKTREE_UNAVAILABLE",
+    );
+    let current_root = root
+        .canonicalize()
+        .unwrap_or_else(|_| fail("PRODUCER_WORKTREE_UNAVAILABLE"));
+    if !worktree_list.lines().any(|line| {
+        line.strip_prefix("worktree ")
+            .and_then(|path| Path::new(path).canonicalize().ok())
+            .is_some_and(|path| path == current_root)
+    }) {
+        fail("PRODUCER_WORKTREE_NOT_REGISTERED");
+    }
+    let status = git_value(
+        root,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "PRODUCER_VCS_UNAVAILABLE",
+    );
+    if !status.is_empty() {
+        fail("PRODUCER_WORKTREE_DIRTY");
+    }
+    let base_commit = producer_string(worktree, "/base_commit", "INVALID_WORKTREE_RECORD");
+    let head_commit = producer_string(worktree, "/head_commit", "INVALID_WORKTREE_RECORD");
+    if git_value(
+        root,
+        &["rev-parse", &base_commit],
+        "PRODUCER_BASE_COMMIT_INVALID",
+    ) != base_commit
+        || git_value(
+            root,
+            &["rev-parse", &head_commit],
+            "PRODUCER_HEAD_COMMIT_INVALID",
+        ) != head_commit
+    {
+        fail("PRODUCER_COMMIT_INVALID");
+    }
+    if git_value(root, &["rev-parse", "HEAD"], "PRODUCER_HEAD_COMMIT_INVALID") != head_commit {
+        fail("PRODUCER_HEAD_COMMIT_MISMATCH");
+    }
+    let base_ref = producer_string(worktree, "/base_ref", "INVALID_WORKTREE_RECORD");
+    if git_value(root, &["rev-parse", &base_ref], "PRODUCER_BASE_REF_INVALID") != base_commit {
+        fail("PRODUCER_BASE_REF_MISMATCH");
+    }
+    let ancestry = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "merge-base",
+            "--is-ancestor",
+        ])
+        .args([base_commit.as_str(), head_commit.as_str()])
+        .status()
+        .unwrap_or_else(|_| fail("PRODUCER_VCS_UNAVAILABLE"));
+    if !ancestry.success() {
+        fail("PRODUCER_BASE_NOT_ANCESTOR");
+    }
+    for path in [
+        "/reproduction_id",
+        "/issue_id",
+        "/module_id",
+        "/base_commit",
+    ] {
+        producer_string(reproduction, path, "INVALID_REPRODUCTION_RECORD");
+    }
+    if producer_string(reproduction, "/module_id", "INVALID_REPRODUCTION_RECORD") != module_id
+        || producer_string(reproduction, "/issue_id", "INVALID_REPRODUCTION_RECORD")
+            != worktree_issue
+        || producer_string(reproduction, "/base_commit", "INVALID_REPRODUCTION_RECORD")
+            != base_commit
+    {
+        fail("PRODUCER_REPRODUCTION_MISMATCH");
+    }
+    for path in [
+        "/issue_id",
+        "/experiment_id",
+        "/phase",
+        "/kind",
+        "/source_commit",
+        "/scope_hash",
+        "/scope/module_id",
+        "/producer/adapter",
+        "/producer/identity",
+    ] {
+        producer_string(baseline, path, "INVALID_BASELINE_EVIDENCE");
+    }
+    if producer_string(baseline, "/issue_id", "INVALID_BASELINE_EVIDENCE") != worktree_issue
+        || producer_string(baseline, "/scope/module_id", "INVALID_BASELINE_EVIDENCE") != module_id
+        || producer_string(baseline, "/scope_hash", "INVALID_BASELINE_EVIDENCE")
+            != producer_string(worktree, "/scope_hash", "INVALID_WORKTREE_RECORD")
+        || producer_string(baseline, "/source_commit", "INVALID_BASELINE_EVIDENCE") != base_commit
+        || producer_string(baseline, "/phase", "INVALID_BASELINE_EVIDENCE")
+            != "baseline_reproduction"
+        || !matches!(
+            producer_string(baseline, "/kind", "INVALID_BASELINE_EVIDENCE").as_str(),
+            "red_test" | "sample_replay" | "gate" | "runtime"
+        )
+    {
+        fail("PRODUCER_BASELINE_MISMATCH");
+    }
+    let (program, args, working_directory, expected_status, expected_error_token) =
+        producer_command(baseline);
+    let command_declaration = serde_json::json!({
+        "program": program,
+        "args": args,
+        "working_directory": working_directory,
+        "expected_exit_status": expected_status,
+        "expected_error_token": expected_error_token
+    });
+    let input_hashes = vec![sha256(&canonical(&command_declaration))];
+    let current_root = root
+        .canonicalize()
+        .unwrap_or_else(|_| fail("PRODUCER_WORKTREE_UNAVAILABLE"));
+    let worktree_id = producer_stable_id(
+        "worktree",
+        &serde_json::json!({
+            "root": current_root,
+            "module_id": module_id,
+            "issue_id": worktree_issue,
+            "base_commit": base_commit,
+            "head_commit": head_commit,
+            "branch": current_branch,
+            "scope_hash": expected_scope_hash
+        }),
+    );
+    let reproduction_id = producer_stable_id(
+        "reproduction",
+        &serde_json::json!({
+            "worktree_id": worktree_id,
+            "input_hashes": input_hashes,
+            "error_token": expected_error_token
+        }),
+    );
+    let baseline_id = producer_stable_id(
+        "baseline",
+        &serde_json::json!({
+            "reproduction_id": reproduction_id,
+            "source_commit": base_commit,
+            "input_hashes": input_hashes,
+            "command": command_declaration
+        }),
+    );
+    let targets = producer_record_targets(root, module_id, &input, &baseline_id);
+    for (target, _) in &targets {
+        assert_no_symlink_components(root, target, "record_control");
+        if target.exists() {
+            fail(format!(
+                "LIFECYCLE_RECORD_EXISTS:{}",
+                target.strip_prefix(root).unwrap_or(target).display()
+            ));
+        }
+    }
+    // Validate the declaration before creating a temporary worktree. The
+    // baseline checkout must be disposable even when its directory is
+    // malformed or absent at the declared source commit.
+    let _candidate_command_directory =
+        producer_command_dir(root, &working_directory).unwrap_or_else(|error| fail(error));
+    let baseline_started_at = Utc::now();
+    let baseline_root = producer_baseline_worktree(root, &base_commit);
+    match producer_baseline_git_value(&baseline_root, &["rev-parse", "HEAD"]) {
+        Ok(head) if head == base_commit => {}
+        Ok(_) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail("BASELINE_WORKTREE_COMMIT_MISMATCH");
+        }
+        Err(error) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail(error);
+        }
+    }
+    let command_directory = match producer_command_dir(&baseline_root, &working_directory) {
+        Ok(path) => path,
+        Err(error) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail(error);
+        }
+    };
+    let output = match Command::new(&program)
+        .args(&args)
+        .current_dir(&command_directory)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail("BASELINE_COMMAND_FAILED");
+        }
+    };
+    let actual_status = output.status.code().unwrap_or(-1);
+    if actual_status != expected_status {
+        remove_producer_baseline_worktree(root, &baseline_root);
+        fail(format!(
+            "BASELINE_COMMAND_STATUS_MISMATCH:expected={}:actual={}",
+            expected_status, actual_status
+        ));
+    }
+    match producer_baseline_git_value(&baseline_root, &["rev-parse", "HEAD"]) {
+        Ok(head) if head == base_commit => {}
+        Ok(_) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail("BASELINE_COMMAND_CHANGED_COMMIT");
+        }
+        Err(error) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail(error);
+        }
+    }
+    let output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output_text.contains(&expected_error_token) {
+        remove_producer_baseline_worktree(root, &baseline_root);
+        fail("BASELINE_ERROR_TOKEN_MISSING");
+    }
+    match producer_baseline_git_value(
+        &baseline_root,
+        &["status", "--porcelain", "--untracked-files=all"],
+    ) {
+        Ok(status) if status.is_empty() => {}
+        Ok(_) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail("BASELINE_COMMAND_DIRTY_WORKTREE");
+        }
+        Err(error) => {
+            remove_producer_baseline_worktree(root, &baseline_root);
+            fail(error);
+        }
+    }
+    remove_producer_baseline_worktree(root, &baseline_root);
+    let output_hash = sha256(&format!(
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ));
+    let mut observed_worktree = worktree.clone();
+    observed_worktree["worktree_id"] = Value::String(worktree_id);
+    observed_worktree["base_commit"] = Value::String(base_commit.clone());
+    observed_worktree["head_commit"] = Value::String(head_commit.clone());
+    observed_worktree["branch"] = Value::String(current_branch);
+    observed_worktree["initial_clean"] = Value::Bool(true);
+    observed_worktree["final_clean"] = Value::Bool(true);
+    observed_worktree["created_at"] = Value::String(baseline_started_at.to_rfc3339());
+    let mut observed_bug_triage = worktree
+        .get("bug_triage")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !observed_bug_triage.is_object() {
+        fail("INVALID_BUG_TRIAGE");
+    }
+    observed_worktree["bug_triage"] = observed_bug_triage.take();
+    let mut observed_reproduction = reproduction.clone();
+    observed_reproduction["reproduction_id"] = Value::String(reproduction_id);
+    observed_reproduction["worktree_id"] = observed_worktree["worktree_id"].clone();
+    observed_reproduction["input_hashes"] = serde_json::json!(input_hashes);
+    observed_reproduction["baseline_evidence_id"] = Value::String(baseline_id.clone());
+    observed_reproduction["first_divergence"] =
+        Value::String(format!("baseline_error_token:{}", expected_error_token));
+    observed_reproduction["base_commit"] = Value::String(base_commit);
+    observed_reproduction["result"] = Value::String("reproduced".into());
+    observed_reproduction["created_at"] = Value::String(Utc::now().to_rfc3339());
+    let mut observed_baseline = baseline.clone();
+    observed_baseline["source_commit"] = Value::String(producer_string(
+        &worktree,
+        "/base_commit",
+        "INVALID_WORKTREE_RECORD",
+    ));
+    observed_baseline["evidence_id"] = Value::String(baseline_id);
+    observed_baseline["input_hashes"] = serde_json::json!(input_hashes);
+    observed_baseline["producer"] = serde_json::json!({
+        "adapter": "appsdk",
+        "identity": "appsdk-lifecycle-record-producer"
+    });
+    observed_baseline["result"] = Value::String("pass".into());
+    observed_baseline["command"] = command_declaration;
+    observed_baseline["exit_status"] = Value::Number(actual_status.into());
+    observed_baseline["output_hash"] = Value::String(output_hash);
+    observed_baseline["created_at"] = Value::String(Utc::now().to_rfc3339());
+    observed_baseline["expires_at"] =
+        Value::String((Utc::now() + chrono::Duration::hours(24)).to_rfc3339());
+    let targets = vec![
+        (targets[0].0.clone(), observed_worktree),
+        (targets[1].0.clone(), observed_reproduction),
+        (targets[2].0.clone(), observed_baseline),
+    ];
+    let evidence_dir = root
+        .join(".appsdk")
+        .join("records")
+        .join("evidence")
+        .join(module_id);
+    fs::create_dir_all(&evidence_dir).unwrap_or_else(|_| fail("RECORD_WRITE_FAILED"));
+    let mut staged = Vec::new();
+    for (target, record) in &targets {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
+            .as_nanos();
+        let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
+        let bytes = (serde_json::to_string_pretty(record).unwrap() + "\n").into_bytes();
+        let write_result = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .and_then(|mut file| file.write_all(&bytes));
+        if write_result.is_err() {
+            for (existing, _) in &staged {
+                let _ = fs::remove_file(existing);
+            }
+            let _ = fs::remove_file(&staging);
+            fail("RECORD_WRITE_FAILED");
+        }
+        staged.push((staging, target.clone()));
+    }
+    let mut installed = Vec::new();
+    for (staging, target) in &staged {
+        if let Err(error) = fs::hard_link(staging, target) {
+            for installed_target in &installed {
+                let _ = fs::remove_file(installed_target);
+            }
+            for (remaining, _) in &staged {
+                let _ = fs::remove_file(remaining);
+            }
+            fail(format!("RECORD_WRITE_FAILED:{}", error));
+        }
+        if let Err(error) = fs::remove_file(staging) {
+            let _ = fs::remove_file(target);
+            for installed_target in &installed {
+                let _ = fs::remove_file(installed_target);
+            }
+            for (remaining, _) in &staged {
+                let _ = fs::remove_file(remaining);
+            }
+            fail(format!("RECORD_WRITE_FAILED:{}", error));
+        }
+        installed.push(target.clone());
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "module_id": module_id,
+            "goal_id": input["goal_id"],
+            "records": targets.iter().map(|(target, record)| serde_json::json!({
+                "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
+                "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+    );
+}
+
 fn record_str<'a>(record: &'a Value, path: &str, name: &str) -> &'a str {
     record
         .pointer(path)
@@ -6012,7 +6742,6 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
         let module_artifact = read_module_artifact(root, &project, module_id);
         let mut staged = module_artifact_matches_project(&modules[index], &module_artifact);
         staged["stage"] = Value::String(target.into());
-        write_module_artifact_value(root, &project, module_id, &staged);
         Some(staged)
     } else {
         None
@@ -6023,6 +6752,9 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
             module_id,
             module_artifact.as_ref().unwrap_or(&artifact),
         );
+    }
+    if let Some(module_artifact) = &module_artifact {
+        write_module_artifact_value(root, &project, module_id, module_artifact);
     }
     write_artifact_value(root, &project, &artifact);
     write_project(root, &candidate);
@@ -11447,6 +12179,9 @@ fn print_cli_help(command: Option<&str>) {
         }
         Some("compile") => "Usage: appsdk compile [project] [--module <id>]",
         Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
+        Some("produce-lifecycle-records") => {
+            "Usage: appsdk produce-lifecycle-records [project] --module <id> --input <json>"
+        }
         Some("pin-lock") => "Usage: appsdk pin-lock [project] --binary <path>",
         Some("reset-governance") => {
             "Usage: appsdk reset-governance [project] --discard-legacy"
@@ -11745,6 +12480,25 @@ fn main() {
                 fail("USAGE: appsdk promote-module [project] --module <id> --to <stage>");
             }
             promote_module(&root, &module_id, &target);
+        }
+        Some("produce-lifecycle-records") => {
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>");
+            }
+            let module_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>")
+            });
+            if args.next().as_deref() != Some("--input") {
+                fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>");
+            }
+            let input = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>")
+            });
+            if args.next().is_some() {
+                fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>");
+            }
+            produce_lifecycle_records(&root, &module_id, &input);
         }
         Some("freeze") => {
             let root = project_root_or_cwd(&mut args);

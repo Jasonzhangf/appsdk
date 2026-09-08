@@ -3049,6 +3049,206 @@ fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
 }
 
 #[test]
+fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
+    let root = temp_root("lifecycle-record-producer");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/goal.json"),
+        r#"{"goal_id":"goal-1","issue_id":null,"raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#,
+    )
+    .unwrap();
+    init_git(&root);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    assert!(run(&["compile-module", root_text, "--module", "app-core"])
+        .status
+        .success());
+    assert!(run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "contract_bound",
+    ])
+    .status
+    .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/project.json"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "candidate"])
+        .status()
+        .unwrap()
+        .success());
+    let commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let scope_hash = digest(&canonical(&serde_json::json!({
+        "module_id":"app-core",
+        "source_hash":artifact["source_hash"],
+        "contract_hash":artifact["contract_hash"]
+    })));
+    let input_path = root.with_extension("producer-input.json");
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "goal_id":"goal-1",
+            "worktree": {
+                "worktree_id":"caller-worktree-id","issue_id":"issue-producer-1","module_id":"app-core",
+                "base_ref":"HEAD","base_commit":commit,"branch":"codex/test","head_commit":commit,
+                "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
+                "scope_hash":scope_hash,"created_at":"2026-01-01T00:00:00Z",
+                "bug_triage":{"query_executed":"appsdk bug list -q issue-producer-1","mode":"new_confirmed","reopened_from_issue_id":null}
+            },
+            "reproduction": {
+                "reproduction_id":"caller-reproduction-id","issue_id":"issue-producer-1","module_id":"app-core",
+                "worktree_id":"caller-worktree-id","base_commit":commit,"input_hashes":["caller-input"],
+                "baseline_evidence_id":"caller-baseline-id","first_divergence":"caller text",
+                "result":"reproduced","created_at":"2026-01-01T00:01:00Z"
+            },
+            "baseline_evidence": {
+                "evidence_id":"caller-evidence-id","issue_id":"issue-producer-1","experiment_id":"experiment-producer-1",
+                "phase":"baseline_reproduction","kind":"red_test","source_commit":commit,"scope":{"module_id":"app-core"},
+                "producer":{"adapter":"test","identity":"lifecycle-producer-test"},"result":"pass",
+                "command":{"program":"sh","args":["-c","printf baseline-error-token >&2; exit 1"],"working_directory":".","expected_exit_status":1,"expected_error_token":"baseline-error-token"},
+                "created_at":"2026-01-01T00:00:30Z","expires_at":"2099-01-01T00:00:00Z",
+                "input_hashes":["input-producer-1"],"scope_hash":scope_hash
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let produced = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(
+        produced.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&produced.stdout),
+        String::from_utf8_lossy(&produced.stderr)
+    );
+    assert!(root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .is_file());
+    assert!(root
+        .join(".appsdk/records/reproduction-record-app-core.json")
+        .is_file());
+    let evidence_files = fs::read_dir(root.join(".appsdk/records/evidence/app-core"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(evidence_files.len(), 1);
+    assert!(evidence_files[0].is_file());
+    let produced_worktree: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/worktree-record-app-core.json")).unwrap(),
+    )
+    .unwrap();
+    let produced_reproduction: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/reproduction-record-app-core.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let produced_evidence: Value =
+        serde_json::from_str(&fs::read_to_string(&evidence_files[0]).unwrap()).unwrap();
+    assert_ne!(produced_worktree["worktree_id"], "caller-worktree-id");
+    assert_ne!(
+        produced_reproduction["reproduction_id"],
+        "caller-reproduction-id"
+    );
+    assert_eq!(
+        produced_reproduction["input_hashes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        produced_evidence["producer"],
+        serde_json::json!({"adapter":"appsdk","identity":"appsdk-lifecycle-record-producer"})
+    );
+    assert_eq!(produced_evidence["exit_status"], 1);
+    let repeated = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(!repeated.status.success());
+    assert!(
+        String::from_utf8_lossy(&repeated.stderr).contains("LIFECYCLE_RECORD_EXISTS"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&repeated.stdout),
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    fs::remove_file(input_path).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_record_producer_rejects_dirty_or_mismatched_input_without_records() {
+    let root = temp_root("lifecycle-record-producer-reject");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/goal.json"),
+        r#"{"goal_id":"goal-1","issue_id":null,"raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#,
+    )
+    .unwrap();
+    init_git(&root);
+    let commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    fs::write(root.join("dirty.txt"), "dirty\n").unwrap();
+    let input_path = root.with_extension("producer-input.json");
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "goal_id":"wrong-goal",
+            "worktree": {"worktree_id":"worktree-1","issue_id":"issue-1","module_id":"app-core","base_ref":"HEAD","base_commit":commit,"branch":"codex/test","head_commit":commit,"initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree","scope_hash":"scope-1","created_at":"2026-01-01T00:00:00Z"},
+            "reproduction": {"reproduction_id":"reproduction-1","issue_id":"issue-1","module_id":"app-core","worktree_id":"worktree-1","base_commit":commit,"input_hashes":["input-1"],"baseline_evidence_id":"baseline-1","first_divergence":"test","result":"reproduced","created_at":"2026-01-01T00:01:00Z"},
+            "baseline_evidence": {"evidence_id":"baseline-1","issue_id":"issue-1","experiment_id":"experiment-1","phase":"baseline_reproduction","kind":"red_test","source_commit":commit,"scope":{"module_id":"app-core"},"producer":{"adapter":"test","identity":"test"},"command":{"program":"sh","args":["-c","exit 1"],"working_directory":".","expected_exit_status":1},"input_hashes":["input-1"],"scope_hash":"scope-1"}
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("PRODUCER_GOAL_MISMATCH"));
+    assert!(!root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .exists());
+    fs::remove_file(input_path).unwrap();
+    fs::remove_file(root.join("dirty.txt")).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn initialized_lock_is_not_bound_to_the_running_binary() {
     let root = temp_root("unbound-sdk-lock");
     let root_text = root.to_str().unwrap();

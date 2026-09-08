@@ -195,6 +195,13 @@ does not imply any other state. Never install or restart from a worker branch.
     close operation. Cleanup records the removed path and receipt; it never
     deletes another task's worktree, mailbox, journal, or token.
 
+The documented command surface must match the installed Collab binary. Before
+using an optional lifecycle subcommand, run `collab task --help`. If the
+installed version has no dedicated review or integration command, record the
+same evidence with the supported `collab task update --status ... --next ...`,
+`collab task deliver`, bug comments, and the mainline/remote receipts; never
+invent a successful command or claim that an unavailable subcommand ran.
+
 If a gate fails, preserve the exact error and leave the task explicitly
 blocked with owner, unblock condition, next check, and recovery trigger. Never
 report deployed from a candidate branch, merged from a local-only ref, or

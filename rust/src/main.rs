@@ -10587,11 +10587,16 @@ where
                     false,
                     None,
                     None,
-                    Some(if error == "GOAL_COLLAB_COMMAND_TIMEOUT" {
-                        error
-                    } else {
-                        format!("COLLAB_UNAVAILABLE:{}", error)
-                    }),
+                    Some(
+                        if matches!(
+                            error.as_str(),
+                            "GOAL_COLLAB_COMMAND_TIMEOUT" | "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"
+                        ) {
+                            error
+                        } else {
+                            format!("COLLAB_UNAVAILABLE:{}", error)
+                        },
+                    ),
                 ),
             };
 

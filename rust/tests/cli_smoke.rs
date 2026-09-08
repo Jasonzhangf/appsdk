@@ -588,6 +588,164 @@ fn lifecycle_record_producer_rejects_drifted_project_map_before_records() {
 }
 
 #[test]
+fn lifecycle_record_producer_rejects_missing_invalid_and_shadowed_canonical_maps() {
+    let cases = [
+        ("missing", "function-map.json"),
+        ("empty", "resource-map.json"),
+        ("invalid", "verification-map.json"),
+        ("shadowed", "mainline-call-map.json"),
+    ];
+    for (kind, map_name) in cases {
+        let root = temp_root(&format!("lifecycle-record-producer-map-{kind}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let map_path = root.join(".appsdk/maps").join(map_name);
+        let expected_error = match kind {
+            "missing" => {
+                fs::remove_file(&map_path).unwrap();
+                format!("MISSING_GOVERNANCE_MAP:{map_name}")
+            }
+            "empty" => {
+                fs::write(&map_path, r#"{"schema_version":1,"resources":[]}"#).unwrap();
+                format!("INVALID_GOVERNANCE_MAP:{map_name}")
+            }
+            "invalid" => {
+                fs::write(&map_path, "{\n").unwrap();
+                format!("INVALID_GOVERNANCE_MAP:{map_name}")
+            }
+            "shadowed" => {
+                let mut map: Value =
+                    serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+                let entries = map["edges"].as_array_mut().unwrap();
+                let canonical = entries
+                    .iter()
+                    .find(|entry| entry["chain_id"] == "lifecycle-record-production-v1")
+                    .cloned()
+                    .unwrap();
+                let mut shadow = canonical;
+                shadow["caller"] = Value::String("shadowed_producer".into());
+                entries.push(shadow);
+                fs::write(
+                    &map_path,
+                    serde_json::to_string_pretty(&map).unwrap() + "\n",
+                )
+                .unwrap();
+                format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{map_name}")
+            }
+            _ => unreachable!(),
+        };
+        let input = root.join("producer-input.json");
+        fs::write(&input, "{}\n").unwrap();
+        let rejected = run(&[
+            "produce-lifecycle-records",
+            root_text,
+            "--module",
+            "app-core",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(
+            !rejected.status.success(),
+            "map case {kind} unexpectedly passed"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(&expected_error),
+            "map case {kind}: expected {expected_error}, stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(!root
+            .join(".appsdk/records/worktree-record-app-core.json")
+            .exists());
+        assert!(!root
+            .join(".appsdk/records/reproduction-record-app-core.json")
+            .exists());
+        assert!(!root.join(".appsdk/records/evidence/app-core").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn lifecycle_record_producer_rejects_tampered_canonical_entry_in_each_map() {
+    let cases = [
+        (
+            "resource-map.json",
+            "resources",
+            "resource_id",
+            "lifecycle_record_producer_input",
+            "owner",
+        ),
+        (
+            "function-map.json",
+            "functions",
+            "function_id",
+            "lifecycle_record_producer",
+            "owner",
+        ),
+        (
+            "mainline-call-map.json",
+            "edges",
+            "chain_id",
+            "lifecycle-record-production-v1",
+            "caller",
+        ),
+        (
+            "verification-map.json",
+            "gates",
+            "gate_id",
+            "worktree_clean",
+            "command",
+        ),
+    ];
+    for (map_name, key, id_key, id, field) in cases {
+        let root = temp_root(&format!("lifecycle-record-producer-map-tampered-{id_key}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let map_path = root.join(".appsdk/maps").join(map_name);
+        let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+        let entry = map[key]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry[id_key] == id)
+            .unwrap();
+        entry[field] = Value::String("tampered_producer_contract".into());
+        fs::write(
+            &map_path,
+            serde_json::to_string_pretty(&map).unwrap() + "\n",
+        )
+        .unwrap();
+        let input = root.join("producer-input.json");
+        fs::write(&input, "{}\n").unwrap();
+        let rejected = run(&[
+            "produce-lifecycle-records",
+            root_text,
+            "--module",
+            "app-core",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(
+            !rejected.status.success(),
+            "map {map_name} unexpectedly passed"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains(&format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{map_name}")),
+            "map {map_name}: stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(!root
+            .join(".appsdk/records/worktree-record-app-core.json")
+            .exists());
+        assert!(!root
+            .join(".appsdk/records/reproduction-record-app-core.json")
+            .exists());
+        assert!(!root.join(".appsdk/records/evidence/app-core").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn lifecycle_record_producer_recovers_partial_group_commit() {
     let root = temp_root("lifecycle-record-producer-recovery");
     let root_text = root.to_str().unwrap();

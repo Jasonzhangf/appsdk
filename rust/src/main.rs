@@ -1051,7 +1051,7 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
         let canonical: Value = serde_json::from_str(canonical_governance_map(name))
             .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name)));
         let required = canonical.get(key).unwrap().as_array().unwrap();
-        for entry in required.iter().filter(|entry| match name {
+        let is_required = |entry: &Value| match name {
             "resource-map.json" => entry
                 .get("resource_id")
                 .and_then(Value::as_str)
@@ -1077,10 +1077,32 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
                 .and_then(Value::as_str)
                 .is_some_and(|id| matches!(id, "worktree_clean" | "baseline_reproduced")),
             _ => false,
-        }) {
-            if !actual.iter().any(|candidate| candidate == entry) {
+        };
+        let shares_required_identity = |candidate: &Value| {
+            required.iter().any(|entry| match name {
+                "resource-map.json" => candidate.get("resource_id") == entry.get("resource_id"),
+                "function-map.json" => candidate.get("function_id") == entry.get("function_id"),
+                "mainline-call-map.json" => candidate.get("chain_id") == entry.get("chain_id"),
+                "verification-map.json" => candidate.get("gate_id") == entry.get("gate_id"),
+                _ => false,
+            })
+        };
+        for entry in required.iter().filter(|entry| is_required(entry)) {
+            if actual
+                .iter()
+                .filter(|candidate| *candidate == entry)
+                .count()
+                != 1
+            {
                 fail(format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{}", name));
             }
+        }
+        // A project map may extend unrelated entries, but an entry with a
+        // producer-owned identity cannot shadow the canonical declaration.
+        if actual.iter().any(|candidate| {
+            shares_required_identity(candidate) && !required.iter().any(|entry| candidate == entry)
+        }) {
+            fail(format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{}", name));
         }
     }
 

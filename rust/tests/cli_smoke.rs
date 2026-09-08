@@ -7825,9 +7825,9 @@ fn bug_command_upstream_fallback() {
     fs::write(client_root.join("README.md"), "# Client Project\n").unwrap();
     init_git(&client_root);
 
-    // 1. In client root, show bug without --upstream: automatically falls back to APPSDK_ROOT
+    // 1. In client root, upstream reads require an explicit store selector.
     let show = Command::new(binary())
-        .args(&["bug", "show", bug_id, "--json"])
+        .args(&["bug", "show", bug_id, "--json", "--upstream"])
         .current_dir(&client_root)
         .env("APPSDK_ROOT", &upstream_root)
         .env_remove("TMUX_PANE")
@@ -7841,9 +7841,26 @@ fn bug_command_upstream_fallback() {
     let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(show_json["title"], "Upstream Daemon Issue");
 
-    // 2. In client root, list with -q: automatically falls back to upstream when local matches nothing
+    // A missing local issue may be read from the configured upstream store,
+    // while the write commands below still require an explicit selector.
+    let implicit_show = Command::new(binary())
+        .args(&["bug", "show", bug_id, "--json"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        implicit_show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&implicit_show.stderr)
+    );
+    let implicit_show_json: Value = serde_json::from_slice(&implicit_show.stdout).unwrap();
+    assert_eq!(implicit_show_json["title"], "Upstream Daemon Issue");
+
+    // 2. The explicit selector also applies to filtered list reads.
     let list_q = Command::new(binary())
-        .args(&["bug", "list", "-q", "Daemon", "--json"])
+        .args(&["bug", "list", "-q", "Daemon", "--json", "--upstream"])
         .current_dir(&client_root)
         .env("APPSDK_ROOT", &upstream_root)
         .env_remove("TMUX_PANE")
@@ -7858,7 +7875,23 @@ fn bug_command_upstream_fallback() {
     assert_eq!(list_json.as_array().unwrap().len(), 1);
     assert_eq!(list_json[0]["title"], "Upstream Daemon Issue");
 
-    // 3. In client root, comment without --upstream targets the resolved upstream store.
+    let implicit_list = Command::new(binary())
+        .args(&["bug", "list", "-q", "Daemon", "--json"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        implicit_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&implicit_list.stderr)
+    );
+    let implicit_list_json: Value = serde_json::from_slice(&implicit_list.stdout).unwrap();
+    assert_eq!(implicit_list_json.as_array().unwrap().len(), 1);
+    assert_eq!(implicit_list_json[0]["title"], "Upstream Daemon Issue");
+
+    // 3. A comment without --upstream remains local and must not target upstream.
     let local_comment = Command::new(binary())
         .args(&[
             "bug",
@@ -7872,24 +7905,8 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(
-        local_comment.status.success(),
-        "{}",
-        String::from_utf8_lossy(&local_comment.stderr)
-    );
-    let upstream_after_comment = Command::new(binary())
-        .args(&["bug", "show", bug_id, "--json", "--upstream"])
-        .current_dir(&client_root)
-        .env("APPSDK_ROOT", &upstream_root)
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap();
-    let upstream_json: Value = serde_json::from_slice(&upstream_after_comment.stdout).unwrap();
-    assert!(upstream_json["comments"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|comment| { comment["message"] == "Verified in client environment" }));
+    assert!(!local_comment.status.success());
+    assert!(String::from_utf8_lossy(&local_comment.stderr).contains("GIT_BUG_COMMENT_FAILED"));
 
     let comment = Command::new(binary())
         .args(&[
@@ -7910,6 +7927,19 @@ fn bug_command_upstream_fallback() {
         "{}",
         String::from_utf8_lossy(&comment.stderr)
     );
+    let upstream_after_comment = Command::new(binary())
+        .args(&["bug", "show", bug_id, "--json", "--upstream"])
+        .current_dir(&client_root)
+        .env("APPSDK_ROOT", &upstream_root)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    let upstream_json: Value = serde_json::from_slice(&upstream_after_comment.stdout).unwrap();
+    assert!(upstream_json["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|comment| { comment["message"] == "Verified in client environment" }));
 
     // 4. Close requires a solution and keeps explicit repository targeting.
     let close = Command::new(binary())
@@ -7981,6 +8011,28 @@ fn bug_reads_external_repo_from_home_upstream_without_local_lock() {
         .unwrap();
     assert!(create_local.status.success());
 
+    // The default writer and a successful local read share the client store,
+    // even when an upstream store is discoverable through HOME.
+    let local_list = Command::new(binary())
+        .args(["bug", "list", "--json"])
+        .current_dir(&client_root)
+        .env("HOME", &home)
+        .env_remove("APPSDK_ROOT")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        local_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&local_list.stderr)
+    );
+    let local_list_json: Value = serde_json::from_slice(&local_list.stdout).unwrap();
+    assert!(local_list_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|bug| bug["title"] == "Local Issue"));
+
     let lock_path = client_root.join(".git/git-bug/lock");
     let held = OpenOptions::new()
         .read(true)
@@ -8037,8 +8089,28 @@ fn bug_reads_external_repo_from_home_upstream_without_local_lock() {
     let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
     assert!(show_json["id"] == bug_id || show_json["human_id"] == bug_id);
 
-    let comment = Command::new(binary())
+    // A locked local store must not turn a default comment into an upstream
+    // mutation; upstream writes remain explicit.
+    let local_comment = Command::new(binary())
         .args(["bug", "comment", &bug_id, "-m", "external client comment"])
+        .current_dir(&client_root)
+        .env("HOME", &home)
+        .env_remove("APPSDK_ROOT")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!local_comment.status.success());
+    assert!(String::from_utf8_lossy(&local_comment.stderr).contains("GIT_BUG_COMMENT_FAILED"));
+
+    let comment = Command::new(binary())
+        .args([
+            "bug",
+            "comment",
+            &bug_id,
+            "-m",
+            "external client comment",
+            "--upstream",
+        ])
         .current_dir(&client_root)
         .env("HOME", &home)
         .env_remove("APPSDK_ROOT")
@@ -8053,7 +8125,7 @@ fn bug_reads_external_repo_from_home_upstream_without_local_lock() {
     drop(held);
 
     let upstream_after_comment = Command::new(binary())
-        .args(["bug", "show", &bug_id, "--json"])
+        .args(["bug", "show", &bug_id, "--json", "--upstream"])
         .current_dir(&client_root)
         .env("HOME", &home)
         .env_remove("APPSDK_ROOT")
@@ -8077,7 +8149,7 @@ fn bug_reads_external_repo_from_home_upstream_without_local_lock() {
     .unwrap();
     init_git(&missing_client);
     let missing = Command::new(binary())
-        .args(["bug", "list", "--json"])
+        .args(["bug", "list", "--json", "--upstream"])
         .current_dir(&missing_client)
         .env("HOME", &missing_home)
         .env_remove("APPSDK_ROOT")
@@ -9794,6 +9866,56 @@ fn longhorizon_bug_permission_failure_remains_explicit() {
         .as_str()
         .unwrap()
         .contains("permission denied"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_bug_read_falls_back_to_upstream_after_local_failure() {
+    let root = temp_root("longhorizon-bug-upstream-fallback");
+    fs::create_dir_all(&root).unwrap();
+    let home = root.join("home");
+    let upstream = home.join("Documents/github/appsdk");
+    fs::create_dir_all(&upstream).unwrap();
+    fs::write(upstream.join("README.md"), "# Upstream SDK Repo\n").unwrap();
+    init_git(&upstream);
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\nprintf '%s\\n' '{\"workers\":[],\"tasks\":[],\"subagents\":[]}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let fake_git_bug = fake_bin.join("git-bug");
+    let fake_git_bug_script = format!(
+        "#!/bin/sh\nif [ \"$PWD\" = \"{}\" ]; then\n  printf '%s\\n' 'permission denied' >&2\n  exit 126\nfi\nprintf '%s\\n' '[{{\"human_id\":\"upstream-1\",\"title\":\"Upstream open bug\",\"labels\":[\"P1\"]}}]'\n",
+        root.display()
+    );
+    fs::write(&fake_git_bug, fake_git_bug_script).unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+
+    let result = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["open_bugs_error"], Value::Null);
+    assert_eq!(payload["open_bugs"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["open_bugs"][0]["title"], "Upstream open bug");
 
     fs::remove_dir_all(root).unwrap();
 }

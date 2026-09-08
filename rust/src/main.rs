@@ -9956,14 +9956,15 @@ fn assert_bug_tracker_triage_evidence(
     real_query_root: Option<&Path>,
 ) {
     let triage = worktree.get("bug_triage");
-    let exempt_issue = issue_id.is_empty() || issue_id == "none" || issue_id.starts_with("legacy-");
+    let legacy_issue = issue_id.starts_with("legacy-");
+    let exempt_issue = issue_id.is_empty() || issue_id == "none" || legacy_issue;
     if triage.is_none() {
         if !exempt_issue {
             fail("BUG_TRIAGE_MISSING");
         }
         return;
     }
-    if exempt_issue {
+    if issue_id.is_empty() || issue_id == "none" {
         fail("BUG_TRIAGE_UNEXPECTED_FOR_EXEMPT_ISSUE");
     }
 
@@ -9972,7 +9973,7 @@ fn assert_bug_tracker_triage_evidence(
         fail("INVALID_BUG_TRIAGE");
     }
     let mode = triage.get("mode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(mode, "new_confirmed" | "reopened") {
+    if !matches!(mode, "new_confirmed" | "reopened" | "historical_legacy") {
         fail("BUG_TRIAGE_MODE_INVALID");
     }
     if triage.get("query_executed") != Some(&Value::Bool(true)) {
@@ -9986,6 +9987,18 @@ fn assert_bug_tracker_triage_evidence(
         .get("reopened_from_issue_id")
         .unwrap_or_else(|| fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING"));
     let reopened_from_id = reopened_from.as_str();
+    if mode == "historical_legacy" {
+        if !legacy_issue {
+            fail("BUG_TRIAGE_LEGACY_ID_MISMATCH");
+        }
+        if reopened_from_id.is_some() {
+            fail("BUG_TRIAGE_REOPENED_SOURCE_UNEXPECTED");
+        }
+        return;
+    }
+    if legacy_issue {
+        fail("BUG_TRIAGE_LEGACY_MODE_INVALID");
+    }
     if mode == "reopened" {
         let Some(reopened_from_id) = reopened_from_id.filter(|value| !value.is_empty()) else {
             fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
@@ -10006,6 +10019,25 @@ fn assert_bug_tracker_triage_evidence(
         if let Some(reopened_from_id) = reopened_from_id {
             query_bug_record(root, reopened_from_id).unwrap_or_else(|error| fail(error));
         }
+    }
+}
+
+#[cfg(test)]
+mod bug_triage_tests {
+    use super::*;
+
+    #[test]
+    fn historical_legacy_triage_binds_to_legacy_issue_without_store_query() {
+        let worktree = serde_json::json!({
+            "bug_triage": {
+                "query_executed": true,
+                "query": "appsdk bug list -q legacy-issue-1",
+                "mode": "historical_legacy",
+                "reopened_from_issue_id": null
+            }
+        });
+
+        assert_bug_tracker_triage_evidence(&worktree, "legacy-issue-1", None);
     }
 }
 

@@ -169,7 +169,7 @@ does not imply any other state. Never install or restart from a worker branch.
 
    ```bash
    scripts/install-global-appsdk.sh
-   appsdk --version
+   appsdk version
    shasum -a 256 "$(command -v appsdk)"
    ```
 

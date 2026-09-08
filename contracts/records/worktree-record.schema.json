@@ -18,8 +18,10 @@
     "scope_hash": {"type": "string"},
     "bug_triage": {
       "type": "object",
+      "required": ["query_executed", "query", "mode", "reopened_from_issue_id"],
       "properties": {
-        "query_executed": {"type": "string"},
+        "query_executed": {"const": true},
+        "query": {"type": "string", "minLength": 1},
         "mode": {"enum": ["new_confirmed", "reopened", "historical_legacy"]},
         "reopened_from_issue_id": {"type": ["string", "null"]}
       }

@@ -3680,6 +3680,14 @@ fn producer_string(record: &Value, path: &str, error: &str) -> String {
         .unwrap_or_else(|| fail(error))
 }
 
+fn producer_issue(record: &Value, path: &str, error: &str) -> String {
+    record
+        .pointer(path)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| fail(error))
+}
+
 fn producer_bool(record: &Value, path: &str, error: &str) {
     if record.pointer(path) != Some(&Value::Bool(true)) {
         fail(error);
@@ -3968,7 +3976,6 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     let expected_scope_hash = producer_scope_hash(root, &project, module, module_id);
     for path in [
         "/worktree_id",
-        "/issue_id",
         "/module_id",
         "/base_ref",
         "/base_commit",
@@ -3992,7 +3999,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
             expected_scope_hash
         ));
     }
-    let worktree_issue = producer_string(worktree, "/issue_id", "INVALID_WORKTREE_RECORD");
+    let worktree_issue = producer_issue(worktree, "/issue_id", "INVALID_WORKTREE_RECORD");
     if !worktree_issue.is_empty()
         && worktree_issue != "none"
         && !worktree_issue.starts_with("legacy-")
@@ -4093,7 +4100,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         producer_string(reproduction, path, "INVALID_REPRODUCTION_RECORD");
     }
     if producer_string(reproduction, "/module_id", "INVALID_REPRODUCTION_RECORD") != module_id
-        || producer_string(reproduction, "/issue_id", "INVALID_REPRODUCTION_RECORD")
+        || producer_issue(reproduction, "/issue_id", "INVALID_REPRODUCTION_RECORD")
             != worktree_issue
         || producer_string(reproduction, "/base_commit", "INVALID_REPRODUCTION_RECORD")
             != base_commit
@@ -4113,7 +4120,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     ] {
         producer_string(baseline, path, "INVALID_BASELINE_EVIDENCE");
     }
-    if producer_string(baseline, "/issue_id", "INVALID_BASELINE_EVIDENCE") != worktree_issue
+    if producer_issue(baseline, "/issue_id", "INVALID_BASELINE_EVIDENCE") != worktree_issue
         || producer_string(baseline, "/scope/module_id", "INVALID_BASELINE_EVIDENCE") != module_id
         || producer_string(baseline, "/scope_hash", "INVALID_BASELINE_EVIDENCE")
             != producer_string(worktree, "/scope_hash", "INVALID_WORKTREE_RECORD")
@@ -4271,14 +4278,12 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     observed_worktree["initial_clean"] = Value::Bool(true);
     observed_worktree["final_clean"] = Value::Bool(true);
     observed_worktree["created_at"] = Value::String(baseline_started_at.to_rfc3339());
-    let mut observed_bug_triage = worktree
-        .get("bug_triage")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !observed_bug_triage.is_object() {
-        fail("INVALID_BUG_TRIAGE");
+    if let Some(observed_bug_triage) = worktree.get("bug_triage") {
+        if !observed_bug_triage.is_object() {
+            fail("INVALID_BUG_TRIAGE");
+        }
+        observed_worktree["bug_triage"] = observed_bug_triage.clone();
     }
-    observed_worktree["bug_triage"] = observed_bug_triage.take();
     let mut observed_reproduction = reproduction.clone();
     observed_reproduction["reproduction_id"] = Value::String(reproduction_id);
     observed_reproduction["worktree_id"] = observed_worktree["worktree_id"].clone();
@@ -9116,23 +9121,24 @@ fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
         return;
     }
 
-    if let Some(triage) = worktree.get("bug_triage") {
-        let mode = triage.get("mode").and_then(Value::as_str).unwrap_or("");
-        if mode.is_empty() {
-            fail("BUG_TRIAGE_MODE_MISSING");
-        }
-        let query = triage
-            .get("query_executed")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if query.is_empty() {
-            fail("BUG_TRIAGE_QUERY_MISSING");
-        }
-        if mode == "reopened" {
-            let reopened_from = triage.get("reopened_from_issue_id").and_then(Value::as_str);
-            if reopened_from.is_none() || reopened_from == Some("") {
-                fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
-            }
+    let triage = worktree
+        .get("bug_triage")
+        .unwrap_or_else(|| fail("BUG_TRIAGE_MISSING"));
+    let mode = triage.get("mode").and_then(Value::as_str).unwrap_or("");
+    if mode.is_empty() {
+        fail("BUG_TRIAGE_MODE_MISSING");
+    }
+    if triage.get("query_executed") != Some(&Value::Bool(true)) {
+        fail("BUG_TRIAGE_QUERY_MISSING");
+    }
+    let query = triage.get("query").and_then(Value::as_str).unwrap_or("");
+    if query.is_empty() || !query.contains(issue_id) {
+        fail("BUG_TRIAGE_QUERY_UNBOUND");
+    }
+    if mode == "reopened" {
+        let reopened_from = triage.get("reopened_from_issue_id").and_then(Value::as_str);
+        if reopened_from.is_none() || reopened_from == Some("") {
+            fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
         }
     }
 }

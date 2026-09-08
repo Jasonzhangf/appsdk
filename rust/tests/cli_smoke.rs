@@ -472,6 +472,81 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
 }
 
 #[test]
+fn lifecycle_record_producer_is_bound_in_canonical_and_embedded_maps() {
+    let root = temp_root("lifecycle-producer-map-binding");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let function_map: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/maps/function-map.json")).unwrap(),
+    )
+    .unwrap();
+    let function = function_map["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["function_id"] == "lifecycle_record_producer")
+        .unwrap();
+    assert!(function["entry_symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|symbol| symbol == "produce_lifecycle_records"));
+
+    let resource_map: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/maps/resource-map.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(resource_map["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["resource_id"] == "lifecycle_record_producer_input"));
+
+    let mainline_map: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/maps/mainline-call-map.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(mainline_map["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |entry| entry["chain_id"] == "lifecycle-record-production-v1"
+                && entry["output_resource_id"] == "fix_worktree"
+        ));
+    assert!(mainline_map["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |entry| entry["chain_id"] == "lifecycle-record-production-v1"
+                && entry["output_resource_id"] == "fix_evidence_set"
+        ));
+    assert!(mainline_map["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |entry| entry["chain_id"] == "lifecycle-record-production-v1"
+                && entry["output_resource_id"] == "fix_reproduction"
+        ));
+
+    let registry: Value =
+        serde_json::from_str(include_str!("../../contracts/maps/module-registry.json")).unwrap();
+    assert_eq!(
+        registry["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["module_id"] == "runtime-core")
+            .unwrap()["symbol_owners"]["produce_lifecycle_records"],
+        "appsdk::fix_lifecycle"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundled_goal_clarification_contract_supports_verify_and_admission() {
     let root = temp_root("bundled-goal-clarification-contract");
     let root_text = root.to_str().unwrap();
@@ -2327,7 +2402,8 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
             "worktree_id":"worktree-1","issue_id":"issue-1","module_id":module_id,
             "base_ref":"HEAD","base_commit":commit,"branch":"test-fix","head_commit":commit,
             "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
-            "scope_hash":"scope-1","created_at":"2026-01-01T00:00:00Z"
+            "scope_hash":"scope-1","created_at":"2026-01-01T00:00:00Z",
+            "bug_triage":{"query_executed":true,"query":"appsdk bug list -q issue-1","mode":"new_confirmed","reopened_from_issue_id":null}
         }))
         .unwrap()
             + "\n",
@@ -3109,7 +3185,7 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
                 "base_ref":"HEAD","base_commit":commit,"branch":"codex/test","head_commit":commit,
                 "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
                 "scope_hash":scope_hash,"created_at":"2026-01-01T00:00:00Z",
-                "bug_triage":{"query_executed":"appsdk bug list -q issue-producer-1","mode":"new_confirmed","reopened_from_issue_id":null}
+                "bug_triage":{"query_executed":true,"query":"appsdk bug list -q issue-producer-1","mode":"new_confirmed","reopened_from_issue_id":null}
             },
             "reproduction": {
                 "reproduction_id":"caller-reproduction-id","issue_id":"issue-producer-1","module_id":"app-core",

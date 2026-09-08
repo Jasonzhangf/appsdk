@@ -9746,20 +9746,106 @@ fn setup_deps(check_only: bool) {
     );
 }
 
-fn resolve_upstream_repo() -> Option<PathBuf> {
-    if let Ok(val) = env::var("APPSDK_ROOT") {
-        let p = PathBuf::from(val);
-        if p.exists() {
-            return Some(p);
+fn resolve_upstream_repo() -> Result<PathBuf, String> {
+    let candidate = if let Some(value) = env::var_os("APPSDK_ROOT") {
+        let value = value.to_string_lossy().trim().to_string();
+        if value.is_empty() {
+            return Err("APPSDK_UPSTREAM_REPO_NOT_FOUND: APPSDK_ROOT is empty".into());
         }
+        PathBuf::from(value)
+    } else {
+        let home = env::var_os("HOME")
+            .ok_or_else(|| "APPSDK_UPSTREAM_REPO_NOT_FOUND: set APPSDK_ROOT or HOME".to_string())?;
+        PathBuf::from(home).join("Documents/github/appsdk")
+    };
+
+    if !candidate.exists() {
+        return Err(format!(
+            "APPSDK_UPSTREAM_REPO_NOT_FOUND: expected AppSDK repository at {} (set APPSDK_ROOT)",
+            candidate.display()
+        ));
     }
-    if let Ok(home) = env::var("HOME") {
-        let p = PathBuf::from(format!("{}/Documents/github/appsdk", home));
-        if p.exists() {
-            return Some(p);
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&candidate)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|error| {
+            format!(
+                "APPSDK_UPSTREAM_REPO_INVALID:{}:{}",
+                candidate.display(),
+                error
+            )
+        })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "APPSDK_UPSTREAM_REPO_INVALID:{}{}",
+            candidate.display(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", detail)
+            }
+        ));
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return Err(format!(
+            "APPSDK_UPSTREAM_REPO_INVALID:{}:git returned no repository root",
+            candidate.display()
+        ));
+    }
+    fs::canonicalize(Path::new(&root)).map_err(|error| {
+        format!(
+            "APPSDK_UPSTREAM_REPO_INVALID:{}:{}",
+            candidate.display(),
+            error
+        )
+    })
+}
+
+fn select_bug_store(root: &Path, explicit_upstream: bool) -> Result<PathBuf, String> {
+    if explicit_upstream {
+        resolve_upstream_repo()
+    } else {
+        Ok(root.to_path_buf())
+    }
+}
+
+fn distinct_bug_store(left: &Path, right: &Path) -> bool {
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left != right
+}
+
+fn run_git_bug_read<F>(mut run: F, expect_output: bool) -> std::io::Result<Output>
+where
+    F: FnMut() -> std::io::Result<Output>,
+{
+    const MAX_ATTEMPTS: usize = 5;
+    for attempt in 0..MAX_ATTEMPTS {
+        let output = run()?;
+        if (output.status.success() && (!expect_output || !output.stdout.is_empty()))
+            || attempt + 1 == MAX_ATTEMPTS
+        {
+            return Ok(output);
         }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // git-bug 0.10.1 can expose an empty lock owner as this parse error
+        // while another read is releasing the repository lock.
+        if !stderr.contains("already locked")
+            && !stderr.contains("git-bug/lock")
+            && !stderr.contains("strconv.Atoi: parsing \"\": invalid syntax")
+            && !(expect_output && output.status.success())
+        {
+            return Ok(output);
+        }
+        thread::sleep(Duration::from_millis(25 * (attempt as u64 + 1)));
     }
-    None
+    unreachable!("read retry loop always returns an output")
 }
 
 fn handle_bug_command<I>(root: &Path, mut args: I)
@@ -9821,8 +9907,6 @@ where
         }
     };
 
-    ensure_identity(root);
-
     match sub.as_str() {
         "new" => {
             let mut title: Option<String> = None;
@@ -9862,7 +9946,7 @@ where
             let message_str = message.unwrap_or_else(|| "".to_string());
 
             let work_dir = if upstream {
-                resolve_upstream_repo().unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+                resolve_upstream_repo().unwrap_or_else(|error| fail(error))
             } else {
                 root.to_path_buf()
             };
@@ -9971,14 +10055,7 @@ where
                 }
             }
 
-            let upstream_repo = resolve_upstream_repo();
-            let work_dir = if upstream {
-                upstream_repo
-                    .clone()
-                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
-            } else {
-                root.to_path_buf()
-            };
+            let work_dir = select_bug_store(root, upstream).unwrap_or_else(|error| fail(error));
 
             let build_cmd = |dir: &Path| {
                 let mut cmd = Command::new(&git_bug);
@@ -10011,23 +10088,32 @@ where
                 cmd
             };
 
-            let mut output = build_cmd(&work_dir)
-                .output()
+            let mut output = run_git_bug_read(|| build_cmd(&work_dir).output(), format_json)
                 .unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+
+            // Reads may originate in a client checkout while the shared AppSDK
+            // bug store is locked or contains the requested issue. Keep the
+            // local store as the first choice, and only use the configured
+            // upstream store as an explicit read fallback. Writes never take
+            // this path.
             if !upstream {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let is_empty = stdout.is_empty() || (format_json && stdout == "[]");
-                if (!output.status.success() || is_empty) && query.is_some() {
-                    if let Some(ref up_dir) = upstream_repo {
-                        if up_dir != root {
-                            if let Ok(up_out) = build_cmd(up_dir).output() {
-                                if up_out.status.success() {
-                                    let up_stdout =
-                                        String::from_utf8_lossy(&up_out.stdout).trim().to_string();
-                                    if !up_stdout.is_empty() && (!format_json || up_stdout != "[]")
-                                    {
-                                        output = up_out;
-                                    }
+                let local_stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let local_empty = local_stdout.is_empty() || (format_json && local_stdout == "[]");
+                if !output.status.success() || (query.is_some() && local_empty) {
+                    if let Ok(upstream_dir) = resolve_upstream_repo() {
+                        if distinct_bug_store(&work_dir, &upstream_dir) {
+                            if let Ok(upstream_output) =
+                                run_git_bug_read(|| build_cmd(&upstream_dir).output(), format_json)
+                            {
+                                let upstream_stdout =
+                                    String::from_utf8_lossy(&upstream_output.stdout)
+                                        .trim()
+                                        .to_string();
+                                if upstream_output.status.success()
+                                    && !upstream_stdout.is_empty()
+                                    && (!format_json || upstream_stdout != "[]")
+                                {
+                                    output = upstream_output;
                                 }
                             }
                         }
@@ -10060,14 +10146,7 @@ where
                     _ => {}
                 }
             }
-            let upstream_repo = resolve_upstream_repo();
-            let work_dir = if upstream {
-                upstream_repo
-                    .clone()
-                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
-            } else {
-                root.to_path_buf()
-            };
+            let work_dir = select_bug_store(root, upstream).unwrap_or_else(|error| fail(error));
 
             let run_show = |dir: &Path| {
                 let mut cmd = Command::new(&git_bug);
@@ -10079,14 +10158,17 @@ where
                 cmd.output()
             };
 
-            let mut output =
-                run_show(&work_dir).unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+            let mut output = run_git_bug_read(|| run_show(&work_dir), format_json)
+                .unwrap_or_else(|_| fail("GIT_BUG_EXECUTION_FAILED"));
+
             if !upstream && !output.status.success() {
-                if let Some(ref up_dir) = upstream_repo {
-                    if up_dir != root {
-                        if let Ok(up_out) = run_show(up_dir) {
-                            if up_out.status.success() {
-                                output = up_out;
+                if let Ok(upstream_dir) = resolve_upstream_repo() {
+                    if distinct_bug_store(&work_dir, &upstream_dir) {
+                        if let Ok(upstream_output) =
+                            run_git_bug_read(|| run_show(&upstream_dir), format_json)
+                        {
+                            if upstream_output.status.success() {
+                                output = upstream_output;
                             }
                         }
                     }
@@ -10126,14 +10208,7 @@ where
             let message = msg.unwrap_or_else(|| {
                 fail("USAGE: appsdk bug comment <id> [-m] <message> [--upstream]")
             });
-            let upstream_repo = resolve_upstream_repo();
-            let work_dir = if upstream {
-                upstream_repo
-                    .clone()
-                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
-            } else {
-                root.to_path_buf()
-            };
+            let work_dir = select_bug_store(root, upstream).unwrap_or_else(|error| fail(error));
 
             let run_comment = |dir: &Path| {
                 ensure_identity(dir);
@@ -10191,11 +10266,8 @@ where
                 notes
             };
 
-            let upstream_repo = resolve_upstream_repo();
             let target_dir = if upstream {
-                upstream_repo
-                    .clone()
-                    .unwrap_or_else(|| fail("APPSDK_UPSTREAM_REPO_NOT_FOUND"))
+                resolve_upstream_repo().unwrap_or_else(|error| fail(error))
             } else {
                 root.to_path_buf()
             };
@@ -11276,27 +11348,40 @@ fn open_bugs_json(root: &Path) -> Result<Vec<Value>, String> {
         Ok(path) => path,
         Err(err) => return Err(err),
     };
-    let out = match Command::new(&git_bug)
-        .args(["bug", "--status", "open", "-f", "json"])
-        .current_dir(root)
-        .output()
-    {
-        Ok(out) if out.status.success() => out,
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(if err.is_empty() {
-                format!(
-                    "GIT_BUG_OPEN_READ_FAILED: exit={}",
-                    out.status.code().unwrap_or(-1)
-                )
-            } else {
-                format!("GIT_BUG_OPEN_READ_FAILED:{}", err)
-            });
-        }
-        Err(err) => {
-            return Err(format!("GIT_BUG_EXECUTION_FAILED:{}", err));
-        }
+    let read = |dir: &Path| {
+        Command::new(&git_bug)
+            .args(["bug", "--status", "open", "-f", "json"])
+            .current_dir(dir)
+            .output()
     };
+    let mut out = run_git_bug_read(|| read(root), true)
+        .map_err(|err| format!("GIT_BUG_EXECUTION_FAILED:{}", err))?;
+
+    // Long-horizon status is a read path too. If a client checkout is holding
+    // its git-bug lock, consult the configured AppSDK store after the local
+    // attempt; never use this fallback for mutations.
+    if !out.status.success() {
+        if let Ok(upstream_dir) = resolve_upstream_repo() {
+            if distinct_bug_store(root, &upstream_dir) {
+                if let Ok(upstream_out) = run_git_bug_read(|| read(&upstream_dir), true) {
+                    if upstream_out.status.success() {
+                        out = upstream_out;
+                    }
+                }
+            }
+        }
+    }
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!(
+                "GIT_BUG_OPEN_READ_FAILED: exit={}",
+                out.status.code().unwrap_or(-1)
+            )
+        } else {
+            format!("GIT_BUG_OPEN_READ_FAILED:{}", err)
+        });
+    }
     let mut bugs: Vec<Value> = serde_json::from_slice(&out.stdout)
         .map_err(|e| format!("GIT_BUG_OPEN_JSON_INVALID:{}", e))?;
     let rank = |bug: &Value| -> u8 {

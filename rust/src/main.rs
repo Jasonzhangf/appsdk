@@ -9986,7 +9986,11 @@ fn assert_bug_tracker_triage_evidence(
     let reopened_from = triage
         .get("reopened_from_issue_id")
         .unwrap_or_else(|| fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING"));
-    let reopened_from_id = reopened_from.as_str();
+    let reopened_from_id = match reopened_from {
+        Value::Null => None,
+        Value::String(value) => Some(value.as_str()),
+        _ => fail("BUG_TRIAGE_REOPENED_SOURCE_INVALID"),
+    };
     if mode == "historical_legacy" {
         if !legacy_issue {
             fail("BUG_TRIAGE_LEGACY_ID_MISMATCH");

@@ -3807,6 +3807,21 @@ esac
     assert!(String::from_utf8_lossy(&non_boolean_query_result.stderr)
         .contains("BUG_TRIAGE_QUERY_MISSING"));
 
+    let mut invalid_reopened_source_type = valid_input.clone();
+    invalid_reopened_source_type["worktree"]["bug_triage"]["reopened_from_issue_id"] =
+        Value::Bool(false);
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&invalid_reopened_source_type).unwrap() + "\n",
+    )
+    .unwrap();
+    let invalid_reopened_source_type_result = produce(&input_path);
+    assert!(!invalid_reopened_source_type_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid_reopened_source_type_result.stderr)
+            .contains("BUG_TRIAGE_REOPENED_SOURCE_INVALID")
+    );
+
     let mut forged_query = valid_input.clone();
     forged_query["worktree"]["bug_triage"]["query"] =
         Value::String("appsdk bug list -q prefixissue-producer-1suffix".into());

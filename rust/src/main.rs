@@ -4445,7 +4445,7 @@ fn assert_produced_record_shapes(targets: &[(PathBuf, Value)], module_id: &str) 
         fail("PRODUCER_RECORD_SCHEMA_INVALID");
     }
     let issue_id = producer_issue(worktree, "/issue_id", "PRODUCER_RECORD_SCHEMA_INVALID");
-    assert_bug_tracker_triage_evidence(worktree, &issue_id);
+    assert_bug_tracker_triage_evidence(worktree, &issue_id, None);
 
     let reproduction = &targets[1].1;
     for path in [
@@ -4778,7 +4778,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     {
         fail("BUG_TRIAGE_MISSING");
     }
-    assert_bug_tracker_triage_evidence(worktree, &worktree_issue);
+    assert_bug_tracker_triage_evidence(worktree, &worktree_issue, Some(root));
     if goal
         .get("issue_id")
         .and_then(Value::as_str)
@@ -6082,7 +6082,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
     }
-    assert_bug_tracker_triage_evidence(&worktree, issue_id);
+    assert_bug_tracker_triage_evidence(&worktree, issue_id, None);
     if record_str(&reproduction, "/worktree_id", &reproduction_name)
         != record_str(&worktree, "/worktree_id", &worktree_name)
         || record_str(&candidate, "/worktree_id", &candidate_name)
@@ -9904,13 +9904,67 @@ fn locate_git_bug_binary() -> Result<PathBuf, String> {
     Err("GIT_BUG_NOT_FOUND: please run `appsdk setup-deps` to install git-bug".into())
 }
 
-fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
+fn bug_record_matches_identity(record: &Value, issue_id: &str) -> bool {
+    record.get("human_id").and_then(Value::as_str) == Some(issue_id)
+        || record.get("id").and_then(Value::as_str) == Some(issue_id)
+}
+
+fn query_bug_record(root: &Path, issue_id: &str) -> Result<Value, String> {
+    let git_bug = locate_git_bug_binary()?;
+    let run = |dir: &Path| {
+        Command::new(&git_bug)
+            .args(["bug", "show", issue_id, "-f", "json"])
+            .current_dir(dir)
+            .output()
+    };
+    let mut output = run_git_bug_read(|| run(root), true)
+        .map_err(|error| format!("BUG_TRIAGE_QUERY_EXECUTION_FAILED:{error}"))?;
+    if !output.status.success() {
+        if let Ok(upstream_dir) = resolve_upstream_repo() {
+            if distinct_bug_store(root, &upstream_dir) {
+                if let Ok(upstream_output) = run_git_bug_read(|| run(&upstream_dir), true) {
+                    if upstream_output.status.success() {
+                        output = upstream_output;
+                    }
+                }
+            }
+        }
+    }
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!(
+                "BUG_TRIAGE_QUERY_FAILED:{}:exit={}",
+                issue_id,
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            format!("BUG_TRIAGE_QUERY_FAILED:{}:{}", issue_id, detail)
+        });
+    }
+    let record: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("BUG_TRIAGE_QUERY_INVALID_JSON:{}:{error}", issue_id))?;
+    if !bug_record_matches_identity(&record, issue_id) {
+        return Err(format!("BUG_TRIAGE_QUERY_IDENTITY_MISMATCH:{issue_id}"));
+    }
+    Ok(record)
+}
+
+fn assert_bug_tracker_triage_evidence(
+    worktree: &Value,
+    issue_id: &str,
+    real_query_root: Option<&Path>,
+) {
     let triage = worktree.get("bug_triage");
+    let exempt_issue = issue_id.is_empty() || issue_id == "none" || issue_id.starts_with("legacy-");
     if triage.is_none() {
-        if !issue_id.is_empty() && issue_id != "none" && !issue_id.starts_with("legacy-") {
+        if !exempt_issue {
             fail("BUG_TRIAGE_MISSING");
         }
         return;
+    }
+    if exempt_issue {
+        fail("BUG_TRIAGE_UNEXPECTED_FOR_EXEMPT_ISSUE");
     }
 
     let triage = triage.unwrap();
@@ -9918,24 +9972,40 @@ fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
         fail("INVALID_BUG_TRIAGE");
     }
     let mode = triage.get("mode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(mode, "new_confirmed" | "reopened" | "historical_legacy") {
+    if !matches!(mode, "new_confirmed" | "reopened") {
         fail("BUG_TRIAGE_MODE_INVALID");
     }
     if triage.get("query_executed") != Some(&Value::Bool(true)) {
         fail("BUG_TRIAGE_QUERY_MISSING");
     }
     let query = triage.get("query").and_then(Value::as_str).unwrap_or("");
-    if query.is_empty() || !query.contains(issue_id) {
+    if query.is_empty() || !query.split_whitespace().any(|token| token == issue_id) {
         fail("BUG_TRIAGE_QUERY_UNBOUND");
     }
     let reopened_from = triage
         .get("reopened_from_issue_id")
         .unwrap_or_else(|| fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING"));
-    if !reopened_from.is_null() && reopened_from.as_str().is_none_or(|value| value.is_empty()) {
-        fail("BUG_TRIAGE_REOPENED_SOURCE_INVALID");
+    let reopened_from_id = reopened_from.as_str();
+    if mode == "reopened" {
+        let Some(reopened_from_id) = reopened_from_id.filter(|value| !value.is_empty()) else {
+            fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
+        };
+        if reopened_from_id == issue_id
+            || !query
+                .split_whitespace()
+                .any(|token| token == reopened_from_id)
+        {
+            fail("BUG_TRIAGE_REOPENED_QUERY_UNBOUND");
+        }
+    } else if reopened_from_id.is_some() {
+        fail("BUG_TRIAGE_REOPENED_SOURCE_UNEXPECTED");
     }
-    if mode == "reopened" && reopened_from.as_str().is_none() {
-        fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
+
+    if let Some(root) = real_query_root {
+        query_bug_record(root, issue_id).unwrap_or_else(|error| fail(error));
+        if let Some(reopened_from_id) = reopened_from_id {
+            query_bug_record(root, reopened_from_id).unwrap_or_else(|error| fail(error));
+        }
     }
 }
 

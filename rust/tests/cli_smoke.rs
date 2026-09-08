@@ -3710,6 +3710,41 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
         "contract_hash":artifact["contract_hash"]
     })));
     let input_path = root.with_extension("producer-input.json");
+    let fake_bin = root.with_extension("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "bug show")
+    printf '{"human_id":"%s","status":"open","title":"test issue"}\n' "$3"
+    exit 0
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let produce_with = |input: &Path, git_bug: &Path| {
+        Command::new(binary())
+            .args([
+                "produce-lifecycle-records",
+                root_text,
+                "--module",
+                "app-core",
+                "--input",
+                input.to_str().unwrap(),
+            ])
+            .env("GIT_BUG_BIN", git_bug)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+    let produce = |input: &Path| produce_with(input, &fake_git_bug);
     fs::write(
         &input_path,
         serde_json::to_string_pretty(&serde_json::json!({
@@ -3749,14 +3784,7 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
         serde_json::to_string_pretty(&invalid_triage).unwrap() + "\n",
     )
     .unwrap();
-    let invalid_triage_result = run(&[
-        "produce-lifecycle-records",
-        root_text,
-        "--module",
-        "app-core",
-        "--input",
-        input_path.to_str().unwrap(),
-    ]);
+    let invalid_triage_result = produce(&input_path);
     assert!(!invalid_triage_result.status.success());
     assert!(
         String::from_utf8_lossy(&invalid_triage_result.stderr).contains("BUG_TRIAGE_MODE_INVALID"),
@@ -3766,19 +3794,68 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
     assert!(!root
         .join(".appsdk/records/worktree-record-app-core.json")
         .exists());
+    let mut non_boolean_query_flag = valid_input.clone();
+    non_boolean_query_flag["worktree"]["bug_triage"]["query_executed"] =
+        Value::String("true".into());
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&non_boolean_query_flag).unwrap() + "\n",
+    )
+    .unwrap();
+    let non_boolean_query_result = produce(&input_path);
+    assert!(!non_boolean_query_result.status.success());
+    assert!(String::from_utf8_lossy(&non_boolean_query_result.stderr)
+        .contains("BUG_TRIAGE_QUERY_MISSING"));
+
+    let mut forged_query = valid_input.clone();
+    forged_query["worktree"]["bug_triage"]["query"] =
+        Value::String("appsdk bug list -q prefixissue-producer-1suffix".into());
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&forged_query).unwrap() + "\n",
+    )
+    .unwrap();
+    let forged_query_result = produce(&input_path);
+    assert!(!forged_query_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&forged_query_result.stderr).contains("BUG_TRIAGE_QUERY_UNBOUND")
+    );
+
+    let mismatched_bin = root.with_extension("mismatched-bin");
+    fs::create_dir_all(&mismatched_bin).unwrap();
+    let mismatched_git_bug = mismatched_bin.join("git-bug");
+    fs::write(
+        &mismatched_git_bug,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "bug show")
+    printf '%s\n' '{"human_id":"different-issue","status":"open"}'
+    exit 0
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&mismatched_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(
         &input_path,
         serde_json::to_string_pretty(&valid_input).unwrap() + "\n",
     )
     .unwrap();
-    let produced = run(&[
-        "produce-lifecycle-records",
-        root_text,
-        "--module",
-        "app-core",
-        "--input",
-        input_path.to_str().unwrap(),
-    ]);
+    let mismatched_result = produce_with(&input_path, &mismatched_git_bug);
+    assert!(!mismatched_result.status.success());
+    assert!(String::from_utf8_lossy(&mismatched_result.stderr)
+        .contains("BUG_TRIAGE_QUERY_IDENTITY_MISMATCH"));
+
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&valid_input).unwrap() + "\n",
+    )
+    .unwrap();
+    let produced = produce(&input_path);
     assert!(
         produced.status.success(),
         "stdout={} stderr={}",
@@ -3825,14 +3902,7 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
         serde_json::json!({"adapter":"appsdk","identity":"appsdk-lifecycle-record-producer"})
     );
     assert_eq!(produced_evidence["exit_status"], 1);
-    let repeated = run(&[
-        "produce-lifecycle-records",
-        root_text,
-        "--module",
-        "app-core",
-        "--input",
-        input_path.to_str().unwrap(),
-    ]);
+    let repeated = produce(&input_path);
     assert!(!repeated.status.success());
     assert!(
         String::from_utf8_lossy(&repeated.stderr).contains("LIFECYCLE_RECORD_EXISTS"),

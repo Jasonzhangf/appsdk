@@ -7833,6 +7833,24 @@ esac
     )
     .unwrap();
 
+    let periodic = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--repeat",
+            "2",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(periodic.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&periodic.stderr).contains("GOAL_PERIODIC_UNSUPPORTED"));
+
     let sub_res = Command::new(binary())
         .args([
             "goal",
@@ -7865,6 +7883,9 @@ esac
     assert!(prompt.contains("Master 专属"));
     assert!(prompt.contains("饱和"));
     assert!(prompt.contains("appsdk bug"));
+    assert_eq!(sub_json["schedule"], "one_shot");
+    assert_eq!(sub_json["repeat_count"], 1);
+    assert!(prompt.contains("一次性 deadline"));
 
     // 4. Check goal status
     let status_res = Command::new(binary())
@@ -7880,6 +7901,24 @@ esac
     assert_eq!(status_json["interval"], "5m");
     assert_eq!(status_json["desired"], "subscribed");
     assert_eq!(status_json["observed"], "subscribed");
+
+    let record_path = root.join(".appsdk-control/long-task-goal.json");
+    let mut record: Value =
+        serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
+    record["subscription_id"] = Value::Null;
+    record["collab_subscription"] = Value::Null;
+    fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let status_reconciled = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(status_reconciled.status.success());
+    let status_reconciled_json: Value = serde_json::from_slice(&status_reconciled.stdout).unwrap();
+    assert_eq!(status_reconciled_json["active"], true);
+    assert_eq!(status_reconciled_json["subscription_id"], "goal-sub-1");
 
     // 5. Check standalone prompt command
     let prompt_res = Command::new(binary())
@@ -7900,6 +7939,7 @@ esac
     let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
     assert!(prompt_text.contains("长程任务目标文档"));
     assert!(prompt_text.contains("10m"));
+    assert!(prompt_text.contains("一次性 deadline"));
 
     // 6. Cancel goal
     let cancel_res = Command::new(binary())
@@ -7910,6 +7950,20 @@ esac
         .output()
         .unwrap();
     assert!(cancel_res.status.success());
+
+    let cancel_again = Command::new(binary())
+        .args(["goal", "cancel", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(cancel_again.status.success());
+    let cancel_again_json: Value = serde_json::from_slice(&cancel_again.stdout).unwrap();
+    assert_eq!(cancel_again_json["idempotent"], true);
+    assert_eq!(cancel_again_json["status"], "cancelled");
+    assert!(cancel_again_json["cancel_receipt"].is_object());
+    assert!(cancel_again_json["revision"].as_u64().unwrap() >= 3);
 
     let post_cancel_status = run_in(&root, &["goal", "status", "--json"]);
     assert!(post_cancel_status.status.success());
@@ -8161,6 +8215,33 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     assert!(marker.exists());
 
     fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn goal_stale_lock_is_recovered_after_owner_exit() {
+    let root = temp_root("goal-stale-lock");
+    let control_dir = root.join(".appsdk-control");
+    fs::create_dir_all(&control_dir).unwrap();
+    let mut exited = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let stale_pid = exited.id();
+    assert!(exited.wait().unwrap().success());
+    let lock_path = control_dir.join("long-task-goal.lock");
+    fs::write(
+        &lock_path,
+        format!("pid={} owner=crashed-goal-worker\n", stale_pid),
+    )
+    .unwrap();
+
+    let status = run_in(&root, &["goal", "status", "--json"]);
+    assert!(status.status.success());
+    let payload: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(payload["error"], "GOAL_RECORD_NOT_FOUND");
+    assert!(!lock_path.exists());
+
     fs::remove_dir_all(root).unwrap();
 }
 

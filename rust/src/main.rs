@@ -1761,11 +1761,42 @@ fn safe_module_artifact_path(
     {
         fail(format!("INVALID_MODULE_ARTIFACT_PATH:{}", module_id));
     }
-    let target = lib_root.join(candidate);
-    if target.starts_with(&lib_root) {
-        target
+    let project_target = root.join(candidate);
+    let legacy_target = lib_root.join(candidate);
+    assert_no_symlink_components(root, &project_target, "module_artifact");
+    assert_no_symlink_components(root, &legacy_target, "module_artifact");
+    // Current project contracts declare paths from the project root. Keep the
+    // historical module-lib-relative form for existing generated contracts.
+    let generated_root = required_str(
+        project,
+        "/governance/generated_root",
+        "INVALID_GOVERNANCE_CONTRACT",
+    )
+    .trim_end_matches("/**")
+    .trim_end_matches('/');
+    let project_relative = relative.trim_end_matches('/');
+    let project_declared = registry_path_matches(generated_root, project_relative)
+        || project
+            .get("modules")
+            .and_then(Value::as_array)
+            .and_then(|modules| {
+                modules.iter().find(|module| {
+                    module.get("module_id").and_then(Value::as_str) == Some(module_id)
+                })
+            })
+            .and_then(|module| module.get("generated_outputs"))
+            .and_then(Value::as_array)
+            .is_some_and(|outputs| {
+                outputs.iter().any(|output| {
+                    output
+                        .as_str()
+                        .is_some_and(|pattern| registry_path_matches(pattern, project_relative))
+                })
+            });
+    if project_declared {
+        project_target
     } else {
-        fail(format!("INVALID_MODULE_ARTIFACT_PATH:{}", module_id));
+        legacy_target
     }
 }
 
@@ -1811,14 +1842,24 @@ fn collect_files(root: &Path, prefix: &Path, label: &str, files: &mut Vec<(PathB
     });
     for entry in entries {
         let entry = entry.unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)));
-        if entry
+        let entry_type = entry
             .file_type()
-            .unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)))
-            .is_symlink()
+            .unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)));
+        let path = entry.path();
+        // npm dependency trees are generated inputs; their .bin entries are
+        // ordinary symlinks and must not contaminate source ownership hashes.
+        let relative = path
+            .strip_prefix(prefix)
+            .unwrap_or_else(|_| fail(format!("HASH_TREE_PREFIX:{}", label)));
+        if relative
+            .components()
+            .any(|component| component.as_os_str().to_str() == Some("node_modules"))
         {
+            continue;
+        }
+        if entry_type.is_symlink() {
             fail(format!("HASH_TREE_SYMLINK:{}", label));
         }
-        let path = entry.path();
         if path.is_dir() {
             collect_files(&path, prefix, label, files);
         } else if path.is_file() {

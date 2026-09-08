@@ -3552,6 +3552,120 @@ fn development_dependencies_require_current_artifacts_and_freeze_order() {
 }
 
 #[test]
+fn compile_resolves_project_artifact_paths_and_normal_node_modules_links() {
+    let root = temp_root("project-artifact-path-and-node-modules");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(&goal_path, serde_json::to_vec_pretty(&goal).unwrap()).unwrap();
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    let module = &mut project["modules"][0];
+    module["module_id"] = Value::String("relay-service".into());
+    module["source_owner"] = Value::String("relay-service".into());
+    module["owned_paths"] = serde_json::json!(["services/relay/**", "protocol/relay/**"]);
+    module["active_artifact"] = Value::String("active/lib/relay-service".into());
+    module["generated_outputs"] = serde_json::json!([
+        "services/relay/dist/**",
+        "generated/modules/relay-service/**"
+    ]);
+    module["contract_paths"] = serde_json::json!(["docs/relay-service.md"]);
+    module["build"] = serde_json::json!({
+        "program": "sh",
+        "args": [
+            "-c",
+            "mkdir -p generated/modules/relay-service/lib && printf relay > generated/modules/relay-service/lib/relay.tar"
+        ],
+        "working_directory": "."
+    });
+    module["artifact_paths"] = serde_json::json!(["generated/modules/relay-service/lib/relay.tar"]);
+    module["regression"]["input_paths"] = serde_json::json!(["services/relay/**"]);
+    fs::create_dir_all(root.join("services/relay/src")).unwrap();
+    fs::create_dir_all(root.join("services/relay/node_modules/typescript/bin")).unwrap();
+    fs::create_dir_all(root.join("services/relay/node_modules/.bin")).unwrap();
+    fs::write(root.join("services/relay/src/index.ts"), "export {}\n").unwrap();
+    fs::write(
+        root.join("services/relay/node_modules/typescript/bin/tsc"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+    symlink(
+        "../typescript/bin/tsc",
+        root.join("services/relay/node_modules/.bin/tsc"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("protocol/relay")).unwrap();
+    fs::write(root.join("protocol/relay/protocol.ts"), "export {}\n").unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/relay-service.md"), "relay contract\n").unwrap();
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    pin_test_lock(root_text);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    project = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+
+    let compiled = run(&["compile", root_text]);
+    assert!(
+        compiled.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let artifact_path = root.join("generated/modules/relay-service/module.compiled.json");
+    let artifact: Value = serde_json::from_slice(&fs::read(&artifact_path).unwrap()).unwrap();
+    assert_eq!(
+        artifact["artifacts"][0]["path"],
+        "generated/modules/relay-service/lib/relay.tar"
+    );
+    assert!(root
+        .join("generated/modules/relay-service/lib/relay.tar")
+        .is_file());
+
+    project["modules"][0]["artifact_paths"] =
+        serde_json::json!(["generated/modules/relay-service/lib/missing.tar"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing = run(&["compile", root_text]);
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("ARTIFACT_PATH_MISSING"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&missing.stdout),
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
+    project["modules"][0]["artifact_paths"] = serde_json::json!(["../relay.tar"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let wrong = run(&["compile", root_text]);
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("INVALID_MODULE_ARTIFACT_PATH"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
     let root = temp_root("positive");
     let root_text = root.to_str().unwrap();

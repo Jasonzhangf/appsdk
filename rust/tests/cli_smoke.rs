@@ -10103,6 +10103,70 @@ esac
 }
 
 #[test]
+fn goal_status_reconciles_armed_subscription_after_recovery_required() {
+    let root = temp_root("goal-status-recovery-reconciliation");
+    fs::create_dir_all(root.join(".appsdk-control")).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "notify status")
+    printf '%s\n' '{"subscriptions":[{"id":"sub-recovered","worker_id":"master-peer","event":"deadline","subject":"goal:retained-subject","status":"armed"}]}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        root.join(".appsdk-control/long-task-goal.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "goal_id": "sha256:current-goal",
+            "goal_path": "long-task.md",
+            "subject": "goal:retained-subject",
+            "desired": "recovery_required",
+            "observed": "unknown",
+            "active": false,
+            "collab_subscribed": true,
+            "collab_subscription": null,
+            "subscription_id": null,
+            "remote_state": "unknown",
+            "error": "GOAL_STATUS_SUBSCRIPTION_ID_MISSING",
+            "revision": 3
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["active"], true);
+    assert_eq!(status_json["desired"], "subscribed");
+    assert_eq!(status_json["observed"], "subscribed");
+    assert_eq!(status_json["subscription_id"], "sub-recovered");
+    assert_eq!(status_json["record"]["subject"], "goal:retained-subject");
+    assert!(status_json["record"]["error"].is_null());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     let root = temp_root("goal-persistence-failure");
     fs::create_dir_all(&root).unwrap();

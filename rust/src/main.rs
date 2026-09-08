@@ -12571,7 +12571,10 @@ where
             let old_record = record.clone();
             let subscription_id = goal_record_subscription_id(&record);
             let mut reconcile_error = None;
-            if record["desired"].as_str() == Some("subscribed") {
+            if matches!(
+                record["desired"].as_str(),
+                Some("subscribed" | "recovery_required")
+            ) {
                 let by_id = subscription_id
                     .as_deref()
                     .map(|id| goal_subscription_status(root, id));
@@ -12582,8 +12585,10 @@ where
                         record["remote_state"] = Value::String(remote_status.clone());
                         record["collab_subscription"] = remote_record;
                         if remote_status == "armed" {
+                            record["desired"] = Value::String("subscribed".into());
                             record["observed"] = Value::String("subscribed".into());
                             record["active"] = Value::Bool(true);
+                            record["collab_subscribed"] = Value::Bool(true);
                             record["error"] = Value::Null;
                         } else {
                             let error = format!(
@@ -12620,8 +12625,10 @@ where
                                     record["subject"].as_str().map(str::to_owned);
                                 record["subscription_id"] = Value::String(resolved_id);
                                 record["remote_state"] = Value::String(remote_status);
+                                record["desired"] = Value::String("subscribed".into());
                                 record["observed"] = Value::String("subscribed".into());
                                 record["active"] = Value::Bool(true);
+                                record["collab_subscribed"] = Value::Bool(true);
                                 record["collab_subscription"] = remote_record;
                                 record["error"] = Value::Null;
                                 if retained_subject.as_deref() != Some(matched_subject.as_str()) {

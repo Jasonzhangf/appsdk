@@ -576,7 +576,7 @@ fn bootstrap_contracts(root: &Path) {
     "module_id": "app-core",
     "status": "active",
     "owner": "app-core",
-    "owned_paths": ["playground/experiments/**", "tests/core/**"],
+    "owned_paths": ["playground/experiments/**", "protected/source/**", "tests/core/**"],
     "forbidden_paths": ["active/lib/**", "protected/**", "generated/**"],
     "verification_gates": ["fix_lifecycle_graph", "mainline_merge_identity"]
   }]
@@ -989,6 +989,147 @@ fn assert_governance_maps(root: &Path) {
                     }
                 }
             }
+        }
+    }
+}
+
+fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id: &str) {
+    for name in GOVERNANCE_MAP_NAMES {
+        assert_no_symlink_components(
+            root,
+            &root.join(".appsdk/maps").join(name),
+            "lifecycle_producer_map",
+        );
+    }
+    assert_no_symlink_components(
+        root,
+        &root.join(".appsdk/maps/module-registry.json"),
+        "lifecycle_producer_module_registry",
+    );
+    assert_governance_maps(root);
+    // The producer's entries are compiled into the SDK. A project may extend
+    // maps for other features, but it cannot rewrite or remove this contract.
+    let mut maps = std::collections::HashMap::new();
+    for name in GOVERNANCE_MAP_NAMES {
+        let path = root.join(".appsdk/maps").join(name);
+        assert_no_symlink_components(root, &path, "lifecycle_producer_map");
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(&path)
+                .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_MISSING:{}", name))),
+        )
+        .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name)));
+        let key = match name {
+            "resource-map.json" => "resources",
+            "function-map.json" => "functions",
+            "mainline-call-map.json" => "edges",
+            "verification-map.json" => "gates",
+            _ => unreachable!(),
+        };
+        if value.get("schema_version").and_then(Value::as_u64) != Some(1)
+            || value
+                .get(key)
+                .and_then(Value::as_array)
+                .is_none_or(|items| items.is_empty())
+        {
+            fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name));
+        }
+        maps.insert(name, value);
+    }
+    for (name, key) in [
+        ("resource-map.json", "resources"),
+        ("function-map.json", "functions"),
+        ("mainline-call-map.json", "edges"),
+        ("verification-map.json", "gates"),
+    ] {
+        let actual = maps
+            .get(name)
+            .unwrap()
+            .get(key)
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let canonical: Value = serde_json::from_str(canonical_governance_map(name))
+            .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name)));
+        let required = canonical.get(key).unwrap().as_array().unwrap();
+        for entry in required.iter().filter(|entry| match name {
+            "resource-map.json" => entry
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    matches!(
+                        id,
+                        "lifecycle_record_producer_input"
+                            | "fix_worktree"
+                            | "fix_evidence_set"
+                            | "fix_reproduction"
+                    )
+                }),
+            "function-map.json" => {
+                entry.get("function_id").and_then(Value::as_str)
+                    == Some("lifecycle_record_producer")
+            }
+            "mainline-call-map.json" => {
+                entry.get("chain_id").and_then(Value::as_str)
+                    == Some("lifecycle-record-production-v1")
+            }
+            "verification-map.json" => entry
+                .get("gate_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| matches!(id, "worktree_clean" | "baseline_reproduced")),
+            _ => false,
+        }) {
+            if !actual.iter().any(|candidate| candidate == entry) {
+                fail(format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{}", name));
+            }
+        }
+    }
+
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    assert_no_symlink_components(root, &registry_path, "lifecycle_producer_module_registry");
+    let registry: Value = serde_json::from_str(
+        &fs::read_to_string(&registry_path)
+            .unwrap_or_else(|_| fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID"));
+    if registry.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID");
+    }
+    let registry_modules = registry
+        .get("modules")
+        .and_then(Value::as_array)
+        .filter(|modules| !modules.is_empty())
+        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID"));
+    let project_module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    let registered = registry_modules
+        .iter()
+        .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISSING"));
+    if registered.get("status").and_then(Value::as_str) != Some("active")
+        || registered.get("owner").and_then(Value::as_str)
+            != project_module.get("source_owner").and_then(Value::as_str)
+    {
+        fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH");
+    }
+    let registered_paths = registered
+        .get("owned_paths")
+        .and_then(Value::as_array)
+        .filter(|paths| !paths.is_empty())
+        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID"));
+    for path in project_module
+        .get("owned_paths")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"))
+    {
+        if !registered_paths.iter().any(|candidate| candidate == path) {
+            fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH");
         }
     }
 }
@@ -3914,13 +4055,372 @@ fn producer_stable_id(prefix: &str, value: &Value) -> String {
     )
 }
 
+fn producer_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
+    root.join(".appsdk")
+        .join("transactions")
+        .join(format!("producer-{}", module_id))
+}
+
+fn producer_record_transaction_recover(
+    root: &Path,
+    module_id: &str,
+    input_hash: &str,
+) -> Option<Vec<(PathBuf, Value)>> {
+    let transaction = producer_transaction_dir(root, module_id);
+    if !transaction.exists() {
+        return None;
+    }
+    assert_no_symlink_components(root, &transaction, "lifecycle_producer_transaction");
+    let marker_path = transaction.join("marker.json");
+    if !marker_path.is_file() {
+        // No commit marker means staging never became durable. It is safe to
+        // discard that incomplete transaction and run the producer again.
+        fs::remove_dir_all(&transaction)
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
+        return None;
+    }
+    let marker: Value = serde_json::from_str(
+        &fs::read_to_string(&marker_path)
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_MARKER_INVALID")),
+    )
+    .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+    if marker.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || marker.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || marker.get("input_hash").and_then(Value::as_str) != Some(input_hash)
+        || marker.get("phase").and_then(Value::as_str) != Some("commit")
+    {
+        fail("PRODUCER_TRANSACTION_MARKER_MISMATCH");
+    }
+    let entries = marker
+        .get("records")
+        .and_then(Value::as_array)
+        .filter(|entries| entries.len() == 3)
+        .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+    let records_root = root.join(".appsdk").join("records");
+    let expected_fixed_targets = [
+        records_root.join(module_record_name("worktree-record", module_id)),
+        records_root.join(module_record_name("reproduction-record", module_id)),
+    ];
+    let expected_evidence_root = records_root.join("evidence").join(module_id);
+    let mut recovered = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let relative = entry
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            || !relative.starts_with(".appsdk/records/")
+        {
+            fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+        }
+        let target = root.join(relative_path);
+        if !target.starts_with(&records_root) {
+            fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+        }
+        if index < expected_fixed_targets.len() {
+            if target != expected_fixed_targets[index] {
+                fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+            }
+        } else if target.parent() != Some(expected_evidence_root.as_path())
+            || target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| {
+                    let Some(digest) = name
+                        .strip_prefix("baseline-")
+                        .and_then(|name| name.strip_suffix(".json"))
+                    else {
+                        return true;
+                    };
+                    digest.len() != 64
+                        || !digest
+                            .chars()
+                            .all(|character| character.is_ascii_hexdigit())
+                })
+        {
+            fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+        }
+        assert_no_symlink_components(root, &target, "lifecycle_producer_record");
+        let staging_name = entry
+            .get("staging")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+            .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+        if staging_name != format!("record-{}.json", index) {
+            fail("PRODUCER_TRANSACTION_MARKER_INVALID");
+        }
+        let expected_hash = entry
+            .get("digest")
+            .and_then(Value::as_str)
+            .filter(|digest| digest.starts_with("sha256:"))
+            .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+        let staging = transaction.join(staging_name);
+        assert_no_symlink_components(root, &staging, "lifecycle_producer_staging");
+        if target.exists() {
+            if file_sha256(&target, "lifecycle_producer_record") != expected_hash {
+                fail("PRODUCER_TRANSACTION_TARGET_CONFLICT");
+            }
+        } else {
+            if !staging.is_file()
+                || file_sha256(&staging, "lifecycle_producer_staging") != expected_hash
+            {
+                fail("PRODUCER_TRANSACTION_STAGING_MISSING");
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+            }
+            fs::hard_link(&staging, &target)
+                .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+        }
+        let bytes =
+            fs::read(&target).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+        let record: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECORD_INVALID"));
+        if index == 2 {
+            let expected_name = format!(
+                "{}.json",
+                producer_string(
+                    &record,
+                    "/evidence_id",
+                    "PRODUCER_TRANSACTION_RECORD_INVALID"
+                )
+            );
+            if target.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+                fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+            }
+        }
+        recovered.push((target, record));
+    }
+    fs::remove_dir_all(&transaction)
+        .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
+    Some(recovered)
+}
+
+fn producer_durable_json(target: &Path, value: &Value, error: &str) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
+        .as_nanos();
+    let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
+    let bytes = (serde_json::to_string_pretty(value).unwrap() + "\n").into_bytes();
+    let result = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .and_then(|mut file| {
+            file.write_all(&bytes)?;
+            file.sync_all()
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+        fail(error);
+    }
+    fs::rename(&staging, target).unwrap_or_else(|_| fail(error));
+    if let Some(parent) = target.parent() {
+        if let Ok(file) = OpenOptions::new().read(true).open(parent) {
+            let _ = file.sync_all();
+        }
+    }
+}
+
+fn producer_commit_records(
+    root: &Path,
+    module_id: &str,
+    input_hash: &str,
+    targets: &[(PathBuf, Value)],
+) {
+    let transaction = producer_transaction_dir(root, module_id);
+    assert_no_symlink_components(root, &transaction, "lifecycle_producer_transaction");
+    fs::create_dir_all(&transaction).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_WRITE_FAILED"));
+    assert_no_symlink_components(root, &transaction, "lifecycle_producer_transaction");
+    let mut entries = Vec::new();
+    for (index, (target, record)) in targets.iter().enumerate() {
+        assert_no_symlink_components(root, target, "lifecycle_producer_record");
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_WRITE_FAILED"));
+        }
+        let staging_name = format!("record-{}.json", index);
+        let staging = transaction.join(&staging_name);
+        let bytes = (serde_json::to_string_pretty(record).unwrap() + "\n").into_bytes();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_WRITE_FAILED"));
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_WRITE_FAILED"));
+        entries.push(serde_json::json!({
+            "target": target.strip_prefix(root).unwrap_or(target).to_string_lossy(),
+            "staging": staging_name,
+            "digest": digest_bytes(&bytes)
+        }));
+    }
+    producer_durable_json(
+        &transaction.join("marker.json"),
+        &serde_json::json!({
+            "schema_version": 1,
+            "module_id": module_id,
+            "input_hash": input_hash,
+            "phase": "commit",
+            "records": entries
+        }),
+        "PRODUCER_TRANSACTION_WRITE_FAILED",
+    );
+    for (index, (target, record)) in targets.iter().enumerate() {
+        let staging = transaction.join(format!("record-{}.json", index));
+        if target.exists() {
+            if file_sha256(target, "lifecycle_producer_record")
+                != digest_bytes(
+                    &(serde_json::to_string_pretty(record).unwrap() + "\n").into_bytes(),
+                )
+            {
+                fail("PRODUCER_TRANSACTION_TARGET_CONFLICT");
+            }
+        } else {
+            fs::hard_link(&staging, target)
+                .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_WRITE_FAILED"));
+        }
+        let _ = fs::remove_file(staging);
+    }
+    fs::remove_dir_all(&transaction)
+        .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
+}
+
+fn assert_produced_record_shapes(targets: &[(PathBuf, Value)], module_id: &str) {
+    if targets.len() != 3 {
+        fail("PRODUCER_RECORD_SET_INVALID");
+    }
+    let worktree = &targets[0].1;
+    for path in [
+        "/worktree_id",
+        "/issue_id",
+        "/module_id",
+        "/base_ref",
+        "/base_commit",
+        "/branch",
+        "/head_commit",
+        "/isolation_mode",
+        "/scope_hash",
+        "/created_at",
+    ] {
+        producer_string(worktree, path, "PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+    producer_bool(worktree, "/initial_clean", "PRODUCER_RECORD_SCHEMA_INVALID");
+    producer_bool(worktree, "/final_clean", "PRODUCER_RECORD_SCHEMA_INVALID");
+    if producer_string(
+        worktree,
+        "/isolation_mode",
+        "PRODUCER_RECORD_SCHEMA_INVALID",
+    ) != "isolated_worktree"
+    {
+        fail("PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+    if producer_string(worktree, "/module_id", "PRODUCER_RECORD_SCHEMA_INVALID") != module_id {
+        fail("PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+    let issue_id = producer_issue(worktree, "/issue_id", "PRODUCER_RECORD_SCHEMA_INVALID");
+    assert_bug_tracker_triage_evidence(worktree, &issue_id);
+
+    let reproduction = &targets[1].1;
+    for path in [
+        "/reproduction_id",
+        "/issue_id",
+        "/module_id",
+        "/worktree_id",
+        "/base_commit",
+        "/baseline_evidence_id",
+        "/first_divergence",
+        "/created_at",
+    ] {
+        producer_string(reproduction, path, "PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+    if reproduction
+        .get("input_hashes")
+        .and_then(Value::as_array)
+        .is_none_or(|values| {
+            values.is_empty() || values.iter().any(|value| value.as_str().is_none())
+        })
+        || reproduction.get("result").and_then(Value::as_str) != Some("reproduced")
+        || producer_string(reproduction, "/module_id", "PRODUCER_RECORD_SCHEMA_INVALID")
+            != module_id
+        || producer_string(reproduction, "/issue_id", "PRODUCER_RECORD_SCHEMA_INVALID") != issue_id
+        || producer_string(
+            reproduction,
+            "/worktree_id",
+            "PRODUCER_RECORD_SCHEMA_INVALID",
+        ) != producer_string(worktree, "/worktree_id", "PRODUCER_RECORD_SCHEMA_INVALID")
+    {
+        fail("PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+
+    let evidence = &targets[2].1;
+    for path in [
+        "/evidence_id",
+        "/issue_id",
+        "/experiment_id",
+        "/phase",
+        "/kind",
+        "/source_commit",
+        "/scope/module_id",
+        "/producer/adapter",
+        "/producer/identity",
+        "/created_at",
+        "/expires_at",
+        "/scope_hash",
+    ] {
+        producer_string(evidence, path, "PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+    if !matches!(
+        evidence.get("phase").and_then(Value::as_str),
+        Some("baseline_reproduction")
+    ) || !matches!(
+        evidence.get("kind").and_then(Value::as_str),
+        Some("red_test" | "sample_replay" | "gate" | "runtime")
+    ) || !matches!(
+        evidence.get("result").and_then(Value::as_str),
+        Some("pass" | "fail")
+    ) || evidence
+        .get("input_hashes")
+        .and_then(Value::as_array)
+        .is_none_or(|values| {
+            values.is_empty() || values.iter().any(|value| value.as_str().is_none())
+        })
+        || producer_string(
+            evidence,
+            "/scope/module_id",
+            "PRODUCER_RECORD_SCHEMA_INVALID",
+        ) != module_id
+        || producer_string(evidence, "/issue_id", "PRODUCER_RECORD_SCHEMA_INVALID") != issue_id
+        || producer_string(evidence, "/source_commit", "PRODUCER_RECORD_SCHEMA_INVALID")
+            != producer_string(worktree, "/base_commit", "PRODUCER_RECORD_SCHEMA_INVALID")
+        || producer_string(evidence, "/evidence_id", "PRODUCER_RECORD_SCHEMA_INVALID")
+            != producer_string(
+                reproduction,
+                "/baseline_evidence_id",
+                "PRODUCER_RECORD_SCHEMA_INVALID",
+            )
+    {
+        fail("PRODUCER_RECORD_SCHEMA_INVALID");
+    }
+}
+
 fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
-    let _producer_lock = producer_lock(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     assert_declared_contracts(root, &project, true);
+    assert_lifecycle_producer_map_binding(root, &project, module_id);
     assert_goal_confirmed(root);
     let goal = read_goal(root);
     let input_file = producer_input_path(root, input_path);
@@ -3931,6 +4431,11 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     if !input.is_object() {
         fail("INVALID_PRODUCER_INPUT");
     }
+    // Validate again after taking the lock so a concurrent map edit cannot be
+    // accepted between the read-only preflight and the record transaction.
+    let _producer_lock = producer_lock(root);
+    assert_declared_contracts(root, &project, true);
+    assert_lifecycle_producer_map_binding(root, &project, module_id);
     if producer_string(&input, "/goal_id", "PRODUCER_GOAL_MISSING")
         != producer_string(&goal, "/goal_id", "INVALID_GOAL_CLARIFICATION_RECORD")
     {
@@ -3948,6 +4453,25 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     let stage = producer_string(module, "/stage", "INVALID_MODULE_CONTRACT");
     if stage == "frozen" || stage == "retired" {
         fail(format!("PRODUCER_MODULE_STAGE_FORBIDDEN:{}", stage));
+    }
+    let input_hash = sha256(&canonical(&input));
+    if let Some(recovered) = producer_record_transaction_recover(root, module_id, &input_hash) {
+        assert_produced_record_shapes(&recovered, module_id);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "module_id": module_id,
+                "goal_id": input["goal_id"],
+                "recovered": true,
+                "records": recovered.iter().map(|(target, record)| serde_json::json!({
+                    "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
+                    "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
+                })).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        );
+        return;
     }
     let worktree = input
         .get("worktree")
@@ -4318,57 +4842,8 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         (targets[1].0.clone(), observed_reproduction),
         (targets[2].0.clone(), observed_baseline),
     ];
-    let evidence_dir = root
-        .join(".appsdk")
-        .join("records")
-        .join("evidence")
-        .join(module_id);
-    fs::create_dir_all(&evidence_dir).unwrap_or_else(|_| fail("RECORD_WRITE_FAILED"));
-    let mut staged = Vec::new();
-    for (target, record) in &targets {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
-            .as_nanos();
-        let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
-        let bytes = (serde_json::to_string_pretty(record).unwrap() + "\n").into_bytes();
-        let write_result = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)
-            .and_then(|mut file| file.write_all(&bytes));
-        if write_result.is_err() {
-            for (existing, _) in &staged {
-                let _ = fs::remove_file(existing);
-            }
-            let _ = fs::remove_file(&staging);
-            fail("RECORD_WRITE_FAILED");
-        }
-        staged.push((staging, target.clone()));
-    }
-    let mut installed = Vec::new();
-    for (staging, target) in &staged {
-        if let Err(error) = fs::hard_link(staging, target) {
-            for installed_target in &installed {
-                let _ = fs::remove_file(installed_target);
-            }
-            for (remaining, _) in &staged {
-                let _ = fs::remove_file(remaining);
-            }
-            fail(format!("RECORD_WRITE_FAILED:{}", error));
-        }
-        if let Err(error) = fs::remove_file(staging) {
-            let _ = fs::remove_file(target);
-            for installed_target in &installed {
-                let _ = fs::remove_file(installed_target);
-            }
-            for (remaining, _) in &staged {
-                let _ = fs::remove_file(remaining);
-            }
-            fail(format!("RECORD_WRITE_FAILED:{}", error));
-        }
-        installed.push(target.clone());
-    }
+    assert_produced_record_shapes(&targets, module_id);
+    producer_commit_records(root, module_id, &input_hash, &targets);
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -9117,16 +9592,21 @@ fn locate_git_bug_binary() -> Result<PathBuf, String> {
 }
 
 fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
-    if issue_id.is_empty() || issue_id == "none" || issue_id.starts_with("legacy-") {
+    let triage = worktree.get("bug_triage");
+    if triage.is_none() {
+        if !issue_id.is_empty() && issue_id != "none" && !issue_id.starts_with("legacy-") {
+            fail("BUG_TRIAGE_MISSING");
+        }
         return;
     }
 
-    let triage = worktree
-        .get("bug_triage")
-        .unwrap_or_else(|| fail("BUG_TRIAGE_MISSING"));
+    let triage = triage.unwrap();
+    if !triage.is_object() {
+        fail("INVALID_BUG_TRIAGE");
+    }
     let mode = triage.get("mode").and_then(Value::as_str).unwrap_or("");
-    if mode.is_empty() {
-        fail("BUG_TRIAGE_MODE_MISSING");
+    if !matches!(mode, "new_confirmed" | "reopened" | "historical_legacy") {
+        fail("BUG_TRIAGE_MODE_INVALID");
     }
     if triage.get("query_executed") != Some(&Value::Bool(true)) {
         fail("BUG_TRIAGE_QUERY_MISSING");
@@ -9135,11 +9615,14 @@ fn assert_bug_tracker_triage_evidence(worktree: &Value, issue_id: &str) {
     if query.is_empty() || !query.contains(issue_id) {
         fail("BUG_TRIAGE_QUERY_UNBOUND");
     }
-    if mode == "reopened" {
-        let reopened_from = triage.get("reopened_from_issue_id").and_then(Value::as_str);
-        if reopened_from.is_none() || reopened_from == Some("") {
-            fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
-        }
+    let reopened_from = triage
+        .get("reopened_from_issue_id")
+        .unwrap_or_else(|| fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING"));
+    if !reopened_from.is_null() && reopened_from.as_str().is_none_or(|value| value.is_empty()) {
+        fail("BUG_TRIAGE_REOPENED_SOURCE_INVALID");
+    }
+    if mode == "reopened" && reopened_from.as_str().is_none() {
+        fail("BUG_TRIAGE_REOPENED_SOURCE_MISSING");
     }
 }
 

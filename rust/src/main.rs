@@ -4061,11 +4061,97 @@ fn producer_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
         .join(format!("producer-{}", module_id))
 }
 
-fn producer_record_transaction_recover(
+fn producer_record_transaction_validate_marker(root: &Path, module_id: &str, input_hash: &str) {
+    let transaction = producer_transaction_dir(root, module_id);
+    let marker_path = transaction.join("marker.json");
+    if !transaction.exists() || !marker_path.is_file() {
+        return;
+    }
+    assert_no_symlink_components(root, &transaction, "lifecycle_producer_transaction");
+    let marker: Value = serde_json::from_str(
+        &fs::read_to_string(&marker_path)
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_MARKER_INVALID")),
+    )
+    .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+    if marker.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || marker.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || marker.get("input_hash").and_then(Value::as_str) != Some(input_hash)
+        || marker.get("phase").and_then(Value::as_str) != Some("commit")
+    {
+        fail("PRODUCER_TRANSACTION_MARKER_MISMATCH");
+    }
+    let entries = marker
+        .get("records")
+        .and_then(Value::as_array)
+        .filter(|entries| entries.len() == 3)
+        .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+    let records_root = root.join(".appsdk").join("records");
+    let expected_fixed_targets = [
+        records_root.join(module_record_name("worktree-record", module_id)),
+        records_root.join(module_record_name("reproduction-record", module_id)),
+    ];
+    let expected_evidence_root = records_root.join("evidence").join(module_id);
+    for (index, entry) in entries.iter().enumerate() {
+        let relative = entry
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            || !relative.starts_with(".appsdk/records/")
+        {
+            fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+        }
+        let target = root.join(relative_path);
+        if index < expected_fixed_targets.len() {
+            if target != expected_fixed_targets[index] {
+                fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+            }
+        } else if target.parent() != Some(expected_evidence_root.as_path())
+            || target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| {
+                    let Some(digest) = name
+                        .strip_prefix("baseline-")
+                        .and_then(|name| name.strip_suffix(".json"))
+                    else {
+                        return true;
+                    };
+                    digest.len() != 64
+                        || !digest
+                            .chars()
+                            .all(|character| character.is_ascii_hexdigit())
+                })
+        {
+            fail("PRODUCER_TRANSACTION_TARGET_INVALID");
+        }
+        let staging_name = entry
+            .get("staging")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+            .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
+        if staging_name != format!("record-{}.json", index) {
+            fail("PRODUCER_TRANSACTION_MARKER_INVALID");
+        }
+    }
+}
+
+fn producer_record_transaction_recover<F>(
     root: &Path,
     module_id: &str,
     input_hash: &str,
-) -> Option<Vec<(PathBuf, Value)>> {
+    validate: F,
+) -> Option<Vec<(PathBuf, Value)>>
+where
+    F: FnOnce(&[(PathBuf, Value)]),
+{
     let transaction = producer_transaction_dir(root, module_id);
     if !transaction.exists() {
         return None;
@@ -4103,6 +4189,7 @@ fn producer_record_transaction_recover(
     ];
     let expected_evidence_root = records_root.join("evidence").join(module_id);
     let mut recovered = Vec::new();
+    let mut pending_links = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         let relative = entry
             .get("target")
@@ -4163,25 +4250,20 @@ fn producer_record_transaction_recover(
             .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
         let staging = transaction.join(staging_name);
         assert_no_symlink_components(root, &staging, "lifecycle_producer_staging");
-        if target.exists() {
+        let bytes = if target.exists() {
             if file_sha256(&target, "lifecycle_producer_record") != expected_hash {
                 fail("PRODUCER_TRANSACTION_TARGET_CONFLICT");
             }
+            fs::read(&target).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"))
         } else {
             if !staging.is_file()
                 || file_sha256(&staging, "lifecycle_producer_staging") != expected_hash
             {
                 fail("PRODUCER_TRANSACTION_STAGING_MISSING");
             }
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
-                    .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
-            }
-            fs::hard_link(&staging, &target)
-                .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
-        }
-        let bytes =
-            fs::read(&target).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+            pending_links.push((staging.clone(), target.clone()));
+            fs::read(&staging).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"))
+        };
         let record: Value = serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECORD_INVALID"));
         if index == 2 {
@@ -4198,6 +4280,18 @@ fn producer_record_transaction_recover(
             }
         }
         recovered.push((target, record));
+    }
+    // Validate the complete staged graph against the current candidate before
+    // publishing any missing records. A mismatch must leave the transaction
+    // available for diagnosis and must not publish a partial graph.
+    validate(&recovered);
+    for (staging, target) in pending_links {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+        }
+        fs::hard_link(&staging, &target)
+            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
     }
     fs::remove_dir_all(&transaction)
         .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
@@ -4414,6 +4508,149 @@ fn assert_produced_record_shapes(targets: &[(PathBuf, Value)], module_id: &str) 
     }
 }
 
+fn assert_recovered_record_bindings(
+    targets: &[(PathBuf, Value)],
+    module_id: &str,
+    issue_id: &str,
+    base_ref: &str,
+    base_commit: &str,
+    head_commit: &str,
+    branch: &str,
+    scope_hash: &str,
+    worktree_id: &str,
+    reproduction_id: &str,
+    baseline_id: &str,
+    input_hashes: &[String],
+    command: &Value,
+    actual_status: i32,
+    output_hash: &str,
+    bug_triage: Option<&Value>,
+) {
+    let worktree = &targets[0].1;
+    if producer_issue(
+        worktree,
+        "/issue_id",
+        "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+    ) != issue_id
+        || producer_string(
+            worktree,
+            "/base_ref",
+            "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+        ) != base_ref
+        || producer_string(
+            worktree,
+            "/base_commit",
+            "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+        ) != base_commit
+        || producer_string(
+            worktree,
+            "/head_commit",
+            "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+        ) != head_commit
+        || producer_string(
+            worktree,
+            "/branch",
+            "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+        ) != branch
+        || producer_string(
+            worktree,
+            "/scope_hash",
+            "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+        ) != scope_hash
+        || producer_string(
+            worktree,
+            "/worktree_id",
+            "PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH",
+        ) != worktree_id
+        || worktree.get("initial_clean") != Some(&Value::Bool(true))
+        || worktree.get("final_clean") != Some(&Value::Bool(true))
+        || bug_triage.is_some_and(|expected| worktree.get("bug_triage") != Some(expected))
+        || bug_triage.is_none() && worktree.get("bug_triage").is_some()
+    {
+        fail("PRODUCER_RECOVERY_WORKTREE_BINDING_MISMATCH");
+    }
+    assert_produced_record_shapes(targets, module_id);
+
+    let reproduction = &targets[1].1;
+    if producer_string(
+        reproduction,
+        "/issue_id",
+        "PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH",
+    ) != issue_id
+        || producer_string(
+            reproduction,
+            "/module_id",
+            "PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH",
+        ) != module_id
+        || producer_string(
+            reproduction,
+            "/worktree_id",
+            "PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH",
+        ) != worktree_id
+        || producer_string(
+            reproduction,
+            "/base_commit",
+            "PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH",
+        ) != base_commit
+        || producer_string(
+            reproduction,
+            "/reproduction_id",
+            "PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH",
+        ) != reproduction_id
+        || reproduction.get("input_hashes") != Some(&serde_json::json!(input_hashes))
+        || producer_string(
+            reproduction,
+            "/baseline_evidence_id",
+            "PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH",
+        ) != baseline_id
+    {
+        fail("PRODUCER_RECOVERY_RECORD_BINDING_MISMATCH");
+    }
+
+    let evidence = &targets[2].1;
+    if producer_string(
+        evidence,
+        "/issue_id",
+        "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
+    ) != issue_id
+        || producer_string(
+            evidence,
+            "/scope/module_id",
+            "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
+        ) != module_id
+        || producer_string(
+            evidence,
+            "/scope_hash",
+            "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
+        ) != scope_hash
+        || producer_string(
+            evidence,
+            "/source_commit",
+            "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
+        ) != base_commit
+        || producer_string(
+            evidence,
+            "/evidence_id",
+            "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
+        ) != baseline_id
+        || evidence.get("input_hashes") != Some(&serde_json::json!(input_hashes))
+        || evidence.get("command") != Some(command)
+        || evidence.get("exit_status").and_then(Value::as_i64) != Some(i64::from(actual_status))
+        || producer_string(
+            evidence,
+            "/output_hash",
+            "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
+        ) != output_hash
+        || evidence.get("producer")
+            != Some(&serde_json::json!({
+                "adapter": "appsdk",
+                "identity": "appsdk-lifecycle-record-producer"
+            }))
+    {
+        fail("PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH");
+    }
+}
+
 fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -4455,23 +4692,24 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         fail(format!("PRODUCER_MODULE_STAGE_FORBIDDEN:{}", stage));
     }
     let input_hash = sha256(&canonical(&input));
-    if let Some(recovered) = producer_record_transaction_recover(root, module_id, &input_hash) {
-        assert_produced_record_shapes(&recovered, module_id);
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": true,
-                "module_id": module_id,
-                "goal_id": input["goal_id"],
-                "recovered": true,
-                "records": recovered.iter().map(|(target, record)| serde_json::json!({
-                    "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
-                    "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
-                })).collect::<Vec<_>>()
-            }))
-            .unwrap()
-        );
-        return;
+    // A durable marker is structurally checked during preflight so malformed
+    // transactions fail with their own diagnostic; record recovery itself is
+    // still delayed until all current-candidate gates have passed below.
+    producer_record_transaction_validate_marker(root, module_id, &input_hash);
+    let records_root = root.join(".appsdk").join("records");
+    if !producer_transaction_dir(root, module_id).exists() {
+        for target in [
+            records_root.join(module_record_name("worktree-record", module_id)),
+            records_root.join(module_record_name("reproduction-record", module_id)),
+        ] {
+            assert_no_symlink_components(root, &target, "record_control");
+            if target.exists() {
+                fail(format!(
+                    "LIFECYCLE_RECORD_EXISTS:{}",
+                    target.strip_prefix(root).unwrap_or(&target).display()
+                ));
+            }
+        }
     }
     let worktree = input
         .get("worktree")
@@ -4484,19 +4722,6 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         .unwrap_or_else(|| fail("PRODUCER_BASELINE_EVIDENCE_MISSING"));
     // These paths are module-stable, so reject a repeated producer call before
     // any later clean-worktree gate can mask the idempotent result.
-    let records_root = root.join(".appsdk").join("records");
-    for target in [
-        records_root.join(module_record_name("worktree-record", module_id)),
-        records_root.join(module_record_name("reproduction-record", module_id)),
-    ] {
-        assert_no_symlink_components(root, &target, "record_control");
-        if target.exists() {
-            fail(format!(
-                "LIFECYCLE_RECORD_EXISTS:{}",
-                target.strip_prefix(root).unwrap_or(&target).display()
-            ));
-        }
-    }
     let expected_scope_hash = producer_scope_hash(root, &project, module, module_id);
     for path in [
         "/worktree_id",
@@ -4578,7 +4803,31 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         "PRODUCER_VCS_UNAVAILABLE",
     );
     if !status.is_empty() {
-        fail("PRODUCER_WORKTREE_DIRTY");
+        let transaction = producer_transaction_dir(root, module_id);
+        let marker_path = transaction.join("marker.json");
+        let transaction_targets = fs::read_to_string(marker_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .and_then(|marker| marker.get("records").cloned())
+            .and_then(|records| records.as_array().cloned())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter_map(|entry| entry.get("target").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            });
+        let transaction_only = status.lines().all(|line| {
+            line.get(3..).map(str::trim).is_some_and(|path| {
+                transaction_targets
+                    .as_ref()
+                    .is_some_and(|targets| targets.iter().any(|target| target == path))
+                    || path.starts_with(&format!(".appsdk/transactions/producer-{}/", module_id))
+            })
+        });
+        if !transaction_only {
+            fail("PRODUCER_WORKTREE_DIRTY");
+        }
     }
     let base_commit = producer_string(worktree, "/base_commit", "INVALID_WORKTREE_RECORD");
     let head_commit = producer_string(worktree, "/head_commit", "INVALID_WORKTREE_RECORD");
@@ -4701,15 +4950,6 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         }),
     );
     let targets = producer_record_targets(root, module_id, &input, &baseline_id);
-    for (target, _) in &targets {
-        assert_no_symlink_components(root, target, "record_control");
-        if target.exists() {
-            fail(format!(
-                "LIFECYCLE_RECORD_EXISTS:{}",
-                target.strip_prefix(root).unwrap_or(target).display()
-            ));
-        }
-    }
     // Validate the declaration before creating a temporary worktree. The
     // baseline checkout must be disposable even when its directory is
     // malformed or absent at the declared source commit.
@@ -4794,6 +5034,57 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ));
+    let bug_triage = worktree.get("bug_triage");
+    if let Some(recovered) =
+        producer_record_transaction_recover(root, module_id, &input_hash, |recovered| {
+            assert_recovered_record_bindings(
+                recovered,
+                module_id,
+                &worktree_issue,
+                &base_ref,
+                &base_commit,
+                &head_commit,
+                &current_branch,
+                &expected_scope_hash,
+                &worktree_id,
+                &reproduction_id,
+                &baseline_id,
+                &input_hashes,
+                &command_declaration,
+                actual_status,
+                &output_hash,
+                bug_triage,
+            );
+        })
+    {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "module_id": module_id,
+                "goal_id": input["goal_id"],
+                "recovered": true,
+                "records": recovered.iter().map(|(target, record)| serde_json::json!({
+                    "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
+                    "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
+                })).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        );
+        return;
+    }
+    for target in [
+        records_root.join(module_record_name("worktree-record", module_id)),
+        records_root.join(module_record_name("reproduction-record", module_id)),
+    ] {
+        assert_no_symlink_components(root, &target, "record_control");
+        if target.exists() {
+            fail(format!(
+                "LIFECYCLE_RECORD_EXISTS:{}",
+                target.strip_prefix(root).unwrap_or(&target).display()
+            ));
+        }
+    }
     let mut observed_worktree = worktree.clone();
     observed_worktree["worktree_id"] = Value::String(worktree_id);
     observed_worktree["base_commit"] = Value::String(base_commit.clone());

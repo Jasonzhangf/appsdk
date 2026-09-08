@@ -7751,6 +7751,50 @@ esac
 }
 
 #[test]
+fn longhorizon_show_rejects_invalid_worker_before_master_match() {
+    let root = temp_root("longhorizon-invalid-master-worker");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    case "${STATUS_VARIANT:-endpoint}" in
+      endpoint) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":false,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      identity) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":false,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      offline) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
+    esac
+    ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true,"pane":"%42"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","pane":"%42"}}' ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    for variant in ["endpoint", "identity", "offline"] {
+        let result = Command::new(binary())
+            .args(["longhorizon", "show", "--json"])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env("STATUS_VARIANT", variant)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "variant={variant}");
+        let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(payload["role"], "unknown", "variant={variant}");
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn longhorizon_show_never_masks_bug_read_failures() {
     let root = temp_root("longhorizon-bug-read");
     fs::create_dir_all(&root).unwrap();

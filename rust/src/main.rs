@@ -9290,35 +9290,35 @@ fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRole {
         }
     }
 
+    let Some(worker) = status["workers"].as_array().and_then(|workers| {
+        workers
+            .iter()
+            .find(|worker| worker["id"].as_str() == Some(peer.as_str()))
+    }) else {
+        return ExecutionRole::Unknown;
+    };
+    let worker_is_live = worker["endpoint_live"].as_bool() == Some(true)
+        && worker["identity_valid"].as_bool() == Some(true)
+        && worker["suspected_offline"].as_bool() == Some(false);
+    if !worker_is_live {
+        return ExecutionRole::Unknown;
+    }
+
     let master_matches_context = collab_master_matches_context(root, &peer, &context);
     if master_matches_context == Some(true) {
         return ExecutionRole::Master;
     }
 
-    if let Some(worker) = status["workers"].as_array().and_then(|workers| {
-        workers
-            .iter()
-            .find(|worker| worker["id"].as_str() == Some(peer.as_str()))
-    }) {
-        let worker_is_live = worker["endpoint_live"].as_bool() == Some(true)
-            && worker["identity_valid"].as_bool() == Some(true)
-            && worker["suspected_offline"].as_bool() == Some(false);
-        if !worker_is_live {
-            return ExecutionRole::Unknown;
-        }
-        return match worker["role"].as_str() {
-            // Collab calls independent peers `peer`; AppSDK exposes that
-            // verified identity as the worker execution view.
-            Some("peer") | Some("worker") => ExecutionRole::Worker,
-            // A valid authoritative master status proves this peer is a worker
-            // when it names a different live master.
-            _ if master_matches_context == Some(false) => ExecutionRole::Worker,
-            // A worker record cannot establish master authority by itself.
-            _ => ExecutionRole::Unknown,
-        };
+    match worker["role"].as_str() {
+        // Collab calls independent peers `peer`; AppSDK exposes that
+        // verified identity as the worker execution view.
+        Some("peer") | Some("worker") => ExecutionRole::Worker,
+        // A valid authoritative master status proves this peer is a worker
+        // when it names a different live master.
+        _ if master_matches_context == Some(false) => ExecutionRole::Worker,
+        // A worker record cannot establish master authority by itself.
+        _ => ExecutionRole::Unknown,
     }
-
-    ExecutionRole::Unknown
 }
 
 fn long_horizon_record(root: &Path) -> Result<Option<Value>, String> {

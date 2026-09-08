@@ -8117,6 +8117,11 @@ fn goal_subscribe_timeout_keeps_explicit_timeout_error() {
         .unwrap();
 
     assert!(
+        started.elapsed() >= std::time::Duration::from_secs(9),
+        "timeout returned before the command timeout window: {:?}",
+        started.elapsed()
+    );
+    assert!(
         started.elapsed() < std::time::Duration::from_secs(30),
         "timeout harness bound exceeded: {:?}",
         started.elapsed()

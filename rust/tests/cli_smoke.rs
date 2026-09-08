@@ -8590,6 +8590,93 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
 }
 
 #[test]
+fn goal_subscribe_timeout_failure_remains_explicit() {
+    let root = temp_root("goal-sub-timeout");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(
+        fake_bin.join("collab"),
+        "#!/bin/sh\nprintf '%s\\n' 'collab request timed out' >&2\nexit 124\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("COLLAB_SUBSCRIBE_FAILED"), "{stderr}");
+    assert!(stderr.contains("exit=124"), "{stderr}");
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["active"], false);
+    assert_eq!(payload["desired"], "subscribed_failed");
+    assert_eq!(payload["observed"], "collab_failed");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn longhorizon_bug_permission_failure_remains_explicit() {
+    let root = temp_root("longhorizon-bug-permission");
+    fs::create_dir_all(&root).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\nprintf '%s\\n' '{\"workers\":[],\"tasks\":[],\"subagents\":[]}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        "#!/bin/sh\nprintf '%s\\n' 'permission denied' >&2\nexit 126\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+
+    let result = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &path)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(payload["open_bugs"].as_array().unwrap().len(), 0);
+    assert!(payload["open_bugs_error"]
+        .as_str()
+        .unwrap()
+        .contains("GIT_BUG_OPEN_READ_FAILED"));
+    assert!(payload["open_bugs_error"]
+        .as_str()
+        .unwrap()
+        .contains("permission denied"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn task_block_governance_reminder_lifecycle() {
     let root = temp_root("task-block");
     fs::create_dir_all(&root).unwrap();

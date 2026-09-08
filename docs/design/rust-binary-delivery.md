@@ -25,6 +25,7 @@ new
 verify
 verify --review-admission
 compile
+produce-lifecycle-records
 begin-version
 promote
 promote-module

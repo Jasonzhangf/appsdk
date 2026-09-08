@@ -270,7 +270,7 @@ All user inputs—whether bug reports or new feature requests—are tracked thro
   - By sort & direction: `appsdk bug list -b <creation|edit> -d <asc|desc>`
 
 ### 3. Lifecycle Evidence Enforcement
-- **Architecture Gate**: `WorktreeRecord` must declare `bug_triage` (`query_executed: true`, `mode`, `reopened_from_issue_id`) verifying that existing issues were triaged before creating new work.
+- **Architecture Gate**: `WorktreeRecord` must declare `bug_triage` (`query_executed: true`, a query containing the issue ID, `mode`, `reopened_from_issue_id`) verifying that existing issues were triaged before creating new work.
 - **Promotion / Closure Gate**: Closing a bug or promoting a candidate requires solution documentation in `git-bug`:
   ```bash
   appsdk bug close <bug_id> -m "Solution: <root cause & resolution>" --receipt-id <receipt_id>

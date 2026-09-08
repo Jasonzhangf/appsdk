@@ -66,6 +66,7 @@ Goal clarification -> clean worktree -> reproduce -> fix candidate -> developmen
 appsdk prepare ./existing-workspace
 appsdk init ./existing-workspace --project-root new-code
 appsdk new ./my-app
+appsdk produce-lifecycle-records --module app-core --input /path/to/baseline-declaration.json
 # Only for a supported legacy SDK migration:
 appsdk pin-lock --binary /path/to/appsdk
 appsdk compile

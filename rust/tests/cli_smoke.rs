@@ -8598,7 +8598,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\nprintf '%s\\n' 'collab request timed out' >&2\nexit 124\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\"}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\"}}' ;;\n  \"notify subscribe\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -8625,8 +8625,12 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     assert!(stderr.contains("exit=124"), "{stderr}");
     let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(payload["active"], false);
-    assert_eq!(payload["desired"], "subscribed_failed");
-    assert_eq!(payload["observed"], "collab_failed");
+    assert_eq!(payload["desired"], "subscribed");
+    assert_eq!(payload["observed"], "unknown");
+    assert!(payload["error"]
+        .as_str()
+        .unwrap()
+        .contains("COLLAB_SUBSCRIBE_FAILED:exit=124"));
 
     fs::remove_dir_all(root).unwrap();
 }

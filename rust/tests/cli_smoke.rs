@@ -9118,11 +9118,22 @@ fn goal_subscription_and_master_prompt_lifecycle() {
 case "$1 $2" in
   "notify subscribe")
     printf '%s\n' "$*" > notify-args
+    case "$*" in
+      *"--at-ms "*) ;;
+      *) printf '%s\n' 'goal deadline requires --at-ms' >&2; exit 42 ;;
+    esac
+    case "$*" in
+      *"--every-ms"*|*"--repeat-count"*) printf '%s\n' 'periodic goal deadline is invalid' >&2; exit 43 ;;
+    esac
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--subject" ]; then printf '%s' "$2" > goal-subject; fi
       shift
     done
-    printf '%s\n' '{"subscription_id":"goal-sub-1"}'
+    if [ "${UNARMED_SUBSCRIBE:-}" = "1" ]; then
+      printf '%s\n' '{"subscription_id":"goal-sub-unarmed","status":"pending"}'
+    else
+      printf '%s\n' '{"subscription_id":"goal-sub-1"}'
+    fi
     ;;
   "notify status")
     subject=$(/bin/cat goal-subject 2>/dev/null || printf '%s' 'missing-subject')
@@ -9212,16 +9223,19 @@ esac
     assert!(prompt.contains("Master 专属"));
     assert!(prompt.contains("饱和"));
     assert!(prompt.contains("appsdk bug"));
-    assert_eq!(sub_json["schedule"], "periodic");
-    assert_eq!(sub_json["repeat_count"], 100);
+    assert_eq!(sub_json["schedule"], "one-shot");
+    assert_eq!(sub_json["local_schedule"], "periodic-rearm-intent");
+    assert_eq!(sub_json["repeat_count"], 1);
+    assert_eq!(sub_json["requested_repeat_count"], 100);
     assert!(sub_json["subject"]
         .as_str()
         .unwrap()
         .starts_with("goal:sha256:"));
-    assert!(prompt.contains("有限次数订阅"));
+    assert!(prompt.contains("每次 Collab deadline 都是单次触发"));
     let notify_args = fs::read_to_string(root.join("notify-args")).unwrap();
-    assert!(notify_args.contains("--every-ms 300000"));
-    assert!(notify_args.contains("--repeat-count 100"));
+    assert!(notify_args.contains("--at-ms "));
+    assert!(!notify_args.contains("--every-ms"));
+    assert!(!notify_args.contains("--repeat-count"));
 
     let duplicate = Command::new(binary())
         .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
@@ -9309,7 +9323,7 @@ esac
     let prompt_text = String::from_utf8_lossy(&prompt_res.stdout);
     assert!(prompt_text.contains("长程任务目标文档"));
     assert!(prompt_text.contains("10m"));
-    assert!(prompt_text.contains("提醒触发周期"));
+    assert!(prompt_text.contains("本地重唤醒意图"));
 
     // 6. Cancel goal
     let cancel_res = Command::new(binary())
@@ -9345,6 +9359,25 @@ esac
     assert_eq!(post_cancel_json["observed"], "cancelled");
     assert_eq!(post_cancel_json["subscription_id"], "goal-sub-2");
     assert!(post_cancel_json["record"]["cancel_receipt"].is_object());
+
+    let unarmed = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("UNARMED_SUBSCRIBE", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert_eq!(unarmed.status.code(), Some(1));
+    let unarmed_json: Value = serde_json::from_slice(&unarmed.stdout).unwrap();
+    assert_eq!(unarmed_json["active"], false);
+    assert_eq!(unarmed_json["desired"], "recovery_required");
+    assert_eq!(unarmed_json["observed"], "unknown");
+    assert_eq!(unarmed_json["subscription_id"], "goal-sub-unarmed");
+    assert!(unarmed_json["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:pending"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -9535,7 +9568,7 @@ esac
 }
 
 #[test]
-fn goal_subscribe_timeout_keeps_explicit_timeout_error() {
+fn goal_subscribe_slow_status_failure_remains_explicit() {
     let root = temp_root("goal-collab-timeout");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
@@ -9559,18 +9592,17 @@ fn goal_subscribe_timeout_keeps_explicit_timeout_error() {
         .unwrap();
 
     assert!(
-        started.elapsed() >= std::time::Duration::from_secs(9),
-        "timeout returned before the command timeout window: {:?}",
+        started.elapsed() >= std::time::Duration::from_secs(19),
+        "slow status returned before its simulated delay: {:?}",
         started.elapsed()
     );
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(30),
-        "timeout harness bound exceeded: {:?}",
+        started.elapsed() < std::time::Duration::from_secs(40),
+        "slow status harness bound exceeded: {:?}",
         started.elapsed()
     );
     assert_eq!(result.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&result.stderr)
-        .contains("COLLAB_STATUS_UNAVAILABLE:GOAL_COLLAB_COMMAND_TIMEOUT"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("COLLAB_STATUS_JSON_INVALID"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -9616,7 +9648,7 @@ esac
         started.elapsed()
     );
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(30),
+        started.elapsed() < std::time::Duration::from_secs(60),
         "slow Collab write exceeded write budget: {:?}",
         started.elapsed()
     );
@@ -9634,7 +9666,7 @@ esac
 }
 
 #[test]
-fn goal_subscribe_bounds_descendant_pipe_drain_and_preserves_error_state() {
+fn goal_subscribe_allows_descendant_pipe_drain_within_batch_budget() {
     let root = temp_root("goal-descendant-pipe-drain");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
@@ -9669,16 +9701,22 @@ esac
         .unwrap();
 
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(30),
-        "descendant pipe drain harness bound exceeded: {:?}",
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "descendant pipe drain harness exceeded the batch budget: {:?}",
         started.elapsed()
     );
-    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        result.status.success(),
+        "status={:?} stdout={} stderr={}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
     let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(payload["active"], false);
+    assert_eq!(payload["active"], true);
     assert_eq!(payload["desired"], "subscribed");
-    assert_eq!(payload["observed"], "unknown");
-    assert_eq!(payload["error"], "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT");
+    assert_eq!(payload["observed"], "subscribed");
+    assert!(payload["error"].is_null());
     assert!(root.join(".appsdk-control/long-task-goal.json").is_file());
 
     fs::remove_dir_all(root).unwrap();
@@ -9895,7 +9933,7 @@ esac
 }
 
 #[test]
-fn goal_lifecycle_reconciles_legacy_subject_and_exposes_periodic_recovery() {
+fn goal_lifecycle_reconciles_legacy_subject_and_exposes_one_shot_recovery() {
     let root = temp_root("goal-legacy-periodic-recovery");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
@@ -9956,9 +9994,10 @@ esac
         String::from_utf8_lossy(&initial.stderr)
     );
     let initial_text = String::from_utf8_lossy(&initial.stdout);
-    assert!(initial_text
-        .contains("Periodic deadline: every 5m for 100 deliveries (TTL 604800 seconds)"));
-    assert!(initial_text.contains("expires or exhausts without automatic renewal"));
+    assert!(initial_text.contains(
+        "One-shot deadline: first trigger after 5m (local rearm intent: every 5m, up to 100 deliveries; TTL 604800 seconds)"
+    ));
+    assert!(initial_text.contains("one-shot armed; rearm is explicit and verifiable"));
 
     let record_path = root.join(".appsdk-control/long-task-goal.json");
     let mut legacy: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
@@ -10034,7 +10073,7 @@ esac
     assert!(expired["error"]
         .as_str()
         .unwrap()
-        .contains("GOAL_PERIODIC_SUBSCRIPTION_NOT_ARMED:expired"));
+        .contains("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:expired"));
     assert!(
         expired["record"]["recovery"]
             .as_str()

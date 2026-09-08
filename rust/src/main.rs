@@ -10793,7 +10793,7 @@ fn generate_long_horizon_master_prompt(goal_path: &Path, interval_str: &str) -> 
         r#"# 长程任务调度与饱和执行提示词（Master 专属）
 
 **长程任务目标文档**: `{}`
-**提醒触发周期**: 每 `{}` 触发一次；Collab 使用有限次数订阅，不自动续期
+**本地重唤醒意图**: 每 `{}` 检查一次；每次 Collab deadline 都是单次触发，不自动续期
 
 RUN: `appsdk longhorizon show`
 THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待用户输入。
@@ -11146,7 +11146,7 @@ fn goal_mark_recovery_required(record: &mut Value, error: String) {
     record["active"] = Value::Bool(false);
     record["error"] = Value::String(error);
     record["recovery"] = Value::String(
-        "Restore Collab if needed, then rerun appsdk goal subscribe --goal <path.md> to rearm a fresh periodic subscription; no automatic renewal is attempted".into(),
+        "Restore Collab if needed, then rerun appsdk goal subscribe --goal <path.md> to rearm a fresh one-shot deadline; no automatic renewal is attempted".into(),
     );
     record["revision"] = Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
 }
@@ -11366,7 +11366,7 @@ fn drain_goal_output_readers(
     stdout_reader: Option<thread::JoinHandle<Vec<u8>>>,
     stderr_reader: Option<thread::JoinHandle<Vec<u8>>>,
 ) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    const DRAIN_GRACE: Duration = Duration::from_secs(2);
+    const DRAIN_GRACE: Duration = Duration::from_secs(120);
     let deadline = Instant::now() + DRAIN_GRACE;
     let stdout = match stdout_reader {
         Some(reader) => match join_goal_output_reader_until(reader, deadline) {
@@ -11391,8 +11391,11 @@ fn drain_goal_output_readers(
     Ok((stdout, stderr))
 }
 
-const GOAL_COLLAB_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+// Collab may queue a command behind an active daemon batch. Keep every goal
+// lifecycle call bounded, while allowing the declared 120-second batch
+// window to complete before reporting an explicit timeout.
+const GOAL_COLLAB_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
@@ -12190,7 +12193,7 @@ where
                 fail("USAGE: appsdk goal subscribe --goal <path.md> [--interval <duration>]")
             });
             if !(1..=100).contains(&repeat_count) {
-                fail("GOAL_REPEAT_COUNT_INVALID: Collab supports repeat counts from 1 through 100");
+                fail("GOAL_REPEAT_COUNT_INVALID: --repeat must be from 1 through 100");
             }
             if ttl_seconds == 0 {
                 fail("GOAL_TTL_INVALID: '0' must be greater than zero");
@@ -12384,8 +12387,11 @@ where
                 "interval": interval_str,
                 "every_ms": every_ms,
                 "trigger_ms": trigger_ms,
-                "repeat_count": repeat_count,
-                "schedule": "periodic",
+                "repeat_count": 1,
+                "requested_repeat_count": repeat_count,
+                "schedule": "one-shot",
+                "local_schedule": "periodic-rearm-intent",
+                "rearm_interval_ms": every_ms,
                 "ttl_seconds": ttl_seconds,
                 "owner": owner,
                 "subject": goal_subject,
@@ -12396,7 +12402,7 @@ where
                 "error": Value::Null,
                 "registered_at": chrono::Utc::now().to_rfc3339(),
                 "active": false,
-                "recovery": "When repeat_count is exhausted, TTL expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh periodic subscription; renewal is explicit and is not automatic."
+                "recovery": "When the one-shot deadline is consumed, expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh one-shot deadline; renewal is explicit and is not automatic."
             });
             if let Some(previous) = existing
                 .as_ref()
@@ -12424,10 +12430,8 @@ where
                     "subscribe",
                     "--event",
                     "deadline",
-                    "--every-ms",
-                    &every_ms.to_string(),
-                    "--repeat-count",
-                    &repeat_count.to_string(),
+                    "--at-ms",
+                    &trigger_ms.to_string(),
                     "--ttl-seconds",
                     &ttl_seconds.to_string(),
                     "--subject",
@@ -12439,7 +12443,25 @@ where
             let (collab_subscribed, sub_details, subscription_id, sub_error) = match collab_sub {
                 Ok(out) if out.status.success() => {
                     match parse_goal_subscription_response(&out.stdout) {
-                        Ok((response, id)) => (true, Some(response), Some(id), None),
+                        Ok((response, id)) => {
+                            let subscription = response.get("subscription").unwrap_or(&response);
+                            let status = subscription
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            match status.as_deref() {
+                                Some("armed") | None => (true, Some(response), Some(id), None),
+                                Some(status) => (
+                                    false,
+                                    Some(response),
+                                    Some(id),
+                                    Some(format!(
+                                        "GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:{}",
+                                        status
+                                    )),
+                                ),
+                            }
+                        }
                         Err(error) => (false, None, None, Some(error)),
                     }
                 }
@@ -12493,6 +12515,17 @@ where
             });
             record["active"] = Value::Bool(collab_subscribed);
             record["error"] = sub_error.map(Value::String).unwrap_or(Value::Null);
+            let subscription_not_armed_error = record["error"].as_str().and_then(|error| {
+                error
+                    .starts_with("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:")
+                    .then_some(error.to_string())
+            });
+            if !collab_subscribed
+                && record["subscription_id"].as_str().is_some()
+                && subscription_not_armed_error.is_some()
+            {
+                goal_mark_recovery_required(&mut record, subscription_not_armed_error.unwrap());
+            }
             record["revision"] = Value::Number(2.into());
             if let Err(error) = goal_record_write(root, &record) {
                 record["active"] = Value::Bool(false);
@@ -12517,10 +12550,10 @@ where
                 println!("Long-horizon goal successfully registered:");
                 println!("- Goal file: {}", goal_path.display());
                 println!(
-                    "- Periodic deadline: every {} for {} deliveries (TTL {} seconds)",
-                    interval_str, repeat_count, ttl_seconds
+                    "- One-shot deadline: first trigger after {} (local rearm intent: every {}, up to {} deliveries; TTL {} seconds)",
+                    interval_str, interval_str, repeat_count, ttl_seconds
                 );
-                println!("- Collab notification status: armed; it expires or exhausts without automatic renewal");
+                println!("- Collab notification status: one-shot armed; rearm is explicit and verifiable");
                 println!("\n{}", master_prompt);
             }
         }
@@ -12592,7 +12625,7 @@ where
                             record["error"] = Value::Null;
                         } else {
                             let error = format!(
-                                "GOAL_PERIODIC_SUBSCRIPTION_NOT_ARMED:{}: repeat_count or TTL may be exhausted, or Collab may have restarted",
+                                "GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:{}: deadline may be consumed or expired, or Collab may have restarted",
                                 remote_status
                             );
                             record["desired"] = Value::String("recovery_required".into());
@@ -12600,7 +12633,7 @@ where
                             record["active"] = Value::Bool(false);
                             record["error"] = Value::String(error.clone());
                             record["recovery"] = Value::String(
-                                "Rerun appsdk goal subscribe --goal <path.md> to rearm a fresh periodic subscription; no automatic renewal is attempted".into(),
+                                "Rerun appsdk goal subscribe --goal <path.md> to rearm a fresh one-shot deadline; no automatic renewal is attempted".into(),
                             );
                             reconcile_error = Some(error);
                         }
@@ -12671,7 +12704,7 @@ where
                             }
                         }
                         record["recovery"] = Value::String(
-                            "restore Collab, then rerun appsdk goal status; if the periodic subscription expired, rerun appsdk goal subscribe --goal <path.md> to rearm it".into(),
+                            "restore Collab, then rerun appsdk goal status; if the one-shot deadline expired, rerun appsdk goal subscribe --goal <path.md> to rearm it".into(),
                         );
                     }
                 }

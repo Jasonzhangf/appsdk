@@ -10932,14 +10932,19 @@ impl ExecutionRole {
     }
 }
 
-fn collab_context(root: &Path) -> Option<Value> {
+fn collab_context(root: &Path) -> Result<Value, String> {
     let mut command = Command::new("collab");
     command.arg("context").current_dir(root);
-    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT).ok()?;
+    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
+        .map_err(|error| format!("COLLAB_CONTEXT_UNAVAILABLE:{}", error))?;
     if !out.status.success() {
-        return None;
+        return Err(format!(
+            "COLLAB_CONTEXT_FAILED:exit={}",
+            out.status.code().unwrap_or(1)
+        ));
     }
-    serde_json::from_slice(&out.stdout).ok()
+    serde_json::from_slice(&out.stdout)
+        .map_err(|error| format!("COLLAB_CONTEXT_JSON_INVALID:{}", error))
 }
 
 /// The role must come from verified Collab identity. If context or status does
@@ -10990,8 +10995,12 @@ fn collab_master_matches_context(root: &Path, peer: &str, context: &Value) -> Op
 }
 
 fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRole {
-    let Some(context) = collab_context(root) else {
-        return ExecutionRole::Unknown;
+    let context = match collab_context(root) {
+        Ok(context) => context,
+        Err(error) => {
+            eprintln!("{}", error);
+            return ExecutionRole::Unknown;
+        }
     };
     let Some(peer) = context["identity"]["worker_id"].as_str().map(str::to_owned) else {
         return ExecutionRole::Unknown;
@@ -11391,36 +11400,11 @@ fn drain_goal_output_readers(
 }
 
 // Collab may queue a command behind an active daemon batch. Keep every goal
-// lifecycle call within one declared 120-second batch budget. The environment
-// override is an explicit operator/test setting for exercising the same bound.
+// lifecycle call within one declared 120-second batch budget.
 const GOAL_COLLAB_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
-const GOAL_COLLAB_TIMEOUT_ENV: &str = "APPSDK_GOAL_COLLAB_TIMEOUT_MS";
-
-fn configured_goal_timeout(default: Duration) -> Result<Duration, String> {
-    let Some(raw) = env::var_os(GOAL_COLLAB_TIMEOUT_ENV) else {
-        return Ok(default);
-    };
-    let raw = raw.to_str().ok_or_else(|| {
-        format!(
-            "GOAL_COLLAB_TIMEOUT_CONFIG_INVALID:{}",
-            GOAL_COLLAB_TIMEOUT_ENV
-        )
-    })?;
-    let milliseconds = raw
-        .parse::<u64>()
-        .map_err(|_| format!("GOAL_COLLAB_TIMEOUT_CONFIG_INVALID:{}", raw))?;
-    if milliseconds == 0 {
-        return Err(format!(
-            "GOAL_COLLAB_TIMEOUT_CONFIG_INVALID:{} must be greater than zero",
-            raw
-        ));
-    }
-    Ok(Duration::from_millis(milliseconds))
-}
 
 fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
-    let timeout = configured_goal_timeout(timeout)?;
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -11485,6 +11469,21 @@ mod goal_collab_command_tests {
         assert!(matches!(
             result,
             Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT"
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn injected_timeout_bounds_output_pipe_drain_without_false_success() {
+        let started = Instant::now();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "/bin/sleep 5 & printf inherited-pipe"]);
+
+        let result = run_goal_collab_command(command, Duration::from_millis(100));
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
     }

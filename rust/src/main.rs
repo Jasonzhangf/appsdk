@@ -5,6 +5,10 @@ use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
+#[cfg(unix)]
+use std::os::raw::c_int;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -9334,11 +9338,48 @@ fn goal_record_write(root: &Path, record: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn goal_mark_recovery_required(record: &mut Value, error: String) {
+    record["desired"] = Value::String("recovery_required".into());
+    record["observed"] = Value::String("unknown".into());
+    record["remote_state"] = Value::String("unknown".into());
+    record["active"] = Value::Bool(false);
+    record["error"] = Value::String(error);
+    record["recovery"] = Value::String(
+        "Restore Collab if needed, then rerun appsdk goal subscribe --goal <path.md> to rearm a fresh periodic subscription; no automatic renewal is attempted".into(),
+    );
+    record["revision"] = Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
+}
+
 struct GoalLock {
+    _file: fs::File,
     path: PathBuf,
 }
 
-fn goal_lock_pid(path: &Path) -> Result<u32, String> {
+#[cfg(unix)]
+fn goal_try_advisory_lock(file: &fs::File) -> Result<(), String> {
+    const LOCK_EX: c_int = 2;
+    const LOCK_NB: c_int = 4;
+    unsafe extern "C" {
+        fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == ErrorKind::WouldBlock {
+        Err("GOAL_LOCK_BUSY".into())
+    } else {
+        Err(format!("GOAL_LOCK_ADVISORY_FAILED:{}", error))
+    }
+}
+
+#[cfg(not(unix))]
+fn goal_try_advisory_lock(_file: &fs::File) -> Result<(), String> {
+    Ok(())
+}
+
+fn goal_lock_metadata(path: &Path) -> Result<String, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("GOAL_LOCK_METADATA_READ_FAILED:{}", error))?;
     let pid = contents
@@ -9346,15 +9387,43 @@ fn goal_lock_pid(path: &Path) -> Result<u32, String> {
         .find_map(|field| field.strip_prefix("pid="))
         .ok_or_else(|| "GOAL_LOCK_METADATA_INVALID:pid missing".to_string())?;
     pid.parse::<u32>()
-        .map_err(|error| format!("GOAL_LOCK_METADATA_INVALID:{}", error))
+        .map_err(|error| format!("GOAL_LOCK_METADATA_INVALID:{}", error))?;
+    let owner = contents
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("owner="))
+        .filter(|owner| !owner.trim().is_empty())
+        .ok_or_else(|| "GOAL_LOCK_METADATA_INVALID:owner missing".to_string())?;
+    Ok(format!("pid={} owner={}", pid, owner))
 }
 
-fn goal_process_alive(pid: u32) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(true)
+fn goal_lock_recovery_receipt(
+    control_dir: &Path,
+    quarantined: &Path,
+    original: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let receipt = control_dir.join(format!(
+        "long-task-goal.lock.recovery.{}.{}.json",
+        std::process::id(),
+        goal_now_ms()
+    ));
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "status": "recovered",
+        "reason": reason,
+        "original_metadata": original,
+        "quarantined_path": quarantined.to_string_lossy(),
+        "recovered_by_pid": std::process::id(),
+        "recovered_at": chrono::Utc::now().to_rfc3339(),
+        "recovery": "The advisory lock was released by its prior process; the old path was quarantined atomically before reacquisition."
+    });
+    fs::write(
+        &receipt,
+        serde_json::to_string_pretty(&payload)
+            .map_err(|error| format!("GOAL_LOCK_RECOVERY_RECEIPT_SERIALIZE_FAILED:{}", error))?
+            + "\n",
+    )
+    .map_err(|error| format!("GOAL_LOCK_RECOVERY_RECEIPT_WRITE_FAILED:{}", error))
 }
 
 impl GoalLock {
@@ -9364,24 +9433,60 @@ impl GoalLock {
             .map_err(|error| format!("GOAL_CONTROL_DIR_CREATE_FAILED:{}", error))?;
         let path = control_dir.join("long-task-goal.lock");
         for _ in 0..3 {
-            let mut lock = match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(lock) => lock,
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    let pid = goal_lock_pid(&path)?;
-                    if goal_process_alive(pid) {
-                        return Err(format!(
-                            "GOAL_LOCK_BUSY: another goal lifecycle operation owns the record (pid={})",
-                            pid
-                        ));
+            let mut lock = match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(lock) => {
+                    if let Err(error) = goal_try_advisory_lock(&lock) {
+                        return Err(error);
                     }
-                    let stale = control_dir.join(format!(
-                        "long-task-goal.lock.stale.{}.{}",
+                    lock
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    let existing = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .map_err(|open_error| format!("GOAL_LOCK_ACQUIRE_FAILED:{}", open_error))?;
+                    if let Err(error) = goal_try_advisory_lock(&existing) {
+                        if error == "GOAL_LOCK_BUSY" {
+                            let metadata = fs::read_to_string(&path).unwrap_or_default();
+                            return Err(if metadata.trim().is_empty() {
+                                "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock; metadata is empty".into()
+                            } else {
+                                format!(
+                                    "GOAL_LOCK_BUSY: an active goal lifecycle operation holds the advisory lock ({})",
+                                    metadata.trim()
+                                )
+                            });
+                        }
+                        return Err(error);
+                    }
+                    let original = fs::read_to_string(&path).unwrap_or_default();
+                    let quarantined = control_dir.join(format!(
+                        "long-task-goal.lock.recovered.{}.{}",
                         std::process::id(),
                         goal_now_ms()
                     ));
-                    match fs::rename(&path, &stale) {
+                    match fs::rename(&path, &quarantined) {
                         Ok(()) => {
-                            let _ = fs::remove_file(stale);
+                            if let Err(receipt_error) = goal_lock_recovery_receipt(
+                                &control_dir,
+                                &quarantined,
+                                &original,
+                                if original.trim().is_empty() {
+                                    "empty metadata"
+                                } else if goal_lock_metadata(&quarantined).is_err() {
+                                    "invalid or truncated metadata"
+                                } else {
+                                    "advisory lock released with stale metadata"
+                                },
+                            ) {
+                                return Err(receipt_error);
+                            }
                             continue;
                         }
                         Err(rename_error) if rename_error.kind() == ErrorKind::NotFound => {
@@ -9397,11 +9502,14 @@ impl GoalLock {
                 }
                 Err(error) => return Err(format!("GOAL_LOCK_ACQUIRE_FAILED:{}", error)),
             };
-            if let Err(error) = writeln!(lock, "pid={} owner={}", std::process::id(), owner) {
+            if let Err(error) = lock.set_len(0).and_then(|_| {
+                writeln!(lock, "pid={} owner={}", std::process::id(), owner)?;
+                lock.sync_all()
+            }) {
                 let _ = fs::remove_file(&path);
                 return Err(format!("GOAL_LOCK_WRITE_FAILED:{}", error));
             }
-            return Ok(Self { path });
+            return Ok(Self { _file: lock, path });
         }
         Err("GOAL_LOCK_BUSY: stale lock changed during recovery".into())
     }
@@ -9644,6 +9752,48 @@ fn goal_subscription_by_subject(
         ));
     }
     Ok(matches.into_iter().next())
+}
+
+fn goal_subject_candidates(record: Option<&Value>, canonical_subject: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut push_unique = |subject: String| {
+        if !subject.trim().is_empty() && !candidates.iter().any(|item| item == &subject) {
+            candidates.push(subject);
+        }
+    };
+    if let Some(record) = record {
+        if let Some(subject) = record["subject"]
+            .as_str()
+            .filter(|subject| !subject.trim().is_empty())
+        {
+            // The retained subject is the compatibility anchor. Query it first
+            // so a legacy basename subscription is never silently abandoned.
+            push_unique(subject.to_string());
+        }
+        if let Some(goal_path) = record["goal_path"].as_str() {
+            if let Some(basename) = Path::new(goal_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+            {
+                push_unique(format!("goal:{}", basename));
+            }
+        }
+    }
+    push_unique(canonical_subject.to_string());
+    candidates
+}
+
+fn goal_subscription_by_subject_candidates(
+    root: &Path,
+    record: Option<&Value>,
+    canonical_subject: &str,
+) -> Result<Option<(String, String, Value, String)>, String> {
+    for subject in goal_subject_candidates(record, canonical_subject) {
+        if let Some((id, status, remote_record)) = goal_subscription_by_subject(root, &subject)? {
+            return Ok(Some((id, status, remote_record, subject)));
+        }
+    }
+    Ok(None)
 }
 
 fn goal_fail(format_json: bool, error: &str, record: Option<&Value>) -> ! {
@@ -10050,11 +10200,21 @@ where
                     }
                     "-r" | "--repeat" | "--repeat-count" => {
                         let r = args.next().unwrap_or_else(|| fail("MISSING_REPEAT_ARG"));
-                        repeat_count = r.parse().unwrap_or(0);
+                        repeat_count = r.parse::<u32>().unwrap_or_else(|error| {
+                            fail(format!(
+                                "GOAL_REPEAT_COUNT_INVALID: '{}' is not an integer: {}",
+                                r, error
+                            ))
+                        });
                     }
                     "--ttl" | "--ttl-seconds" => {
                         let t = args.next().unwrap_or_else(|| fail("MISSING_TTL_ARG"));
-                        ttl_seconds = t.parse().unwrap_or(604800);
+                        ttl_seconds = t.parse::<u64>().unwrap_or_else(|error| {
+                            fail(format!(
+                                "GOAL_TTL_INVALID: '{}' is not an unsigned integer: {}",
+                                t, error
+                            ))
+                        });
                     }
                     "--json" => format_json = true,
                     _ => fail(format!("UNKNOWN_GOAL_SUBSCRIBE_OPTION:{}", arg)),
@@ -10066,6 +10226,9 @@ where
             });
             if !(1..=100).contains(&repeat_count) {
                 fail("GOAL_REPEAT_COUNT_INVALID: Collab supports repeat counts from 1 through 100");
+            }
+            if ttl_seconds == 0 {
+                fail("GOAL_TTL_INVALID: '0' must be greater than zero");
             }
             if !raw_goal.to_lowercase().ends_with(".md") {
                 fail(format!(
@@ -10121,10 +10284,21 @@ where
             let goal_subject = format!("goal:{}", goal_id);
             if let Some(existing) = existing.as_ref() {
                 if existing["desired"].as_str() == Some("subscribed") {
-                    match goal_subscription_by_subject(root, &goal_subject) {
-                        Ok(Some((subscription_id, remote_status, remote_record))) => {
+                    match goal_subscription_by_subject_candidates(
+                        root,
+                        Some(existing),
+                        &goal_subject,
+                    ) {
+                        Ok(Some((
+                            subscription_id,
+                            remote_status,
+                            remote_record,
+                            matched_subject,
+                        ))) => {
                             if existing["goal_id"].as_str() == Some(goal_id.as_str()) {
                                 let mut response = existing.clone();
+                                let retained_subject =
+                                    existing["subject"].as_str().map(str::to_owned);
                                 response["subscription_id"] = Value::String(subscription_id);
                                 response["collab_subscription"] = remote_record;
                                 response["remote_state"] = Value::String(remote_status);
@@ -10136,6 +10310,15 @@ where
                                 );
                                 response["idempotent"] = Value::Bool(true);
                                 response["master_prompt"] = Value::String(master_prompt);
+                                if retained_subject.as_deref() != Some(matched_subject.as_str()) {
+                                    response["subject_migration"] = serde_json::json!({
+                                        "from": retained_subject,
+                                        "to": matched_subject,
+                                        "status": "canonical_subject_migrated",
+                                        "migrated_at": chrono::Utc::now().to_rfc3339()
+                                    });
+                                    response["subject"] = Value::String(matched_subject);
+                                }
                                 if let Err(error) = goal_record_write(root, &response) {
                                     drop(_goal_lock);
                                     goal_fail(format_json, &error, Some(&response));
@@ -10160,16 +10343,31 @@ where
                             );
                         }
                         Ok(None) => {
+                            let mut recovery = existing.clone();
+                            goal_mark_recovery_required(
+                                &mut recovery,
+                                "GOAL_EXISTING_SUBSCRIPTION_NOT_RECONCILED: no armed deadline subscription matches the retained or canonical subject".into(),
+                            );
+                            if let Err(error) = goal_record_write(root, &recovery) {
+                                drop(_goal_lock);
+                                goal_fail(format_json, &error, Some(&recovery));
+                            }
                             drop(_goal_lock);
                             goal_fail(
                                 format_json,
-                                "GOAL_EXISTING_SUBSCRIPTION_NOT_RECONCILED: no armed deadline subscription matches the retained subject",
-                                Some(existing),
+                                recovery["error"].as_str().unwrap(),
+                                Some(&recovery),
                             );
                         }
                         Err(error) => {
+                            let mut recovery = existing.clone();
+                            goal_mark_recovery_required(&mut recovery, error.clone());
+                            if let Err(write_error) = goal_record_write(root, &recovery) {
+                                drop(_goal_lock);
+                                goal_fail(format_json, &write_error, Some(&recovery));
+                            }
                             drop(_goal_lock);
-                            goal_fail(format_json, &error, Some(existing));
+                            goal_fail(format_json, &error, Some(&recovery));
                         }
                     }
                 }
@@ -10199,8 +10397,23 @@ where
                 "remote_state": "pending",
                 "error": Value::Null,
                 "registered_at": chrono::Utc::now().to_rfc3339(),
-                "active": false
+                "active": false,
+                "recovery": "When repeat_count is exhausted, TTL expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh periodic subscription; renewal is explicit and is not automatic."
             });
+            if let Some(previous) = existing
+                .as_ref()
+                .filter(|previous| previous["desired"].as_str() == Some("recovery_required"))
+            {
+                let mut history = previous["recovery_history"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                history.push(serde_json::json!({
+                    "previous_record": previous,
+                    "recovered_at": chrono::Utc::now().to_rfc3339()
+                }));
+                record["recovery_history"] = Value::Array(history);
+            }
             if let Err(error) = goal_record_write(root, &record) {
                 record["error"] = Value::String(error.clone());
                 drop(_goal_lock);
@@ -10300,8 +10513,11 @@ where
             } else {
                 println!("Long-horizon goal successfully registered:");
                 println!("- Goal file: {}", goal_path.display());
-                println!("- One-shot deadline: after {}", interval_str);
-                println!("- Collab notification status: armed (no automatic renewal)");
+                println!(
+                    "- Periodic deadline: every {} for {} deliveries (TTL {} seconds)",
+                    interval_str, repeat_count, ttl_seconds
+                );
+                println!("- Collab notification status: armed; it expires or exhausts without automatic renewal");
                 println!("\n{}", master_prompt);
             }
         }
@@ -10361,42 +10577,71 @@ where
                 match by_id {
                     Ok((remote_status, remote_record)) => {
                         record["remote_state"] = Value::String(remote_status.clone());
-                        record["observed"] = Value::String(if remote_status == "armed" {
-                            "subscribed".into()
-                        } else {
-                            remote_status
-                        });
-                        record["active"] = Value::Bool(record["observed"] == "subscribed");
                         record["collab_subscription"] = remote_record;
-                        record["error"] = Value::Null;
+                        if remote_status == "armed" {
+                            record["observed"] = Value::String("subscribed".into());
+                            record["active"] = Value::Bool(true);
+                            record["error"] = Value::Null;
+                        } else {
+                            let error = format!(
+                                "GOAL_PERIODIC_SUBSCRIPTION_NOT_ARMED:{}: repeat_count or TTL may be exhausted, or Collab may have restarted",
+                                remote_status
+                            );
+                            record["desired"] = Value::String("recovery_required".into());
+                            record["observed"] = Value::String(remote_status);
+                            record["active"] = Value::Bool(false);
+                            record["error"] = Value::String(error.clone());
+                            record["recovery"] = Value::String(
+                                "Rerun appsdk goal subscribe --goal <path.md> to rearm a fresh periodic subscription; no automatic renewal is attempted".into(),
+                            );
+                            reconcile_error = Some(error);
+                        }
                     }
                     Err(primary_error) => {
-                        let subject = record["subject"]
+                        let canonical_subject = record["goal_id"]
                             .as_str()
-                            .filter(|value| !value.trim().is_empty());
-                        let by_subject =
-                            subject.map(|value| goal_subscription_by_subject(root, value));
-                        match by_subject
-                            .unwrap_or_else(|| Err("GOAL_STATUS_SUBJECT_MISSING".into()))
-                        {
-                            Ok(Some((resolved_id, remote_status, remote_record))) => {
+                            .map(|goal_id| format!("goal:{}", goal_id))
+                            .unwrap_or_default();
+                        match goal_subscription_by_subject_candidates(
+                            root,
+                            Some(&record),
+                            &canonical_subject,
+                        ) {
+                            Ok(Some((
+                                resolved_id,
+                                remote_status,
+                                remote_record,
+                                matched_subject,
+                            ))) => {
+                                let retained_subject =
+                                    record["subject"].as_str().map(str::to_owned);
                                 record["subscription_id"] = Value::String(resolved_id);
                                 record["remote_state"] = Value::String(remote_status);
                                 record["observed"] = Value::String("subscribed".into());
                                 record["active"] = Value::Bool(true);
                                 record["collab_subscription"] = remote_record;
                                 record["error"] = Value::Null;
+                                if retained_subject.as_deref() != Some(matched_subject.as_str()) {
+                                    record["subject_migration"] = serde_json::json!({
+                                        "from": retained_subject,
+                                        "to": matched_subject,
+                                        "status": "canonical_subject_migrated",
+                                        "migrated_at": chrono::Utc::now().to_rfc3339()
+                                    });
+                                    record["subject"] = Value::String(matched_subject);
+                                }
                                 reconcile_error = Some(format!(
-                                    "{}; reconciled by canonical subject",
+                                    "{}; reconciled by retained-compatible subject",
                                     primary_error
                                 ));
                             }
                             Ok(None) => {
                                 let error = format!(
-                                    "{}; GOAL_STATUS_SUBJECT_NOT_FOUND: remote state remains unknown",
+                                    "{}; GOAL_STATUS_SUBSCRIPTION_LOST: no armed deadline subscription matches the retained or canonical subject",
                                     primary_error
                                 );
                                 reconcile_error = Some(error.clone());
+                                record["desired"] = Value::String("recovery_required".into());
                                 record["active"] = Value::Bool(false);
                                 record["observed"] = Value::String("unknown".into());
                                 record["remote_state"] = Value::String("unknown".into());
@@ -10408,6 +10653,7 @@ where
                                     primary_error, subject_error
                                 );
                                 reconcile_error = Some(error.clone());
+                                record["desired"] = Value::String("recovery_required".into());
                                 record["active"] = Value::Bool(false);
                                 record["observed"] = Value::String("unknown".into());
                                 record["remote_state"] = Value::String("unknown".into());
@@ -10415,7 +10661,7 @@ where
                             }
                         }
                         record["recovery"] = Value::String(
-                            "restore Collab or rerun goal status to reconcile by the canonical subject".into(),
+                            "restore Collab, then rerun appsdk goal status; if the periodic subscription expired, rerun appsdk goal subscribe --goal <path.md> to rearm it".into(),
                         );
                     }
                 }
@@ -10531,14 +10777,28 @@ where
                 .as_str()
                 .filter(|value| !value.trim().is_empty())
                 .map(str::to_owned);
+            let canonical_subject = record["goal_id"]
+                .as_str()
+                .map(|goal_id| format!("goal:{}", goal_id))
+                .unwrap_or_default();
             let mut subscription_id = goal_record_subscription_id(&record);
             if subscription_id.is_none() {
-                let subject_result = subject
-                    .as_deref()
-                    .map(|subject| goal_subscription_by_subject(root, subject))
-                    .unwrap_or_else(|| Err("GOAL_CANCEL_SUBJECT_MISSING".into()));
+                let subject_result = goal_subscription_by_subject_candidates(
+                    root,
+                    Some(&record),
+                    &canonical_subject,
+                );
                 match subject_result {
-                    Ok(Some((resolved_id, remote_status, remote_record))) => {
+                    Ok(Some((resolved_id, remote_status, remote_record, matched_subject))) => {
+                        if subject.as_deref() != Some(matched_subject.as_str()) {
+                            record["subject_migration"] = serde_json::json!({
+                                "from": subject.clone(),
+                                "to": matched_subject,
+                                "status": "canonical_subject_migrated",
+                                "migrated_at": chrono::Utc::now().to_rfc3339()
+                            });
+                            record["subject"] = Value::String(matched_subject.clone());
+                        }
                         record["subscription_id"] = Value::String(resolved_id.clone());
                         record["collab_subscription"] = remote_record;
                         record["remote_state"] = Value::String(remote_status);
@@ -10561,7 +10821,7 @@ where
                         subscription_id = Some(resolved_id);
                     }
                     Ok(None) => {
-                        let error = "GOAL_CANCEL_SUBJECT_NOT_FOUND: no armed deadline subscription matches the retained subject";
+                        let error = "GOAL_CANCEL_SUBJECT_NOT_FOUND: no armed deadline subscription matches the retained or canonical subject";
                         record["desired"] = Value::String("cancel_pending".into());
                         record["observed"] = Value::String("unknown".into());
                         record["active"] = Value::Bool(false);
@@ -10612,13 +10872,26 @@ where
             let subscription_id = subscription_id.expect("resolved goal subscription ID");
             let mut cancel_result = goal_cancel_subscription(root, &subscription_id);
             if let Err(original_error) = cancel_result {
-                if let Some(subject) = subject.as_deref() {
-                    cancel_result = match goal_subscription_by_subject(root, subject) {
-                        Ok(Some((resolved_id, remote_status, remote_record))) => {
+                if subject.is_some() || !canonical_subject.is_empty() {
+                    cancel_result = match goal_subscription_by_subject_candidates(
+                        root,
+                        Some(&record),
+                        &canonical_subject,
+                    ) {
+                        Ok(Some((resolved_id, remote_status, remote_record, matched_subject))) => {
                             if resolved_id != subscription_id {
                                 record["subscription_id"] = Value::String(resolved_id.clone());
                                 record["collab_subscription"] = remote_record;
                                 record["remote_state"] = Value::String(remote_status);
+                                if subject.as_deref() != Some(matched_subject.as_str()) {
+                                    record["subject_migration"] = serde_json::json!({
+                                        "from": subject.clone(),
+                                        "to": matched_subject,
+                                        "status": "canonical_subject_migrated",
+                                        "migrated_at": chrono::Utc::now().to_rfc3339()
+                                    });
+                                    record["subject"] = Value::String(matched_subject);
+                                }
                                 record["revision"] = Value::Number(
                                     (record["revision"].as_u64().unwrap_or(0) + 1).into(),
                                 );

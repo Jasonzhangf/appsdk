@@ -1,8 +1,10 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,6 +14,16 @@ fn binary() -> PathBuf {
 
 fn memory_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_project-memory"))
+}
+
+#[cfg(unix)]
+fn hold_advisory_lock(file: &fs::File) {
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    assert_eq!(unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) }, 0);
 }
 
 fn temp_root(name: &str) -> PathBuf {
@@ -7904,6 +7916,29 @@ esac
     assert_eq!(duplicate.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("GOAL_RECONCILE_SUBJECT_AMBIGUOUS"));
 
+    let rearm = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        rearm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rearm.stderr)
+    );
+    let rearm_json: Value = serde_json::from_slice(&rearm.stdout).unwrap();
+    assert_eq!(rearm_json["desired"], "subscribed");
+
     // 4. Check goal status
     let status_res = Command::new(binary())
         .args(["goal", "status", "--json"])
@@ -8188,6 +8223,153 @@ esac
 }
 
 #[test]
+fn goal_lifecycle_reconciles_legacy_subject_and_exposes_periodic_recovery() {
+    let root = temp_root("goal-legacy-periodic-recovery");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master"}],"tasks":[],"subagents":[]}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer"}}' ;;
+  "notify subscribe") printf '%s\n' '{"subscription_id":"sub-periodic"}' ;;
+  "notify status")
+    if [ "${STATUS_EXPIRED:-}" = "1" ]; then
+      printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"expired","event":"deadline","subject":"goal:sha256:legacy"}]}'
+    elif [ "${LEGACY_SUBJECT:-}" = "1" ]; then
+      printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"armed","event":"deadline","subject":"goal:long-task.md"}]}'
+    else
+      printf '%s\n' '{"subscriptions":[{"id":"sub-periodic","status":"armed","event":"deadline","subject":"goal:sha256:current"}]}'
+    fi
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let initial = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "5m",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial_text = String::from_utf8_lossy(&initial.stdout);
+    assert!(initial_text
+        .contains("Periodic deadline: every 5m for 100 deliveries (TTL 604800 seconds)"));
+    assert!(initial_text.contains("expires or exhausts without automatic renewal"));
+
+    let record_path = root.join(".appsdk-control/long-task-goal.json");
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    legacy["subject"] = Value::String("goal:long-task.md".into());
+    legacy["subscription_id"] = Value::Null;
+    legacy["collab_subscription"] = Value::Null;
+    fs::write(&record_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let reconciled = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("LEGACY_SUBJECT", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        reconciled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reconciled.stderr)
+    );
+    let reconciled: Value = serde_json::from_slice(&reconciled.stdout).unwrap();
+    assert_eq!(reconciled["subject"], "goal:long-task.md");
+    assert_eq!(reconciled["subscription_id"], "sub-periodic");
+
+    let expired = Command::new(binary())
+        .args(["goal", "status", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env("STATUS_EXPIRED", "1")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        expired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expired.stderr)
+    );
+    let expired: Value = serde_json::from_slice(&expired.stdout).unwrap();
+    assert_eq!(expired["desired"], "recovery_required");
+    assert_eq!(expired["observed"], "expired");
+    assert!(expired["error"]
+        .as_str()
+        .unwrap()
+        .contains("GOAL_PERIODIC_SUBSCRIPTION_NOT_ARMED:expired"));
+    assert!(
+        expired["record"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("appsdk goal subscribe"),
+        "recovery={:?}",
+        expired["record"]["recovery"]
+    );
+
+    let rearmed = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        rearmed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rearmed.stderr)
+    );
+    let rearmed: Value = serde_json::from_slice(&rearmed.stdout).unwrap();
+    assert_eq!(rearmed["desired"], "subscribed");
+    assert!(rearmed["recovery_history"].is_array());
+
+    for (flag, expected) in [
+        ("--repeat", "GOAL_REPEAT_COUNT_INVALID: 'oops'"),
+        ("--ttl-seconds", "GOAL_TTL_INVALID: 'oops'"),
+        ("--ttl-seconds", "GOAL_TTL_INVALID: '0'"),
+    ] {
+        let value = if expected.contains("'0'") {
+            "0"
+        } else {
+            "oops"
+        };
+        let invalid = Command::new(binary())
+            .args(["goal", "subscribe", "--goal", "long-task.md", flag, value])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        assert_eq!(invalid.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains(expected));
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     let root = temp_root("goal-persistence-failure");
     fs::create_dir_all(&root).unwrap();
@@ -8264,13 +8446,32 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
 
     fs::write(&lock_path, "").unwrap();
     let empty_lock = run_in(&root, &["goal", "status", "--json"]);
-    assert_eq!(empty_lock.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&empty_lock.stderr).contains("GOAL_LOCK_METADATA_INVALID"));
+    assert!(empty_lock.status.success());
+    let empty_payload: Value = serde_json::from_slice(&empty_lock.stdout).unwrap();
+    assert_eq!(empty_payload["error"], "GOAL_RECORD_NOT_FOUND");
+    assert!(!lock_path.exists());
+    let recovery_receipt = fs::read_dir(&control_dir)
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("long-task-goal.lock.recovery.")
+        })
+        .expect("empty lock recovery receipt");
+    let recovery_receipt: Value =
+        serde_json::from_slice(&fs::read(recovery_receipt.path()).unwrap()).unwrap();
+    assert_eq!(recovery_receipt["status"], "recovered");
+    assert_eq!(recovery_receipt["original_metadata"], "");
+    assert_eq!(recovery_receipt["reason"], "empty metadata");
+
     fs::write(&lock_path, "pid=").unwrap();
     let truncated_lock = run_in(&root, &["goal", "status", "--json"]);
-    assert_eq!(truncated_lock.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&truncated_lock.stderr).contains("GOAL_LOCK_METADATA_INVALID"));
-    fs::remove_file(&lock_path).unwrap();
+    assert!(truncated_lock.status.success());
+    let truncated_payload: Value = serde_json::from_slice(&truncated_lock.stdout).unwrap();
+    assert_eq!(truncated_payload["error"], "GOAL_RECORD_NOT_FOUND");
+    assert!(!lock_path.exists());
 
     let mut live_owner = Command::new("/bin/sh")
         .args(["-c", "sleep 2"])
@@ -8282,11 +8483,30 @@ fn goal_stale_lock_is_recovered_after_owner_exit() {
     )
     .unwrap();
     let reused_pid = run_in(&root, &["goal", "status", "--json"]);
-    assert_eq!(reused_pid.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&reused_pid.stderr).contains("GOAL_LOCK_BUSY"));
+    assert!(reused_pid.status.success());
+    let reused_payload: Value = serde_json::from_slice(&reused_pid.stdout).unwrap();
+    assert_eq!(reused_payload["error"], "GOAL_RECORD_NOT_FOUND");
+
+    let held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .unwrap();
+    fs::write(
+        &lock_path,
+        format!("pid={} owner=live-owner\n", live_owner.id()),
+    )
+    .unwrap();
+    hold_advisory_lock(&held);
+    let busy = run_in(&root, &["goal", "status", "--json"]);
+    assert_eq!(busy.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&busy.stderr).contains("GOAL_LOCK_BUSY"));
+    drop(held);
     live_owner.kill().unwrap();
     live_owner.wait().unwrap();
-    fs::remove_file(&lock_path).unwrap();
+    let recovered = run_in(&root, &["goal", "status", "--json"]);
+    assert!(recovered.status.success());
 
     fs::remove_dir_all(root).unwrap();
 }

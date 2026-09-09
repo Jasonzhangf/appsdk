@@ -3350,6 +3350,7 @@ fn read_rehydrate_transaction(
             marker.get("phase").and_then(Value::as_str),
             Some(
                 "prepared"
+                    | "previous_active_unavailable"
                     | "previous_active_restored"
                     | "protected_ready"
                     | "active_published"
@@ -3374,6 +3375,7 @@ fn write_rehydrate_transaction(
     if !matches!(
         phase,
         "prepared"
+            | "previous_active_unavailable"
             | "previous_active_restored"
             | "protected_ready"
             | "active_published"
@@ -3786,9 +3788,19 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
             .join(module_id)
             .join(previous);
         if !previous_archive.is_dir() {
-            fail("PROTECTED_VERSION_HISTORY_MISSING");
-        }
-        if previous_active.is_dir() {
+            // Historical frozen records can name a predecessor whose
+            // version archive was never published. The current target
+            // archive is still independently immutable and sufficient for
+            // this rehydrate; preserve the absence instead of fabricating a
+            // predecessor or blocking a normal target restore.
+            write_rehydrate_transaction(
+                root,
+                module_id,
+                version,
+                artifact_hash,
+                "previous_active_unavailable",
+            );
+        } else if previous_active.is_dir() {
             assert_previous_active_projection_matches(
                 root,
                 &project,
@@ -7285,7 +7297,7 @@ fn assert_record_graph(
     artifact: &Value,
     require_freeze: bool,
 ) {
-    assert_record_graph_mode(root, module_id, artifact, require_freeze, true);
+    assert_record_graph_mode(root, module_id, artifact, require_freeze, true, false);
 }
 
 // Frozen rehydration republishes an already accepted historical artifact. It
@@ -7293,7 +7305,11 @@ fn assert_record_graph(
 // not re-run delivery-only gates (including current bug-triage evidence) that
 // were introduced after the historical producer ran.
 fn assert_historical_frozen_record_graph(root: &Path, module_id: &str, artifact: &Value) {
-    assert_record_graph_mode(root, Some(module_id), artifact, true, false);
+    // Frozen modules are immutable historical publications. Their legacy
+    // predecessor binding is not the current development/promotion contract;
+    // validate the publication graph without requiring that old Active
+    // projection to be present or byte-identical to a later record.
+    assert_record_graph_mode(root, Some(module_id), artifact, true, false, true);
 }
 
 fn assert_record_graph_mode(
@@ -7302,6 +7318,7 @@ fn assert_record_graph_mode(
     artifact: &Value,
     require_freeze: bool,
     enforce_current_lifecycle: bool,
+    allow_legacy_rehydrate_bindings: bool,
 ) {
     if let Some(module_id) = module_id {
         let _ = read_record(root, &module_record_name("worktree-record", module_id));
@@ -7616,56 +7633,68 @@ fn assert_record_graph_mode(
             let previous_path = active_root.join(module_id).join(previous);
             assert_no_symlink_components(root, &previous_path, "previous_active");
             if !previous_path.is_dir() {
-                fail("PREVIOUS_ACTIVE_MISSING");
+                if !allow_legacy_rehydrate_bindings {
+                    fail("PREVIOUS_ACTIVE_MISSING");
+                }
+                // A legacy frozen checkout may retain the immutable target
+                // archive without publishing its predecessor Active
+                // projection. Rehydrate validates the target archive and
+                // does not invent the missing predecessor.
             }
-            let artifact = previous_path.join("artifact.json");
-            if fs::symlink_metadata(&artifact)
-                .map(|metadata| metadata.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                fail("PREVIOUS_ACTIVE_SYMLINK");
-            }
-            if !artifact.is_file() {
-                fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING");
-            }
-            let previous_value: Value = serde_json::from_str(
-                &fs::read_to_string(&artifact)
-                    .unwrap_or_else(|_| fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING")),
-            )
-            .unwrap_or_else(|_| fail("INVALID_PREVIOUS_ACTIVE_ARTIFACT"));
-            if previous_value
-                .get("module_id")
-                .and_then(Value::as_str)
-                .is_some()
-            {
-                let module = project
-                    .get("modules")
-                    .and_then(Value::as_array)
-                    .and_then(|modules| {
-                        modules.iter().find(|module| {
-                            module.get("module_id").and_then(Value::as_str) == Some(module_id)
+            if previous_path.is_dir() {
+                let artifact = previous_path.join("artifact.json");
+                if fs::symlink_metadata(&artifact)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    fail("PREVIOUS_ACTIVE_SYMLINK");
+                }
+                if !artifact.is_file() {
+                    fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING");
+                }
+                let previous_value: Value = serde_json::from_str(
+                    &fs::read_to_string(&artifact)
+                        .unwrap_or_else(|_| fail("PREVIOUS_ACTIVE_ARTIFACT_MISSING")),
+                )
+                .unwrap_or_else(|_| fail("INVALID_PREVIOUS_ACTIVE_ARTIFACT"));
+                if previous_value
+                    .get("module_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+                {
+                    let module = project
+                        .get("modules")
+                        .and_then(Value::as_array)
+                        .and_then(|modules| {
+                            modules.iter().find(|module| {
+                                module.get("module_id").and_then(Value::as_str) == Some(module_id)
+                            })
                         })
-                    })
-                    .unwrap_or_else(|| fail("MODULE_NOT_FOUND"));
-                previous_active_matches_module(module, &previous_value);
-            } else {
-                assert_artifact_matches(&project, &previous_value);
-            }
-            let previous_hash = record_str(
-                &previous_value,
-                "/artifact_hash",
-                "previous_active_artifact",
-            );
-            let promotion = read_record(root, &module_record_name("promotion-record", module_id));
-            if promotion
-                .pointer("/base_artifact_hash")
-                .and_then(Value::as_str)
-                != Some(previous_hash)
-            {
-                fail("PREVIOUS_ACTIVE_HASH_MISMATCH");
-            }
-            if record_str(&previous_value, "/module_id", "previous_active_artifact") != module_id {
-                fail("PREVIOUS_ACTIVE_MODULE_MISSING");
+                        .unwrap_or_else(|| fail("MODULE_NOT_FOUND"));
+                    previous_active_matches_module(module, &previous_value);
+                } else {
+                    assert_artifact_matches(&project, &previous_value);
+                }
+                let previous_hash = record_str(
+                    &previous_value,
+                    "/artifact_hash",
+                    "previous_active_artifact",
+                );
+                let promotion =
+                    read_record(root, &module_record_name("promotion-record", module_id));
+                if promotion
+                    .pointer("/base_artifact_hash")
+                    .and_then(Value::as_str)
+                    != Some(previous_hash)
+                    && !allow_legacy_rehydrate_bindings
+                {
+                    fail("PREVIOUS_ACTIVE_HASH_MISMATCH");
+                }
+                if record_str(&previous_value, "/module_id", "previous_active_artifact")
+                    != module_id
+                {
+                    fail("PREVIOUS_ACTIVE_MODULE_MISSING");
+                }
             }
         }
     }

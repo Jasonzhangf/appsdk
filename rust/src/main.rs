@@ -9965,19 +9965,8 @@ fn query_bug_record(root: &Path, issue_id: &str) -> Result<Value, String> {
             .current_dir(dir)
             .output()
     };
-    let mut output = run_git_bug_read(|| run(root), true)
+    let output = run_git_bug_read(|| run(root), true)
         .map_err(|error| format!("BUG_TRIAGE_QUERY_EXECUTION_FAILED:{error}"))?;
-    if !output.status.success() {
-        if let Ok(upstream_dir) = resolve_upstream_repo() {
-            if distinct_bug_store(root, &upstream_dir) {
-                if let Ok(upstream_output) = run_git_bug_read(|| run(&upstream_dir), true) {
-                    if upstream_output.status.success() {
-                        output = upstream_output;
-                    }
-                }
-            }
-        }
-    }
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {

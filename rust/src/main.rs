@@ -7309,6 +7309,9 @@ fn assert_historical_frozen_record_graph(root: &Path, module_id: &str, artifact:
     // predecessor binding is not the current development/promotion contract;
     // validate the publication graph without requiring that old Active
     // projection to be present or byte-identical to a later record.
+    // The merge/mainline binding remains authoritative and must still be
+    // resolved before a historical publication is rehydrated.
+    assert_fix_merge_gate(root, module_id);
     assert_record_graph_mode(root, Some(module_id), artifact, true, false, true);
 }
 
@@ -9907,6 +9910,17 @@ fn install_current_record_contracts(root: &Path) {
         assert_no_symlink_components(root, &target, "record_contract_migration");
         let canonical: Value = serde_json::from_str(canonical)
             .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+        if !target.is_file() {
+            continue;
+        }
+        let current: Value = serde_json::from_str(
+            &fs::read_to_string(&target)
+                .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED")),
+        )
+        .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
+        if current == canonical {
+            continue;
+        }
         let mut content = serde_json::to_vec_pretty(&canonical)
             .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
         content.push(b'\n');

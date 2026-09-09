@@ -557,6 +557,41 @@ fn lifecycle_record_producer_is_bound_in_canonical_and_embedded_maps() {
 }
 
 #[test]
+fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
+    let root = temp_root("lifecycle-chain-invalid-phase");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let input = root.join("chain-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "unknown",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("PRODUCER_PHASE_INVALID"));
+    assert!(!root
+        .join(".appsdk/records/review-record-app-core.json")
+        .exists());
+    assert!(!root
+        .join(".appsdk/records/effectiveness-record-app-core.json")
+        .exists());
+    assert!(!root
+        .join(".appsdk/records/merge-record-app-core.json")
+        .exists());
+    assert!(!root
+        .join(".appsdk/records/promotion-record-app-core.json")
+        .exists());
+    fs::remove_file(input).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_record_producer_rejects_drifted_project_map_before_records() {
     let root = temp_root("lifecycle-record-producer-map-drift");
     let root_text = root.to_str().unwrap();

@@ -5438,6 +5438,627 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     );
 }
 
+fn lifecycle_chain_input(root: &Path, input_path: &str, phase: &str) -> Value {
+    let input_file = producer_input_path(root, input_path);
+    let input: Value = serde_json::from_str(
+        &fs::read_to_string(input_file).unwrap_or_else(|_| fail("PRODUCER_INPUT_READ_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_PRODUCER_INPUT"));
+    if !input.is_object() {
+        fail("INVALID_PRODUCER_INPUT");
+    }
+    input
+        .get(phase)
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| {
+            fail(format!(
+                "PRODUCER_{}_INPUT_MISSING",
+                phase.to_ascii_uppercase()
+            ))
+        })
+}
+
+fn lifecycle_chain_required_array(value: &Value, path: &str, error: &str) -> Vec<String> {
+    let values = value
+        .pointer(path)
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| fail(error));
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        let id = value
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| fail(error));
+        result.push(id.to_string());
+    }
+    result
+}
+
+fn lifecycle_chain_candidate(root: &Path, module_id: &str) -> (Value, Value, Value, Value) {
+    let candidate_name = module_record_name("fix-candidate-record", module_id);
+    let candidate = read_record(root, &candidate_name);
+    let validation = read_record(
+        root,
+        &module_record_name("pre-review-validation-record", module_id),
+    );
+    let reproduction = read_record(root, &module_record_name("reproduction-record", module_id));
+    let worktree = read_record(root, &module_record_name("worktree-record", module_id));
+    if producer_string(&candidate, "/module_id", &candidate_name) != module_id
+        || producer_string(
+            &validation,
+            "/module_id",
+            "pre-review-validation-record.json",
+        ) != module_id
+        || producer_string(&reproduction, "/module_id", "reproduction-record.json") != module_id
+        || producer_string(&worktree, "/module_id", "worktree-record.json") != module_id
+    {
+        fail("LIFECYCLE_CHAIN_MODULE_MISMATCH");
+    }
+    (worktree, reproduction, candidate, validation)
+}
+
+fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record: &Value) {
+    let target = root
+        .join(".appsdk")
+        .join("records")
+        .join(module_record_name(kind, module_id));
+    assert_no_symlink_components(root, &target, "lifecycle_chain_record");
+    if target.exists() {
+        fail(format!(
+            "LIFECYCLE_RECORD_EXISTS:{}",
+            target.strip_prefix(root).unwrap_or(&target).display()
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_RECORD_WRITE_FAILED"));
+    }
+    producer_durable_json(&target, record, "LIFECYCLE_CHAIN_RECORD_WRITE_FAILED");
+}
+
+fn lifecycle_chain_validate_evidence(
+    root: &Path,
+    module_id: &str,
+    evidence_id: &str,
+    issue_id: &str,
+    scope_hash: &str,
+    source_commit: &str,
+) -> Value {
+    let evidence = evidence_by_id(root, module_id, evidence_id);
+    assert_evidence_record(&evidence, evidence_id, Utc::now());
+    if producer_string(&evidence, "/evidence_id", evidence_id) != evidence_id
+        || producer_string(&evidence, "/issue_id", evidence_id) != issue_id
+        || producer_string(&evidence, "/scope/module_id", evidence_id) != module_id
+        || producer_string(&evidence, "/scope_hash", evidence_id) != scope_hash
+        || producer_string(&evidence, "/source_commit", evidence_id) != source_commit
+        || producer_string(&evidence, "/result", evidence_id) != "pass"
+    {
+        fail("LIFECYCLE_CHAIN_EVIDENCE_MISMATCH");
+    }
+    evidence
+}
+
+fn lifecycle_chain_promotion_id(issue_id: &str, module_id: &str, candidate_id: &str) -> String {
+    producer_stable_id(
+        "promotion",
+        &serde_json::json!({
+            "issue_id": issue_id,
+            "module_id": module_id,
+            "fix_candidate_id": candidate_id
+        }),
+    )
+}
+
+fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    assert_lifecycle_producer_map_binding(root, &project, module_id);
+    let observation = lifecycle_chain_input(root, input_path, "architecture");
+    let (worktree, _reproduction, candidate, _validation) =
+        lifecycle_chain_candidate(root, module_id);
+    let artifact = read_module_artifact(root, &project, module_id);
+    module_artifact_matches_project(
+        project
+            .get("modules")
+            .and_then(Value::as_array)
+            .and_then(|modules| {
+                modules.iter().find(|module| {
+                    module.get("module_id").and_then(Value::as_str) == Some(module_id)
+                })
+            })
+            .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id))),
+        &artifact,
+    );
+    assert_pre_review_validation_gate(root, module_id, &artifact);
+    let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
+    let candidate_id =
+        producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
+    let candidate_commit = producer_string(&candidate, "/head_commit", "fix-candidate-record.json");
+    let candidate_tree = producer_string(&candidate, "/tree_hash", "fix-candidate-record.json");
+    let scope_hash = producer_string(&candidate, "/scope_hash", "fix-candidate-record.json");
+    if git_value(
+        root,
+        &["rev-parse", "HEAD"],
+        "PRODUCER_HEAD_COMMIT_UNAVAILABLE",
+    ) != candidate_commit
+        || git_value(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+            "PRODUCER_CANDIDATE_TREE_UNAVAILABLE",
+        ) != candidate_tree
+    {
+        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
+    }
+    let evidence_ids = lifecycle_chain_required_array(
+        &observation,
+        "/evidence_ids",
+        "ARCHITECTURE_REVIEW_EVIDENCE_MISSING",
+    );
+    let review_time = Utc::now();
+    for id in &evidence_ids {
+        let evidence = lifecycle_chain_validate_evidence(
+            root,
+            module_id,
+            id,
+            &issue_id,
+            &scope_hash,
+            &candidate_commit,
+        );
+        if record_time(&evidence, id) > review_time {
+            fail("ARCHITECTURE_REVIEW_EVIDENCE_FUTURE");
+        }
+    }
+    let reviewer = observation
+        .get("reviewer")
+        .filter(|value| {
+            value
+                .get("adapter")
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+                && value
+                    .get("identity")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| !v.is_empty())
+        })
+        .cloned()
+        .unwrap_or_else(|| fail("ARCHITECTURE_REVIEWER_MISSING"));
+    let verdict = producer_string(
+        &observation,
+        "/verdict",
+        "ARCHITECTURE_REVIEW_VERDICT_MISSING",
+    );
+    if !matches!(
+        verdict.as_str(),
+        "pass" | "fail" | "new_version_required" | "manual_auth_required"
+    ) {
+        fail("ARCHITECTURE_REVIEW_VERDICT_INVALID");
+    }
+    let promotion_id = lifecycle_chain_promotion_id(&issue_id, module_id, &candidate_id);
+    let review_id = producer_stable_id(
+        "review",
+        &serde_json::json!({
+            "promotion_id": promotion_id,
+            "fix_candidate_id": candidate_id,
+            "reviewer": reviewer,
+            "verdict": verdict,
+            "evidence_ids": evidence_ids
+        }),
+    );
+    let review = serde_json::json!({
+        "review_id": review_id,
+        "review_kind": "architecture",
+        "issue_id": issue_id,
+        "promotion_id": promotion_id,
+        "fix_candidate_id": candidate_id,
+        "pre_review_validation_id": producer_string(&_validation, "/validation_id", "pre-review-validation-record.json"),
+        "reviewer": reviewer,
+        "verdict": verdict,
+        "evidence_ids": evidence_ids,
+        "reviewed_commit": candidate_commit,
+        "reviewed_tree_hash": candidate_tree,
+        "reviewed_diff_hash": producer_string(&candidate, "/diff_hash", "fix-candidate-record.json"),
+        "reviewed_artifact_hash": producer_string(&artifact, "/artifact_hash", "module-artifact"),
+        "reviewed_scope_hash": scope_hash,
+        "resource_map_hash": file_sha256(&root.join(".appsdk/maps/resource-map.json"), "resource-map.json"),
+        "function_map_hash": file_sha256(&root.join(".appsdk/maps/function-map.json"), "function-map.json"),
+        "mainline_call_map_hash": file_sha256(&root.join(".appsdk/maps/mainline-call-map.json"), "mainline-call-map.json"),
+        "verification_map_hash": file_sha256(&root.join(".appsdk/maps/verification-map.json"), "verification-map.json"),
+        "created_at": review_time.to_rfc3339()
+    });
+    for path in [
+        "/review_id",
+        "/promotion_id",
+        "/fix_candidate_id",
+        "/pre_review_validation_id",
+        "/reviewed_commit",
+        "/reviewed_tree_hash",
+        "/reviewed_diff_hash",
+        "/reviewed_artifact_hash",
+        "/reviewed_scope_hash",
+        "/resource_map_hash",
+        "/function_map_hash",
+        "/mainline_call_map_hash",
+        "/verification_map_hash",
+        "/created_at",
+    ] {
+        producer_string(&review, path, "ARCHITECTURE_REVIEW_RECORD_INVALID");
+    }
+    lifecycle_chain_write_record(root, module_id, "review-record", &review);
+    println!("{}", serde_json::to_string_pretty(&review).unwrap());
+}
+
+fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    let observation = lifecycle_chain_input(root, input_path, "effectiveness");
+    let (worktree, reproduction, candidate, _validation) =
+        lifecycle_chain_candidate(root, module_id);
+    let review_name = module_record_name("review-record", module_id);
+    let review = read_record(root, &review_name);
+    let artifact = read_module_artifact(root, &project, module_id);
+    assert_fix_architecture_gate(root, module_id, &artifact);
+    let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
+    let candidate_id =
+        producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
+    let candidate_commit = producer_string(&candidate, "/head_commit", "fix-candidate-record.json");
+    let candidate_tree = producer_string(&candidate, "/tree_hash", "fix-candidate-record.json");
+    let scope_hash = producer_string(&candidate, "/scope_hash", "fix-candidate-record.json");
+    if git_value(
+        root,
+        &["rev-parse", "HEAD"],
+        "PRODUCER_HEAD_COMMIT_UNAVAILABLE",
+    ) != candidate_commit
+        || git_value(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+            "PRODUCER_CANDIDATE_TREE_UNAVAILABLE",
+        ) != candidate_tree
+    {
+        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
+    }
+    let fixed_id = producer_string(
+        &observation,
+        "/fixed_replay_evidence_id",
+        "EFFECTIVENESS_FIXED_REPLAY_MISSING",
+    );
+    let positive_ids = lifecycle_chain_required_array(
+        &observation,
+        "/positive_evidence_ids",
+        "EFFECTIVENESS_POSITIVE_EVIDENCE_MISSING",
+    );
+    let negative_ids = lifecycle_chain_required_array(
+        &observation,
+        "/negative_evidence_ids",
+        "EFFECTIVENESS_NEGATIVE_EVIDENCE_MISSING",
+    );
+    let blackbox_ids = lifecycle_chain_required_array(
+        &observation,
+        "/blackbox_evidence_ids",
+        "EFFECTIVENESS_BLACKBOX_EVIDENCE_MISSING",
+    );
+    let mut all_ids = vec![fixed_id.clone()];
+    all_ids.extend(positive_ids.iter().cloned());
+    all_ids.extend(negative_ids.iter().cloned());
+    all_ids.extend(blackbox_ids.iter().cloned());
+    let effectiveness_time = Utc::now();
+    let mut phases = std::collections::HashSet::new();
+    for id in &all_ids {
+        let evidence = lifecycle_chain_validate_evidence(
+            root,
+            module_id,
+            id,
+            &issue_id,
+            &scope_hash,
+            &candidate_commit,
+        );
+        if evidence.get("input_hashes") != reproduction.get("input_hashes") {
+            fail("EFFECTIVENESS_INPUT_MISMATCH");
+        }
+        if record_time(&evidence, id) > effectiveness_time {
+            fail("EFFECTIVENESS_EVIDENCE_FUTURE");
+        }
+        phases.insert(producer_string(&evidence, "/phase", id));
+    }
+    if !phases.contains("positive_intervention")
+        || !phases.contains("negative_intervention")
+        || (!phases.contains("post_architecture_effectiveness")
+            && !phases.contains("deployed_blackbox"))
+    {
+        fail("EFFECTIVENESS_REQUIRED_PHASE_MISSING");
+    }
+    let review_id = producer_string(&review, "/review_id", &review_name);
+    let effectiveness_id = producer_stable_id(
+        "effectiveness",
+        &serde_json::json!({"fix_candidate_id": candidate_id, "architecture_review_id": review_id, "evidence_ids": all_ids}),
+    );
+    let effectiveness = serde_json::json!({
+        "effectiveness_id": effectiveness_id,
+        "issue_id": issue_id,
+        "module_id": module_id,
+        "fix_candidate_id": candidate_id,
+        "architecture_review_id": review_id,
+        "reviewed_commit": candidate_commit,
+        "reviewed_tree_hash": candidate_tree,
+        "reproduction_input_hashes": reproduction["input_hashes"].clone(),
+        "baseline_evidence_id": producer_string(&reproduction, "/baseline_evidence_id", "reproduction-record.json"),
+        "fixed_replay_evidence_id": fixed_id,
+        "positive_evidence_ids": positive_ids,
+        "negative_evidence_ids": negative_ids,
+        "blackbox_evidence_ids": blackbox_ids,
+        "source_unchanged_since_review": true,
+        "result": "pass",
+        "created_at": effectiveness_time.to_rfc3339()
+    });
+    for path in [
+        "/effectiveness_id",
+        "/issue_id",
+        "/module_id",
+        "/fix_candidate_id",
+        "/architecture_review_id",
+        "/reviewed_commit",
+        "/reviewed_tree_hash",
+        "/baseline_evidence_id",
+        "/fixed_replay_evidence_id",
+        "/created_at",
+    ] {
+        producer_string(&effectiveness, path, "EFFECTIVENESS_RECORD_INVALID");
+    }
+    lifecycle_chain_write_record(root, module_id, "effectiveness-record", &effectiveness);
+    println!("{}", serde_json::to_string_pretty(&effectiveness).unwrap());
+}
+
+fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    let observation = lifecycle_chain_input(root, input_path, "merge");
+    let (worktree, _reproduction, candidate, _validation) =
+        lifecycle_chain_candidate(root, module_id);
+    let effectiveness = read_record(root, &module_record_name("effectiveness-record", module_id));
+    let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
+    let candidate_id =
+        producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
+    let candidate_commit = producer_string(&candidate, "/head_commit", "fix-candidate-record.json");
+    let candidate_tree = producer_string(&candidate, "/tree_hash", "fix-candidate-record.json");
+    let mainline_ref = producer_string(&observation, "/mainline_ref", "MERGE_MAINLINE_REF_MISSING");
+    let merge_commit = git_value(root, &["rev-parse", "HEAD"], "MERGE_COMMIT_UNAVAILABLE");
+    let merged_tree = git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", merge_commit)],
+        "MERGE_TREE_UNAVAILABLE",
+    );
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{commit}}", mainline_ref)],
+        "MERGE_MAINLINE_REF_MISSING",
+    ) != merge_commit
+    {
+        fail("MERGE_MAINLINE_HEAD_MISMATCH");
+    }
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+        || !Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                candidate_commit.as_str(),
+                merge_commit.as_str(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    {
+        fail("MERGE_CANDIDATE_IDENTITY_MISMATCH");
+    }
+    let change_identity = if candidate_commit == merge_commit {
+        "exact"
+    } else {
+        let requested = producer_string(
+            &observation,
+            "/change_identity",
+            "MERGE_CHANGE_IDENTITY_MISSING",
+        );
+        if requested != "tested_integration_exact" {
+            fail("MERGE_CHANGE_IDENTITY_REQUIRED");
+        }
+        "tested_integration_exact"
+    };
+    let merge_time = Utc::now();
+    let merge_id = producer_stable_id(
+        "merge",
+        &serde_json::json!({"fix_candidate_id": candidate_id, "effectiveness_id": effectiveness["effectiveness_id"], "merge_commit": merge_commit, "mainline_ref": mainline_ref}),
+    );
+    let merge = serde_json::json!({
+        "merge_id": merge_id,
+        "issue_id": issue_id,
+        "module_id": module_id,
+        "fix_candidate_id": candidate_id,
+        "effectiveness_id": effectiveness["effectiveness_id"].clone(),
+        "mainline_ref": mainline_ref,
+        "candidate_commit": candidate_commit,
+        "merge_commit": merge_commit,
+        "candidate_tree_hash": candidate_tree,
+        "merged_tree_hash": merged_tree,
+        "change_identity": change_identity,
+        "result": "pass",
+        "created_at": merge_time.to_rfc3339()
+    });
+    lifecycle_chain_write_record(root, module_id, "merge-record", &merge);
+    println!("{}", serde_json::to_string_pretty(&merge).unwrap());
+}
+
+fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    let project = read_project(root);
+    assert_declared_contracts(root, &project, true);
+    assert_goal_confirmed(root);
+    let observation = lifecycle_chain_input(root, input_path, "promotion");
+    let (worktree, reproduction, candidate, _validation) =
+        lifecycle_chain_candidate(root, module_id);
+    let review = read_record(root, &module_record_name("review-record", module_id));
+    let effectiveness = read_record(root, &module_record_name("effectiveness-record", module_id));
+    let merge = read_record(root, &module_record_name("merge-record", module_id));
+    let artifact = read_module_artifact(root, &project, module_id);
+    let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
+    let candidate_id =
+        producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
+    let merge_commit = producer_string(&merge, "/merge_commit", "merge-record.json");
+    let artifact_hash = producer_string(&artifact, "/artifact_hash", "module-artifact");
+    let scope_hash = producer_string(&candidate, "/scope_hash", "fix-candidate-record.json");
+    let public_api_hash = producer_string(&artifact, "/public_api_hash", "module-artifact");
+    if git_value(root, &["rev-parse", "HEAD"], "PROMOTION_HEAD_UNAVAILABLE") != merge_commit {
+        fail("PROMOTION_MERGE_HEAD_MISMATCH");
+    }
+    let experiment_id = producer_string(
+        &observation,
+        "/experiment_id",
+        "PROMOTION_EXPERIMENT_MISSING",
+    );
+    let new_version = producer_string(
+        &observation,
+        "/new_active_version",
+        "PROMOTION_NEW_VERSION_MISSING",
+    );
+    assert_version(&new_version, "INVALID_ACTIVE_VERSION");
+    let previous = if let Some(base) = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|m| m.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .and_then(|m| m.get("version_base"))
+        .filter(|value| !value.is_null())
+    {
+        Value::String(
+            record_str(base, "/previous_active_version", "module-version-base").to_string(),
+        )
+    } else {
+        observation
+            .get("previous_active_version")
+            .filter(|value| value.is_null() || value.as_str().is_some())
+            .cloned()
+            .unwrap_or_else(|| fail("PROMOTION_PREVIOUS_VERSION_MISSING"))
+    };
+    let compatibility = producer_string(
+        &observation,
+        "/compatibility_level",
+        "PROMOTION_COMPATIBILITY_MISSING",
+    );
+    if !matches!(
+        compatibility.as_str(),
+        "compatible" | "migration_required" | "breaking"
+    ) {
+        fail("PROMOTION_COMPATIBILITY_INVALID");
+    }
+    let evidence_ids =
+        lifecycle_chain_required_array(&observation, "/evidence_ids", "PROMOTION_EVIDENCE_MISSING");
+    for id in &evidence_ids {
+        lifecycle_chain_validate_evidence(
+            root,
+            module_id,
+            id,
+            &issue_id,
+            &scope_hash,
+            &merge_commit,
+        );
+    }
+    let gates = observation
+        .get("required_gate_results")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .cloned()
+        .unwrap_or_else(|| fail("PROMOTION_GATES_MISSING"));
+    for gate in &gates {
+        if producer_string(gate, "/gate_id", "PROMOTION_GATE_INVALID") == ""
+            || producer_string(gate, "/producer", "PROMOTION_GATE_INVALID") == ""
+            || producer_string(gate, "/result", "PROMOTION_GATE_INVALID") != "pass"
+        {
+            fail("PROMOTION_GATE_INVALID");
+        }
+    }
+    let cleanup_id = producer_string(
+        &observation,
+        "/playground_cleanup_record_id",
+        "PROMOTION_CLEANUP_MISSING",
+    );
+    let cleanup = read_record(root, &format!("playground-cleanup-{}.json", cleanup_id));
+    if producer_string(&cleanup, "/cleanup_id", "playground-cleanup-record") != cleanup_id {
+        fail("PROMOTION_CLEANUP_MISMATCH");
+    }
+    let promotion_id = lifecycle_chain_promotion_id(&issue_id, module_id, &candidate_id);
+    let promotion_time = Utc::now();
+    let promotion = serde_json::json!({
+        "promotion_id": promotion_id,
+        "issue_id": issue_id,
+        "experiment_id": experiment_id,
+        "module_id": module_id,
+        "worktree_record_id": worktree["worktree_id"].clone(),
+        "reproduction_record_id": reproduction["reproduction_id"].clone(),
+        "fix_candidate_id": candidate_id,
+        "architecture_review_id": review["review_id"].clone(),
+        "effectiveness_record_id": effectiveness["effectiveness_id"].clone(),
+        "merge_record_id": merge["merge_id"].clone(),
+        "base_commit": worktree["base_commit"].clone(),
+        "candidate_commit": candidate["head_commit"].clone(),
+        "merged_commit": merge_commit.clone(),
+        "source_commit": merge_commit,
+        "previous_active_version": previous,
+        "new_active_version": new_version,
+        "artifact_hash": artifact_hash,
+        "scope_hash": scope_hash,
+        "public_api_hash": public_api_hash,
+        "review_id": review["review_id"].clone(),
+        "evidence_ids": evidence_ids,
+        "required_gate_results": gates,
+        "change_set_id": producer_string(&observation, "/change_set_id", "PROMOTION_CHANGE_SET_MISSING"),
+        "compatibility_level": compatibility,
+        "root_cause": producer_string(&observation, "/root_cause", "PROMOTION_ROOT_CAUSE_MISSING"),
+        "design_id": producer_string(&observation, "/design_id", "PROMOTION_DESIGN_MISSING"),
+        "change_reason_comment": producer_string(&observation, "/change_reason_comment", "PROMOTION_REASON_MISSING"),
+        "playground_cleanup_record_id": cleanup_id,
+        "created_at": promotion_time.to_rfc3339()
+    });
+    lifecycle_chain_write_record(root, module_id, "promotion-record", &promotion);
+    println!("{}", serde_json::to_string_pretty(&promotion).unwrap());
+}
+
+fn produce_lifecycle_chain(root: &Path, module_id: &str, phase: &str, input_path: &str) {
+    if !matches!(
+        phase,
+        "architecture" | "effectiveness" | "merge" | "promotion"
+    ) {
+        fail("PRODUCER_PHASE_INVALID");
+    }
+    let _producer_lock = producer_lock(root);
+    match phase {
+        "architecture" => lifecycle_chain_architecture(root, module_id, input_path),
+        "effectiveness" => lifecycle_chain_effectiveness(root, module_id, input_path),
+        "merge" => lifecycle_chain_merge(root, module_id, input_path),
+        "promotion" => lifecycle_chain_promotion(root, module_id, input_path),
+        _ => unreachable!(),
+    }
+}
+
 fn record_str<'a>(record: &'a Value, path: &str, name: &str) -> &'a str {
     record
         .pointer(path)
@@ -13319,6 +13940,9 @@ fn print_cli_help(command: Option<&str>) {
         Some("produce-lifecycle-records") => {
             "Usage: appsdk produce-lifecycle-records [project] --module <id> --input <json>"
         }
+        Some("produce-lifecycle-chain") => {
+            "Usage: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>"
+        }
         Some("pin-lock") => "Usage: appsdk pin-lock [project] --binary <path>",
         Some("reset-governance") => {
             "Usage: appsdk reset-governance [project] --discard-legacy"
@@ -13636,6 +14260,31 @@ fn main() {
                 fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>");
             }
             produce_lifecycle_records(&root, &module_id, &input);
+        }
+        Some("produce-lifecycle-chain") => {
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>");
+            }
+            let module_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>")
+            });
+            if args.next().as_deref() != Some("--phase") {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>");
+            }
+            let phase = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>")
+            });
+            if args.next().as_deref() != Some("--input") {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>");
+            }
+            let input = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>")
+            });
+            if args.next().is_some() {
+                fail("USAGE: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>");
+            }
+            produce_lifecycle_chain(&root, &module_id, &phase, &input);
         }
         Some("freeze") => {
             let root = project_root_or_cwd(&mut args);

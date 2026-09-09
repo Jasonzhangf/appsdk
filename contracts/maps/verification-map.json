@@ -32,6 +32,7 @@
     {"gate_id":"remote_main_receipt","command":"appsdk verify <project>","required_for":["promotion","cleanup","freeze","publish"]},
     {"gate_id":"mainline_merge_identity","command":"appsdk verify <project>","required_for":["promotion","compile","freeze","publish"]},
     {"gate_id":"fix_lifecycle_graph","command":"appsdk verify <project>","required_for":["promotion","freeze","publish"]},
+    {"gate_id":"lifecycle_chain_record_producer","command":"appsdk produce-lifecycle-chain <project> --module <id> --phase <phase> --input <json>","human_contract":"AppSDK binds externally observed review, effectiveness, merge, or promotion facts and computes record identity; it never executes review, invents evidence, or infers merge state","required_for":["architecture_review","effectiveness","mainline_merge","promotion"]},
     {"gate_id":"guidance_declared_sources","command":"appsdk guide compile <project>","required_for":["guidance_compile"]},
     {"gate_id":"guidance_deterministic_compile","command":"cargo test --test cli_smoke guidance_compile_is_deterministic_and_optional_for_existing_commands","required_for":["guidance_compile","release"]},
     {"gate_id":"guidance_setup_initialization","command":"cargo test --test cli_smoke existing_governance_without_guide_gets_read_only_setup_proposal","required_for":["guidance_setup","release"]},

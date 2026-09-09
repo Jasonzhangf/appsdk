@@ -9066,8 +9066,8 @@ fn init_project(root: &Path) {
     write_project_scaffold(root);
     if fresh_governance {
         write_project_agent_contract(root);
+        install_bundle_resources(root);
     }
-    install_bundle_resources(root);
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
     initialize_collab_peer();
@@ -9658,40 +9658,15 @@ fn write_legacy_migration_step(root: &Path, source_version: &str) {
 }
 
 fn install_current_record_contracts(root: &Path) {
-    for (relative, property, canonical) in [
-        (
-            "contracts/records/worktree-record.schema.json",
-            "bug_triage",
-            include_str!("../../contracts/records/worktree-record.schema.json"),
-        ),
-        (
-            "contracts/records/promotion-record.schema.json",
-            "bug_closure_verified",
-            include_str!("../../contracts/records/promotion-record.schema.json"),
-        ),
-    ] {
+    for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
+        .iter()
+        .filter(|(path, _, _)| path.starts_with("contracts/records/"))
+    {
         let target = root.join(relative);
         assert_no_symlink_components(root, &target, "record_contract_migration");
-        let mut current: Value = serde_json::from_str(
-            &fs::read_to_string(&target)
-                .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED")),
-        )
-        .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
         let canonical: Value = serde_json::from_str(canonical)
             .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
-        if current == canonical {
-            continue;
-        }
-        let properties = current
-            .get_mut("properties")
-            .and_then(Value::as_object_mut)
-            .unwrap_or_else(|| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
-        let canonical_property = canonical
-            .pointer(&format!("/properties/{property}"))
-            .cloned()
-            .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
-        properties.insert(property.into(), canonical_property);
-        let mut content = serde_json::to_vec_pretty(&current)
+        let mut content = serde_json::to_vec_pretty(&canonical)
             .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
         content.push(b'\n');
         atomic_write_bytes(

@@ -1325,6 +1325,10 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
     let protected_before = fs::read(root.join("protected/history/project-history.txt")).unwrap();
     let reference = root.join(".appsdk/templates/minimal/AGENTS.md");
     fs::write(&reference, "stale template reference\n").unwrap();
+    let governance_map = root.join(".appsdk/maps/function-map.json");
+    let governance_map_before = fs::read(&governance_map).unwrap();
+    let sdk_resources = root.join(".appsdk/sdk-resources.json");
+    let sdk_resources_before = fs::read(&sdk_resources).unwrap();
 
     let initialized = run(&["init", root_text]);
     assert!(
@@ -1336,6 +1340,8 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
     assert!(initialized_stdout.contains("--task guidance-upgrade"));
     assert!(initialized_stdout.contains("--mode bootstrap"));
     assert_eq!(fs::read(&project_file).unwrap(), project_before);
+    assert_eq!(fs::read(&governance_map).unwrap(), governance_map_before);
+    assert_eq!(fs::read(&sdk_resources).unwrap(), sdk_resources_before);
     assert_eq!(fs::read(root.join("AGENTS.md")).unwrap(), agents_before);
     assert_eq!(
         fs::read(root.join("skills/project-flow/SKILL.md")).unwrap(),
@@ -2598,6 +2604,20 @@ fn pin_lock_migrates_stale_project_record_contracts() {
     ])
     .status
     .success());
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&worktree).unwrap()).unwrap(),
+        serde_json::from_str::<Value>(include_str!(
+            "../../contracts/records/worktree-record.schema.json"
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&promotion).unwrap()).unwrap(),
+        serde_json::from_str::<Value>(include_str!(
+            "../../contracts/records/promotion-record.schema.json"
+        ))
+        .unwrap()
+    );
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
 }

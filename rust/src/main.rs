@@ -3620,6 +3620,26 @@ fn restore_generated_module_from_archive(
     fs::rename(staging, generated).unwrap_or_else(|_| fail("FROZEN_REHYDRATE_GENERATED_FAILED"));
 }
 
+fn verify_rehydrated_module(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+    version: &str,
+    artifact: &Value,
+    archive: &Path,
+) {
+    let generated = read_module_artifact(root, project, module_id);
+    module_artifact_matches_project(module, &generated);
+    if generated != *artifact {
+        fail("FROZEN_REHYDRATE_GENERATED_PROJECTION_MISMATCH");
+    }
+    let project_artifact = read_compiled_artifact(root, project);
+    assert_artifact_matches(project, &project_artifact);
+    assert_protected_archive_matches(root, module, artifact, archive);
+    assert_active_projection_matches(root, project, module_id, version, artifact);
+}
+
 fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -3734,7 +3754,9 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
         // The previous Active archive is only needed when this invocation has
         // to restore it; older version metadata must not invalidate the
         // current Active/Protected projection.
-        verify_internal(root, false, false);
+        verify_rehydrated_module(
+            root, &project, module, module_id, version, &artifact, &archive,
+        );
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -3826,7 +3848,9 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
         publish_active_rehydrated(root, module_id, version);
     }
     write_rehydrate_transaction(root, module_id, version, artifact_hash, "active_published");
-    verify_internal(root, false, false);
+    verify_rehydrated_module(
+        root, &project, module, module_id, version, &artifact, &archive,
+    );
     write_rehydrate_transaction(root, module_id, version, artifact_hash, "verified");
     finish_rehydrate_transaction(root, module_id);
     println!(

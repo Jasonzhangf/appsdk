@@ -8425,8 +8425,8 @@ fn bug_command_upstream_fallback() {
     let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(show_json["title"], "Upstream Daemon Issue");
 
-    // A missing local issue may be read from the configured upstream store,
-    // while the write commands below still require an explicit selector.
+    // A missing local issue must not be read from the configured upstream
+    // store without an explicit selector.
     let implicit_show = Command::new(binary())
         .args(&["bug", "show", bug_id, "--json"])
         .current_dir(&client_root)
@@ -8434,13 +8434,8 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(
-        implicit_show.status.success(),
-        "{}",
-        String::from_utf8_lossy(&implicit_show.stderr)
-    );
-    let implicit_show_json: Value = serde_json::from_slice(&implicit_show.stdout).unwrap();
-    assert_eq!(implicit_show_json["title"], "Upstream Daemon Issue");
+    assert!(!implicit_show.status.success());
+    assert!(String::from_utf8_lossy(&implicit_show.stderr).contains("GIT_BUG_SHOW_FAILED"));
 
     // 2. The explicit selector also applies to filtered list reads.
     let list_q = Command::new(binary())
@@ -8466,14 +8461,9 @@ fn bug_command_upstream_fallback() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(
-        implicit_list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&implicit_list.stderr)
-    );
+    assert!(implicit_list.status.success());
     let implicit_list_json: Value = serde_json::from_slice(&implicit_list.stdout).unwrap();
-    assert_eq!(implicit_list_json.as_array().unwrap().len(), 1);
-    assert_eq!(implicit_list_json[0]["title"], "Upstream Daemon Issue");
+    assert!(implicit_list_json.as_array().unwrap().is_empty());
 
     // 3. A comment without --upstream remains local and must not target upstream.
     let local_comment = Command::new(binary())
@@ -8551,7 +8541,7 @@ fn bug_command_upstream_fallback() {
 }
 
 #[test]
-fn bug_reads_external_repo_from_home_upstream_without_local_lock() {
+fn bug_reads_external_repo_requires_explicit_upstream_under_local_lock() {
     let home = temp_root("bug-resolution-home");
     let upstream_root = home.join("Documents/github/appsdk");
     fs::create_dir_all(&upstream_root).unwrap();
@@ -8647,31 +8637,12 @@ fn bug_reads_external_repo_from_home_upstream_without_local_lock() {
         .spawn()
         .unwrap();
     let list = list_child.wait_with_output().unwrap();
-    assert!(
-        list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    let list_json: Value = serde_json::from_slice(&list.stdout).unwrap();
-    assert!(list_json
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|bug| bug["id"] == bug_id || bug["human_id"] == bug_id));
-    assert!(!list_json
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|bug| bug["title"] == "Local Issue"));
+    assert!(!list.status.success());
+    assert!(String::from_utf8_lossy(&list.stderr).contains("GIT_BUG_LIST_FAILED"));
 
     let show = show_child.wait_with_output().unwrap();
-    assert!(
-        show.status.success(),
-        "{}",
-        String::from_utf8_lossy(&show.stderr)
-    );
-    let show_json: Value = serde_json::from_slice(&show.stdout).unwrap();
-    assert!(show_json["id"] == bug_id || show_json["human_id"] == bug_id);
+    assert!(!show.status.success());
+    assert!(String::from_utf8_lossy(&show.stderr).contains("GIT_BUG_SHOW_FAILED"));
 
     // A locked local store must not turn a default comment into an upstream
     // mutation; upstream writes remain explicit.
@@ -10461,7 +10432,7 @@ fn longhorizon_bug_permission_failure_remains_explicit() {
 }
 
 #[test]
-fn longhorizon_bug_read_falls_back_to_upstream_after_local_failure() {
+fn longhorizon_bug_read_does_not_fall_back_to_upstream_after_local_failure() {
     let root = temp_root("longhorizon-bug-upstream-fallback");
     fs::create_dir_all(&root).unwrap();
     let home = root.join("home");
@@ -10481,10 +10452,7 @@ fn longhorizon_bug_read_falls_back_to_upstream_after_local_failure() {
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
 
     let fake_git_bug = fake_bin.join("git-bug");
-    let fake_git_bug_script = format!(
-        "#!/bin/sh\nif [ \"$PWD\" = \"{}\" ]; then\n  printf '%s\\n' 'permission denied' >&2\n  exit 126\nfi\nprintf '%s\\n' '[{{\"human_id\":\"upstream-1\",\"title\":\"Upstream open bug\",\"labels\":[\"P1\"]}}]'\n",
-        root.display()
-    );
+    let fake_git_bug_script = "#!/bin/sh\nprintf '%s\\n' 'permission denied' >&2\nexit 126\n";
     fs::write(&fake_git_bug, fake_git_bug_script).unwrap();
     fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:/usr/bin:/bin", fake_bin.display());
@@ -10497,15 +10465,13 @@ fn longhorizon_bug_read_falls_back_to_upstream_after_local_failure() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    assert!(result.status.success());
     let payload: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(payload["open_bugs_error"], Value::Null);
-    assert_eq!(payload["open_bugs"].as_array().unwrap().len(), 1);
-    assert_eq!(payload["open_bugs"][0]["title"], "Upstream open bug");
+    assert!(payload["open_bugs"].as_array().unwrap().is_empty());
+    assert!(payload["open_bugs_error"]
+        .as_str()
+        .unwrap()
+        .contains("GIT_BUG_OPEN_READ_FAILED"));
 
     fs::remove_dir_all(root).unwrap();
 }

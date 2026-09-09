@@ -5585,6 +5585,26 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         .contains("FROZEN_REHYDRATE_UNOWNED_PARTIAL_PROJECTION"));
     fs::remove_dir_all(root.join("active")).unwrap();
 
+    // Historical frozen records predate the current delivery triage contract.
+    // Rehydration must validate their immutable publication graph without
+    // requiring a newly invented delivery record field.
+    let worktree_record = root.join(".appsdk/records/worktree-record-app-core.json");
+    let mut historical_worktree: Value =
+        serde_json::from_str(&fs::read_to_string(&worktree_record).unwrap()).unwrap();
+    historical_worktree
+        .as_object_mut()
+        .unwrap()
+        .remove("bug_triage");
+    historical_worktree
+        .as_object_mut()
+        .unwrap()
+        .remove("bug_triage_query_binding");
+    fs::write(
+        &worktree_record,
+        serde_json::to_string_pretty(&historical_worktree).unwrap() + "\n",
+    )
+    .unwrap();
+
     let restored = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
     assert!(
         restored.status.success(),

@@ -2766,7 +2766,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
         {
             fail(format!("INVALID_PROJECT_MODULE:{}", id));
         }
-        if let Some(version_base) = module.get("version_base") {
+        if let Some(version_base) = module.get("version_base").filter(|value| !value.is_null()) {
             for path in [
                 "/previous_active_version",
                 "/new_active_version",
@@ -3500,6 +3500,126 @@ fn finish_rehydrate_transaction(root: &Path, module_id: &str) {
         .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_TRANSACTION_CLEANUP_FAILED"));
 }
 
+fn protected_archive_needs_version_restore(root: &Path, archive: &Path, artifact: &Value) -> bool {
+    assert_no_symlink_components(root, archive, "protected_archive");
+    let current = archive.join("module-artifact.json");
+    let Ok(contents) = fs::read_to_string(current) else {
+        return true;
+    };
+    let Ok(current_artifact) = serde_json::from_str::<Value>(&contents) else {
+        return true;
+    };
+    current_artifact.get("artifact_hash") != artifact.get("artifact_hash")
+}
+
+fn restore_current_protected_archive_from_version(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+    version: &str,
+    artifact: &Value,
+    archive: &Path,
+) {
+    let protected_root = contract_root(root, project, "/governance/protected_root");
+    let version_archive = protected_root
+        .join("history-versions")
+        .join(module_id)
+        .join(version);
+    if !version_archive.is_dir() {
+        fail("PROTECTED_ARCHIVE_VERSION_HISTORY_MISSING");
+    }
+    assert_protected_archive_matches(root, module, artifact, &version_archive);
+    let staging = archive.with_file_name(format!(
+        ".{}.rehydrate-version.{}",
+        module_id,
+        std::process::id()
+    ));
+    let backup = archive.with_file_name(format!(
+        ".{}.rehydrate-backup.{}",
+        module_id,
+        std::process::id()
+    ));
+    assert_no_symlink_components(root, &staging, "protected_archive_staging");
+    assert_no_symlink_components(root, &backup, "protected_archive_backup");
+    if staging.exists() || backup.exists() {
+        fail("PROTECTED_ARCHIVE_RESTORE_STAGING_EXISTS");
+    }
+    copy_tree(&version_archive, &staging);
+    if archive.exists() {
+        fs::rename(archive, &backup).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_RESTORE_FAILED"));
+    }
+    if let Err(_) = fs::rename(&staging, archive) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, archive);
+        }
+        fail("PROTECTED_ARCHIVE_RESTORE_FAILED");
+    }
+    if backup.exists() {
+        fs::remove_dir_all(backup).unwrap_or_else(|_| fail("PROTECTED_ARCHIVE_RESTORE_FAILED"));
+    }
+}
+
+fn restore_generated_module_from_archive(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    artifact: &Value,
+    archive: &Path,
+) {
+    let generated = module_generated_dir(root, project, module_id);
+    let staging = generated_root(root, project)
+        .join("rehydrate-generated")
+        .join(format!("{}.{}", module_id, std::process::id()));
+    assert_no_symlink_components(root, &generated, "generated_module");
+    assert_no_symlink_components(root, &staging, "generated_module_staging");
+    if generated.is_dir() {
+        let existing = generated.join("module.compiled.json");
+        if existing.is_file() {
+            let current: Value = serde_json::from_str(
+                &fs::read_to_string(existing)
+                    .unwrap_or_else(|_| fail("MODULE_ARTIFACT_READ_FAILED")),
+            )
+            .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+            if current == *artifact {
+                return;
+            }
+        }
+        fail("FROZEN_REHYDRATE_GENERATED_PROJECTION_MISMATCH");
+    }
+    if staging.exists() {
+        fail("FROZEN_REHYDRATE_GENERATED_STAGING_EXISTS");
+    }
+    fs::create_dir_all(staging.join("lib"))
+        .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_GENERATED_FAILED"));
+    atomic_write_json(
+        &staging.join("module.compiled.json"),
+        artifact,
+        "FROZEN_REHYDRATE_GENERATED_FAILED",
+    );
+    for entry in artifact
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULE_ARTIFACT"))
+    {
+        let relative = record_str(entry, "/path", "module-artifact-entry");
+        let source = safe_owned_path(&archive.join("library"), relative, "protected_library");
+        let expected = record_str(entry, "/hash", "module-artifact-entry");
+        if file_sha256(&source, "protected_library") != expected {
+            fail("PROTECTED_ARCHIVE_LIBRARY_HASH_MISMATCH");
+        }
+        let target = staging.join("lib").join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_GENERATED_FAILED"));
+        }
+        fs::copy(source, target).unwrap_or_else(|_| fail("FROZEN_REHYDRATE_GENERATED_FAILED"));
+    }
+    fs::create_dir_all(generated.parent().unwrap())
+        .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_GENERATED_FAILED"));
+    fs::rename(staging, generated).unwrap_or_else(|_| fail("FROZEN_REHYDRATE_GENERATED_FAILED"));
+}
+
 fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -3532,8 +3652,33 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_protected_not_ignored(root, &archive);
     let active_root = contract_root(root, &project, "/governance/active_root");
 
-    run_module_build(root, module, module_id);
-    let artifact = build_module_artifact(root, &project, module, module_id);
+    let version_archive = protected_root
+        .join("history-versions")
+        .join(module_id)
+        .join(version);
+    let from_version_archive = version_archive.is_dir();
+    let artifact = if from_version_archive {
+        let historical_artifact: Value = serde_json::from_str(
+            &fs::read_to_string(version_archive.join("module-artifact.json"))
+                .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+        module_artifact_matches_project(module, &historical_artifact);
+        assert_protected_archive_matches(root, module, &historical_artifact, &version_archive);
+        historical_artifact
+    } else {
+        run_module_build(root, module, module_id);
+        build_module_artifact(root, &project, module, module_id)
+    };
+    if from_version_archive {
+        restore_generated_module_from_archive(
+            root,
+            &project,
+            module_id,
+            &artifact,
+            &version_archive,
+        );
+    }
     let artifact_hash = record_str(&artifact, "/artifact_hash", "module-artifact");
     if artifact_hash != record_str(&freeze, "/library_hash", &freeze_name)
         || artifact_hash != record_str(&promotion, "/artifact_hash", "promotion-record.json")
@@ -3582,7 +3727,7 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     if transaction.is_none() && current_projection_complete {
         write_module_artifact_value(root, &project, module_id, &artifact);
         write_artifact(root, &project);
-        assert_record_graph(root, Some(module_id), &artifact, true);
+        assert_historical_frozen_record_graph(root, module_id, &artifact);
         assert_protected_archive_matches(root, module, &artifact, &archive);
         assert_active_projection_matches(root, &project, module_id, version, &artifact);
         // A complete current projection is already the idempotent result.
@@ -3606,7 +3751,7 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     if previous_version.is_none() {
         write_module_artifact_value(root, &project, module_id, &artifact);
         write_artifact(root, &project);
-        assert_record_graph(root, Some(module_id), &artifact, true);
+        assert_historical_frozen_record_graph(root, module_id, &artifact);
     }
     if transaction.is_none() {
         write_rehydrate_transaction(root, module_id, version, artifact_hash, "prepared");
@@ -3655,11 +3800,17 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     if previous_version.is_some() {
         write_module_artifact_value(root, &project, module_id, &artifact);
         write_artifact(root, &project);
-        assert_record_graph(root, Some(module_id), &artifact, true);
+        assert_historical_frozen_record_graph(root, module_id, &artifact);
     }
 
     if archive.exists() {
-        assert_protected_archive_matches(root, module, &artifact, &archive);
+        if protected_archive_needs_version_restore(root, &archive, &artifact) {
+            restore_current_protected_archive_from_version(
+                root, &project, module, module_id, version, &artifact, &archive,
+            );
+        } else {
+            assert_protected_archive_matches(root, module, &artifact, &archive);
+        }
     } else {
         let staging =
             archive.with_file_name(format!(".{}.rehydrate.{}", module_id, std::process::id()));
@@ -3672,7 +3823,7 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     if current_active.exists() {
         assert_active_projection_matches(root, &project, module_id, version, &artifact);
     } else {
-        publish_active(root, module_id, version);
+        publish_active_rehydrated(root, module_id, version);
     }
     write_rehydrate_transaction(root, module_id, version, artifact_hash, "active_published");
     verify_internal(root, false, false);
@@ -7110,6 +7261,24 @@ fn assert_record_graph(
     artifact: &Value,
     require_freeze: bool,
 ) {
+    assert_record_graph_mode(root, module_id, artifact, require_freeze, true);
+}
+
+// Frozen rehydration republishes an already accepted historical artifact. It
+// must validate the immutable record graph and freeze bindings, but it must
+// not re-run delivery-only gates (including current bug-triage evidence) that
+// were introduced after the historical producer ran.
+fn assert_historical_frozen_record_graph(root: &Path, module_id: &str, artifact: &Value) {
+    assert_record_graph_mode(root, Some(module_id), artifact, true, false);
+}
+
+fn assert_record_graph_mode(
+    root: &Path,
+    module_id: Option<&str>,
+    artifact: &Value,
+    require_freeze: bool,
+    enforce_current_lifecycle: bool,
+) {
     if let Some(module_id) = module_id {
         let _ = read_record(root, &module_record_name("worktree-record", module_id));
     }
@@ -7126,8 +7295,10 @@ fn assert_record_graph(
     let review = read_record(root, &review_name);
     let promotion = read_record(root, &promotion_name);
     assert_record_schema(&evidence, &review, &promotion);
-    if let Some(module_id) = module_id {
-        assert_fix_lifecycle_graph(root, module_id, &review, &promotion, artifact);
+    if enforce_current_lifecycle {
+        if let Some(module_id) = module_id {
+            assert_fix_lifecycle_graph(root, module_id, &review, &promotion, artifact);
+        }
     }
     let cleanup_id = record_str(
         &promotion,
@@ -7383,7 +7554,7 @@ fn assert_record_graph(
         if previous_immutable != previous_version.is_some() {
             fail("FREEZE_PREVIOUS_ACTIVE_CLAIM_MISMATCH");
         }
-        if let Some(version_base) = module.get("version_base") {
+        if let Some(version_base) = module.get("version_base").filter(|value| !value.is_null()) {
             if freeze
                 .get("previous_active_version")
                 .and_then(Value::as_str)
@@ -7797,6 +7968,19 @@ fn freeze_module(root: &Path, module_id: &str) {
 }
 
 fn publish_active(root: &Path, module_id: &str, version: &str) {
+    publish_active_internal(root, module_id, version, false);
+}
+
+fn publish_active_rehydrated(root: &Path, module_id: &str, version: &str) {
+    publish_active_internal(root, module_id, version, true);
+}
+
+fn publish_active_internal(
+    root: &Path,
+    module_id: &str,
+    version: &str,
+    historical_rehydrate: bool,
+) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
@@ -7819,7 +8003,7 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
             module_id
         ));
     }
-    if let Some(version_base) = module.get("version_base") {
+    if let Some(version_base) = module.get("version_base").filter(|value| !value.is_null()) {
         if version_base
             .get("new_active_version")
             .and_then(Value::as_str)
@@ -7858,7 +8042,11 @@ fn publish_active(root: &Path, module_id: &str, version: &str) {
             module_id
         ));
     }
-    assert_record_graph(root, Some(module_id), &artifact, true);
+    if historical_rehydrate {
+        assert_historical_frozen_record_graph(root, module_id, &artifact);
+    } else {
+        assert_record_graph(root, Some(module_id), &artifact, true);
+    }
     let artifact_hash = record_str(&artifact, "/artifact_hash", "module-artifact");
     if record_str(
         &read_record(root, &freeze_record_name(module_id)),
@@ -8228,7 +8416,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
         {
             fail("INVALID_MODULE_SURFACES");
         }
-        if let Some(version_base) = module.get("version_base") {
+        if let Some(version_base) = module.get("version_base").filter(|value| !value.is_null()) {
             for path in [
                 "/previous_active_version",
                 "/new_active_version",
@@ -8557,7 +8745,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
                         }
                     }
                 } else {
-                    assert_record_graph(root, Some(module_id), &module_artifact, true);
+                    assert_historical_frozen_record_graph(root, module_id, &module_artifact);
                 }
             }
         }

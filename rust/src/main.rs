@@ -10217,6 +10217,88 @@ fn query_bug_record(root: &Path, issue_id: &str) -> Result<Value, String> {
     Ok(record)
 }
 
+fn git_bug_close_event(root: &Path, record: &Value) -> Option<Value> {
+    if record.get("status").and_then(Value::as_str) != Some("closed") {
+        return None;
+    }
+    let bug_id = record.get("id").and_then(Value::as_str)?;
+    let ref_name = format!("refs/bugs/{bug_id}^{{commit}}");
+    let tip = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "--verify", &ref_name])
+            .current_dir(root)
+            .output()
+            .ok()?
+            .stdout,
+    )
+    .ok()?
+    .trim()
+    .to_string();
+    if tip.is_empty() {
+        return None;
+    }
+    let commit = String::from_utf8(
+        Command::new("git")
+            .args(["cat-file", "-p", &tip])
+            .current_dir(root)
+            .output()
+            .ok()?
+            .stdout,
+    )
+    .ok()?;
+    let tree = commit.lines().find_map(|line| line.strip_prefix("tree "))?;
+    let ops_blob = String::from_utf8(
+        Command::new("git")
+            .args(["ls-tree", "-r", tree])
+            .current_dir(root)
+            .output()
+            .ok()?
+            .stdout,
+    )
+    .ok()?
+    .lines()
+    .find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let blob = parts.nth(2)?;
+        (parts.next() == Some("ops")).then(|| blob.to_string())
+    })?;
+    let ops: Value = serde_json::from_slice(
+        &Command::new("git")
+            .args(["cat-file", "-p", &ops_blob])
+            .current_dir(root)
+            .output()
+            .ok()?
+            .stdout,
+    )
+    .ok()?;
+    let close_op = ops.get("ops").and_then(Value::as_array).and_then(|items| {
+        items.iter().find(|item| {
+            item.get("type").and_then(Value::as_u64) == Some(4)
+                && item.get("status").and_then(Value::as_u64) == Some(2)
+        })
+    })?;
+    let comment_id = record
+        .get("comments")
+        .and_then(Value::as_array)
+        .and_then(|comments| comments.last())
+        .and_then(|comment| comment.get("id"))
+        .and_then(Value::as_str)?;
+    Some(serde_json::json!({
+        "event_id": tip,
+        "action": "close",
+        "comment_id": comment_id,
+        "producer": {
+            "adapter": "appsdk",
+            "identity": "appsdk::bug-close"
+        },
+        "metadata": {
+            "bug_id": bug_id,
+            "status": "closed",
+            "timestamp": close_op.get("timestamp")
+        }
+    }))
+}
+
 fn assert_bug_tracker_triage_evidence(
     worktree: &Value,
     issue_id: &str,
@@ -10815,7 +10897,16 @@ where
                 let err = String::from_utf8_lossy(&output.stderr);
                 fail(format!("GIT_BUG_SHOW_FAILED:{}", err.trim()));
             }
-            print!("{}", String::from_utf8_lossy(&output.stdout));
+            if format_json {
+                let mut record: Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|_| fail("GIT_BUG_SHOW_INVALID_JSON"));
+                if let Some(close_event) = git_bug_close_event(&work_dir, &record) {
+                    record["close_event"] = close_event;
+                }
+                println!("{}", serde_json::to_string_pretty(&record).unwrap());
+            } else {
+                print!("{}", String::from_utf8_lossy(&output.stdout));
+            }
         }
         "comment" => {
             let bug_id = args.next().unwrap_or_else(|| {

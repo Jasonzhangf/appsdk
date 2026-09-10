@@ -1098,18 +1098,8 @@ impl CommunicationStore {
         let at = at.map(validate_time).transpose()?.unwrap_or_else(now);
         let current = self.require_agent(&address)?.clone();
         if current.state == next {
-            if current.role == "master" && next == AgentState::Idle {
-                if !self.projection.wakeup.contains_key(&address.key()) {
-                    let wakeup = WakeupRecord {
-                        address: current.address(),
-                        idle_since: Some(at.clone()),
-                        reminders_sent: 0,
-                        next_due_at: Some(add_seconds(&at, DEFAULT_BATCH_WINDOW_SECONDS)?),
-                        stopped: false,
-                        last_reminder_at: None,
-                    };
-                    self.commit("wakeup.updated", serde_json::to_value(&wakeup).unwrap())?;
-                }
+            if current.role == "master" {
+                self.repair_master_wakeup(&current, &next)?;
             } else if current.role != "master" && next == AgentState::Idle {
                 let master_address = self.scope_master_address(&current.scope_id)?;
                 let notification_key = structured_key(&[
@@ -1191,6 +1181,92 @@ impl CommunicationStore {
             "idempotent": false,
             "notification": Value::Null
         }))
+    }
+
+    fn repair_master_wakeup(
+        &mut self,
+        current: &AgentRecord,
+        state: &AgentState,
+    ) -> CommResult<()> {
+        let key = current.address().key();
+        let existing = self.projection.wakeup.get(&key).cloned();
+        let wakeup = match state {
+            AgentState::Working => {
+                let valid = existing.as_ref().is_some_and(|wakeup| {
+                    wakeup.idle_since.is_none()
+                        && wakeup.next_due_at.is_none()
+                        && wakeup.reminders_sent == 0
+                        && !wakeup.stopped
+                        && wakeup.last_reminder_at.is_none()
+                });
+                if valid {
+                    return Ok(());
+                }
+                WakeupRecord {
+                    address: current.address(),
+                    idle_since: None,
+                    reminders_sent: 0,
+                    next_due_at: None,
+                    stopped: false,
+                    last_reminder_at: None,
+                }
+            }
+            AgentState::Idle => {
+                let idle_since = current.last_state_at.clone();
+                let same_cycle = existing.as_ref().is_some_and(|wakeup| {
+                    wakeup.idle_since.as_deref() == Some(idle_since.as_str())
+                });
+                let (reminders_sent, stopped, last_reminder_at) = if same_cycle {
+                    let wakeup = existing.as_ref().expect("same cycle wakeup exists");
+                    (
+                        wakeup.reminders_sent,
+                        wakeup.reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT,
+                        if wakeup.reminders_sent == 0 {
+                            None
+                        } else {
+                            wakeup.last_reminder_at.clone()
+                        },
+                    )
+                } else {
+                    (0, false, None)
+                };
+                let next_due_at = if reminders_sent == 0 {
+                    add_seconds(&idle_since, DEFAULT_BATCH_WINDOW_SECONDS)?
+                } else if let Some(last_reminder_at) = last_reminder_at.as_deref() {
+                    add_seconds(last_reminder_at, DEFAULT_BATCH_WINDOW_SECONDS)?
+                } else {
+                    existing
+                        .as_ref()
+                        .and_then(|wakeup| wakeup.next_due_at.clone())
+                        .ok_or_else(|| {
+                            CommError::new(
+                                "wakeup_schedule_missing",
+                                format!("master wakeup has no next due time: {key}"),
+                            )
+                        })?
+                };
+                let valid = same_cycle
+                    && existing.as_ref().is_some_and(|wakeup| {
+                        wakeup.next_due_at.as_deref() == Some(next_due_at.as_str())
+                            && wakeup.reminders_sent == reminders_sent
+                            && wakeup.stopped == stopped
+                            && wakeup.last_reminder_at == last_reminder_at
+                    });
+                if valid {
+                    return Ok(());
+                }
+                WakeupRecord {
+                    address: current.address(),
+                    idle_since: Some(idle_since),
+                    reminders_sent,
+                    next_due_at: Some(next_due_at),
+                    stopped,
+                    last_reminder_at,
+                }
+            }
+        };
+        self.commit("wakeup.updated", serde_json::to_value(&wakeup).unwrap())?;
+        Ok(())
     }
 
     pub fn tick(&mut self, at: Option<&str>) -> CommResult<Value> {

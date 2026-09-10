@@ -64,6 +64,19 @@ fn retain_mailbox_through(root: &Path, event_kind: &str) {
     fs::write(mailbox, format!("{retained}\n")).unwrap();
 }
 
+fn retain_mailbox_through_last(root: &Path, event_kind: &str) {
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let lines: Vec<&str> = contents.lines().collect();
+    let marker = format!("\"kind\":\"{event_kind}\"");
+    let end = lines
+        .iter()
+        .rposition(|line| line.contains(&marker))
+        .unwrap();
+    let retained = lines[..=end].join("\n");
+    fs::write(mailbox, format!("{retained}\n")).unwrap();
+}
+
 fn remove_mailbox_events(root: &Path, event_kind: &str) {
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
     let marker = format!("\"kind\":\"{event_kind}\"");
@@ -386,6 +399,163 @@ fn master_wakeup_is_state_driven_and_stops_after_three_reminders() {
     let reset = call(&root, json!({ "op": "status" }));
     assert_eq!(reset["wakeup"][0]["remindersSent"], 0);
     assert_eq!(reset["wakeup"][0]["stopped"], false);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_idle_state_retry_recovers_current_wakeup_after_agent_prefix() {
+    let root = temp_root("master-idle-prefix-recovery");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "working",
+            "at": after(observed_at, 10)
+        }),
+    );
+    let idle_at = after(observed_at, 20);
+    let idle_request = json!({
+        "op": "set_agent_state",
+        "address": { "scopeId": "scope", "sessionId": "master" },
+        "state": "idle",
+        "at": idle_at
+    });
+    call(&root, idle_request.clone());
+    retain_mailbox_through_last(&root, "agent.state");
+
+    let recovered = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": after(&idle_at, 1)
+        }),
+    );
+    assert_eq!(recovered["idempotent"], true);
+    assert!(recovered["notification"].is_null());
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["wakeup"][0]["idleSince"], idle_at);
+    assert_eq!(status["wakeup"][0]["nextDueAt"], after(&idle_at, 120));
+    assert_eq!(status["wakeup"][0]["remindersSent"], 0);
+
+    let repeated = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": after(&idle_at, 2)
+        }),
+    );
+    assert_eq!(repeated["idempotent"], true);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"wakeup.updated\"").count(), 3);
+
+    let due = call(&root, json!({ "op": "tick", "now": after(&idle_at, 120) }));
+    assert_eq!(due["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(due["wakeup"][0]["remindersSent"], 1);
+    let same_due = call(&root, json!({ "op": "tick", "now": after(&idle_at, 120) }));
+    assert!(same_due["changed"].as_array().unwrap().is_empty());
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"wakeup.reminder\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_working_state_retry_resets_stale_wakeup_after_agent_prefix() {
+    let root = temp_root("master-working-prefix-recovery");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    for seconds in [120, 240, 360] {
+        let result = call(
+            &root,
+            json!({ "op": "tick", "now": after(observed_at, seconds) }),
+        );
+        assert_eq!(result["wakeup"][0]["remindersSent"], seconds / 120);
+    }
+    let working_at = after(observed_at, 361);
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "working",
+            "at": working_at
+        }),
+    );
+    retain_mailbox_through_last(&root, "agent.state");
+
+    let recovered = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "working",
+            "at": after(&working_at, 1)
+        }),
+    );
+    assert_eq!(recovered["idempotent"], true);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["wakeup"][0]["idleSince"], Value::Null);
+    assert_eq!(status["wakeup"][0]["nextDueAt"], Value::Null);
+    assert_eq!(status["wakeup"][0]["remindersSent"], 0);
+    assert_eq!(status["wakeup"][0]["stopped"], false);
+
+    let repeated = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "working",
+            "at": after(&working_at, 2)
+        }),
+    );
+    assert_eq!(repeated["idempotent"], true);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"wakeup.updated\"").count(), 2);
+
+    let new_idle_at = after(observed_at, 362);
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": new_idle_at
+        }),
+    );
+    let due = call(
+        &root,
+        json!({ "op": "tick", "now": after(&new_idle_at, 120) }),
+    );
+    assert_eq!(due["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(due["wakeup"][0]["remindersSent"], 1);
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -1160,11 +1160,9 @@ impl CommunicationStore {
             if wakeup.stopped || wakeup.reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT {
                 continue;
             }
-            let agent = match self.projection.agents.get(&wakeup.address.key()) {
-                Some(agent) if agent.role == "master" && agent.state == AgentState::Idle => {
-                    agent.clone()
-                }
-                _ => continue,
+            let agent = match self.live_idle_master_at(&wakeup.address, &at) {
+                Some(agent) => agent,
+                None => continue,
             };
             let due = match wakeup.next_due_at.as_deref() {
                 Some(next_due) => parse_time(&at)? >= parse_time(next_due)?,
@@ -2045,14 +2043,31 @@ impl CommunicationStore {
     }
 
     fn require_live_agent(&self, address: &Address) -> CommResult<&AgentRecord> {
+        let at = now();
+        self.require_live_agent_at(address, &at)
+    }
+
+    fn require_live_agent_at(&self, address: &Address, at: &str) -> CommResult<&AgentRecord> {
         let agent = self.require_agent(address)?;
-        if !agent.live_at(&now()) {
+        if !agent.live_at(at) {
             return Err(CommError::new(
                 "agent_lease_expired",
                 format!("agent lease expired: {}", address.key()),
             ));
         }
         Ok(agent)
+    }
+
+    fn live_idle_master_at(&self, address: &Address, at: &str) -> Option<AgentRecord> {
+        let agent = self.require_live_agent_at(address, at).ok()?;
+        if agent.role != "master" || agent.state != AgentState::Idle {
+            return None;
+        }
+        let scope = self.projection.scopes.get(&agent.scope_id)?;
+        if scope.master_session_id.as_deref() != Some(agent.session_id.as_str()) {
+            return None;
+        }
+        Some(agent.clone())
     }
 
     fn scope_master_address(&self, scope_id: &str) -> CommResult<Address> {

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration, SecondsFormat};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -93,6 +94,32 @@ fn register_agent(
         agent["parent"] = parent;
     }
     call(root, json!({ "op": "register_agent", "agent": agent }));
+}
+
+fn register_agent_with_lease(
+    root: &Path,
+    scope_id: &str,
+    session_id: &str,
+    agent_id: &str,
+    role: &str,
+    lease_ms: u64,
+) -> Value {
+    let mut agent = json!({
+        "scopeId": scope_id,
+        "sessionId": session_id,
+        "agentId": agent_id,
+        "role": role,
+        "leaseMs": lease_ms
+    });
+    if role == "master" {
+        agent["masterGrant"] = json!("user approved master for this scope");
+    }
+    call(root, json!({ "op": "register_agent", "agent": agent }))
+}
+
+fn after(timestamp: &str, seconds: i64) -> String {
+    (DateTime::parse_from_rfc3339(timestamp).unwrap() + Duration::seconds(seconds))
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 #[test]
@@ -334,6 +361,79 @@ fn master_wakeup_is_state_driven_and_stops_after_three_reminders() {
     let reset = call(&root, json!({ "op": "status" }));
     assert_eq!(reset["wakeup"][0]["remindersSent"], 0);
     assert_eq!(reset["wakeup"][0]["stopped"], false);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tick_does_not_wake_an_expired_master_or_consume_reminder_budget() {
+    let root = temp_root("expired-master-wakeup");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 1_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+
+    let result = call(
+        &root,
+        json!({ "op": "tick", "now": after(observed_at, 120) }),
+    );
+    assert!(result["changed"].as_array().unwrap().is_empty());
+    assert_eq!(result["wakeup"][0]["remindersSent"], 0);
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert!(status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(status["notificationProjection"]["emitted"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert!(!raw.contains("wakeup.reminder"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tick_wakes_a_live_idle_master_within_its_lease() {
+    let root = temp_root("live-master-wakeup");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+
+    let result = call(
+        &root,
+        json!({ "op": "tick", "now": after(observed_at, 120) }),
+    );
+    assert_eq!(result["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(result["wakeup"][0]["remindersSent"], 1);
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

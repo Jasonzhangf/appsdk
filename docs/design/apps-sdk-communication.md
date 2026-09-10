@@ -36,8 +36,8 @@ JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`�
 协议不匹配或未知事件不跳过，统一以 `journal_corrupt` 或
 `journal_unknown_event` 失败。
 
-`message.created`、`message.state`、`notification.queued`、`notification.emitted`、
-`notification.batch_emitted`、`notification.delivery_failed`、`wakeup.reminder`、
+`message.created`、`message.state`、`notification.queued`、`notification.delivery_attempt`、
+`notification.emitted`、`notification.batch_emitted`、`notification.delivery_failed`、`wakeup.reminder`、
 `bug.*`、`loop.*` 和 `error.recorded` 是可重放事件。错误处理也必须追加事实；如果
 错误事实本身写入失败，返回包含主错误和次级写入错误的错误链。
 
@@ -88,13 +88,15 @@ adapter 或宿主只知道“已尝试”时，receipt 使用 `intent` 或 `acce
   `unknown` 观测，并保留错误上下文；不得把未知、超时或只生成 intent 当成
   `delivered`、`executed`、`replied`、`read` 或 `consumed`。
 
-在 adapter 调用前，`notification.queued` 先记录 `DeliveryAttempt`（包含 attempt ID、
-操作、adapter 和开始时间；批量发送还包含 batch ID）。进程在这条事实之后崩溃时，重放
-会把仍带有未完成 attempt 且没有 terminal receipt 的通知投影为 `unknown`；它不能被当成
-成功，也不能在相同 `messageId` 的幂等恢复中自动重发。`notification.emitted` 或
-`notification.delivery_failed` 是终态事实：前者清除 attempt 并记录 receipt，后者清除
-attempt、保留 `pending` 和错误。attempt 的 adapter 必须与通知记录的 adapter 相同，
-不一致的 JSONL 在重放时 fail-closed。
+adapter 调用前先追加独立的 `notification.delivery_attempt` 事实（包含 attempt ID、操作、
+adapter 和开始时间；批量发送还包含 batch ID）。`notification.queued` 只记录通知本身，
+idle flush 不会因为开始一次投递而重复写 queued。重放要求先看到对应的 queued，再应用
+delivery attempt；缺少通知、attempt 无效或 attempt 的 adapter 与通知记录不一致时
+fail-closed。进程在这条 attempt 事实之后崩溃时，重放会把仍带有未完成 attempt 且没有
+terminal receipt 的通知投影为 `unknown`；它不能被当成成功，也不能在相同 `messageId` 的
+幂等恢复中自动重发。`notification.emitted` 或 `notification.delivery_failed` 是该次
+attempt 的终态事实：前者清除 attempt 并记录 receipt，后者清除 attempt、保留 `pending`
+和错误。
 
 ## 通知聚合、直达和唤醒
 
@@ -197,6 +199,8 @@ projection；变更返回投影和本次写入的事实 ID。
   过期 lease 的拒绝；只有 live master tick，worker idle 只产生一次通知。
 - direct、idle 120 秒、P0 breakthrough、按 adapter 分组的 batch、失败后 pending
   保留和 master 三次唤醒上限都有正反测试。
+- 每次真实 adapter 调用只追加一个 `notification.delivery_attempt`；idle flush 重复执行
+  不重复写 `notification.queued`，attempt 后崩溃会得到 `unknown`，不能自动重发或冒充成功。
 - `cargo` 定向通信测试、全量测试、release build、JSON Schema 语法检查和实际 CLI
   黑盒入口均绑定同一个最终 commit/tree；codexapp 未被修改，也没有外部通信实现
   编译依赖。

@@ -18,6 +18,7 @@
         "message.created",
         "message.state",
         "notification.queued",
+        "notification.delivery_attempt",
         "notification.emitted",
         "notification.batch_emitted",
         "notification.delivery_failed",
@@ -62,6 +63,16 @@
       "then": {
         "properties": {
           "data": {"$ref": "#/$defs/notificationQueueEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "notification.delivery_attempt"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/deliveryAttemptEvent"}
         }
       }
     },
@@ -237,6 +248,12 @@
             "properties": {"operation": {"const": "notification.batch_emitted"}}
           },
           "then": {"required": ["batchId"]}
+        },
+        {
+          "if": {
+            "properties": {"operation": {"const": "notification.emitted"}}
+          },
+          "then": {"not": {"required": ["batchId"]}}
         }
       ],
       "additionalProperties": false
@@ -426,7 +443,7 @@
       },
       "additionalProperties": false
     },
-    "notificationQueueEntry": {
+    "notificationQueueEvent": {
       "type": "object",
       "required": ["key", "notification"],
       "properties": {
@@ -435,47 +452,18 @@
       },
       "additionalProperties": false
     },
-    "notificationQueueEvent": {
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["key", "notification"],
-          "properties": {
-            "key": {"type": "string", "minLength": 1},
-            "notification": {"$ref": "#/$defs/notificationRecord"},
-            "attempt": {"type": "null"}
-          },
-          "additionalProperties": false
+    "deliveryAttemptEvent": {
+      "type": "object",
+      "required": ["keys", "attempt"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
         },
-        {
-          "type": "object",
-          "required": ["key", "notification", "attempt"],
-          "properties": {
-            "key": {"type": "string", "minLength": 1},
-            "notification": {"$ref": "#/$defs/notificationRecord"},
-            "attempt": {"$ref": "#/$defs/deliveryAttempt"}
-          },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": ["keys", "notifications", "attempt"],
-          "properties": {
-            "keys": {
-              "type": "array",
-              "minItems": 1,
-              "items": {"type": "string", "minLength": 1}
-            },
-            "notifications": {
-              "type": "array",
-              "minItems": 1,
-              "items": {"$ref": "#/$defs/notificationQueueEntry"}
-            },
-            "attempt": {"$ref": "#/$defs/deliveryAttempt"}
-          },
-          "additionalProperties": false
-        }
-      ]
+        "attempt": {"$ref": "#/$defs/deliveryAttempt"}
+      },
+      "additionalProperties": false
     },
     "notificationBatch": {
       "type": "object",

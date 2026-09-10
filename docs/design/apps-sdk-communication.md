@@ -163,10 +163,14 @@ Discover -> HandOff -> Verify -> Persist -> Schedule
 
 `create_loop` 默认 `maxIterations=100`，也可以声明 deadline。`advance_loop` 完成时
 必须提供能证明通过的 gate 或 verification evidence；`number`、`false`、`null`、空数组、
-空对象、空字符串以及 `unknown`、`pending`、`failed`、`failure`、`error`、`invalid`、
-`unverified`、`not_run` 等未通过结果必须 fail-closed。对象至少包含 `status`、`result`、
-`outcome`、`state`、`passed`、`success`、`ok` 或 `verified` 之一，并且这些字段的值也
-必须表示通过。完成证据写入 Loop 的 `completionEvidence`，并随 `loop.updated`
+空对象、空字符串以及 `unknown`、`pending`、`failed`、`failure`、`fail`、`error`、
+`invalid`、`timeout`、`blocked`、`unverified`、`not_run` 等未通过结果必须 fail-closed。
+对象至少包含 `status`、`result`、`outcome`、`state`、`passed`、`success`、`ok` 或
+`verified` 之一；`status`、`result`、`outcome`、`state` 只能使用归一化后的
+`passed`、`pass`、`success`、`ok`、`verified` 或 `true`，布尔结果字段
+`passed`、`success`、`ok`、`verified` 只能为 `true`。对象中的每个结果字段都必须通过，
+并递归检查其嵌套对象与数组；描述性字符串只作为非结果元数据保留。完成证据写入 Loop 的
+`completionEvidence`，并随 `loop.updated`
 和 replay projection 保留。deadline 优先于 complete；达到 maxIterations 进入
 `stopped`。Gate 失败、未知 Loop phase 或显式 `record_error` 会留下带 code、message、
 context、at 的错误事实；关联 Loop 进入 `blocked` 或 `stopped`，不会静默重试。

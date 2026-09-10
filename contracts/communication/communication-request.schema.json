@@ -86,38 +86,52 @@
           "minItems": 1,
           "items": {"$ref": "#/$defs/evidenceValue"}
         },
-        {
-          "type": "object",
-          "minProperties": 1,
-          "properties": {
-            "status": {"$ref": "#/$defs/evidenceValue"},
-            "result": {"$ref": "#/$defs/evidenceValue"},
-            "outcome": {"$ref": "#/$defs/evidenceValue"},
-            "state": {"$ref": "#/$defs/evidenceValue"},
-            "passed": {"$ref": "#/$defs/passingEvidenceValue"},
-            "success": {"$ref": "#/$defs/passingEvidenceValue"},
-            "ok": {"$ref": "#/$defs/passingEvidenceValue"},
-            "verified": {"$ref": "#/$defs/passingEvidenceValue"}
-          },
-          "anyOf": [
-            {"required": ["status"]},
-            {"required": ["result"]},
-            {"required": ["outcome"]},
-            {"required": ["state"]},
-            {"required": ["passed"]},
-            {"required": ["success"]},
-            {"required": ["ok"]},
-            {"required": ["verified"]}
-          ],
-          "additionalProperties": true
-        }
+        {"$ref": "#/$defs/evidenceResultObject"}
       ]
     },
     "passingEvidenceValue": {
+      "const": true
+    },
+    "evidenceResultValue": {
       "oneOf": [
-        {"const": true},
-        {"$ref": "#/$defs/evidenceValue"}
+        {"$ref": "#/$defs/evidencePassingString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceResultValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
       ]
+    },
+    "evidenceResultObject": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "status": {"$ref": "#/$defs/evidenceResultValue"},
+        "result": {"$ref": "#/$defs/evidenceResultValue"},
+        "outcome": {"$ref": "#/$defs/evidenceResultValue"},
+        "state": {"$ref": "#/$defs/evidenceResultValue"},
+        "passed": {"$ref": "#/$defs/passingEvidenceValue"},
+        "success": {"$ref": "#/$defs/passingEvidenceValue"},
+        "ok": {"$ref": "#/$defs/passingEvidenceValue"},
+        "verified": {"$ref": "#/$defs/passingEvidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["status"]},
+        {"required": ["result"]},
+        {"required": ["outcome"]},
+        {"required": ["state"]},
+        {"required": ["passed"]},
+        {"required": ["success"]},
+        {"required": ["ok"]},
+        {"required": ["verified"]}
+      ],
+      "additionalProperties": true
+    },
+    "evidencePassingString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\s*(?:[pP][aA][sS][sS][eE][dD]|[pP][aA][sS][sS]|[sS][uU][cC][cC][eE][sS][sS]|[oO][kK]|[vV][eE][rR][iI][fF][iI][eE][dD]|[tT][rR][uU][eE])\\s*$"
     },
     "evidenceString": {
       "type": "string",
@@ -128,13 +142,16 @@
         {"not": {"pattern": "^\\s*[pP][eE][nN][dD][iI][nN][gG]\\s*$"}},
         {"not": {"pattern": "^\\s*[fF][aA][iI][lL][eE][dD]\\s*$"}},
         {"not": {"pattern": "^\\s*[fF][aA][iI][lL][uU][rR][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL]\\s*$"}},
         {"not": {"pattern": "^\\s*[eE][rR][rR][oO][rR]\\s*$"}},
         {"not": {"pattern": "^\\s*[iI][nN][vV][aA][lL][iI][dD]\\s*$"}},
         {"not": {"pattern": "^\\s*[fF][aA][lL][sS][eE]\\s*$"}},
         {"not": {"pattern": "^\\s*[nN][uU][lL][lL]\\s*$"}},
         {"not": {"pattern": "^\\s*[uU][nN][vV][eE][rR][iI][fF][iI][eE][dD]\\s*$"}},
         {"not": {"pattern": "^\\s*[nN][oO][tT]_[rR][uU][nN]\\s*$"}},
-        {"not": {"pattern": "^\\s*[nN][oO][tT]\\s+[rR][uU][nN]\\s*$"}}
+        {"not": {"pattern": "^\\s*[nN][oO][tT]\\s+[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[tT][iI][mM][eE][oO][uU][tT]\\s*$"}},
+        {"not": {"pattern": "^\\s*[bB][lL][oO][cC][kK][eE][dD]\\s*$"}}
       ]
     },
     "loopCompletionEvidence": {

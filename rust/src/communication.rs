@@ -3927,17 +3927,23 @@ fn validate_loop_completion_evidence(evidence: Option<&Value>) -> CommResult<Val
             "loop gate evidence must be a JSON object",
         )
     })?;
-    let gate = object.get("gate").or_else(|| object.get("verification"));
-    let Some(gate) = gate else {
+    let mut found_result = false;
+    for field in ["gate", "verification"] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        found_result = true;
+        if !is_valid_loop_evidence_value(value) {
+            return Err(CommError::new(
+                "loop_gate_evidence_invalid",
+                "loop gate evidence must identify a recognized passing gate and verification results",
+            ));
+        }
+    }
+    if !found_result {
         return Err(CommError::new(
             "loop_gate_evidence_required",
             "loop gate evidence must identify a non-empty gate or verification result",
-        ));
-    };
-    if !is_valid_loop_evidence_value(gate) {
-        return Err(CommError::new(
-            "loop_gate_evidence_invalid",
-            "loop gate evidence must identify a recognized passing gate or verification result",
         ));
     }
     Ok(evidence.clone())
@@ -3946,24 +3952,7 @@ fn validate_loop_completion_evidence(evidence: Option<&Value>) -> CommResult<Val
 fn is_valid_loop_evidence_value(value: &Value) -> bool {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
-        Value::String(text) => {
-            let normalized = text.trim().to_ascii_lowercase();
-            !normalized.is_empty()
-                && !matches!(
-                    normalized.as_str(),
-                    "unknown"
-                        | "pending"
-                        | "failed"
-                        | "failure"
-                        | "error"
-                        | "invalid"
-                        | "false"
-                        | "null"
-                        | "unverified"
-                        | "not_run"
-                        | "not run"
-                )
-        }
+        Value::String(text) => is_valid_descriptive_evidence_string(text),
         Value::Array(values) => {
             !values.is_empty() && values.iter().all(is_valid_loop_evidence_value)
         }
@@ -3971,35 +3960,102 @@ fn is_valid_loop_evidence_value(value: &Value) -> bool {
             if values.is_empty() {
                 return false;
             }
-            let has_result_field = [
-                "status", "result", "outcome", "state", "passed", "success", "ok", "verified",
-            ]
-            .iter()
-            .any(|key| values.contains_key(*key));
-            if !has_result_field {
+            if !values.keys().any(|key| is_loop_evidence_result_field(key)) {
                 return false;
             }
-            for key in ["status", "result", "outcome", "state"] {
-                if let Some(status) = values.get(key) {
-                    if !is_valid_loop_evidence_value(status) {
-                        return false;
-                    }
+            values.iter().all(|(key, value)| {
+                if is_loop_evidence_result_field(key) {
+                    is_valid_loop_evidence_result_field(key, value)
+                } else {
+                    is_valid_loop_evidence_metadata(value)
                 }
-            }
-            for key in ["passed", "success", "ok", "verified"] {
-                if let Some(status) = values.get(key) {
-                    let valid = match status {
-                        Value::Bool(value) => *value,
-                        other => is_valid_loop_evidence_value(other),
-                    };
-                    if !valid {
-                        return false;
-                    }
-                }
-            }
-            true
+            })
         }
     }
+}
+
+fn is_loop_evidence_result_field(key: &str) -> bool {
+    matches!(
+        key,
+        "status" | "result" | "outcome" | "state" | "passed" | "success" | "ok" | "verified"
+    )
+}
+
+fn is_valid_loop_evidence_result_field(key: &str, value: &Value) -> bool {
+    match key {
+        "passed" | "success" | "ok" | "verified" => matches!(value, Value::Bool(true)),
+        "status" | "result" | "outcome" | "state" => is_valid_loop_evidence_result_value(value),
+        _ => false,
+    }
+}
+
+fn is_valid_loop_evidence_result_value(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            let normalized = text.trim().to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "passed" | "pass" | "success" | "ok" | "verified" | "true"
+            )
+        }
+        Value::Array(values) => {
+            !values.is_empty() && values.iter().all(is_valid_loop_evidence_result_value)
+        }
+        Value::Object(values) => {
+            !values.is_empty()
+                && values.keys().any(|key| is_loop_evidence_result_field(key))
+                && values.iter().all(|(key, value)| {
+                    if is_loop_evidence_result_field(key) {
+                        is_valid_loop_evidence_result_field(key, value)
+                    } else {
+                        is_valid_loop_evidence_metadata(value)
+                    }
+                })
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn is_valid_loop_evidence_metadata(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(values) => {
+            !values.is_empty() && values.iter().all(is_valid_loop_evidence_metadata)
+        }
+        Value::Object(values) => {
+            !values.is_empty()
+                && values.iter().all(|(key, value)| {
+                    if is_loop_evidence_result_field(key) {
+                        is_valid_loop_evidence_result_field(key, value)
+                    } else {
+                        is_valid_loop_evidence_metadata(value)
+                    }
+                })
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+    }
+}
+
+fn is_valid_descriptive_evidence_string(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    !normalized.is_empty()
+        && !matches!(
+            normalized.as_str(),
+            "unknown"
+                | "pending"
+                | "failed"
+                | "failure"
+                | "fail"
+                | "error"
+                | "invalid"
+                | "false"
+                | "null"
+                | "unverified"
+                | "not_run"
+                | "not run"
+                | "timeout"
+                | "blocked"
+        )
 }
 
 fn validate_address(address: &Address) -> CommResult<()> {

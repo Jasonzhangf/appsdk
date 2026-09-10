@@ -1975,8 +1975,16 @@ fn adapter_binding_and_bug_loop_gates_are_enforced() {
         json!({ "fix": { "command": "cargo test" }, "verification": "tests", "merge": "main" }),
         json!({ "fix": { "status": "unknown", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
         json!({ "fix": { "status": "failed", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
+        json!({ "fix": { "status": "fail", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
+        json!({ "fix": { "status": "timeout", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
+        json!({ "fix": { "status": "blocked", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
+        json!({ "fix": { "status": "tests passed with warnings", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
+        json!({ "fix": { "status": "passed", "result": "failed", "command": "cargo test" }, "verification": "tests", "merge": "main" }),
         json!({ "fix": "commit", "verification": "unknown", "merge": "main" }),
         json!({ "fix": "commit", "verification": "failed", "merge": "main" }),
+        json!({ "fix": "commit", "verification": { "status": "blocked" }, "merge": "main" }),
+        json!({ "fix": "commit", "verification": "tests", "merge": { "result": "fail" } }),
+        json!({ "fix": { "passed": "true" }, "verification": "tests", "merge": "main" }),
     ] {
         let invalid_evidence = call_error(
             &root,
@@ -2044,12 +2052,27 @@ fn loop_completion_requires_gate_and_deadline_wins() {
         json!({ "gate": false }),
         json!({ "gate": "" }),
         json!({ "gate": "unknown" }),
+        json!({ "gate": "fail" }),
+        json!({ "gate": "timeout" }),
+        json!({ "gate": "blocked" }),
         json!({ "gate": { "command": "cargo test" } }),
         json!({ "gate": { "status": "unknown", "command": "cargo test" } }),
         json!({ "gate": { "status": "failed", "command": "cargo test" } }),
+        json!({ "gate": { "status": "fail", "command": "cargo test" } }),
+        json!({ "gate": { "status": "timeout", "command": "cargo test" } }),
+        json!({ "gate": { "status": "blocked", "command": "cargo test" } }),
+        json!({ "gate": { "status": "tests passed with warnings", "command": "cargo test" } }),
+        json!({ "gate": { "status": "passed", "result": "failed", "command": "cargo test" } }),
+        json!({ "gate": { "status": "passed", "checks": [{ "result": "timeout", "command": "cargo test" }] } }),
+        json!({ "gate": { "status": "passed", "passed": "true" } }),
+        json!({ "gate": { "status": true } }),
         json!({ "gate": { "passed": false } }),
         json!({ "verification": { "status": "unknown" } }),
         json!({ "verification": { "status": "failed" } }),
+        json!({ "gate": { "status": "passed" }, "verification": { "status": "unknown" } }),
+        json!({ "gate": { "status": "passed" }, "verification": { "status": "failed" } }),
+        json!({ "gate": { "status": "passed" }, "verification": { "status": "timeout" } }),
+        json!({ "gate": { "status": "passed" }, "verification": { "status": "blocked" } }),
     ] {
         let invalid = call_error(
             &root,
@@ -2091,6 +2114,45 @@ fn loop_completion_requires_gate_and_deadline_wins() {
             .find(|loop_record| loop_record["loopId"] == "loop-gated")
             .unwrap()["completionEvidence"]["verification"],
         "communication_cli"
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "create_loop",
+            "loop": {
+                "loopId": "loop-explicit-results",
+                "kind": "master",
+                "owner": { "scopeId": "scope", "sessionId": "master" },
+                "trigger": "event",
+                "work": "work",
+                "gate": "tests",
+                "state": "persist",
+                "stop": "done"
+            }
+        }),
+    );
+    let explicit_results = call(
+        &root,
+        json!({
+            "op": "advance_loop",
+            "loopId": "loop-explicit-results",
+            "complete": true,
+            "evidence": {
+                "gate": {
+                    "status": "PASSED",
+                    "result": ["pass", { "outcome": "success", "command": "cargo test" }],
+                    "state": "verified",
+                    "passed": true,
+                    "checks": [{ "status": "ok", "command": "cargo test" }]
+                },
+                "verification": { "status": "true", "verified": true, "command": "communication_cli" }
+            }
+        }),
+    );
+    assert_eq!(
+        explicit_results["loop"]["completionEvidence"]["gate"]["status"],
+        "PASSED"
     );
 
     call(

@@ -77,6 +77,23 @@ fn retain_mailbox_through_last(root: &Path, event_kind: &str) {
     fs::write(mailbox, format!("{retained}\n")).unwrap();
 }
 
+fn retain_mailbox_through_occurrence(root: &Path, event_kind: &str, occurrence: usize) {
+    assert!(occurrence > 0);
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let lines: Vec<&str> = contents.lines().collect();
+    let marker = format!("\"kind\":\"{event_kind}\"");
+    let end = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&marker))
+        .nth(occurrence - 1)
+        .map(|(index, _)| index)
+        .unwrap();
+    let retained = lines[..=end].join("\n");
+    fs::write(mailbox, format!("{retained}\n")).unwrap();
+}
+
 fn remove_mailbox_events(root: &Path, event_kind: &str) {
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
     let marker = format!("\"kind\":\"{event_kind}\"");
@@ -1312,6 +1329,180 @@ fn worker_idle_replay_after_message_created_prefix_reuses_message_id() {
     assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
     assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
     assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worker_idle_second_transition_replays_after_state_prefix_without_reusing_old_bucket() {
+    let root = temp_root("worker-idle-second-transition");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let first = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+    );
+    let first_message_id = first["notification"]["message"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "working",
+            "at": "2026-01-01T00:01:00Z"
+        }),
+    );
+    let second = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:02:00Z"
+        }),
+    );
+    let second_message_id = second["notification"]["message"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(first_message_id, second_message_id);
+
+    retain_mailbox_through_occurrence(&root, "agent.state", 3);
+
+    let recovered = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:02:10Z"
+        }),
+    );
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(
+        recovered["notification"]["message"]["messageId"],
+        second_message_id
+    );
+
+    let repeated = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:02:20Z"
+        }),
+    );
+    assert_eq!(repeated["idempotent"], true);
+    assert!(repeated["notification"].is_null());
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["messages"].as_array().unwrap().len(), 2);
+    assert!(status["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["messageId"] == first_message_id));
+    assert!(status["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["messageId"] == second_message_id));
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"agent.state\"").count(), 3);
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 2);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worker_idle_second_transition_replays_after_message_prefix_without_reusing_old_notification() {
+    let root = temp_root("worker-idle-second-message-prefix");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let first = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+    );
+    let first_message_id = first["notification"]["message"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "working",
+            "at": "2026-01-01T00:01:00Z"
+        }),
+    );
+    let second = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:02:00Z"
+        }),
+    );
+    let second_message_id = second["notification"]["message"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(first_message_id, second_message_id);
+
+    retain_mailbox_through_occurrence(&root, "message.created", 2);
+
+    let recovered = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:02:10Z"
+        }),
+    );
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(
+        recovered["notification"]["message"]["messageId"],
+        second_message_id
+    );
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["messageId"],
+        second_message_id
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"agent.state\"").count(), 3);
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 2);
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 2);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 2);
     fs::remove_dir_all(root).unwrap();
 }
 

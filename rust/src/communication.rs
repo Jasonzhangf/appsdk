@@ -1108,13 +1108,19 @@ impl CommunicationStore {
                     "mailbox",
                     &format!("idle:{}", current.address().key()),
                 ]);
-                if !self
+                let message = worker_idle_message(&current, master_address, &current.last_state_at);
+                let message_id = message
+                    .message_id
+                    .as_deref()
+                    .expect("worker idle message must have a deterministic message id");
+                let notification_matches_message = self
                     .projection
                     .notifications
-                    .contains_key(&notification_key)
+                    .get(&notification_key)
+                    .is_some_and(|notification| notification.message_id == message_id);
+                if !self.projection.messages.contains_key(message_id)
+                    || !notification_matches_message
                 {
-                    let message =
-                        worker_idle_message(&current, master_address, &current.last_state_at);
                     let notification = self.send(message)?;
                     return Ok(json!({
                         "agent": current,
@@ -2245,7 +2251,17 @@ impl CommunicationStore {
             return self.notification_for(message, &message.created_at, None);
         };
 
-        if !immediate || matches!(notification.status.as_str(), "emitted" | "unknown") {
+        if !immediate {
+            if notification.message_id == message.message_id {
+                return Ok(Some(notification));
+            }
+            if parse_time(&notification.created_at)? > parse_time(&message.created_at)? {
+                return Ok(Some(notification));
+            }
+            return self.notification_for(message, &message.created_at, None);
+        }
+
+        if matches!(notification.status.as_str(), "emitted" | "unknown") {
             return Ok(Some(notification));
         }
 

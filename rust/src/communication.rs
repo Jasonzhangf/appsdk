@@ -675,6 +675,8 @@ struct Projection {
     loops: BTreeMap<String, LoopRecord>,
     #[serde(default)]
     batches: Vec<NotificationBatch>,
+    #[serde(skip)]
+    completed_attempts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1210,6 +1212,9 @@ impl CommunicationStore {
             if !due {
                 continue;
             }
+            if self.wakeup_delivery_in_flight(&wakeup)? {
+                continue;
+            }
             let reminders_sent = wakeup.reminders_sent + 1;
             let next_wakeup = WakeupRecord {
                 address: wakeup.address.clone(),
@@ -1219,7 +1224,8 @@ impl CommunicationStore {
                 stopped: reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT,
                 last_reminder_at: Some(at.clone()),
             };
-            let message = self.system_message(
+            let (message_id, conversation_id) = wakeup_message_identity(&wakeup, reminders_sent)?;
+            let mut message = self.system_message(
                 &agent.address(),
                 format!(
                     "master idle reminder {reminders_sent}/{}",
@@ -1231,8 +1237,100 @@ impl CommunicationStore {
                 &at,
                 "mailbox",
             )?;
-            let mut notification = self.build_notification(&message, &at, Some(&at))?;
+            message.message_id = message_id;
+            message.conversation_id = conversation_id;
+            let message = self.prepare_wakeup_message(message)?;
+            let mut notification =
+                self.build_notification(&message, &message.created_at, Some(&message.created_at))?;
+            notification.notification_id = format!("wakeup-notification-{}", message.message_id);
             let notification_key = self.notification_key(&message, &notification, true);
+            if let Some(existing) = self
+                .projection
+                .notifications
+                .get(&notification_key)
+                .cloned()
+            {
+                if existing.message_id == message.message_id {
+                    notification = existing;
+                } else {
+                    self.commit(
+                        "notification.queued",
+                        json!({
+                            "key": notification_key,
+                            "notification": notification.clone()
+                        }),
+                    )?;
+                }
+            } else {
+                self.commit(
+                    "notification.queued",
+                    json!({
+                        "key": notification_key,
+                        "notification": notification.clone()
+                    }),
+                )?;
+            }
+            if notification.message_id == message.message_id && notification.status == "emitted" {
+                let completed_attempt_id = self
+                    .projection
+                    .completed_attempts
+                    .get(&notification_key)
+                    .cloned();
+                if let Some(attempt_id) = completed_attempt_id.as_deref() {
+                    self.commit_wakeup_reminder(
+                        &next_wakeup,
+                        &message,
+                        &notification_key,
+                        &notification,
+                        Some(attempt_id),
+                        notification.transport_receipt.as_ref(),
+                    )?;
+                    let updated = self
+                        .projection
+                        .wakeup
+                        .get(&wakeup.address.key())
+                        .cloned()
+                        .ok_or_else(|| {
+                            CommError::new("wakeup_not_found", "wakeup update was not projected")
+                        })?;
+                    changed.push(updated);
+                }
+                continue;
+            }
+            if notification.message_id == message.message_id
+                && notification.status == "pending"
+                && notification.delivery_attempt.is_none()
+                && notification.last_error.is_some()
+            {
+                let completed_attempt_id = self
+                    .projection
+                    .completed_attempts
+                    .get(&notification_key)
+                    .cloned();
+                if let Some(attempt_id) = completed_attempt_id.as_deref() {
+                    self.commit_wakeup_reminder(
+                        &next_wakeup,
+                        &message,
+                        &notification_key,
+                        &notification,
+                        Some(attempt_id),
+                        None,
+                    )?;
+                    let updated = self
+                        .projection
+                        .wakeup
+                        .get(&wakeup.address.key())
+                        .cloned()
+                        .ok_or_else(|| {
+                            CommError::new("wakeup_not_found", "wakeup update was not projected")
+                        })?;
+                    changed.push(updated);
+                }
+                continue;
+            }
+            if notification.status == "unknown" || notification.delivery_attempt.is_some() {
+                continue;
+            }
             let adapter = match self.adapter_for(&message.adapter_id, Some(&agent.address())) {
                 Ok(adapter) => adapter,
                 Err(error) => {
@@ -1242,53 +1340,100 @@ impl CommunicationStore {
                         &message.adapter_id,
                         "wakeup.reminder",
                     ));
-                    self.commit(
-                        "wakeup.reminder",
-                        json!({
-                            "wakeup": next_wakeup,
-                            "message": message,
-                            "notificationKey": notification_key,
-                            "notification": notification,
-                            "receipt": Value::Null
-                        }),
+                    self.commit_wakeup_reminder(
+                        &next_wakeup,
+                        &message,
+                        &notification_key,
+                        &notification,
+                        None,
+                        None,
                     )?;
                     return Err(error);
                 }
             };
+            let attempt =
+                new_delivery_attempt_at(&message.adapter_id, "notification.emitted", None, &at);
+            let attempt_id = attempt.attempt_id.clone();
+            let notification_id = notification.notification_id.clone();
+            self.commit(
+                "notification.delivery_attempt",
+                json!({
+                    "attemptId": attempt_id.clone(),
+                    "keys": [notification_key.clone()],
+                    "attempt": attempt
+                }),
+            )?;
             let receipt = match adapter.deliver(&message) {
                 Ok(receipt) => receipt,
                 Err(error) => {
                     let error = adapter_error(&error, &message.adapter_id, "wakeup.reminder");
-                    notification.last_error = Some(adapter_error_record(
-                        &error,
+                    if let Err(record_error) = self.record_notification_failure(
+                        std::slice::from_ref(&notification_key),
                         &message.adapter_id,
-                        "wakeup.reminder",
-                    ));
-                    self.commit(
-                        "wakeup.reminder",
+                        &error,
+                        "notification.emitted",
                         json!({
-                            "wakeup": next_wakeup,
-                            "message": message,
-                            "notificationKey": notification_key,
-                            "notification": notification,
-                            "receipt": Value::Null
+                            "messageId": message.message_id,
+                            "notificationKey": notification_key.clone(),
+                            "notificationId": notification_id,
+                            "attemptId": attempt_id.clone()
                         }),
+                    ) {
+                        return Err(with_secondary_error(
+                            error,
+                            record_error,
+                            "notification.delivery_failed",
+                        ));
+                    }
+                    let notification = self
+                        .projection
+                        .notifications
+                        .get(&notification_key)
+                        .cloned()
+                        .ok_or_else(|| {
+                            CommError::new(
+                                "notification_recovery_failed",
+                                format!("notification disappeared during wakeup failure: {notification_key}"),
+                            )
+                        })?;
+                    self.commit_wakeup_reminder(
+                        &next_wakeup,
+                        &message,
+                        &notification_key,
+                        &notification,
+                        Some(&attempt_id),
+                        None,
                     )?;
                     return Err(error);
                 }
             };
-            notification.status = "emitted".into();
-            notification.emitted_at = Some(at.clone());
-            notification.transport_receipt = Some(receipt.clone());
             self.commit(
-                "wakeup.reminder",
+                "notification.emitted",
                 json!({
-                    "wakeup": next_wakeup,
-                    "message": message,
-                    "notificationKey": notification_key,
-                    "notification": notification,
-                    "receipt": receipt
+                    "attemptId": attempt_id.clone(),
+                    "keys": [notification_key.clone()],
+                    "at": at.clone(),
+                    "receipt": receipt.clone()
                 }),
+            )?;
+            let notification = self
+                .projection
+                .notifications
+                .get(&notification_key)
+                .cloned()
+                .ok_or_else(|| {
+                    CommError::new(
+                        "notification_recovery_failed",
+                        format!("notification disappeared during wakeup: {notification_key}"),
+                    )
+                })?;
+            self.commit_wakeup_reminder(
+                &next_wakeup,
+                &message,
+                &notification_key,
+                &notification,
+                Some(&attempt_id),
+                Some(&receipt),
             )?;
             let updated = self
                 .projection
@@ -2262,6 +2407,140 @@ impl CommunicationStore {
         ])
     }
 
+    fn wakeup_delivery_in_flight(&self, wakeup: &WakeupRecord) -> CommResult<bool> {
+        let Some(idle_since) = wakeup.idle_since.as_deref() else {
+            return Ok(false);
+        };
+        let idle_since = parse_time(idle_since)?;
+        let daemon = Address {
+            scope_id: "appsdk".into(),
+            session_id: "daemon".into(),
+        };
+        let key = structured_key(&[
+            &daemon.key(),
+            &wakeup.address.key(),
+            "mailbox",
+            "master-idle",
+        ]);
+        let Some(notification) = self.projection.notifications.get(&key) else {
+            return Ok(false);
+        };
+        if notification.status != "unknown" && notification.delivery_attempt.is_none() {
+            return Ok(false);
+        }
+        Ok(parse_time(&notification.created_at)? >= idle_since)
+    }
+
+    fn prepare_wakeup_message(&mut self, expected: MessageRecord) -> CommResult<MessageRecord> {
+        if let Some(existing) = self.projection.messages.get(&expected.message_id).cloned() {
+            if !wakeup_message_matches(&existing, &expected) {
+                return Err(CommError::new(
+                    "wakeup_message_conflict",
+                    format!(
+                        "wakeup message id already identifies a different message: {}",
+                        expected.message_id
+                    ),
+                ));
+            }
+            if existing.state == "created" {
+                let accepted = DeliveryEvidence {
+                    state: "accepted".into(),
+                    at: existing.created_at.clone(),
+                    details: json!({
+                        "transport": "appsdk-internal",
+                        "durable": true,
+                        "recovered": true
+                    }),
+                };
+                self.commit(
+                    "message.state",
+                    json!({
+                        "messageId": existing.message_id,
+                        "state": "accepted",
+                        "evidence": accepted
+                    }),
+                )?;
+            } else if existing.state != "accepted" {
+                return Err(CommError::new(
+                    "wakeup_message_state_invalid",
+                    format!(
+                        "wakeup message {} has unsupported state: {}",
+                        existing.message_id, existing.state
+                    ),
+                ));
+            }
+            return self
+                .projection
+                .messages
+                .get(&expected.message_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CommError::new(
+                        "message_recovery_failed",
+                        format!(
+                            "wakeup message disappeared during recovery: {}",
+                            expected.message_id
+                        ),
+                    )
+                });
+        }
+
+        let mut created = expected.clone();
+        created.state = "created".into();
+        created.evidence.clear();
+        self.commit("message.created", serde_json::to_value(&created).unwrap())?;
+        let accepted = expected.evidence.first().cloned().ok_or_else(|| {
+            CommError::new(
+                "message_evidence_missing",
+                "system message accepted evidence missing",
+            )
+        })?;
+        self.commit(
+            "message.state",
+            json!({
+                "messageId": expected.message_id,
+                "state": "accepted",
+                "evidence": accepted
+            }),
+        )?;
+        self.projection
+            .messages
+            .get(&created.message_id)
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "message_recovery_failed",
+                    format!(
+                        "wakeup message disappeared during creation: {}",
+                        created.message_id
+                    ),
+                )
+            })
+    }
+
+    fn commit_wakeup_reminder(
+        &mut self,
+        wakeup: &WakeupRecord,
+        message: &MessageRecord,
+        notification_key: &str,
+        notification: &NotificationRecord,
+        attempt_id: Option<&str>,
+        receipt: Option<&TransportReceipt>,
+    ) -> CommResult<()> {
+        self.commit(
+            "wakeup.reminder",
+            json!({
+                "wakeup": wakeup,
+                "message": message,
+                "notificationKey": notification_key,
+                "notification": notification,
+                "attemptId": attempt_id,
+                "receipt": receipt
+            }),
+        )
+        .map(|_| ())
+    }
+
     fn system_message(
         &self,
         target: &Address,
@@ -2867,23 +3146,35 @@ impl CommunicationStore {
                         })
                     })
                     .transpose()?;
+                let completed_attempt_id = attempt_id.map(str::to_owned);
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
                     })?;
-                    let notification =
-                        self.projection.notifications.get_mut(key).ok_or_else(|| {
-                            CommError::new(
-                                "event_data_invalid",
-                                format!("notification key not found: {key}"),
-                            )
-                        })?;
-                    validate_terminal_attempt(notification, attempt_id, "notification.emitted")?;
-                    notification.status = "emitted".into();
-                    notification.emitted_at = Some(at.into());
-                    notification.delivery_attempt = None;
-                    if let Some(receipt) = receipt.clone() {
-                        notification.transport_receipt = Some(receipt);
+                    {
+                        let notification =
+                            self.projection.notifications.get_mut(key).ok_or_else(|| {
+                                CommError::new(
+                                    "event_data_invalid",
+                                    format!("notification key not found: {key}"),
+                                )
+                            })?;
+                        validate_terminal_attempt(
+                            notification,
+                            attempt_id,
+                            "notification.emitted",
+                        )?;
+                        notification.status = "emitted".into();
+                        notification.emitted_at = Some(at.into());
+                        notification.delivery_attempt = None;
+                        if let Some(receipt) = receipt.clone() {
+                            notification.transport_receipt = Some(receipt);
+                        }
+                    }
+                    if let Some(attempt_id) = completed_attempt_id.as_ref() {
+                        self.projection
+                            .completed_attempts
+                            .insert(key.into(), attempt_id.clone());
                     }
                 }
             }
@@ -2923,12 +3214,15 @@ impl CommunicationStore {
                         })
                     })
                     .transpose()?;
+                let completed_attempt_id = attempt_id.map(str::to_owned);
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
                     })?;
-                    let notification =
-                        if let Some(notification) = self.projection.notifications.get_mut(key) {
+                    {
+                        let notification = if let Some(notification) =
+                            self.projection.notifications.get_mut(key)
+                        {
                             notification
                         } else {
                             self.projection
@@ -2942,16 +3236,22 @@ impl CommunicationStore {
                                     )
                                 })?
                         };
-                    validate_terminal_attempt(
-                        notification,
-                        attempt_id,
-                        "notification.batch_emitted",
-                    )?;
-                    notification.status = "emitted".into();
-                    notification.emitted_at = Some(at.into());
-                    notification.delivery_attempt = None;
-                    if let Some(receipt) = receipt.clone() {
-                        notification.transport_receipt = Some(receipt);
+                        validate_terminal_attempt(
+                            notification,
+                            attempt_id,
+                            "notification.batch_emitted",
+                        )?;
+                        notification.status = "emitted".into();
+                        notification.emitted_at = Some(at.into());
+                        notification.delivery_attempt = None;
+                        if let Some(receipt) = receipt.clone() {
+                            notification.transport_receipt = Some(receipt);
+                        }
+                    }
+                    if let Some(attempt_id) = completed_attempt_id.as_ref() {
+                        self.projection
+                            .completed_attempts
+                            .insert(key.into(), attempt_id.clone());
                     }
                 }
                 self.projection.batches.push(batch);
@@ -2972,10 +3272,6 @@ impl CommunicationStore {
                 if let Some(receipt) = event.data.get("receipt").filter(|value| !value.is_null()) {
                     let _: TransportReceipt = decode(receipt, "receipt")?;
                 }
-                self.projection.wakeup.insert(wakeup.address.key(), wakeup);
-                self.projection
-                    .messages
-                    .insert(message.message_id.clone(), message);
                 let key = event
                     .data
                     .get("notificationKey")
@@ -2994,6 +3290,44 @@ impl CommunicationStore {
                             ])
                         )
                     });
+                let attempt_id = event
+                    .data
+                    .get("attemptId")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                "wakeup reminder attempt id is not a string",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                if let Some(attempt_id) = attempt_id {
+                    match self.projection.completed_attempts.get(&key) {
+                        Some(completed_attempt_id) if completed_attempt_id == attempt_id => {}
+                        Some(completed_attempt_id) => {
+                            return Err(CommError::new(
+                                "delivery_attempt_mismatch",
+                                format!(
+                                    "wakeup reminder attempt {attempt_id} does not match completed attempt {completed_attempt_id}"
+                                ),
+                            ));
+                        }
+                        None => {
+                            return Err(CommError::new(
+                                "delivery_attempt_mismatch",
+                                format!(
+                                    "wakeup reminder attempt {attempt_id} has no completed terminal event"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                self.projection.wakeup.insert(wakeup.address.key(), wakeup);
+                self.projection
+                    .messages
+                    .insert(message.message_id.clone(), message);
                 self.projection.notifications.insert(key, notification);
             }
             "notification.delivery_failed" => {
@@ -3035,12 +3369,15 @@ impl CommunicationStore {
                     event.data.get("error").unwrap_or(&Value::Null),
                     "notification failure error",
                 )?;
+                let completed_attempt_id = attempt_id.map(str::to_owned);
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
                     })?;
-                    let notification =
-                        if let Some(notification) = self.projection.notifications.get_mut(key) {
+                    {
+                        let notification = if let Some(notification) =
+                            self.projection.notifications.get_mut(key)
+                        {
                             notification
                         } else {
                             self.projection
@@ -3054,10 +3391,16 @@ impl CommunicationStore {
                                     )
                                 })?
                         };
-                    validate_terminal_attempt(notification, attempt_id, operation)?;
-                    notification.last_error = Some(error.clone());
-                    notification.status = "pending".into();
-                    notification.delivery_attempt = None;
+                        validate_terminal_attempt(notification, attempt_id, operation)?;
+                        notification.last_error = Some(error.clone());
+                        notification.status = "pending".into();
+                        notification.delivery_attempt = None;
+                    }
+                    if let Some(attempt_id) = completed_attempt_id.as_ref() {
+                        self.projection
+                            .completed_attempts
+                            .insert(key.into(), attempt_id.clone());
+                    }
                 }
             }
             "bug.reported" => {
@@ -3606,6 +3949,45 @@ fn bug_loop_matches(loop_record: &LoopRecord, owner: &Address) -> bool {
         && loop_record.stop == "resolved, merged, and reporter notified"
 }
 
+fn wakeup_message_identity(
+    wakeup: &WakeupRecord,
+    reminder_number: u8,
+) -> CommResult<(String, String)> {
+    let idle_since = wakeup.idle_since.as_deref().ok_or_else(|| {
+        CommError::new(
+            "wakeup_cycle_missing",
+            format!("master wakeup has no idle cycle: {}", wakeup.address.key()),
+        )
+    })?;
+    let reminder_number = reminder_number.to_string();
+    let cycle = structured_key(&[&wakeup.address.key(), idle_since, &reminder_number]);
+    let conversation = structured_key(&[&wakeup.address.key(), idle_since]);
+    Ok((
+        format!("wakeup-message-{cycle}"),
+        format!("wakeup-conversation-{conversation}"),
+    ))
+}
+
+fn wakeup_message_matches(existing: &MessageRecord, expected: &MessageRecord) -> bool {
+    existing.protocol == expected.protocol
+        && existing.message_id == expected.message_id
+        && existing.conversation_id == expected.conversation_id
+        && existing.from == expected.from
+        && existing.to == expected.to
+        && existing.title == expected.title
+        && existing.priority == expected.priority
+        && existing.body == expected.body
+        && existing.delivery_mode == expected.delivery_mode
+        && existing.coalesce_key == expected.coalesce_key
+        && existing.issue_id == expected.issue_id
+        && existing.adapter_id == expected.adapter_id
+        && existing.route.mode == expected.route.mode
+        && existing.route.same_appserver == expected.route.same_appserver
+        && existing.route.same_project == expected.route.same_project
+        && existing.route.source_role == expected.route.source_role
+        && existing.route.target_role == expected.route.target_role
+}
+
 fn next_loop_phase(loop_record: &mut LoopRecord) -> CommResult<String> {
     let phase = match loop_record.phase.as_str() {
         "discover" => "hand_off",
@@ -3684,11 +4066,20 @@ fn new_delivery_attempt(
     operation: &str,
     batch_id: Option<&str>,
 ) -> DeliveryAttempt {
+    new_delivery_attempt_at(adapter_id, operation, batch_id, &now())
+}
+
+fn new_delivery_attempt_at(
+    adapter_id: &str,
+    operation: &str,
+    batch_id: Option<&str>,
+    started_at: &str,
+) -> DeliveryAttempt {
     DeliveryAttempt {
         attempt_id: new_id("attempt"),
         operation: operation.into(),
         adapter_id: adapter_id.into(),
-        started_at: now(),
+        started_at: started_at.into(),
         batch_id: batch_id.map(str::to_owned),
     }
 }

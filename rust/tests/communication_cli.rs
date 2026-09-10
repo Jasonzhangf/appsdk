@@ -459,6 +459,272 @@ fn tick_wakes_a_live_idle_master_within_its_lease() {
             .len(),
         1
     );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let tick_events: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["kind"].as_str(),
+                Some(
+                    "message.created"
+                        | "message.state"
+                        | "notification.queued"
+                        | "notification.delivery_attempt"
+                        | "notification.emitted"
+                        | "wakeup.reminder"
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        tick_events
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "message.created",
+            "message.state",
+            "notification.queued",
+            "notification.delivery_attempt",
+            "notification.emitted",
+            "wakeup.reminder"
+        ]
+    );
+    let attempt_id = tick_events[3]["data"]["attemptId"].as_str().unwrap();
+    assert_eq!(
+        tick_events[4]["data"]["attemptId"].as_str(),
+        Some(attempt_id)
+    );
+    assert_eq!(
+        tick_events[5]["data"]["attemptId"].as_str(),
+        Some(attempt_id)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tick_crash_after_attempt_is_unknown_and_does_not_replay_or_consume_budget() {
+    let root = temp_root("wakeup-attempt-crash");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    let due = after(observed_at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    retain_mailbox_through(&root, "notification.delivery_attempt");
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["unknown"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(status["wakeup"][0]["remindersSent"], 0);
+
+    let replay = call(&root, json!({ "op": "tick", "now": due }));
+    assert!(replay["changed"].as_array().unwrap().is_empty());
+    assert_eq!(replay["wakeup"][0]["remindersSent"], 0);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    assert!(!raw.contains("\"kind\":\"notification.emitted\""));
+    assert!(!raw.contains("\"kind\":\"wakeup.reminder\""));
+
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "working",
+            "at": after(observed_at, 121)
+        }),
+    );
+    let new_idle_at = after(observed_at, 122);
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": new_idle_at
+        }),
+    );
+    let new_cycle = call(
+        &root,
+        json!({ "op": "tick", "now": after(observed_at, 242) }),
+    );
+    assert_eq!(new_cycle["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(new_cycle["wakeup"][0]["remindersSent"], 1);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        2
+    );
+    assert_eq!(raw.matches("\"kind\":\"wakeup.reminder\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tick_retry_reuses_stable_cycle_message_and_notification_prefix() {
+    let root = temp_root("wakeup-prefix-retry");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    let due = after(observed_at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let raw = fs::read_to_string(&mailbox).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let first_message_id = events
+        .iter()
+        .find(|event| event["kind"] == "message.created")
+        .and_then(|event| event["data"]["messageId"].as_str())
+        .unwrap()
+        .to_owned();
+    let first_notification_id = events
+        .iter()
+        .find(|event| event["kind"] == "notification.queued")
+        .and_then(|event| event["data"]["notification"]["notificationId"].as_str())
+        .unwrap()
+        .to_owned();
+    retain_mailbox_through(&root, "notification.queued");
+
+    let retry = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(retry["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(retry["wakeup"][0]["remindersSent"], 1);
+    let raw = fs::read_to_string(&mailbox).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    assert_eq!(raw.matches("\"kind\":\"notification.emitted\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"wakeup.reminder\"").count(), 1);
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events
+        .iter()
+        .filter(|event| event["kind"] == "message.created")
+        .all(|event| { event["data"]["messageId"] == first_message_id }));
+    assert!(events
+        .iter()
+        .filter(|event| event["kind"] == "notification.queued")
+        .all(|event| event["data"]["notification"]["notificationId"] == first_notification_id));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tick_retry_recovers_created_message_prefix_without_duplicate_facts() {
+    let root = temp_root("wakeup-created-prefix");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    let due = after(observed_at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    retain_mailbox_through(&root, "message.created");
+
+    let retry = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(retry["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(retry["wakeup"][0]["remindersSent"], 1);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    assert_eq!(raw.matches("\"kind\":\"notification.emitted\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"wakeup.reminder\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tick_retry_after_emitted_prefix_reuses_attempt_and_finishes_wakeup() {
+    let root = temp_root("wakeup-emitted-prefix");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    let due = after(observed_at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    retain_mailbox_through(&root, "notification.emitted");
+
+    let retry = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(retry["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(retry["wakeup"][0]["remindersSent"], 1);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    assert_eq!(raw.matches("\"kind\":\"notification.emitted\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"wakeup.reminder\"").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 

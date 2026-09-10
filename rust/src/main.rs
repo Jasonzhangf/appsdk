@@ -4673,7 +4673,7 @@ fn assert_produced_record_shapes(targets: &[(PathBuf, Value)], module_id: &str) 
         fail("PRODUCER_RECORD_SCHEMA_INVALID");
     }
     let issue_id = producer_issue(worktree, "/issue_id", "PRODUCER_RECORD_SCHEMA_INVALID");
-    assert_bug_tracker_triage_evidence(worktree, &issue_id, None);
+    assert_bug_tracker_triage_evidence(worktree, &issue_id, None, true);
 
     let reproduction = &targets[1].1;
     for path in [
@@ -5006,7 +5006,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     {
         fail("BUG_TRIAGE_MISSING");
     }
-    assert_bug_tracker_triage_evidence(worktree, &worktree_issue, Some(root));
+    assert_bug_tracker_triage_evidence(worktree, &worktree_issue, Some(root), false);
     if goal
         .get("issue_id")
         .and_then(Value::as_str)
@@ -6317,7 +6317,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("FIX_WORKTREE_NOT_CLEAN_ISOLATED");
     }
-    assert_bug_tracker_triage_evidence(&worktree, issue_id, None);
+    assert_bug_tracker_triage_evidence(&worktree, issue_id, None, true);
     if record_str(&reproduction, "/worktree_id", &reproduction_name)
         != record_str(&worktree, "/worktree_id", &worktree_name)
         || record_str(&candidate, "/worktree_id", &candidate_name)
@@ -7288,7 +7288,7 @@ fn assert_fix_lifecycle_graph(
     {
         fail("FIX_LIFECYCLE_ORDER_INVALID");
     }
-    assert_bug_tracker_solution_evidence(root, issue_id);
+    assert_bug_tracker_solution_evidence(root, issue_id, promotion);
 }
 
 fn assert_record_graph(
@@ -10303,6 +10303,7 @@ fn assert_bug_tracker_triage_evidence(
     worktree: &Value,
     issue_id: &str,
     real_query_root: Option<&Path>,
+    require_binding: bool,
 ) {
     let triage = worktree.get("bug_triage");
     let legacy_issue = issue_id.starts_with("legacy-");
@@ -10367,6 +10368,21 @@ fn assert_bug_tracker_triage_evidence(
         fail("BUG_TRIAGE_REOPENED_SOURCE_UNEXPECTED");
     }
 
+    let expected_binding = sha256(&canonical(&serde_json::json!({
+        "issue_id": issue_id,
+        "query": query,
+        "mode": mode,
+        "reopened_from_issue_id": reopened_from_id
+    })));
+    if require_binding
+        && worktree
+            .get("bug_triage_query_binding")
+            .and_then(Value::as_str)
+            != Some(expected_binding.as_str())
+    {
+        fail("BUG_TRIAGE_QUERY_BINDING_MISMATCH");
+    }
+
     if let Some(root) = real_query_root {
         query_bug_record(root, issue_id).unwrap_or_else(|error| fail(error));
         if let Some(reopened_from_id) = reopened_from_id {
@@ -10390,46 +10406,46 @@ mod bug_triage_tests {
             }
         });
 
-        assert_bug_tracker_triage_evidence(&worktree, "legacy-issue-1", None);
+        assert_bug_tracker_triage_evidence(&worktree, "legacy-issue-1", None, false);
     }
 }
 
-fn assert_bug_tracker_solution_evidence(root: &Path, issue_id: &str) {
+fn assert_bug_tracker_solution_evidence(root: &Path, issue_id: &str, promotion: &Value) {
     if issue_id.is_empty() || issue_id == "none" || issue_id.starts_with("legacy-") {
         return;
     }
 
-    if let Ok(git_bug) = locate_git_bug_binary() {
-        let out = Command::new(&git_bug)
-            .args(["bug", "show", issue_id, "-f", "json"])
-            .current_dir(root)
-            .output();
-        if let Ok(output) = out {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Ok(json) = serde_json::from_str::<Value>(&stdout) {
-                    let mut has_solution = false;
-                    if let Some(comments) = json.get("comments").and_then(Value::as_array) {
-                        for c in comments {
-                            if let Some(msg) = c.get("message").and_then(Value::as_str) {
-                                if msg.contains("### Solution / Resolution")
-                                    || msg.contains("Solution:")
-                                {
-                                    has_solution = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if !has_solution {
-                        fail(format!(
-                            "BUG_TRACKER_SOLUTION_EVIDENCE_MISSING:{}",
-                            issue_id
-                        ));
-                    }
-                }
-            }
-        }
+    if promotion.get("bug_closure_verified") != Some(&Value::Bool(true)) {
+        fail("BUG_TRACKER_CLOSURE_NOT_VERIFIED");
+    }
+    let record = query_bug_record(root, issue_id)
+        .unwrap_or_else(|error| fail(format!("BUG_TRACKER_CLOSURE_QUERY_FAILED:{}", error)));
+    if record.get("status").and_then(Value::as_str) != Some("closed") {
+        fail(format!("BUG_TRACKER_ISSUE_NOT_CLOSED:{}", issue_id));
+    }
+    if git_bug_close_event(root, &record).is_none() {
+        fail(format!("BUG_TRACKER_CLOSE_EVENT_MISSING:{}", issue_id));
+    }
+    let has_solution = record
+        .get("comments")
+        .and_then(Value::as_array)
+        .map(|comments| {
+            comments.iter().any(|comment| {
+                comment
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| {
+                        message.contains("### Solution / Resolution")
+                            || message.contains("Solution:")
+                    })
+            })
+        })
+        .unwrap_or(false);
+    if !has_solution {
+        fail(format!(
+            "BUG_TRACKER_SOLUTION_EVIDENCE_MISSING:{}",
+            issue_id
+        ));
     }
 }
 

@@ -2773,7 +2773,82 @@ fn file_digest(path: &Path) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_freeze: bool) {
+fn install_authoritative_bug_fixture(root: &Path, issue_id: &str) -> PathBuf {
+    let fake_bin = root.with_extension("fake-git-bug");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"bug show\")\n    printf '%s\\n' '{{\"id\":\"bug-object\",\"human_id\":\"{}\",\"status\":\"closed\",\"comments\":[{{\"id\":\"comment-1\",\"message\":\"### Solution / Resolution\\nfixed\"}}]}}'\n    exit 0\n    ;;\n  *) exit 64 ;;\nesac\n",
+            issue_id
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let ops = root.join("bug-ops.json");
+    fs::write(
+        &ops,
+        r#"{"ops":[{"type":4,"status":2,"timestamp":"2026-01-01T00:00:00Z"}]}"#,
+    )
+    .unwrap();
+    let blob = git_test_value(root, &["hash-object", "-w", ops.to_str().unwrap()]);
+    let tree_input = format!("100644 blob {}\tops\n", blob);
+    let mut mktree = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "mktree"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    mktree
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(tree_input.as_bytes())
+        .unwrap();
+    let tree = mktree.wait_with_output().unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap().trim().to_string();
+    let commit = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "commit-tree",
+            &tree,
+            "-m",
+            "close bug",
+        ])
+        .output()
+        .unwrap();
+    assert!(commit.status.success());
+    let commit = String::from_utf8(commit.stdout).unwrap().trim().to_string();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "update-ref",
+            "refs/bugs/bug-object",
+            &commit
+        ])
+        .status()
+        .unwrap()
+        .success());
+    fs::remove_file(ops).unwrap();
+    fake_git_bug
+}
+
+fn write_records(
+    root: &PathBuf,
+    module_id: &str,
+    artifact_hash: &str,
+    include_freeze: bool,
+    issue_id: &str,
+) {
+    let fake_git_bug = install_authoritative_bug_fixture(root, issue_id);
+    unsafe {
+        env::set_var("GIT_BUG_BIN", &fake_git_bug);
+    }
     let records = root.join(".appsdk/records");
     fs::create_dir_all(&records).unwrap();
     let evidence_dir = records.join("evidence").join(module_id);
@@ -2784,7 +2859,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     let evidence = |id: &str, phase: &str, kind: &str, created_at: &str| {
         serde_json::json!({
             "evidence_id": id,
-            "issue_id": "issue-1",
+            "issue_id": issue_id,
             "experiment_id": "experiment-1",
             "phase": phase,
             "kind": kind,
@@ -2852,7 +2927,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         evidence_dir.join("whitebox-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
-            "evidence_id":"whitebox-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "evidence_id":"whitebox-1","issue_id":issue_id,"experiment_id":"experiment-1",
             "phase":"development_whitebox","kind":"gate","source_commit":commit,
             "artifact_hash":artifact_hash,"execution_surface":"development_whitebox",
             "scope":{"module_id":module_id},"producer":{"adapter":"test","identity":"whitebox-runner"},
@@ -2866,7 +2941,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         evidence_dir.join("install-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
-            "evidence_id":"install-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "evidence_id":"install-1","issue_id":issue_id,"experiment_id":"experiment-1",
             "phase":"deployment_install","kind":"install","source_commit":commit,
             "artifact_hash":artifact_hash,"execution_surface":"deployed_blackbox",
             "environment_id":"test-deployment","entrypoint":"test://installed-app",
@@ -2882,7 +2957,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         evidence_dir.join("restart-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
-            "evidence_id":"restart-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "evidence_id":"restart-1","issue_id":issue_id,"experiment_id":"experiment-1",
             "phase":"deployment_restart","kind":"restart","source_commit":commit,
             "artifact_hash":artifact_hash,"execution_surface":"deployed_blackbox",
             "environment_id":"test-deployment","entrypoint":"test://installed-app",
@@ -2898,7 +2973,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         evidence_dir.join("blackbox-1.json"),
         serde_json::to_string_pretty(&serde_json::json!({
-            "evidence_id":"blackbox-1","issue_id":"issue-1","experiment_id":"experiment-1",
+            "evidence_id":"blackbox-1","issue_id":issue_id,"experiment_id":"experiment-1",
             "phase":"deployed_blackbox","kind":"runtime","source_commit":commit,
             "artifact_hash":artifact_hash,"execution_surface":"deployed_blackbox",
             "environment_id":"test-deployment","entrypoint":"test://installed-app",
@@ -2923,23 +2998,29 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
             + "\n",
     )
     .unwrap();
+    let mut worktree_record = serde_json::json!({
+        "worktree_id":"worktree-1","issue_id":issue_id,"module_id":module_id,
+        "base_ref":"HEAD","base_commit":commit,"branch":"test-fix","head_commit":commit,
+        "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
+        "scope_hash":"scope-1","created_at":"2026-01-01T00:00:00Z",
+        "bug_triage":{"query_executed":true,"query":format!("appsdk bug list -q {}", issue_id),"mode":"new_confirmed","reopened_from_issue_id":null}
+    });
+    worktree_record["bug_triage_query_binding"] =
+        Value::String(digest(&canonical(&serde_json::json!({
+            "issue_id": issue_id,
+            "query": format!("appsdk bug list -q {}", issue_id),
+            "mode": "new_confirmed",
+            "reopened_from_issue_id": null
+        }))));
     fs::write(
         records.join(format!("worktree-record-{module_id}.json")),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "worktree_id":"worktree-1","issue_id":"issue-1","module_id":module_id,
-            "base_ref":"HEAD","base_commit":commit,"branch":"test-fix","head_commit":commit,
-            "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
-            "scope_hash":"scope-1","created_at":"2026-01-01T00:00:00Z",
-            "bug_triage":{"query_executed":true,"query":"appsdk bug list -q issue-1","mode":"new_confirmed","reopened_from_issue_id":null}
-        }))
-        .unwrap()
-            + "\n",
+        serde_json::to_string_pretty(&worktree_record).unwrap() + "\n",
     )
     .unwrap();
     fs::write(
         records.join(format!("reproduction-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "reproduction_id":"reproduction-1","issue_id":"issue-1","module_id":module_id,
+            "reproduction_id":"reproduction-1","issue_id":issue_id,"module_id":module_id,
             "worktree_id":"worktree-1","base_commit":commit,"input_hashes":["input-1"],
             "baseline_evidence_id":"baseline-1","first_divergence":"test-owner",
             "result":"reproduced","created_at":"2026-01-01T00:01:00Z"
@@ -2951,7 +3032,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         records.join(format!("fix-candidate-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "fix_candidate_id":"candidate-1","issue_id":"issue-1","module_id":module_id,
+            "fix_candidate_id":"candidate-1","issue_id":issue_id,"module_id":module_id,
             "worktree_id":"worktree-1","base_commit":commit,"head_commit":commit,
             "tree_hash":tree,"diff_hash":"sha256:test-diff","design_id":"design-1",
             "owner":"app-core","scope_hash":"scope-1","changed_paths":[],
@@ -2965,7 +3046,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         records.join(format!("pre-review-validation-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "validation_id":"pre-review-validation-1","issue_id":"issue-1","module_id":module_id,
+            "validation_id":"pre-review-validation-1","issue_id":issue_id,"module_id":module_id,
             "fix_candidate_id":"candidate-1","candidate_commit":commit,"candidate_tree_hash":tree,
             "artifact_hash":artifact_hash,"whitebox_producer":{"adapter":"test","identity":"whitebox-runner"},
             "whitebox_evidence_ids":["whitebox-1"],
@@ -2982,7 +3063,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         records.join(format!("review-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "review_id":"review-1","issue_id":"issue-1","promotion_id":"promotion-1",
+            "review_id":"review-1","issue_id":issue_id,"promotion_id":"promotion-1",
             "review_kind":"architecture","fix_candidate_id":"candidate-1",
             "pre_review_validation_id":"pre-review-validation-1",
             "reviewer":{"adapter":"test","identity":"test"},"verdict":"pass",
@@ -3002,7 +3083,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         records.join(format!("effectiveness-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "effectiveness_id":"effectiveness-1","issue_id":"issue-1","module_id":module_id,
+            "effectiveness_id":"effectiveness-1","issue_id":issue_id,"module_id":module_id,
             "fix_candidate_id":"candidate-1","architecture_review_id":"review-1",
             "reviewed_commit":commit,"reviewed_tree_hash":tree,
             "reproduction_input_hashes":["input-1"],"baseline_evidence_id":"baseline-1",
@@ -3017,7 +3098,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     fs::write(
         records.join(format!("merge-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "merge_id":"merge-1","issue_id":"issue-1","module_id":module_id,
+            "merge_id":"merge-1","issue_id":issue_id,"module_id":module_id,
             "fix_candidate_id":"candidate-1","effectiveness_id":"effectiveness-1",
             "mainline_ref":"HEAD","candidate_commit":commit,"merge_commit":commit,
             "candidate_tree_hash":tree,"merged_tree_hash":tree,"change_identity":"exact",
@@ -3028,7 +3109,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
     )
     .unwrap();
     let promotion_value = serde_json::json!({
-        "promotion_id":"promotion-1","issue_id":"issue-1","experiment_id":"experiment-1",
+        "promotion_id":"promotion-1","issue_id":issue_id,"experiment_id":"experiment-1",
         "module_id":module_id,"base_commit":commit,"source_commit":commit,
         "candidate_commit":commit,"merged_commit":commit,
         "worktree_record_id":"worktree-1","reproduction_record_id":"reproduction-1",
@@ -3040,7 +3121,7 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
         "required_gate_results":[{"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"}],
         "change_set_id":"change-1","compatibility_level":"compatible","root_cause":"test root cause",
         "design_id":"design-1","change_reason_comment":"test reason",
-        "playground_cleanup_record_id":"cleanup-1","created_at":"2026-01-01T00:07:00Z"
+        "playground_cleanup_record_id":"cleanup-1","bug_closure_verified":true,"created_at":"2026-01-01T00:07:00Z"
     });
     let promotion = serde_json::to_string_pretty(&promotion_value).unwrap() + "\n";
     fs::write(
@@ -3058,8 +3139,8 @@ fn write_records(root: &PathBuf, module_id: &str, artifact_hash: &str, include_f
         fs::write(
             records.join(format!("freeze-record-{module_id}.json")),
             format!(
-                r#"{{"freeze_id":"freeze-1","issue_id":"issue-1","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"candidate-evidence-1","source_commit_or_tag":"{}","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"{}","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:08:00Z"}}"#,
-                module_id, promotion_hash, commit, artifact_hash, commit
+                r#"{{"freeze_id":"freeze-1","issue_id":"{}","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"candidate-evidence-1","source_commit_or_tag":"{}","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"{}","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:08:00Z"}}"#,
+                issue_id, module_id, promotion_hash, commit, artifact_hash, commit
             ),
         )
         .unwrap();
@@ -3087,7 +3168,7 @@ fn write_parallel_records(
     artifact_hash: &str,
     include_freeze: bool,
 ) {
-    write_records(root, module_id, artifact_hash, include_freeze);
+    write_records(root, module_id, artifact_hash, include_freeze, "issue-1");
     let records = root.join(".appsdk/records");
     let worktree_file = records.join(format!("worktree-record-{module_id}.json"));
     let mut worktree: Value =
@@ -3321,7 +3402,7 @@ fn write_regression_report(root: &PathBuf, module_id: &str, artifact_hash: &str)
 
 fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash: &str) {
     let root = root.to_path_buf();
-    write_records(&root, module_id, artifact_hash, true);
+    write_records(&root, module_id, artifact_hash, true, "issue-1");
     let records = root.join(".appsdk/records");
     let project: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
@@ -4050,9 +4131,16 @@ esac
         produced_evidence["producer"],
         serde_json::json!({"adapter":"appsdk","identity":"appsdk-lifecycle-record-producer"})
     );
-    assert!(produced_worktree["bug_triage_query_binding"]
-        .as_str()
-        .is_some_and(|binding| binding.starts_with("sha256:")));
+    let expected_triage_binding = digest(&canonical(&serde_json::json!({
+        "issue_id": "issue-producer-1",
+        "query": "appsdk bug list -q issue-producer-1",
+        "mode": "new_confirmed",
+        "reopened_from_issue_id": null
+    })));
+    assert_eq!(
+        produced_worktree["bug_triage_query_binding"],
+        expected_triage_binding
+    );
     assert_eq!(produced_evidence["exit_status"], 1);
     let repeated = produce(&input_path);
     assert!(!repeated.status.success());
@@ -4092,6 +4180,23 @@ fn worktree_schema_requires_triage_only_for_non_legacy_issue_ids() {
     assert!(then_required
         .iter()
         .any(|value| value == "bug_triage_query_binding"));
+}
+
+#[test]
+fn promotion_schema_requires_authoritative_bug_closure() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../contracts/records/promotion-record.schema.json"
+    ))
+    .unwrap();
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "bug_closure_verified"));
+    assert_eq!(
+        schema["properties"]["bug_closure_verified"]["type"],
+        "boolean"
+    );
 }
 
 #[test]
@@ -4411,6 +4516,7 @@ fn review_requires_only_declared_deployment_operations_and_binds_the_contract() 
             "app-core",
             artifact["artifact_hash"].as_str().unwrap(),
             false,
+            "issue-1",
         );
         let validation_file =
             root.join(".appsdk/records/pre-review-validation-record-app-core.json");
@@ -4459,6 +4565,7 @@ fn review_requires_only_declared_deployment_operations_and_binds_the_contract() 
             "app-core",
             artifact["artifact_hash"].as_str().unwrap(),
             false,
+            "issue-1",
         );
         let mut drifted: Value =
             serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
@@ -4562,7 +4669,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         .and_then(Value::as_str)
         .unwrap()
         .to_string();
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let review_file = root.join(".appsdk/records/review-record-app-core.json");
     fs::remove_file(&review_file).unwrap();
     let review_admission = run(&[
@@ -4624,7 +4731,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     ]);
     assert!(!wrong_tree.status.success());
     assert!(String::from_utf8_lossy(&wrong_tree.stderr).contains("FIX_CANDIDATE_TREE_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let restart_receipt_file = root.join(".appsdk/records/evidence/app-core/restart-1.json");
     let mut wrong_restart_producer: Value =
         serde_json::from_str(&fs::read_to_string(&restart_receipt_file).unwrap()).unwrap();
@@ -4644,7 +4751,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!forged_restart_receipt.status.success());
     assert!(String::from_utf8_lossy(&forged_restart_receipt.stderr)
         .contains("DEPLOYMENT_RECEIPT_EVIDENCE_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let whitebox_file = root.join(".appsdk/records/evidence/app-core/whitebox-1.json");
     let mut forged_whitebox_producer: Value =
         serde_json::from_str(&fs::read_to_string(&whitebox_file).unwrap()).unwrap();
@@ -4664,7 +4771,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!forged_whitebox.status.success());
     assert!(String::from_utf8_lossy(&forged_whitebox.stderr)
         .contains("DEVELOPMENT_WHITEBOX_EVIDENCE_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     fs::remove_file(&restart_receipt_file).unwrap();
     let missing_restart_receipt = run(&[
         "verify",
@@ -4676,7 +4783,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!missing_restart_receipt.status.success());
     assert!(String::from_utf8_lossy(&missing_restart_receipt.stderr)
         .contains("MISSING_EVIDENCE_RECORD:restart-1"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let mut late_restart_receipt: Value =
         serde_json::from_str(&fs::read_to_string(&restart_receipt_file).unwrap()).unwrap();
     late_restart_receipt["created_at"] = Value::String("2026-01-01T00:03:35Z".into());
@@ -4695,7 +4802,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!invalid_causal_order.status.success());
     assert!(String::from_utf8_lossy(&invalid_causal_order.stderr)
         .contains("PRE_REVIEW_CAUSAL_ORDER_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let blackbox_file = root.join(".appsdk/records/evidence/app-core/blackbox-1.json");
     let mut expired_blackbox: Value =
         serde_json::from_str(&fs::read_to_string(&blackbox_file).unwrap()).unwrap();
@@ -4715,7 +4822,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!expired_evidence.status.success());
     assert!(String::from_utf8_lossy(&expired_evidence.stderr)
         .contains("EXPIRED_EVIDENCE_RECORD:blackbox-1"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     fs::remove_file(&blackbox_file).unwrap();
     let missing_deployed_blackbox = run(&[
         "verify",
@@ -4728,7 +4835,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!String::from_utf8_lossy(&missing_deployed_blackbox.stdout).contains("\"ok\":true"));
     assert!(String::from_utf8_lossy(&missing_deployed_blackbox.stderr)
         .contains("MISSING_EVIDENCE_RECORD:blackbox-1"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let validation_file = root.join(".appsdk/records/pre-review-validation-record-app-core.json");
     fs::remove_file(&validation_file).unwrap();
     let missing_blackbox_gate = run(&[
@@ -4742,7 +4849,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!missing_blackbox_gate.status.success());
     assert!(String::from_utf8_lossy(&missing_blackbox_gate.stderr)
         .contains("MISSING_RECORD:pre-review-validation-record-app-core.json"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let mut relabeled_blackbox: Value =
         serde_json::from_str(&fs::read_to_string(&blackbox_file).unwrap()).unwrap();
     relabeled_blackbox["execution_surface"] = Value::String("development_whitebox".into());
@@ -4762,7 +4869,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!relabeled_blackbox_gate.status.success());
     assert!(String::from_utf8_lossy(&relabeled_blackbox_gate.stderr)
         .contains("PRE_REVIEW_EVIDENCE_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let mut wrong_artifact_blackbox: Value =
         serde_json::from_str(&fs::read_to_string(&blackbox_file).unwrap()).unwrap();
     wrong_artifact_blackbox["artifact_hash"] = Value::String("sha256:wrong-artifact".into());
@@ -4782,7 +4889,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!wrong_artifact_gate.status.success());
     assert!(String::from_utf8_lossy(&wrong_artifact_gate.stderr)
         .contains("DEPLOYED_BLACKBOX_EVIDENCE_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     fs::write(&source_drift_file, "drift after admission\n").unwrap();
     let promotion_source_drift = run(&[
         "promote-module",
@@ -4796,7 +4903,29 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(String::from_utf8_lossy(&promotion_source_drift.stderr)
         .contains("CANDIDATE_CONTROLLED_SOURCE_DRIFT"));
     fs::remove_file(&source_drift_file).unwrap();
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
+    let worktree_file = root.join(".appsdk/records/worktree-record-app-core.json");
+    let mut forged_binding: Value =
+        serde_json::from_str(&fs::read_to_string(&worktree_file).unwrap()).unwrap();
+    forged_binding["bug_triage_query_binding"] = Value::String("sha256:forged".into());
+    fs::write(
+        &worktree_file,
+        serde_json::to_string_pretty(&forged_binding).unwrap() + "\n",
+    )
+    .unwrap();
+    let forged_binding_result = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "architecture_stable",
+    ]);
+    assert!(!forged_binding_result.status.success());
+    assert!(String::from_utf8_lossy(&forged_binding_result.stderr)
+        .contains("BUG_TRIAGE_QUERY_BINDING_MISMATCH"));
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let mut stale_review: Value =
         serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
     stale_review["resource_map_hash"] = Value::String("sha256:stale".into());
@@ -4816,7 +4945,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!stale_architecture.status.success());
     assert!(String::from_utf8_lossy(&stale_architecture.stderr)
         .contains("ARCHITECTURE_REVIEW_MAP_STALE"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     let mut missing_review_evidence: Value =
         serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
     missing_review_evidence["evidence_ids"]
@@ -4839,7 +4968,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!missing_review_result.status.success());
     assert!(String::from_utf8_lossy(&missing_review_result.stderr)
         .contains("MISSING_EVIDENCE_RECORD:missing-review-evidence"));
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     for relative in [
         ".appsdk/records/effectiveness-record-app-core.json",
         ".appsdk/records/merge-record-app-core.json",
@@ -4865,7 +4994,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!run(&["freeze", root_text, "--module", "app-core"])
         .status
         .success());
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     for relative in [
         ".appsdk/records/merge-record-app-core.json",
         ".appsdk/records/promotion-record-app-core.json",
@@ -4906,7 +5035,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
         !run(&["verify", root_text]).status.success(),
         "reuse must preserve reproduction input identity"
     );
-    write_records(&root, "app-core", &architecture_hash, true);
+    write_records(&root, "app-core", &architecture_hash, true, "issue-1");
     let effectiveness_file = root.join(".appsdk/records/effectiveness-record-app-core.json");
     let mut stale_effectiveness: Value =
         serde_json::from_str(&fs::read_to_string(&effectiveness_file).unwrap()).unwrap();
@@ -4920,7 +5049,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!stale_replay.status.success());
     assert!(String::from_utf8_lossy(&stale_replay.stderr)
         .contains("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH"));
-    write_records(&root, "app-core", &architecture_hash, true);
+    write_records(&root, "app-core", &architecture_hash, true, "issue-1");
     let merge_file = root.join(".appsdk/records/merge-record-app-core.json");
     let promotion_file = root.join(".appsdk/records/promotion-record-app-core.json");
     let mut invalid_merge: Value =
@@ -4944,7 +5073,7 @@ fn full_module_freeze_and_active_publish_require_record_graph() {
     assert!(!invalid_merge_result.status.success());
     assert!(String::from_utf8_lossy(&invalid_merge_result.stderr)
         .contains("MAINLINE_MERGE_COMMIT_MISSING"));
-    write_records(&root, "app-core", &architecture_hash, true);
+    write_records(&root, "app-core", &architecture_hash, true, "issue-1");
     assert!(Command::new("git")
         .args(["-C", root_text, "add", "."])
         .status()
@@ -5087,7 +5216,7 @@ fn frozen_module_keeps_other_modules_mutable() {
         .and_then(Value::as_str)
         .unwrap()
         .to_string();
-    write_records(&root, "app-core", &architecture_hash, false);
+    write_records(&root, "app-core", &architecture_hash, false, "issue-1");
     assert!(run(&[
         "promote-module",
         root_text,
@@ -5098,7 +5227,7 @@ fn frozen_module_keeps_other_modules_mutable() {
     ])
     .status
     .success());
-    write_records(&root, "app-core", &architecture_hash, true);
+    write_records(&root, "app-core", &architecture_hash, true, "issue-1");
     assert!(Command::new("git")
         .args(["-C", root_text, "add", "."])
         .status()
@@ -5261,7 +5390,7 @@ fn frozen_module_keeps_other_modules_mutable() {
         .and_then(Value::as_str)
         .unwrap()
         .to_string();
-    write_records(&root, "app-edge", &edge_hash, false);
+    write_records(&root, "app-edge", &edge_hash, false, "issue-1");
     assert!(Command::new("git")
         .args(["-C", root_text, "add", "."])
         .status()
@@ -5335,7 +5464,7 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         .as_str()
         .unwrap()
         .to_string();
-    write_records(&root, "app-core", &v1_hash, false);
+    write_records(&root, "app-core", &v1_hash, false, "issue-1");
     assert!(run(&[
         "promote-module",
         root_text,
@@ -5346,7 +5475,7 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     ])
     .status
     .success());
-    write_records(&root, "app-core", &v1_hash, true);
+    write_records(&root, "app-core", &v1_hash, true, "issue-1");
     let regression_hash = write_regression_report(&root, "app-core", &v1_hash);
     let freeze_file = root.join(".appsdk/records/freeze-record-app-core.json");
     let mut freeze: Value =

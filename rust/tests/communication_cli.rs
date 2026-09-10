@@ -51,6 +51,30 @@ fn call_error(root: &Path, request: Value) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn retain_mailbox_through(root: &Path, event_kind: &str) {
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let lines: Vec<&str> = contents.lines().collect();
+    let marker = format!("\"kind\":\"{event_kind}\"");
+    let end = lines
+        .iter()
+        .position(|line| line.contains(&marker))
+        .unwrap();
+    let retained = lines[..=end].join("\n");
+    fs::write(mailbox, format!("{retained}\n")).unwrap();
+}
+
+fn remove_mailbox_events(root: &Path, event_kind: &str) {
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let marker = format!("\"kind\":\"{event_kind}\"");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let retained: Vec<&str> = contents
+        .lines()
+        .filter(|line| !line.contains(&marker))
+        .collect();
+    fs::write(mailbox, format!("{}\n", retained.join("\n"))).unwrap();
+}
+
 fn register_scope(
     root: &Path,
     scope_id: &str,
@@ -828,6 +852,239 @@ fn direct_delivery_failures_keep_each_message_retryable() {
         .as_array()
         .unwrap();
     assert_eq!(pending.len(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn idempotent_message_retry_recovers_created_only_prefix() {
+    let root = temp_root("message-retry-created");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let request = json!({
+        "op": "send",
+        "message": {
+            "from": { "scopeId": "scope", "sessionId": "worker" },
+            "to": { "scopeId": "scope", "sessionId": "master" },
+            "title": "recover created",
+            "priority": "p1",
+            "body": "replay after crash",
+            "deliveryMode": "direct",
+            "messageId": "recover-created"
+        }
+    });
+    call(&root, request.clone());
+    retain_mailbox_through(&root, "message.created");
+
+    let recovered = call(&root, request);
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(recovered["message"]["state"], "accepted");
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn idempotent_message_retry_recovers_state_prefix_without_notification() {
+    let root = temp_root("message-retry-state");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let request = json!({
+        "op": "send",
+        "message": {
+            "from": { "scopeId": "scope", "sessionId": "worker" },
+            "to": { "scopeId": "scope", "sessionId": "master" },
+            "title": "recover notification",
+            "priority": "p1",
+            "body": "notification was not queued",
+            "deliveryMode": "direct",
+            "messageId": "recover-notification"
+        }
+    });
+    call(&root, request.clone());
+    retain_mailbox_through(&root, "message.state");
+
+    let recovered = call(&root, request);
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(recovered["message"]["state"], "accepted");
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn direct_retry_retries_known_failure_without_overwriting_identity() {
+    let root = temp_root("direct-retry");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "tmux-execute",
+                "kind": "tmux",
+                "target": "missing-pane",
+                "execute": true,
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    let request = json!({
+        "op": "send",
+        "message": {
+            "from": { "scopeId": "scope", "sessionId": "worker" },
+            "to": { "scopeId": "scope", "sessionId": "master" },
+            "title": "retry direct",
+            "priority": "p1",
+            "body": "known transport failure",
+            "deliveryMode": "direct",
+            "adapterId": "tmux-execute",
+            "messageId": "retry-direct"
+        }
+    });
+    let first = call_error(&root, request.clone());
+    assert!(first.contains("tmux_delivery_failed"), "{first}");
+    let second = call_error(&root, request);
+    assert!(second.contains("tmux_delivery_failed"), "{second}");
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(status["notificationProjection"]["unknown"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        2
+    );
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_failed\"")
+            .count(),
+        2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unresolved_delivery_attempt_is_unknown_and_is_not_replayed() {
+    let root = temp_root("delivery-unknown");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let request = json!({
+        "op": "send",
+        "message": {
+            "from": { "scopeId": "scope", "sessionId": "worker" },
+            "to": { "scopeId": "scope", "sessionId": "master" },
+            "title": "unknown delivery",
+            "priority": "p1",
+            "body": "side effect receipt is uncertain",
+            "deliveryMode": "direct",
+            "messageId": "unknown-delivery"
+        }
+    });
+    call(&root, request.clone());
+    retain_mailbox_through(&root, "notification.delivery_attempt");
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["unknown"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let retry = call(&root, request);
+    assert_eq!(retry["idempotent"], true);
+    let reopened = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        reopened["notificationProjection"]["unknown"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    assert!(!raw.contains("\"kind\":\"notification.emitted\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn idempotent_bug_retry_rehydrates_missing_loop_and_notification() {
+    let root = temp_root("bug-retry");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    let request = json!({
+        "op": "report_bug",
+        "bug": {
+            "bugId": "bug-recover",
+            "scopeId": "scope",
+            "title": "recover bug",
+            "priority": "p2",
+            "description": "notification and loop were interrupted",
+            "reporter": { "scopeId": "scope", "sessionId": "master" }
+        }
+    });
+    call(&root, request.clone());
+    retain_mailbox_through(&root, "bug.reported");
+    remove_mailbox_events(&root, "loop.created");
+
+    let recovered = call(&root, request);
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(recovered["bug"]["bugId"], "bug-recover");
+    assert_eq!(recovered["loop"]["loopId"], "bug-loop-bug-recover");
+    assert!(recovered["notification"]["notification"].is_object());
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["bugs"].as_array().unwrap().len(), 1);
+    assert_eq!(status["loops"].as_array().unwrap().len(), 1);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"bug.reported\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"loop.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 

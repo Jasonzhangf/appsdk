@@ -354,6 +354,19 @@ struct TransportReceipt {
     evidence: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeliveryAttempt {
+    #[serde(rename = "attemptId")]
+    attempt_id: String,
+    operation: String,
+    #[serde(rename = "adapterId")]
+    adapter_id: String,
+    #[serde(rename = "startedAt")]
+    started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "batchId")]
+    batch_id: Option<String>,
+}
+
 trait CommunicationAdapter {
     fn deliver(&self, message: &MessageRecord) -> CommResult<TransportReceipt>;
     fn emit_batch(&self, batch: &NotificationBatch) -> CommResult<TransportReceipt>;
@@ -533,6 +546,12 @@ struct NotificationRecord {
     transport_receipt: Option<TransportReceipt>,
     #[serde(default, rename = "lastError")]
     last_error: Option<ErrorRecord>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "deliveryAttempt"
+    )]
+    delivery_attempt: Option<DeliveryAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,6 +814,13 @@ impl CommunicationStore {
             .filter(|notification| notification.status == "emitted")
             .cloned()
             .collect();
+        let unknown: Vec<NotificationRecord> = self
+            .projection
+            .notifications
+            .values()
+            .filter(|notification| notification.status == "unknown")
+            .cloned()
+            .collect();
         json!({
             "protocol": PROTOCOL,
             "mailboxPath": self.mailbox_path,
@@ -809,6 +835,7 @@ impl CommunicationStore {
             "notificationProjection": {
                 "pending": pending,
                 "emitted": emitted,
+                "unknown": unknown,
                 "batches": self.projection.batches
             }
         })
@@ -1327,9 +1354,17 @@ impl CommunicationStore {
                 Ok(adapter) => adapter,
                 Err(error) => {
                     let error = adapter_error(&error, &adapter_id, "notification.batch_emitted");
-                    if let Err(record_error) =
-                        self.record_notification_failure(&keys, &adapter_id, &error)
-                    {
+                    if let Err(record_error) = self.record_notification_failure(
+                        &keys,
+                        &adapter_id,
+                        &error,
+                        "notification.batch_emitted",
+                        json!({
+                            "batchId": batch.batch_id,
+                            "recipient": batch.recipient,
+                            "notificationKeys": keys
+                        }),
+                    ) {
                         return Err(with_secondary_error(
                             error,
                             record_error,
@@ -1339,13 +1374,36 @@ impl CommunicationStore {
                     return Err(error);
                 }
             };
+            let attempt = new_delivery_attempt(
+                &adapter_id,
+                "notification.batch_emitted",
+                Some(&batch.batch_id),
+            );
+            let attempt_id = attempt.attempt_id.clone();
+            self.commit(
+                "notification.delivery_attempt",
+                json!({
+                    "attemptId": attempt_id.clone(),
+                    "keys": keys,
+                    "attempt": attempt
+                }),
+            )?;
             let receipt = match adapter.emit_batch(&batch) {
                 Ok(receipt) => receipt,
                 Err(error) => {
                     let error = adapter_error(&error, &adapter_id, "notification.batch_emitted");
-                    if let Err(record_error) =
-                        self.record_notification_failure(&keys, &adapter_id, &error)
-                    {
+                    if let Err(record_error) = self.record_notification_failure(
+                        &keys,
+                        &adapter_id,
+                        &error,
+                        "notification.batch_emitted",
+                        json!({
+                            "batchId": batch.batch_id,
+                            "recipient": batch.recipient,
+                            "notificationKeys": keys,
+                            "attemptId": attempt_id.clone()
+                        }),
+                    ) {
                         return Err(with_secondary_error(
                             error,
                             record_error,
@@ -1361,6 +1419,7 @@ impl CommunicationStore {
                     "batch": batch,
                     "notificationKeys": keys,
                     "at": at,
+                    "attemptId": attempt_id.clone(),
                     "receipt": receipt
                 }),
             )?;
@@ -1385,7 +1444,7 @@ impl CommunicationStore {
         let at = now();
         let loop_id = format!("bug-loop-{}", request.bug_id);
         let owner = self.scope_master_address(&request.scope_id)?;
-        if let Some(existing) = self.projection.bugs.get(&request.bug_id) {
+        if let Some(existing) = self.projection.bugs.get(&request.bug_id).cloned() {
             if existing.scope_id != request.scope_id || existing.loop_id != loop_id {
                 return Err(CommError::new(
                     "bug_loop_conflict",
@@ -1408,7 +1467,7 @@ impl CommunicationStore {
                 && existing.reporter == request.reporter
                 && existing.worktree_id == request.worktree_id
             {
-                return Ok(json!({ "bug": existing, "idempotent": true }));
+                return self.recover_idempotent_bug(existing);
             }
             return Err(CommError::new(
                 "bug_conflict",
@@ -1465,6 +1524,104 @@ impl CommunicationStore {
             "mailbox",
         )?;
         Ok(json!({ "bug": bug, "notification": notification, "idempotent": false }))
+    }
+
+    fn recover_idempotent_bug(&mut self, bug: BugRecord) -> CommResult<Value> {
+        let owner = self.scope_master_address(&bug.scope_id)?;
+        let loop_record = self.recover_bug_loop(&bug, &owner)?;
+        let notification = self.recover_bug_notification(&bug, &owner)?;
+        Ok(json!({
+            "bug": bug,
+            "loop": loop_record,
+            "notification": notification,
+            "idempotent": true
+        }))
+    }
+
+    fn recover_bug_loop(&mut self, bug: &BugRecord, owner: &Address) -> CommResult<LoopRecord> {
+        if let Some(existing) = self.projection.loops.get(&bug.loop_id).cloned() {
+            if !bug_loop_matches(&existing, owner) {
+                return Err(CommError::new(
+                    "bug_loop_conflict",
+                    format!("bug loop is already used by another loop: {}", bug.loop_id),
+                ));
+            }
+            return Ok(existing);
+        }
+        let at = now();
+        let loop_record = LoopRecord {
+            loop_id: bug.loop_id.clone(),
+            kind: "bug".into(),
+            owner: owner.clone(),
+            trigger: "event:bug.reported".into(),
+            work: "triage -> fix in an independent worktree".into(),
+            gate: "project verification and review".into(),
+            state: "persist bug evidence and next action".into(),
+            stop: "resolved, merged, and reporter notified".into(),
+            max_iterations: 100,
+            deadline_at: None,
+            phase: "discover".into(),
+            status: "active".into(),
+            iteration: 0,
+            created_at: at.clone(),
+            updated_at: at,
+        };
+        self.commit("loop.created", serde_json::to_value(&loop_record).unwrap())?;
+        Ok(loop_record)
+    }
+
+    fn recover_bug_notification(&mut self, bug: &BugRecord, owner: &Address) -> CommResult<Value> {
+        if let Some(notification) = self
+            .projection
+            .notifications
+            .values()
+            .find(|notification| {
+                notification.issue_id.as_deref() == Some(bug.bug_id.as_str())
+                    && notification.recipient == *owner
+                    && notification.coalesce_key.as_deref() == Some("bug")
+            })
+            .cloned()
+        {
+            let message = self
+                .projection
+                .messages
+                .get(&notification.message_id)
+                .cloned();
+            return Ok(json!({
+                "message": message,
+                "notification": notification.summary()
+            }));
+        }
+
+        if let Some(message) = self
+            .projection
+            .messages
+            .values()
+            .find(|message| {
+                message.issue_id.as_deref() == Some(bug.bug_id.as_str())
+                    && message.to == *owner
+                    && message.coalesce_key.as_deref() == Some("bug")
+            })
+            .cloned()
+        {
+            let notification = self.notification_for(&message, &message.created_at, None)?;
+            return Ok(json!({
+                "message": message,
+                "notification": notification.map(|value| value.summary())
+            }));
+        }
+
+        self.system_notification(
+            owner,
+            format!("bug reported: {}", bug.title),
+            &bug.priority,
+            &bug.description,
+            Some(&bug.bug_id),
+            "bug",
+            &bug.created_at,
+            None,
+            "mailbox",
+        )
     }
 
     pub fn update_bug(
@@ -1734,14 +1891,10 @@ impl CommunicationStore {
             .adapter_id
             .clone()
             .unwrap_or_else(|| "mailbox".into());
-        if self.projection.messages.contains_key(&message_id) {
-            let existing = self.projection.messages.get(&message_id).unwrap();
-            if message_matches_request(existing, &request, &priority, &delivery_mode, &adapter_id) {
-                return Ok(json!({
-                    "message": existing,
-                    "route": existing.route,
-                    "idempotent": true
-                }));
+        if let Some(existing) = self.projection.messages.get(&message_id).cloned() {
+            if message_matches_request(&existing, &request, &priority, &delivery_mode, &adapter_id)
+            {
+                return self.recover_idempotent_message(existing);
             }
             return Err(CommError::new(
                 "message_id_conflict",
@@ -1801,6 +1954,89 @@ impl CommunicationStore {
         }))
     }
 
+    fn recover_idempotent_message(&mut self, existing: MessageRecord) -> CommResult<Value> {
+        let current = self.recover_message_state(existing)?;
+        let notification = self.recover_message_notification(&current)?;
+        let direct = notification
+            .as_ref()
+            .filter(|notification| notification.status == "emitted")
+            .map(NotificationRecord::summary);
+        Ok(json!({
+            "message": current,
+            "route": current.route,
+            "notification": direct,
+            "idempotent": true
+        }))
+    }
+
+    fn recover_message_state(&mut self, existing: MessageRecord) -> CommResult<MessageRecord> {
+        if existing.state == "created"
+            && !existing
+                .evidence
+                .iter()
+                .any(|evidence| evidence.state == "accepted")
+        {
+            let accepted = DeliveryEvidence {
+                state: "accepted".into(),
+                at: existing.created_at.clone(),
+                details: json!({ "transport": "appsdk-internal", "durable": true, "recovered": true }),
+            };
+            self.commit(
+                "message.state",
+                json!({
+                    "messageId": existing.message_id,
+                    "state": "accepted",
+                    "evidence": accepted
+                }),
+            )?;
+        }
+        self.projection
+            .messages
+            .get(&existing.message_id)
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "message_recovery_failed",
+                    format!(
+                        "message disappeared during recovery: {}",
+                        existing.message_id
+                    ),
+                )
+            })
+    }
+
+    fn recover_message_notification(
+        &mut self,
+        message: &MessageRecord,
+    ) -> CommResult<Option<NotificationRecord>> {
+        let immediate = matches!(message.delivery_mode, DeliveryMode::Direct)
+            || message.priority.is_breakthrough();
+        let existing = if immediate {
+            self.projection
+                .notifications
+                .iter()
+                .find(|(_, notification)| notification.message_id == message.message_id)
+                .map(|(key, notification)| (key.clone(), notification.clone()))
+        } else {
+            let key = self.message_notification_key(message);
+            self.projection
+                .notifications
+                .get(&key)
+                .cloned()
+                .map(|notification| (key, notification))
+        };
+        let Some((key, notification)) = existing else {
+            return self.notification_for(message, &message.created_at, None);
+        };
+
+        if !immediate || matches!(notification.status.as_str(), "emitted" | "unknown") {
+            return Ok(Some(notification));
+        }
+
+        self.retry_immediate_notification(message, &key, notification)
+            .map(Some)
+    }
+
     fn notification_for(
         &mut self,
         message: &MessageRecord,
@@ -1809,37 +2045,42 @@ impl CommunicationStore {
     ) -> CommResult<Option<NotificationRecord>> {
         let immediate = matches!(message.delivery_mode, DeliveryMode::Direct)
             || message.priority.is_breakthrough();
+        let adapter = if immediate {
+            Some(self.adapter_for(&message.adapter_id, Some(&message.to))?)
+        } else {
+            None
+        };
         let mut notification =
             self.build_notification(message, created_at, available_at_override)?;
         let key = self.notification_key(message, &notification, !immediate);
         if let Some(existing) = self.projection.notifications.get(&key) {
+            if existing.status == "unknown" {
+                return Ok(Some(existing.clone()));
+            }
             if existing.status == "pending" {
                 notification.available_at = existing.available_at.clone();
             }
         }
+        let attempt = immediate
+            .then(|| new_delivery_attempt(&message.adapter_id, "notification.emitted", None));
+        let attempt_id = attempt.as_ref().map(|attempt| attempt.attempt_id.clone());
+        let notification_id = notification.notification_id.clone();
         self.commit(
             "notification.queued",
             json!({ "key": key, "notification": notification }),
         )?;
+        if let Some(attempt) = attempt.as_ref() {
+            self.commit(
+                "notification.delivery_attempt",
+                json!({
+                    "attemptId": attempt_id.clone(),
+                    "keys": [key],
+                    "attempt": attempt
+                }),
+            )?;
+        }
         if immediate {
-            let adapter = match self.adapter_for(&message.adapter_id, Some(&message.to)) {
-                Ok(adapter) => adapter,
-                Err(error) => {
-                    let error = adapter_error(&error, &message.adapter_id, "notification.emitted");
-                    if let Err(record_error) = self.record_notification_failure(
-                        std::slice::from_ref(&key),
-                        &message.adapter_id,
-                        &error,
-                    ) {
-                        return Err(with_secondary_error(
-                            error,
-                            record_error,
-                            "notification.delivery_failed",
-                        ));
-                    }
-                    return Err(error);
-                }
-            };
+            let adapter = adapter.expect("immediate notification adapter is initialized");
             let receipt = match adapter.deliver(message) {
                 Ok(receipt) => receipt,
                 Err(error) => {
@@ -1848,6 +2089,13 @@ impl CommunicationStore {
                         std::slice::from_ref(&key),
                         &message.adapter_id,
                         &error,
+                        "notification.emitted",
+                        json!({
+                            "messageId": message.message_id,
+                            "notificationKey": key,
+                            "notificationId": notification_id,
+                            "attemptId": attempt_id
+                        }),
                     ) {
                         return Err(with_secondary_error(
                             error,
@@ -1860,10 +2108,107 @@ impl CommunicationStore {
             };
             self.commit(
                 "notification.emitted",
-                json!({ "keys": [key], "at": created_at, "receipt": receipt }),
+                json!({
+                    "attemptId": attempt_id,
+                    "keys": [key],
+                    "at": created_at,
+                    "receipt": receipt
+                }),
             )?;
         }
         Ok(self.projection.notifications.get(&key).cloned())
+    }
+
+    fn retry_immediate_notification(
+        &mut self,
+        message: &MessageRecord,
+        key: &str,
+        existing: NotificationRecord,
+    ) -> CommResult<NotificationRecord> {
+        let adapter = match self.adapter_for(&message.adapter_id, Some(&message.to)) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                let error = adapter_error(&error, &message.adapter_id, "notification.emitted");
+                if let Err(record_error) = self.record_notification_failure(
+                    std::slice::from_ref(&key.to_string()),
+                    &message.adapter_id,
+                    &error,
+                    "notification.emitted",
+                    json!({
+                        "messageId": message.message_id,
+                        "notificationKey": key,
+                        "notificationId": existing.notification_id
+                    }),
+                ) {
+                    return Err(with_secondary_error(
+                        error,
+                        record_error,
+                        "notification.delivery_failed",
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let attempt = new_delivery_attempt(&message.adapter_id, "notification.emitted", None);
+        let attempt_id = attempt.attempt_id.clone();
+        let attempt_started_at = attempt.started_at.clone();
+        let notification_id = existing.notification_id.clone();
+        self.commit(
+            "notification.queued",
+            json!({ "key": key, "notification": existing }),
+        )?;
+        self.commit(
+            "notification.delivery_attempt",
+            json!({
+                "attemptId": attempt_id.clone(),
+                "keys": [key],
+                "attempt": attempt
+            }),
+        )?;
+        let receipt = match adapter.deliver(message) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let error = adapter_error(&error, &message.adapter_id, "notification.emitted");
+                if let Err(record_error) = self.record_notification_failure(
+                    std::slice::from_ref(&key.to_string()),
+                    &message.adapter_id,
+                    &error,
+                    "notification.emitted",
+                    json!({
+                        "messageId": message.message_id,
+                        "notificationKey": key,
+                        "notificationId": notification_id,
+                        "attemptId": attempt_id.clone()
+                    }),
+                ) {
+                    return Err(with_secondary_error(
+                        error,
+                        record_error,
+                        "notification.delivery_failed",
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        self.commit(
+            "notification.emitted",
+            json!({
+                "attemptId": attempt_id,
+                "keys": [key],
+                "at": attempt_started_at,
+                "receipt": receipt
+            }),
+        )?;
+        self.projection
+            .notifications
+            .get(key)
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "notification_recovery_failed",
+                    format!("notification disappeared during recovery: {key}"),
+                )
+            })
     }
 
     fn build_notification(
@@ -1897,6 +2242,7 @@ impl CommunicationStore {
             adapter_id: message.adapter_id.clone(),
             transport_receipt: None,
             last_error: None,
+            delivery_attempt: None,
         })
     }
 
@@ -1909,14 +2255,15 @@ impl CommunicationStore {
         if !force_coalesce {
             return notification.notification_id.clone();
         }
+        self.message_notification_key(message)
+    }
+
+    fn message_notification_key(&self, message: &MessageRecord) -> String {
         structured_key(&[
             &message.from.key(),
             &message.to.key(),
             &message.adapter_id,
-            notification
-                .coalesce_key
-                .as_deref()
-                .unwrap_or("notification"),
+            message.coalesce_key.as_deref().unwrap_or("notification"),
         ])
     }
 
@@ -2076,13 +2423,18 @@ impl CommunicationStore {
         keys: &[String],
         adapter_id: &str,
         error: &CommError,
+        operation: &str,
+        identity: Value,
     ) -> CommResult<()> {
-        let record = adapter_error_record(error, adapter_id, "notification.delivery");
-        self.commit(
-            "notification.delivery_failed",
-            json!({ "keys": keys, "adapterId": adapter_id, "error": record }),
-        )
-        .map(|_| ())
+        let record = adapter_error_record(error, adapter_id, operation);
+        let mut data = json!({ "keys": keys, "adapterId": adapter_id, "operation": operation, "error": record });
+        if let (Some(data), Some(identity)) = (data.as_object_mut(), identity.as_object()) {
+            for (key, value) in identity {
+                data.insert(key.clone(), value.clone());
+            }
+        }
+        self.commit("notification.delivery_failed", data)
+            .map(|_| ())
     }
 
     fn require_scope(&self, scope_id: &str) -> CommResult<&ScopeRecord> {
@@ -2319,6 +2671,11 @@ impl CommunicationStore {
                 )
             })?;
         }
+        for notification in self.projection.notifications.values_mut() {
+            if notification.delivery_attempt.is_some() {
+                notification.status = "unknown".into();
+            }
+        }
         Ok(())
     }
 
@@ -2425,6 +2782,63 @@ impl CommunicationStore {
                     .notifications
                     .insert(key.into(), notification);
             }
+            "notification.delivery_attempt" => {
+                let keys = event
+                    .data
+                    .get("keys")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        CommError::new("event_data_invalid", "delivery attempt keys missing")
+                    })?;
+                if keys.is_empty() {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "delivery attempt keys must not be empty",
+                    ));
+                }
+                let attempt_id = event
+                    .data
+                    .get("attemptId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CommError::new("event_data_invalid", "delivery attempt id missing")
+                    })?;
+                let attempt: DeliveryAttempt = decode(
+                    event.data.get("attempt").unwrap_or(&Value::Null),
+                    "delivery attempt",
+                )?;
+                if attempt_id != attempt.attempt_id {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "delivery attempt id does not match attempt record",
+                    ));
+                }
+                for value in keys {
+                    let key = value.as_str().ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "delivery attempt notification key is not a string",
+                        )
+                    })?;
+                    let notification =
+                        self.projection.notifications.get_mut(key).ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                format!("notification key not found: {key}"),
+                            )
+                        })?;
+                    if notification.adapter_id != attempt.adapter_id {
+                        return Err(CommError::new(
+                            "event_data_invalid",
+                            format!(
+                                "delivery attempt adapter mismatch for notification key: {key}"
+                            ),
+                        ));
+                    }
+                    notification.delivery_attempt = Some(attempt.clone());
+                    notification.status = "pending".into();
+                }
+            }
             "notification.emitted" => {
                 let keys = event
                     .data
@@ -2445,6 +2859,19 @@ impl CommunicationStore {
                     .get("receipt")
                     .map(|value| decode::<TransportReceipt>(value, "receipt"))
                     .transpose()?;
+                let attempt_id = event
+                    .data
+                    .get("attemptId")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                "notification emitted attempt id is not a string",
+                            )
+                        })
+                    })
+                    .transpose()?;
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
@@ -2456,8 +2883,10 @@ impl CommunicationStore {
                                 format!("notification key not found: {key}"),
                             )
                         })?;
+                    validate_terminal_attempt(notification, attempt_id, "notification.emitted")?;
                     notification.status = "emitted".into();
                     notification.emitted_at = Some(at.into());
+                    notification.delivery_attempt = None;
                     if let Some(receipt) = receipt.clone() {
                         notification.transport_receipt = Some(receipt);
                     }
@@ -2486,6 +2915,19 @@ impl CommunicationStore {
                     .get("receipt")
                     .map(|value| decode::<TransportReceipt>(value, "receipt"))
                     .transpose()?;
+                let attempt_id = event
+                    .data
+                    .get("attemptId")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                "notification batch attempt id is not a string",
+                            )
+                        })
+                    })
+                    .transpose()?;
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
@@ -2505,8 +2947,14 @@ impl CommunicationStore {
                                     )
                                 })?
                         };
+                    validate_terminal_attempt(
+                        notification,
+                        attempt_id,
+                        "notification.batch_emitted",
+                    )?;
                     notification.status = "emitted".into();
                     notification.emitted_at = Some(at.into());
+                    notification.delivery_attempt = None;
                     if let Some(receipt) = receipt.clone() {
                         notification.transport_receipt = Some(receipt);
                     }
@@ -2561,6 +3009,33 @@ impl CommunicationStore {
                     .ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification failure keys missing")
                     })?;
+                let attempt_id = event
+                    .data
+                    .get("attemptId")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                "notification failure attempt id is not a string",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let operation = event
+                    .data
+                    .get("operation")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                "notification failure operation is not a string",
+                            )
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or("notification.delivery_failed");
                 let error: ErrorRecord = decode(
                     event.data.get("error").unwrap_or(&Value::Null),
                     "notification failure error",
@@ -2584,7 +3059,10 @@ impl CommunicationStore {
                                     )
                                 })?
                         };
+                    validate_terminal_attempt(notification, attempt_id, operation)?;
                     notification.last_error = Some(error.clone());
+                    notification.status = "pending".into();
+                    notification.delivery_attempt = None;
                 }
             }
             "bug.reported" => {
@@ -3111,6 +3589,16 @@ fn priority_then_time_bug(left: &BugRecord, right: &BugRecord) -> Ordering {
         .then_with(|| left.bug_id.cmp(&right.bug_id))
 }
 
+fn bug_loop_matches(loop_record: &LoopRecord, owner: &Address) -> bool {
+    loop_record.kind == "bug"
+        && loop_record.owner == *owner
+        && loop_record.trigger == "event:bug.reported"
+        && loop_record.work == "triage -> fix in an independent worktree"
+        && loop_record.gate == "project verification and review"
+        && loop_record.state == "persist bug evidence and next action"
+        && loop_record.stop == "resolved, merged, and reporter notified"
+}
+
 fn next_loop_phase(loop_record: &mut LoopRecord) -> CommResult<String> {
     let phase = match loop_record.phase.as_str() {
         "discover" => "hand_off",
@@ -3181,6 +3669,53 @@ fn adapter_error_record(error: &CommError, adapter_id: &str, operation: &str) ->
             "cause": error.context
         }),
         at: now(),
+    }
+}
+
+fn new_delivery_attempt(
+    adapter_id: &str,
+    operation: &str,
+    batch_id: Option<&str>,
+) -> DeliveryAttempt {
+    DeliveryAttempt {
+        attempt_id: new_id("attempt"),
+        operation: operation.into(),
+        adapter_id: adapter_id.into(),
+        started_at: now(),
+        batch_id: batch_id.map(str::to_owned),
+    }
+}
+
+fn validate_terminal_attempt(
+    notification: &NotificationRecord,
+    event_attempt_id: Option<&str>,
+    operation: &str,
+) -> CommResult<()> {
+    match (notification.delivery_attempt.as_ref(), event_attempt_id) {
+        (None, None) => Ok(()),
+        (Some(attempt), Some(attempt_id))
+            if attempt.attempt_id == attempt_id && attempt.operation == operation =>
+        {
+            Ok(())
+        }
+        (Some(attempt), Some(attempt_id)) => Err(CommError::new(
+            "delivery_attempt_mismatch",
+            format!(
+                "{operation} attempt {attempt_id} does not match pending attempt {}",
+                attempt.attempt_id
+            ),
+        )),
+        (Some(attempt), None) => Err(CommError::new(
+            "delivery_attempt_mismatch",
+            format!(
+                "{operation} is missing pending attempt {}",
+                attempt.attempt_id
+            ),
+        )),
+        (None, Some(attempt_id)) => Err(CommError::new(
+            "delivery_attempt_mismatch",
+            format!("{operation} references unknown attempt {attempt_id}"),
+        )),
     }
 }
 

@@ -3960,6 +3960,12 @@ esac
             .unwrap()
     };
     let produce = |input: &Path| produce_with(input, &fake_git_bug);
+    let producer_triage_binding = digest(&canonical(&serde_json::json!({
+        "issue_id": "issue-producer-1",
+        "query": "appsdk bug list -q issue-producer-1",
+        "mode": "new_confirmed",
+        "reopened_from_issue_id": null
+    })));
     fs::write(
         &input_path,
         serde_json::to_string_pretty(&serde_json::json!({
@@ -3969,7 +3975,8 @@ esac
                 "base_ref":"HEAD","base_commit":commit,"branch":"codex/test","head_commit":commit,
                 "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
                 "scope_hash":scope_hash,"created_at":"2026-01-01T00:00:00Z",
-                "bug_triage":{"query_executed":true,"query":"appsdk bug list -q issue-producer-1","mode":"new_confirmed","reopened_from_issue_id":null}
+                "bug_triage":{"query_executed":true,"query":"appsdk bug list -q issue-producer-1","mode":"new_confirmed","reopened_from_issue_id":null},
+                "bug_triage_query_binding":producer_triage_binding
             },
             "reproduction": {
                 "reproduction_id":"caller-reproduction-id","issue_id":"issue-producer-1","module_id":"app-core",

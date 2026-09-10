@@ -5006,7 +5006,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     {
         fail("BUG_TRIAGE_MISSING");
     }
-    assert_bug_tracker_triage_evidence(worktree, &worktree_issue, Some(root), false);
+    assert_bug_tracker_triage_evidence(worktree, &worktree_issue, Some(root), true);
     if goal
         .get("issue_id")
         .and_then(Value::as_str)

@@ -6505,6 +6505,25 @@ fn assert_lifecycle_chain_candidate_at_head(
         fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
     }
     assert_candidate_source_identity(root, module, candidate_commit);
+    let git_root = PathBuf::from(git_value(
+        root,
+        &["rev-parse", "--show-toplevel"],
+        "CANDIDATE_SOURCE_GIT_UNAVAILABLE",
+    ));
+    let project_root = root
+        .canonicalize()
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    let git_root = git_root
+        .canonicalize()
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    let project_relative = project_root
+        .strip_prefix(&git_root)
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    let records_prefix = if project_relative.as_os_str().is_empty() {
+        ".appsdk/records/".to_string()
+    } else {
+        format!("{}/.appsdk/records/", project_relative.to_string_lossy())
+    };
     let changed = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -6514,7 +6533,7 @@ fn assert_lifecycle_chain_candidate_at_head(
     if !changed.status.success()
         || String::from_utf8_lossy(&changed.stdout)
             .lines()
-            .any(|path| !path.starts_with(".appsdk/records/"))
+            .any(|path| !path.starts_with(&records_prefix))
     {
         fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
     }

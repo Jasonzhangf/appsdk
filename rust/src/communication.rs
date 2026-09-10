@@ -1454,13 +1454,6 @@ impl CommunicationStore {
                     ),
                 ));
             }
-            let loop_record = self.projection.loops.get(&loop_id).ok_or_else(|| {
-                CommError::new(
-                    "bug_loop_conflict",
-                    format!("deterministic bug loop is missing: {loop_id}"),
-                )
-            })?;
-            validate_bug_loop_binding(loop_record, &request.bug_id, &request.scope_id, &owner)?;
             if existing.title == request.title
                 && existing.description == request.description
                 && existing.priority == priority
@@ -1553,11 +1546,11 @@ impl CommunicationStore {
             loop_id: bug.loop_id.clone(),
             kind: "bug".into(),
             owner: owner.clone(),
-            trigger: "event:bug.reported".into(),
-            work: "triage -> fix in an independent worktree".into(),
-            gate: "project verification and review".into(),
-            state: "persist bug evidence and next action".into(),
-            stop: "resolved, merged, and reporter notified".into(),
+            trigger: BUG_LOOP_TRIGGER.into(),
+            work: BUG_LOOP_WORK.into(),
+            gate: BUG_LOOP_GATE.into(),
+            state: BUG_LOOP_STATE.into(),
+            stop: BUG_LOOP_STOP.into(),
             max_iterations: 100,
             deadline_at: None,
             phase: "discover".into(),
@@ -1565,6 +1558,7 @@ impl CommunicationStore {
             iteration: 0,
             created_at: at.clone(),
             updated_at: at,
+            completion_evidence: None,
         };
         self.commit("loop.created", serde_json::to_value(&loop_record).unwrap())?;
         Ok(loop_record)

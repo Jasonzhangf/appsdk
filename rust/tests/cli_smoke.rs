@@ -9076,6 +9076,9 @@ case "$1 $2" in
   "status --all")
     printf '%s\n' '{"workers":[{"id":"worker-peer","role":"peer","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"}],"subagents":[]}'
     ;;
+  "master status")
+    printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true,"pane":"%42"}}'
+    ;;
   "context ")
     printf '%s\n' '{"identity":{"worker_id":"worker-peer"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'
     ;;
@@ -9194,7 +9197,7 @@ esac
     };
     for (case_name, expected_role) in [
         ("master", "master"),
-        ("worker", "worker"),
+        ("worker", "unknown"),
         ("subagent", "managed-subagent"),
         ("missing", "unknown"),
         ("mismatch", "worker"),

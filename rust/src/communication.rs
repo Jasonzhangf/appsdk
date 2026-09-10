@@ -18,6 +18,11 @@ pub const PROTOCOL: &str = "appsdk-comm/v1";
 pub const DEFAULT_BATCH_WINDOW_SECONDS: i64 = 120;
 pub const DEFAULT_MASTER_REMINDER_LIMIT: u8 = 3;
 pub const DEFAULT_AGENT_LEASE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+const BUG_LOOP_TRIGGER: &str = "event:bug.reported";
+const BUG_LOOP_WORK: &str = "triage -> fix in an independent worktree";
+const BUG_LOOP_GATE: &str = "project verification and review";
+const BUG_LOOP_STATE: &str = "persist bug evidence and next action";
+const BUG_LOOP_STOP: &str = "resolved, merged, and reporter notified";
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -631,6 +636,12 @@ struct LoopRecord {
     created_at: String,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    #[serde(
+        default,
+        rename = "completionEvidence",
+        skip_serializing_if = "Option::is_none"
+    )]
+    completion_evidence: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1371,7 +1382,26 @@ impl CommunicationStore {
         }
         self.require_live_agent(&request.reporter)?;
         let priority = Priority::parse(&request.priority)?;
+        let at = now();
+        let loop_id = format!("bug-loop-{}", request.bug_id);
+        let owner = self.scope_master_address(&request.scope_id)?;
         if let Some(existing) = self.projection.bugs.get(&request.bug_id) {
+            if existing.scope_id != request.scope_id || existing.loop_id != loop_id {
+                return Err(CommError::new(
+                    "bug_loop_conflict",
+                    format!(
+                        "bug is bound outside deterministic loop: {}",
+                        existing.loop_id
+                    ),
+                ));
+            }
+            let loop_record = self.projection.loops.get(&loop_id).ok_or_else(|| {
+                CommError::new(
+                    "bug_loop_conflict",
+                    format!("deterministic bug loop is missing: {loop_id}"),
+                )
+            })?;
+            validate_bug_loop_binding(loop_record, &request.bug_id, &request.scope_id, &owner)?;
             if existing.title == request.title
                 && existing.description == request.description
                 && existing.priority == priority
@@ -1385,19 +1415,18 @@ impl CommunicationStore {
                 format!("bug already exists: {}", request.bug_id),
             ));
         }
-        let at = now();
-        let loop_id = format!("bug-loop-{}", request.bug_id);
-        let owner = self.scope_master_address(&request.scope_id)?;
-        if !self.projection.loops.contains_key(&loop_id) {
+        if let Some(loop_record) = self.projection.loops.get(&loop_id) {
+            validate_bug_loop_binding(loop_record, &request.bug_id, &request.scope_id, &owner)?;
+        } else {
             let loop_record = LoopRecord {
                 loop_id: loop_id.clone(),
                 kind: "bug".into(),
                 owner: owner.clone(),
-                trigger: "event:bug.reported".into(),
-                work: "triage -> fix in an independent worktree".into(),
-                gate: "project verification and review".into(),
-                state: "persist bug evidence and next action".into(),
-                stop: "resolved, merged, and reporter notified".into(),
+                trigger: BUG_LOOP_TRIGGER.into(),
+                work: BUG_LOOP_WORK.into(),
+                gate: BUG_LOOP_GATE.into(),
+                state: BUG_LOOP_STATE.into(),
+                stop: BUG_LOOP_STOP.into(),
                 max_iterations: 100,
                 deadline_at: None,
                 phase: "discover".into(),
@@ -1405,6 +1434,7 @@ impl CommunicationStore {
                 iteration: 0,
                 created_at: at.clone(),
                 updated_at: at.clone(),
+                completion_evidence: None,
             };
             self.commit("loop.created", serde_json::to_value(&loop_record).unwrap())?;
         }
@@ -1476,6 +1506,25 @@ impl CommunicationStore {
                 "only the scope master may resolve or close a bug",
             ));
         }
+        let owner = self.scope_master_address(&current.scope_id)?;
+        let expected_loop_id = format!("bug-loop-{}", current.bug_id);
+        if current.loop_id != expected_loop_id {
+            return Err(CommError::new(
+                "bug_loop_conflict",
+                format!("bug is bound to an unexpected loop: {}", current.loop_id),
+            ));
+        }
+        let current_loop = self
+            .projection
+            .loops
+            .get(&expected_loop_id)
+            .ok_or_else(|| {
+                CommError::new(
+                    "bug_loop_conflict",
+                    format!("deterministic bug loop is missing: {expected_loop_id}"),
+                )
+            })?;
+        validate_bug_loop_binding(current_loop, &current.bug_id, &current.scope_id, &owner)?;
         let resolution_evidence = if matches!(status, "resolved" | "closed") {
             Some(validate_resolution_evidence(evidence.as_ref())?)
         } else {
@@ -1485,18 +1534,20 @@ impl CommunicationStore {
         updated.status = status.into();
         updated.updated_at = now();
         updated.resolution_evidence = resolution_evidence.clone();
-        let mut updated_loop = self.projection.loops.get(&current.loop_id).cloned();
+        let mut updated_loop = Some(current_loop.clone());
         if matches!(status, "resolved" | "closed") {
             if let Some(loop_record) = updated_loop.as_mut() {
                 loop_record.status = "completed".into();
                 loop_record.phase = "completed".into();
                 loop_record.updated_at = updated.updated_at.clone();
+                loop_record.completion_evidence = resolution_evidence.clone();
             }
         } else if status == "active" {
             if let Some(loop_record) = updated_loop.as_mut() {
                 loop_record.status = "active".into();
                 loop_record.phase = "discover".into();
                 loop_record.updated_at = updated.updated_at.clone();
+                loop_record.completion_evidence = None;
             }
         }
         self.commit(
@@ -1523,6 +1574,12 @@ impl CommunicationStore {
 
     fn create_loop(&mut self, request: LoopRequest) -> CommResult<Value> {
         validate_loop_request(&request)?;
+        if request.loop_id.starts_with("bug-loop-") {
+            return Err(CommError::new(
+                "bug_loop_reserved",
+                "bug-loop identifiers are reserved for report_bug",
+            ));
+        }
         self.require_live_agent(&request.owner)?;
         if self.projection.loops.contains_key(&request.loop_id) {
             return Err(CommError::new(
@@ -1550,6 +1607,7 @@ impl CommunicationStore {
             iteration: 0,
             created_at: at.clone(),
             updated_at: at,
+            completion_evidence: None,
         };
         self.commit("loop.created", serde_json::to_value(&loop_record).unwrap())?;
         Ok(json!({ "loop": loop_record }))
@@ -1601,7 +1659,8 @@ impl CommunicationStore {
             updated.status = "stopped".into();
             updated.phase = "deadline".into();
         } else if complete {
-            validate_loop_completion_evidence(evidence.as_ref())?;
+            updated.completion_evidence =
+                Some(validate_loop_completion_evidence(evidence.as_ref())?);
             updated.status = "completed".into();
             updated.phase = "completed".into();
         } else if blocked {
@@ -2868,6 +2927,12 @@ fn validate_resolution_evidence(evidence: Option<&Value>) -> CommResult<Value> {
             "bug resolution evidence must be a JSON object",
         )
     })?;
+    if object.is_empty() {
+        return Err(CommError::new(
+            "bug_resolution_evidence_invalid",
+            "bug resolution evidence must contain fix, verification and merge evidence",
+        ));
+    }
     for field in ["fix", "verification", "merge"] {
         let value = object.get(field).ok_or_else(|| {
             CommError::new(
@@ -2881,11 +2946,44 @@ fn validate_resolution_evidence(evidence: Option<&Value>) -> CommResult<Value> {
                 format!("bug resolution evidence {field} must be non-empty"),
             ));
         }
+        if !is_valid_loop_evidence_value(value) {
+            return Err(CommError::new(
+                "bug_resolution_evidence_invalid",
+                format!("bug resolution evidence {field} must identify a recognized result"),
+            ));
+        }
     }
     Ok(evidence.clone())
 }
 
-fn validate_loop_completion_evidence(evidence: Option<&Value>) -> CommResult<()> {
+fn validate_bug_loop_binding(
+    loop_record: &LoopRecord,
+    bug_id: &str,
+    scope_id: &str,
+    owner: &Address,
+) -> CommResult<()> {
+    let expected_loop_id = format!("bug-loop-{bug_id}");
+    let semantic_match = loop_record.kind == "bug"
+        && loop_record.owner == *owner
+        && loop_record.owner.scope_id == scope_id
+        && loop_record.trigger == BUG_LOOP_TRIGGER
+        && loop_record.work == BUG_LOOP_WORK
+        && loop_record.gate == BUG_LOOP_GATE
+        && loop_record.state == BUG_LOOP_STATE
+        && loop_record.stop == BUG_LOOP_STOP;
+    if loop_record.loop_id != expected_loop_id || !semantic_match {
+        return Err(CommError::new(
+            "bug_loop_conflict",
+            format!(
+                "loop is not the deterministic bug loop: {}",
+                loop_record.loop_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_loop_completion_evidence(evidence: Option<&Value>) -> CommResult<Value> {
     let evidence = evidence.ok_or_else(|| {
         CommError::new(
             "loop_gate_evidence_required",
@@ -2899,18 +2997,70 @@ fn validate_loop_completion_evidence(evidence: Option<&Value>) -> CommResult<()>
         )
     })?;
     let gate = object.get("gate").or_else(|| object.get("verification"));
-    if gate.is_none()
-        || gate.is_some_and(|value| {
-            value.as_str().is_some_and(|text| text.trim().is_empty())
-                || value.as_object().is_some_and(|object| object.is_empty())
-        })
-    {
+    let Some(gate) = gate else {
         return Err(CommError::new(
             "loop_gate_evidence_required",
             "loop gate evidence must identify a non-empty gate or verification result",
         ));
+    };
+    if !is_valid_loop_evidence_value(gate) {
+        return Err(CommError::new(
+            "loop_gate_evidence_invalid",
+            "loop gate evidence must identify a recognized passing gate or verification result",
+        ));
     }
-    Ok(())
+    Ok(evidence.clone())
+}
+
+fn is_valid_loop_evidence_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        Value::String(text) => {
+            let normalized = text.trim().to_ascii_lowercase();
+            !normalized.is_empty()
+                && !matches!(
+                    normalized.as_str(),
+                    "unknown"
+                        | "pending"
+                        | "failed"
+                        | "failure"
+                        | "error"
+                        | "invalid"
+                        | "false"
+                        | "null"
+                        | "unverified"
+                        | "not_run"
+                        | "not run"
+                )
+        }
+        Value::Array(values) => {
+            !values.is_empty() && values.iter().all(is_valid_loop_evidence_value)
+        }
+        Value::Object(values) => {
+            if values.is_empty() {
+                return false;
+            }
+            for key in ["status", "result", "outcome", "state"] {
+                if let Some(status) = values.get(key) {
+                    if !is_valid_loop_evidence_value(status) {
+                        return false;
+                    }
+                }
+            }
+            for key in ["passed", "success", "ok", "verified"] {
+                if let Some(status) = values.get(key) {
+                    let valid = match status {
+                        Value::Bool(value) => *value,
+                        other => is_valid_loop_evidence_value(other),
+                    };
+                    if !valid {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+    }
 }
 
 fn validate_address(address: &Address) -> CommResult<()> {

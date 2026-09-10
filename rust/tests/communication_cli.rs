@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, SecondsFormat};
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1013,6 +1014,28 @@ fn adapter_binding_and_bug_loop_gates_are_enforced() {
         missing_evidence.contains("bug_resolution_evidence_required"),
         "{missing_evidence}"
     );
+    for evidence in [
+        json!({ "fix": false, "verification": "tests", "merge": "main" }),
+        json!({ "fix": [], "verification": "tests", "merge": "main" }),
+        json!({ "fix": {}, "verification": "tests", "merge": "main" }),
+        json!({ "fix": "commit", "verification": "unknown", "merge": "main" }),
+        json!({ "fix": "commit", "verification": "failed", "merge": "main" }),
+    ] {
+        let invalid_evidence = call_error(
+            &root,
+            json!({
+                "op": "update_bug",
+                "bugId": "bug-high",
+                "status": "closed",
+                "actor": { "scopeId": "scope", "sessionId": "master" },
+                "evidence": evidence
+            }),
+        );
+        assert!(
+            invalid_evidence.contains("bug_resolution_evidence_invalid"),
+            "invalid resolution evidence must fail closed: {invalid_evidence}"
+        );
+    }
     let closed = call(
         &root,
         json!({
@@ -1055,6 +1078,61 @@ fn loop_completion_requires_gate_and_deadline_wins() {
     );
     assert!(missing.contains("loop_gate_evidence_required"), "{missing}");
 
+    for evidence in [
+        Value::Null,
+        json!(false),
+        json!([]),
+        json!({}),
+        json!({ "gate": null }),
+        json!({ "gate": false }),
+        json!({ "gate": "" }),
+        json!({ "gate": "unknown" }),
+        json!({ "gate": { "passed": false } }),
+        json!({ "verification": { "status": "unknown" } }),
+        json!({ "verification": { "status": "failed" } }),
+    ] {
+        let invalid = call_error(
+            &root,
+            json!({
+                "op": "advance_loop",
+                "loopId": "loop-gated",
+                "complete": true,
+                "evidence": evidence
+            }),
+        );
+        assert!(
+            invalid.contains("loop_gate_evidence_"),
+            "invalid evidence must fail closed: {invalid}"
+        );
+    }
+
+    let completed = call(
+        &root,
+        json!({
+            "op": "advance_loop",
+            "loopId": "loop-gated",
+            "complete": true,
+            "evidence": {
+                "gate": { "status": "passed", "command": "cargo test" },
+                "verification": "communication_cli"
+            }
+        }),
+    );
+    assert_eq!(
+        completed["loop"]["completionEvidence"]["gate"]["status"],
+        "passed"
+    );
+    let replayed = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        replayed["loops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|loop_record| loop_record["loopId"] == "loop-gated")
+            .unwrap()["completionEvidence"]["verification"],
+        "communication_cli"
+    );
+
     call(
         &root,
         json!({
@@ -1084,5 +1162,227 @@ fn loop_completion_requires_gate_and_deadline_wins() {
     );
     assert_eq!(expired["loop"]["status"], "stopped");
     assert_eq!(expired["loop"]["phase"], "deadline");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bug_loop_collisions_fail_closed_without_mutating_unrelated_loops() {
+    let root = temp_root("bug-loop-conflict");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let reserved = call_error(
+        &root,
+        json!({
+            "op": "create_loop",
+            "loop": {
+                "loopId": "bug-loop-report-conflict",
+                "kind": "task",
+                "owner": { "scopeId": "scope", "sessionId": "master" },
+                "trigger": "manual",
+                "work": "unrelated work",
+                "gate": "other tests",
+                "state": "other state",
+                "stop": "other stop"
+            }
+        }),
+    );
+    assert!(reserved.contains("bug_loop_reserved"), "{reserved}");
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let report_conflicting_loop = json!({
+        "protocol": "appsdk-comm/v1",
+        "eventId": "manual-conflicting-report-loop",
+        "at": "2026-01-01T00:00:00Z",
+        "kind": "loop.created",
+        "data": {
+            "loopId": "bug-loop-report-conflict",
+            "kind": "task",
+            "owner": { "scopeId": "scope", "sessionId": "master" },
+            "trigger": "manual",
+            "work": "unrelated work",
+            "gate": "other tests",
+            "state": "other state",
+            "stop": "other stop",
+            "maxIterations": 1,
+            "deadlineAt": null,
+            "phase": "discover",
+            "status": "active",
+            "iteration": 0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        }
+    });
+    let mut file = fs::OpenOptions::new().append(true).open(&mailbox).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&report_conflicting_loop).unwrap()
+    )
+    .unwrap();
+    drop(file);
+
+    let report_conflict = call_error(
+        &root,
+        json!({
+            "op": "report_bug",
+            "bug": {
+                "bugId": "report-conflict",
+                "scopeId": "scope",
+                "title": "collision",
+                "priority": "p1",
+                "description": "must not reuse unrelated loop",
+                "reporter": { "scopeId": "scope", "sessionId": "worker" }
+            }
+        }),
+    );
+    assert!(
+        report_conflict.contains("bug_loop_conflict"),
+        "{report_conflict}"
+    );
+    let after_report_conflict = call(&root, json!({ "op": "status" }));
+    assert!(after_report_conflict["bugs"].as_array().unwrap().is_empty());
+    let unrelated = after_report_conflict["loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|loop_record| loop_record["loopId"] == "bug-loop-report-conflict")
+        .unwrap();
+    assert_eq!(unrelated["kind"], "task");
+
+    register_scope(
+        &root,
+        "scope-b",
+        "other-app",
+        "/other-project",
+        &["master-b", "worker-b"],
+    );
+    register_agent(&root, "scope-b", "master-b", "master-b", "master", None);
+    register_agent(&root, "scope-b", "worker-b", "worker-b", "peer", None);
+    let cross_scope_loop = json!({
+        "protocol": "appsdk-comm/v1",
+        "eventId": "manual-cross-scope-loop",
+        "at": "2026-01-01T00:00:00Z",
+        "kind": "loop.created",
+        "data": {
+            "loopId": "bug-loop-cross-scope-conflict",
+            "kind": "bug",
+            "owner": { "scopeId": "scope", "sessionId": "master" },
+            "trigger": "event:bug.reported",
+            "work": "triage -> fix in an independent worktree",
+            "gate": "project verification and review",
+            "state": "persist bug evidence and next action",
+            "stop": "resolved, merged, and reporter notified",
+            "maxIterations": 100,
+            "deadlineAt": null,
+            "phase": "discover",
+            "status": "active",
+            "iteration": 0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        }
+    });
+    let mut file = fs::OpenOptions::new().append(true).open(&mailbox).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&cross_scope_loop).unwrap()
+    )
+    .unwrap();
+    drop(file);
+    let cross_scope_conflict = call_error(
+        &root,
+        json!({
+            "op": "report_bug",
+            "bug": {
+                "bugId": "cross-scope-conflict",
+                "scopeId": "scope-b",
+                "title": "cross scope collision",
+                "priority": "p1",
+                "description": "must not reuse another scope loop",
+                "reporter": { "scopeId": "scope-b", "sessionId": "worker-b" }
+            }
+        }),
+    );
+    assert!(
+        cross_scope_conflict.contains("bug_loop_conflict"),
+        "{cross_scope_conflict}"
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "report_bug",
+            "bug": {
+                "bugId": "update-conflict",
+                "scopeId": "scope",
+                "title": "update collision",
+                "priority": "p1",
+                "description": "must reject a corrupted bug loop",
+                "reporter": { "scopeId": "scope", "sessionId": "worker" }
+            }
+        }),
+    );
+    let conflicting_loop = json!({
+        "protocol": "appsdk-comm/v1",
+        "eventId": "manual-conflicting-loop",
+        "at": "2026-01-01T00:00:00Z",
+        "kind": "loop.updated",
+        "data": {
+            "loopId": "bug-loop-update-conflict",
+            "kind": "task",
+            "owner": { "scopeId": "scope", "sessionId": "master" },
+            "trigger": "manual",
+            "work": "unrelated work",
+            "gate": "other tests",
+            "state": "other state",
+            "stop": "other stop",
+            "maxIterations": 1,
+            "deadlineAt": null,
+            "phase": "discover",
+            "status": "active",
+            "iteration": 0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        }
+    });
+    let mut file = fs::OpenOptions::new().append(true).open(mailbox).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&conflicting_loop).unwrap()
+    )
+    .unwrap();
+    drop(file);
+
+    let update_conflict = call_error(
+        &root,
+        json!({
+            "op": "update_bug",
+            "bugId": "update-conflict",
+            "status": "active",
+            "actor": { "scopeId": "scope", "sessionId": "master" }
+        }),
+    );
+    assert!(
+        update_conflict.contains("bug_loop_conflict"),
+        "{update_conflict}"
+    );
+    let after_update_conflict = call(&root, json!({ "op": "status" }));
+    let bug = after_update_conflict["bugs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bug| bug["bugId"] == "update-conflict")
+        .unwrap();
+    assert_eq!(bug["status"], "active");
+    let corrupted_loop = after_update_conflict["loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|loop_record| loop_record["loopId"] == "bug-loop-update-conflict")
+        .unwrap();
+    assert_eq!(corrupted_loop["kind"], "task");
     fs::remove_dir_all(root).unwrap();
 }

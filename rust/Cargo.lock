@@ -28,6 +28,7 @@ name = "appsdk"
 version = "0.1.6"
 dependencies = [
  "chrono",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/communication/communication-event.schema.json",
+  "type": "object",
+  "required": ["protocol", "eventId", "at", "kind", "data"],
+  "properties": {
+    "protocol": {"const": "appsdk-comm/v1"},
+    "eventId": {"type": "string", "minLength": 1},
+    "at": {"type": "string", "format": "date-time"},
+    "kind": {
+      "enum": [
+        "scope.registered",
+        "scope.unregistered",
+        "adapter.registered",
+        "agent.registered",
+        "agent.refreshed",
+        "agent.state",
+        "message.created",
+        "message.state",
+        "notification.queued",
+        "notification.delivery_attempt",
+        "notification.emitted",
+        "notification.batch_emitted",
+        "notification.delivery_failed",
+        "wakeup.updated",
+        "wakeup.reminder",
+        "bug.reported",
+        "bug.updated",
+        "loop.created",
+        "loop.updated",
+        "error.recorded"
+      ]
+    },
+    "data": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {"enum": ["loop.created", "loop.updated"]}
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/loopRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "message.state"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/messageStateEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "notification.queued"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/notificationQueueEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "notification.delivery_attempt"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/deliveryAttemptEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "notification.emitted"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/notificationEmittedEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "notification.batch_emitted"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/notificationBatchEmittedEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "notification.delivery_failed"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/notificationFailureEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "error.recorded"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/errorEvent"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "address": {
+      "type": "object",
+      "required": ["scopeId", "sessionId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "evidenceValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/evidenceString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
+      ]
+    },
+    "passingEvidenceValue": {
+      "const": true
+    },
+    "evidenceResultValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/evidencePassingString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceResultValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
+      ]
+    },
+    "evidenceResultObject": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "status": {"$ref": "#/$defs/evidenceResultValue"},
+        "result": {"$ref": "#/$defs/evidenceResultValue"},
+        "outcome": {"$ref": "#/$defs/evidenceResultValue"},
+        "state": {"$ref": "#/$defs/evidenceResultValue"},
+        "passed": {"$ref": "#/$defs/passingEvidenceValue"},
+        "success": {"$ref": "#/$defs/passingEvidenceValue"},
+        "ok": {"$ref": "#/$defs/passingEvidenceValue"},
+        "verified": {"$ref": "#/$defs/passingEvidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["status"]},
+        {"required": ["result"]},
+        {"required": ["outcome"]},
+        {"required": ["state"]},
+        {"required": ["passed"]},
+        {"required": ["success"]},
+        {"required": ["ok"]},
+        {"required": ["verified"]}
+      ],
+      "additionalProperties": true
+    },
+    "evidencePassingString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\s*(?:[pP][aA][sS][sS][eE][dD]|[pP][aA][sS][sS]|[sS][uU][cC][cC][eE][sS][sS]|[oO][kK]|[vV][eE][rR][iI][fF][iI][eE][dD]|[tT][rR][uU][eE])\\s*$"
+    },
+    "evidenceString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "allOf": [
+        {"not": {"pattern": "^\\s*[uU][nN][kK][nN][oO][wW][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[pP][eE][nN][dD][iI][nN][gG]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL][eE][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL][uU][rR][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL]\\s*$"}},
+        {"not": {"pattern": "^\\s*[eE][rR][rR][oO][rR]\\s*$"}},
+        {"not": {"pattern": "^\\s*[iI][nN][vV][aA][lL][iI][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][lL][sS][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][uU][lL][lL]\\s*$"}},
+        {"not": {"pattern": "^\\s*[uU][nN][vV][eE][rR][iI][fF][iI][eE][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][oO][tT]_[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][oO][tT]\\s+[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[tT][iI][mM][eE][oO][uU][tT]\\s*$"}},
+        {"not": {"pattern": "^\\s*[bB][lL][oO][cC][kK][eE][dD]\\s*$"}}
+      ]
+    },
+    "completionEvidence": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "gate": {"$ref": "#/$defs/evidenceValue"},
+        "verification": {"$ref": "#/$defs/evidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["gate"]},
+        {"required": ["verification"]}
+      ],
+      "additionalProperties": true
+    },
+    "deliveryEvidence": {
+      "type": "object",
+      "required": ["state", "at", "details"],
+      "properties": {
+        "state": {
+          "enum": [
+            "accepted",
+            "intent",
+            "delivered",
+            "executed",
+            "replied",
+            "read",
+            "consumed",
+            "unknown"
+          ]
+        },
+        "at": {"type": "string", "format": "date-time"},
+        "details": {}
+      },
+      "additionalProperties": false
+    },
+    "transportReceipt": {
+      "type": "object",
+      "required": ["adapterId", "kind", "state", "target", "evidence"],
+      "properties": {
+        "adapterId": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["mailbox", "tmux", "appserver"]},
+        "state": {"enum": ["accepted", "intent", "delivered", "unknown"]},
+        "target": {"type": ["string", "null"]},
+        "evidence": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "deliveryAttempt": {
+      "type": "object",
+      "required": ["attemptId", "operation", "adapterId", "startedAt"],
+      "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
+        "operation": {"enum": ["notification.emitted", "notification.batch_emitted"]},
+        "adapterId": {"type": "string", "minLength": 1},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "batchId": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"operation": {"const": "notification.batch_emitted"}}
+          },
+          "then": {"required": ["batchId"]}
+        },
+        {
+          "if": {
+            "properties": {"operation": {"const": "notification.emitted"}}
+          },
+          "then": {"not": {"required": ["batchId"]}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "errorRecord": {
+      "type": "object",
+      "required": ["code", "message", "context", "at"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "context": {},
+        "at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "loopRecord": {
+      "type": "object",
+      "required": [
+        "loopId",
+        "kind",
+        "owner",
+        "trigger",
+        "work",
+        "gate",
+        "state",
+        "stop",
+        "maxIterations",
+        "deadlineAt",
+        "phase",
+        "status",
+        "iteration",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "loopId": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "owner": {"$ref": "#/$defs/address"},
+        "trigger": {"type": "string", "minLength": 1},
+        "work": {"type": "string", "minLength": 1},
+        "gate": {"type": "string", "minLength": 1},
+        "state": {"type": "string", "minLength": 1},
+        "stop": {"type": "string", "minLength": 1},
+        "maxIterations": {"type": "integer", "minimum": 1},
+        "deadlineAt": {"type": ["string", "null"], "format": "date-time"},
+        "phase": {
+          "enum": [
+            "discover",
+            "hand_off",
+            "verify",
+            "persist",
+            "schedule",
+            "completed",
+            "blocked",
+            "deadline",
+            "max_iterations"
+          ]
+        },
+        "status": {"enum": ["active", "completed", "blocked", "stopped"]},
+        "iteration": {"type": "integer", "minimum": 0},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "completionEvidence": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/completionEvidence"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "completed"}}
+          },
+          "then": {
+            "required": ["completionEvidence"],
+            "properties": {
+              "completionEvidence": {"$ref": "#/$defs/completionEvidence"}
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "messageStateEvent": {
+      "type": "object",
+      "required": ["messageId", "state", "evidence"],
+      "properties": {
+        "messageId": {"type": "string", "minLength": 1},
+        "state": {"type": "string", "minLength": 1},
+        "evidence": {"$ref": "#/$defs/deliveryEvidence"}
+      },
+      "additionalProperties": false
+    },
+    "notificationEmittedEvent": {
+      "type": "object",
+      "required": ["attemptId", "keys", "at"],
+      "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "at": {"type": "string", "format": "date-time"},
+        "receipt": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/transportReceipt"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "notificationSummary": {
+      "type": "object",
+      "required": [
+        "notificationId",
+        "messageId",
+        "title",
+        "priority",
+        "issueId",
+        "coalesceKey",
+        "createdAt"
+      ],
+      "properties": {
+        "notificationId": {"type": "string", "minLength": 1},
+        "messageId": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+        "issueId": {"type": ["string", "null"]},
+        "coalesceKey": {"type": ["string", "null"]},
+        "createdAt": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "notificationRecord": {
+      "type": "object",
+      "required": [
+        "notificationId",
+        "messageId",
+        "recipient",
+        "title",
+        "priority",
+        "issueId",
+        "coalesceKey",
+        "body",
+        "createdAt",
+        "availableAt",
+        "status",
+        "emittedAt",
+        "adapterId",
+        "transportReceipt",
+        "lastError"
+      ],
+      "properties": {
+        "notificationId": {"type": "string", "minLength": 1},
+        "messageId": {"type": "string", "minLength": 1},
+        "recipient": {"$ref": "#/$defs/address"},
+        "title": {"type": "string", "minLength": 1},
+        "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+        "issueId": {"type": ["string", "null"]},
+        "coalesceKey": {"type": ["string", "null"]},
+        "body": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "availableAt": {"type": "string", "format": "date-time"},
+        "status": {"enum": ["pending", "emitted", "unknown"]},
+        "emittedAt": {"type": ["string", "null"], "format": "date-time"},
+        "adapterId": {"type": "string", "minLength": 1},
+        "transportReceipt": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/transportReceipt"}
+          ]
+        },
+        "lastError": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/errorRecord"}
+          ]
+        },
+        "deliveryAttempt": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/deliveryAttempt"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "notificationQueueEvent": {
+      "type": "object",
+      "required": ["key", "notification"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "notification": {"$ref": "#/$defs/notificationRecord"}
+      },
+      "additionalProperties": false
+    },
+    "deliveryAttemptEvent": {
+      "type": "object",
+      "required": ["attemptId", "keys", "attempt"],
+      "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "attempt": {"$ref": "#/$defs/deliveryAttempt"}
+      },
+      "additionalProperties": false
+    },
+    "notificationBatch": {
+      "type": "object",
+      "required": ["batchId", "recipient", "createdAt", "adapterId", "items"],
+      "properties": {
+        "batchId": {"type": "string", "minLength": 1},
+        "recipient": {"$ref": "#/$defs/address"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "adapterId": {"type": "string", "minLength": 1},
+        "items": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/notificationSummary"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "notificationBatchEmittedEvent": {
+      "type": "object",
+      "required": ["attemptId", "batch", "at"],
+      "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
+        "batch": {"$ref": "#/$defs/notificationBatch"},
+        "notificationKeys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "notificationIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "at": {"type": "string", "format": "date-time"},
+        "receipt": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/transportReceipt"}
+          ]
+        }
+      },
+      "anyOf": [
+        {"required": ["notificationKeys"]},
+        {"required": ["notificationIds"]}
+      ],
+      "additionalProperties": false
+    },
+    "notificationFailureEvent": {
+      "type": "object",
+      "required": ["keys", "adapterId", "operation", "error"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "adapterId": {"type": "string", "minLength": 1},
+        "operation": {"enum": ["notification.emitted", "notification.batch_emitted"]},
+        "error": {"$ref": "#/$defs/errorRecord"},
+        "attemptId": {"type": "string", "minLength": 1},
+        "messageId": {"type": "string", "minLength": 1},
+        "notificationKey": {"type": "string", "minLength": 1},
+        "notificationId": {"type": "string", "minLength": 1},
+        "batchId": {"type": "string", "minLength": 1},
+        "recipient": {"$ref": "#/$defs/address"},
+        "notificationKeys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "additionalProperties": false
+    },
+    "errorEvent": {
+      "oneOf": [
+        {"$ref": "#/$defs/errorRecord"},
+        {
+          "type": "object",
+          "required": ["error"],
+          "properties": {
+            "error": {"$ref": "#/$defs/errorRecord"},
+            "loop": {
+              "oneOf": [
+                {"type": "null"},
+                {"$ref": "#/$defs/loopRecord"}
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

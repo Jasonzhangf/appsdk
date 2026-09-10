@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/communication/communication-request.schema.json",
+  "type": "object",
+  "required": ["op"],
+  "properties": {
+    "op": {
+      "enum": [
+        "capabilities",
+        "status",
+        "register_adapter",
+        "register-adapter",
+        "register_scope",
+        "register-scope",
+        "register_agent",
+        "register-agent",
+        "refresh_agent",
+        "refresh-agent",
+        "send",
+        "set_agent_state",
+        "set-agent-state",
+        "tick",
+        "flush_notifications",
+        "flush-notifications",
+        "report_bug",
+        "report-bug",
+        "update_bug",
+        "update-bug",
+        "create_loop",
+        "create-loop",
+        "advance_loop",
+        "advance-loop",
+        "record_error",
+        "record-error"
+      ]
+    },
+    "address": {"$ref": "#/$defs/address"},
+    "message": {"$ref": "#/$defs/message"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "agent": {"$ref": "#/$defs/agent"},
+    "adapter": {"$ref": "#/$defs/adapter"},
+    "actor": {"$ref": "#/$defs/address"},
+    "loopId": {"type": "string", "minLength": 1},
+    "evidence": {"type": "object", "minProperties": 1},
+    "priority": {"$ref": "#/$defs/priority"},
+    "deliveryMode": {"$ref": "#/$defs/deliveryMode"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["op", "complete"],
+        "properties": {
+          "op": {"enum": ["advance_loop", "advance-loop"]},
+          "complete": {"const": true}
+        }
+      },
+      "then": {
+        "required": ["evidence"],
+        "properties": {
+          "evidence": {"$ref": "#/$defs/loopCompletionEvidence"}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["op", "status"],
+        "properties": {
+          "op": {"enum": ["update_bug", "update-bug"]},
+          "status": {"enum": ["resolved", "closed"]}
+        }
+      },
+      "then": {
+        "required": ["evidence"],
+        "properties": {
+          "evidence": {"$ref": "#/$defs/bugResolutionEvidence"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "evidenceValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/evidenceString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
+      ]
+    },
+    "passingEvidenceValue": {
+      "const": true
+    },
+    "evidenceResultValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/evidencePassingString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceResultValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
+      ]
+    },
+    "evidenceResultObject": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "status": {"$ref": "#/$defs/evidenceResultValue"},
+        "result": {"$ref": "#/$defs/evidenceResultValue"},
+        "outcome": {"$ref": "#/$defs/evidenceResultValue"},
+        "state": {"$ref": "#/$defs/evidenceResultValue"},
+        "passed": {"$ref": "#/$defs/passingEvidenceValue"},
+        "success": {"$ref": "#/$defs/passingEvidenceValue"},
+        "ok": {"$ref": "#/$defs/passingEvidenceValue"},
+        "verified": {"$ref": "#/$defs/passingEvidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["status"]},
+        {"required": ["result"]},
+        {"required": ["outcome"]},
+        {"required": ["state"]},
+        {"required": ["passed"]},
+        {"required": ["success"]},
+        {"required": ["ok"]},
+        {"required": ["verified"]}
+      ],
+      "additionalProperties": true
+    },
+    "evidencePassingString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\s*(?:[pP][aA][sS][sS][eE][dD]|[pP][aA][sS][sS]|[sS][uU][cC][cC][eE][sS][sS]|[oO][kK]|[vV][eE][rR][iI][fF][iI][eE][dD]|[tT][rR][uU][eE])\\s*$"
+    },
+    "evidenceString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "allOf": [
+        {"not": {"pattern": "^\\s*[uU][nN][kK][nN][oO][wW][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[pP][eE][nN][dD][iI][nN][gG]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL][eE][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL][uU][rR][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL]\\s*$"}},
+        {"not": {"pattern": "^\\s*[eE][rR][rR][oO][rR]\\s*$"}},
+        {"not": {"pattern": "^\\s*[iI][nN][vV][aA][lL][iI][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][lL][sS][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][uU][lL][lL]\\s*$"}},
+        {"not": {"pattern": "^\\s*[uU][nN][vV][eE][rR][iI][fF][iI][eE][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][oO][tT]_[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][oO][tT]\\s+[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[tT][iI][mM][eE][oO][uU][tT]\\s*$"}},
+        {"not": {"pattern": "^\\s*[bB][lL][oO][cC][kK][eE][dD]\\s*$"}}
+      ]
+    },
+    "loopCompletionEvidence": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "gate": {"$ref": "#/$defs/evidenceValue"},
+        "verification": {"$ref": "#/$defs/evidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["gate"]},
+        {"required": ["verification"]}
+      ],
+      "additionalProperties": true
+    },
+    "bugResolutionEvidence": {
+      "type": "object",
+      "required": ["fix", "verification", "merge"],
+      "properties": {
+        "fix": {"$ref": "#/$defs/evidenceValue"},
+        "verification": {"$ref": "#/$defs/evidenceValue"},
+        "merge": {"$ref": "#/$defs/evidenceValue"}
+      },
+      "additionalProperties": true
+    },
+    "address": {
+      "type": "object",
+      "required": ["scopeId", "sessionId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+    "deliveryMode": {"enum": ["direct", "idle", "batched"]},
+    "message": {
+      "type": "object",
+      "required": ["from", "to", "title", "priority", "body"],
+      "properties": {
+        "from": {"$ref": "#/$defs/address"},
+        "to": {"$ref": "#/$defs/address"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"$ref": "#/$defs/priority"},
+        "body": {"type": "string", "minLength": 1},
+        "deliveryMode": {"$ref": "#/$defs/deliveryMode"},
+        "coalesceKey": {"type": "string", "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "conversationId": {"type": ["string", "null"]},
+        "messageId": {"type": ["string", "null"]},
+        "createdAt": {"type": ["string", "null"]},
+        "adapterId": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["scopeId", "appserverId", "namespace", "endpoint", "projectRoot"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "appserverId": {"type": "string", "minLength": 1},
+        "namespace": {"enum": ["codex_app", "codex_tui"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "projectRoot": {"type": "string", "minLength": 1},
+        "sessionIds": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "required": ["scopeId", "sessionId", "agentId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1},
+        "agentId": {"type": "string", "minLength": 1},
+        "role": {"enum": ["master", "peer", "subagent"]},
+        "masterGrant": {"type": ["string", "null"]},
+        "parent": {"$ref": "#/$defs/address"},
+        "leaseMs": {"type": ["integer", "null"], "minimum": 1000}
+      },
+      "additionalProperties": false
+    },
+    "adapter": {
+      "type": "object",
+      "required": ["adapterId", "kind"],
+      "properties": {
+        "adapterId": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["mailbox", "tmux", "appserver"]},
+        "target": {"type": ["string", "null"]},
+        "enabled": {"type": ["boolean", "null"]},
+        "execute": {"type": ["boolean", "null"]},
+        "recipient": {"$ref": "#/$defs/address"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

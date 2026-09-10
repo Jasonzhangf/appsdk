@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "resources": [
+    {"resource_id":"communication_mailbox","owner":"appsdk::communication","truth_store":".appsdk-control/communication/mailbox.jsonl","allowed_operations":["read","append","replay"],"relations":{"projection":"notification_projection"}},
+    {"resource_id":"notification_projection","owner":"appsdk::communication","truth_store":"replayed from communication_mailbox","allowed_operations":["read","emit"],"relations":{"facts":"communication_mailbox"}},
+    {"resource_id":"communication_adapter_registry","owner":"appsdk::communication","truth_store":"communication_mailbox adapter.registered events","allowed_operations":["read","register"],"relations":{"facts":"communication_mailbox"}},
+    {"resource_id":"communication_loop_projection","owner":"appsdk::communication","truth_store":"replayed from communication_mailbox loop.* events","allowed_operations":["read","advance"],"relations":{"facts":"communication_mailbox"}},
     {"resource_id":"project_contract","owner":"appsdk::project_contract","truth_store":".appsdk/project.json","allowed_operations":["read","validate","write"]},
     {"resource_id":"sdk_bundle","owner":"appsdk::delivery","truth_store":"AppSDK 0.1.6 embedded Bundle manifest/resources","allowed_operations":["read","validate"]},
     {"resource_id":"installed_sdk_resources","owner":"appsdk::delivery","truth_store":".appsdk/{contracts,docs,rules,skills}/**","allowed_operations":["read","validate","write"],"relations":{"must_reference":["sdk_bundle"]}},

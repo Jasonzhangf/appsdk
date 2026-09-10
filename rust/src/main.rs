@@ -5647,6 +5647,12 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
         })
         .cloned()
         .unwrap_or_else(|| fail("ARCHITECTURE_REVIEWER_MISSING"));
+    let project_bindings = observation.get("project_bindings").map(|value| {
+        if !value.is_object() {
+            fail("ARCHITECTURE_REVIEW_PROJECT_BINDINGS_INVALID");
+        }
+        value.clone()
+    });
     let verdict = producer_string(
         &observation,
         "/verdict",
@@ -5659,17 +5665,18 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
         fail("ARCHITECTURE_REVIEW_VERDICT_INVALID");
     }
     let promotion_id = lifecycle_chain_promotion_id(&issue_id, module_id, &candidate_id);
-    let review_id = producer_stable_id(
-        "review",
-        &serde_json::json!({
-            "promotion_id": promotion_id,
-            "fix_candidate_id": candidate_id,
-            "reviewer": reviewer,
-            "verdict": verdict,
-            "evidence_ids": evidence_ids
-        }),
-    );
-    let review = serde_json::json!({
+    let mut review_identity = serde_json::json!({
+        "promotion_id": promotion_id,
+        "fix_candidate_id": candidate_id,
+        "reviewer": reviewer,
+        "verdict": verdict,
+        "evidence_ids": evidence_ids
+    });
+    if let Some(bindings) = &project_bindings {
+        review_identity["project_bindings"] = bindings.clone();
+    }
+    let review_id = producer_stable_id("review", &review_identity);
+    let mut review = serde_json::json!({
         "review_id": review_id,
         "review_kind": "architecture",
         "issue_id": issue_id,
@@ -5690,6 +5697,9 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
         "verification_map_hash": file_sha256(&root.join(".appsdk/maps/verification-map.json"), "verification-map.json"),
         "created_at": review_time.to_rfc3339()
     });
+    if let Some(bindings) = project_bindings {
+        review["project_bindings"] = bindings;
+    }
     for path in [
         "/review_id",
         "/promotion_id",

@@ -1086,6 +1086,148 @@ fn lifecycle_chain_rejects_non_ancestor_candidate() {
 }
 
 #[test]
+fn lifecycle_chain_architecture_binds_project_bindings_to_review() {
+    let root = temp_root("lifecycle-chain-project-bindings");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    let review_file = records.join("review-record-app-core.json");
+    fs::remove_file(&review_file).unwrap();
+    let input = root.join("architecture-input.json");
+    let bindings = serde_json::json!({
+        "v4_product_map_root": "docs/architecture/maps",
+        "v4_product_map_hashes": {
+            "resource_map_hash": "sha256:resource",
+            "function_map_hash": "sha256:function",
+            "mainline_call_map_hash": "sha256:mainline",
+            "verification_map_hash": "sha256:verification"
+        }
+    });
+    let write_input = |bindings: Option<Value>| {
+        let mut architecture = serde_json::json!({
+            "reviewer": {"adapter": "test", "identity": "chain-reviewer"},
+            "verdict": "pass",
+            "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"]
+        });
+        if let Some(bindings) = bindings {
+            architecture["project_bindings"] = bindings;
+        }
+        fs::write(
+            &input,
+            serde_json::to_string_pretty(&serde_json::json!({"architecture": architecture}))
+                .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    };
+    let produce = || {
+        run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ])
+    };
+
+    write_input(Some(bindings.clone()));
+    let first = produce();
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_review: Value =
+        serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+    assert_eq!(first_review["project_bindings"], bindings);
+    let first_review_id = first_review["review_id"].as_str().unwrap().to_string();
+
+    fs::remove_file(&review_file).unwrap();
+    write_input(Some(bindings));
+    let second = produce();
+    assert!(second.status.success());
+    let second_review: Value =
+        serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+    assert_eq!(
+        second_review["review_id"].as_str(),
+        Some(first_review_id.as_str())
+    );
+
+    fs::remove_file(&review_file).unwrap();
+    write_input(Some(serde_json::json!({
+        "v4_product_map_root": "docs/architecture/maps",
+        "v4_product_map_hashes": {
+            "resource_map_hash": "sha256:resource",
+            "function_map_hash": "sha256:function",
+            "mainline_call_map_hash": "sha256:mainline",
+            "verification_map_hash": "sha256:verification"
+        },
+        "client_provider_entrypoint": "stream"
+    })));
+    let changed = produce();
+    assert!(changed.status.success());
+    let changed_review: Value =
+        serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+    assert_ne!(changed_review["review_id"], first_review["review_id"]);
+    assert_eq!(
+        changed_review["project_bindings"]["client_provider_entrypoint"],
+        "stream"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_architecture_rejects_non_object_project_bindings() {
+    for (label, bindings) in [
+        ("null", Value::Null),
+        ("array", serde_json::json!(["routecodex", "provider"])),
+        ("string", Value::String("routecodex".into())),
+        ("boolean", Value::Bool(true)),
+    ] {
+        let root = temp_root(&format!("lifecycle-chain-project-bindings-{label}"));
+        let root_text = root.to_str().unwrap();
+        prepare_lifecycle_chain_fixture(&root);
+        let records = root.join(".appsdk/records");
+        let review_file = records.join("review-record-app-core.json");
+        fs::remove_file(&review_file).unwrap();
+        let input = root.join("architecture-input.json");
+        fs::write(
+            &input,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "architecture": {
+                    "reviewer": {"adapter": "test", "identity": "chain-reviewer"},
+                    "verdict": "pass",
+                    "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"],
+                    "project_bindings": bindings
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        let rejected = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(!rejected.status.success(), "unexpected success for {label}");
+        assert!(String::from_utf8_lossy(&rejected.stderr)
+            .contains("ARCHITECTURE_REVIEW_PROJECT_BINDINGS_INVALID"));
+        assert!(!review_file.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn lifecycle_chain_promotion_rejects_tampered_project_promotion_gate_map() {
     let root = temp_root("lifecycle-chain-promotion-map-tamper");
     let root_text = root.to_str().unwrap();

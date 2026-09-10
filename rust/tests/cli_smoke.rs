@@ -2515,6 +2515,49 @@ fn pin_test_lock(root: &str) {
     );
 }
 
+fn prepare_lifecycle_chain_fixture(root: &PathBuf) -> String {
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(root);
+    let goal_file = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_file,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    pin_test_lock(root_text);
+    for stage in ["source_implemented", "contract_bound"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    assert!(run(&["compile", root_text]).status.success());
+    for stage in ["compiled", "controlled_verified"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage,
+        ])
+        .status
+        .success());
+    }
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let artifact_hash = artifact["artifact_hash"].as_str().unwrap().to_string();
+    write_records(root, "app-core", &artifact_hash, false, "issue-1");
+    artifact_hash
+}
+
 fn install_legacy_governance_maps(root: &Path) {
     for (name, content) in [
         (
@@ -9629,6 +9672,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -9987,6 +10031,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -10011,6 +10056,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -10040,6 +10086,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -11284,6 +11331,7 @@ fn longhorizon_bug_permission_failure_remains_explicit() {
         .args(["longhorizon", "show", "--json"])
         .current_dir(&root)
         .env("PATH", &path)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();

@@ -615,6 +615,58 @@ fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
 }
 
 #[test]
+fn lifecycle_chain_accepts_committed_candidate_records() {
+    let root = temp_root("lifecycle-chain-record-commit");
+    let root_text = root.to_str().unwrap();
+    let _artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    fs::remove_file(records.join("effectiveness-record-app-core.json")).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "lifecycle records"])
+        .status()
+        .unwrap()
+        .success());
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let architecture = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        architecture.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&architecture.stdout),
+        String::from_utf8_lossy(&architecture.stderr)
+    );
+    assert!(records.join("review-record-app-core.json").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_merge_rejects_effectiveness_mismatch_before_writing_record() {
     let root = temp_root("lifecycle-chain-merge-gate");
     let root_text = root.to_str().unwrap();

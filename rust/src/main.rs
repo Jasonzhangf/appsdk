@@ -1116,23 +1116,26 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
                                 | "lifecycle-record-chain-production-v1"
                         )
                     }),
-                "verification-map.json" => entry
-                    .get("gate_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| {
-                        matches!(
-                            id,
-                            "worktree_clean"
-                                | "baseline_reproduced"
-                                | "lifecycle_chain_record_producer"
-                        )
-                    }) || entry
-                    .get("required_for")
-                    .and_then(Value::as_array)
-                    .is_some_and(|uses| {
-                        uses.iter()
-                            .any(|use_case| use_case.as_str() == Some("promotion"))
-                    }),
+                "verification-map.json" => {
+                    entry
+                        .get("gate_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| {
+                            matches!(
+                                id,
+                                "worktree_clean"
+                                    | "baseline_reproduced"
+                                    | "lifecycle_chain_record_producer"
+                            )
+                        })
+                        || entry
+                            .get("required_for")
+                            .and_then(Value::as_array)
+                            .is_some_and(|uses| {
+                                uses.iter()
+                                    .any(|use_case| use_case.as_str() == Some("promotion"))
+                            })
+                }
                 _ => false,
             };
         let shares_required_identity = |candidate: &Value| {
@@ -5831,8 +5834,9 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
 }
 
 fn assert_lifecycle_chain_promotion_gates(gates: &[Value]) {
-    let verification_map: Value = serde_json::from_str(canonical_governance_map("verification-map.json"))
-        .unwrap_or_else(|_| fail("PROMOTION_VERIFICATION_MAP_INVALID"));
+    let verification_map: Value =
+        serde_json::from_str(canonical_governance_map("verification-map.json"))
+            .unwrap_or_else(|_| fail("PROMOTION_VERIFICATION_MAP_INVALID"));
     let expected = record_array(&verification_map, "/gates", "verification-map.json")
         .iter()
         .filter(|gate| {

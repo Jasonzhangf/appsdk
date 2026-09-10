@@ -667,6 +667,147 @@ fn lifecycle_chain_accepts_committed_candidate_records() {
 }
 
 #[test]
+fn lifecycle_chain_accepts_candidate_descendant_of_observed_worktree_head() {
+    let root = temp_root("lifecycle-chain-descendant-candidate");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    let observed_head = git_test_value(&root, &["rev-parse", "HEAD"]);
+    fs::write(
+        root.join("candidate-source-change.txt"),
+        "candidate source\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "candidate-source-change.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "candidate source"])
+        .status()
+        .unwrap()
+        .success());
+    let candidate_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    let candidate_tree = git_test_value(&root, &["rev-parse", "HEAD^{tree}"]);
+    assert_ne!(observed_head, candidate_commit);
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "merge-base",
+            "--is-ancestor",
+            &observed_head,
+            &candidate_commit
+        ])
+        .status()
+        .unwrap()
+        .success());
+
+    let candidate_file = records.join("fix-candidate-record-app-core.json");
+    let mut candidate: Value =
+        serde_json::from_str(&fs::read_to_string(&candidate_file).unwrap()).unwrap();
+    candidate["head_commit"] = Value::String(candidate_commit.clone());
+    candidate["tree_hash"] = Value::String(candidate_tree.clone());
+    fs::write(
+        &candidate_file,
+        serde_json::to_string_pretty(&candidate).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let validation_file = records.join("pre-review-validation-record-app-core.json");
+    let mut validation: Value =
+        serde_json::from_str(&fs::read_to_string(&validation_file).unwrap()).unwrap();
+    validation["candidate_commit"] = Value::String(candidate_commit.clone());
+    validation["candidate_tree_hash"] = Value::String(candidate_tree.clone());
+    fs::write(
+        &validation_file,
+        serde_json::to_string_pretty(&validation).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let evidence_dir = records.join("evidence/app-core");
+    for id in [
+        "candidate-evidence-1",
+        "positive-1",
+        "negative-1",
+        "whitebox-1",
+        "install-1",
+        "restart-1",
+        "blackbox-1",
+    ] {
+        let file = evidence_dir.join(format!("{id}.json"));
+        let mut evidence: Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        evidence["source_commit"] = Value::String(candidate_commit.clone());
+        fs::write(
+            &file,
+            serde_json::to_string_pretty(&evidence).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+    let evidence_record_file = records.join("evidence-record-app-core.json");
+    let mut evidence_record: Value =
+        serde_json::from_str(&fs::read_to_string(&evidence_record_file).unwrap()).unwrap();
+    evidence_record["source_commit"] = Value::String(candidate_commit.clone());
+    fs::write(
+        &evidence_record_file,
+        serde_json::to_string_pretty(&evidence_record).unwrap() + "\n",
+    )
+    .unwrap();
+
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    fs::remove_file(records.join("effectiveness-record-app-core.json")).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "candidate records"])
+        .status()
+        .unwrap()
+        .success());
+
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let architecture = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        architecture.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&architecture.stdout),
+        String::from_utf8_lossy(&architecture.stderr)
+    );
+    let worktree: Value = serde_json::from_str(
+        &fs::read_to_string(records.join("worktree-record-app-core.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(worktree["head_commit"], observed_head);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_merge_rejects_effectiveness_mismatch_before_writing_record() {
     let root = temp_root("lifecycle-chain-merge-gate");
     let root_text = root.to_str().unwrap();

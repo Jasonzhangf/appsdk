@@ -6549,6 +6549,23 @@ fn assert_candidate_source_identity(root: &Path, module: &Value, candidate_commi
     }
 }
 
+fn assert_worktree_candidate_ancestry(root: &Path, worktree_head: &str, candidate_commit: &str) {
+    if !Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            worktree_head,
+            candidate_commit,
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        fail("FIX_REPRODUCTION_GRAPH_MISMATCH");
+    }
+}
+
 fn assert_lifecycle_chain_candidate_at_head(
     root: &Path,
     project: &Value,
@@ -7180,6 +7197,11 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     let scope_hash = record_str(&worktree, "/scope_hash", &worktree_name);
     let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
     let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
+    assert_worktree_candidate_ancestry(
+        root,
+        record_str(&worktree, "/head_commit", &worktree_name),
+        candidate_commit,
+    );
     if record_str(&worktree, "/module_id", &worktree_name) != module_id
         || record_str(&reproduction, "/module_id", &reproduction_name) != module_id
         || record_str(&candidate, "/module_id", &candidate_name) != module_id
@@ -7208,8 +7230,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("FIX_REPRODUCTION_GRAPH_MISMATCH");
     }
-    if record_str(&worktree, "/head_commit", &worktree_name) != candidate_commit
-        || record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
+    if record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
         || record_str(&review, "/review_kind", &review_name) != "architecture"
         || record_str(&review, "/fix_candidate_id", &review_name)
             != record_str(&candidate, "/fix_candidate_id", &candidate_name)
@@ -7948,6 +7969,11 @@ fn assert_fix_lifecycle_graph(
     let candidate_commit = record_str(&candidate, "/head_commit", &candidate_name);
     let candidate_tree = record_str(&candidate, "/tree_hash", &candidate_name);
     let review_id = record_str(review, "/review_id", "review-record.json");
+    assert_worktree_candidate_ancestry(
+        root,
+        record_str(&worktree, "/head_commit", &worktree_name),
+        candidate_commit,
+    );
     for (record, name) in [
         (&reproduction, reproduction_name.as_str()),
         (&candidate, candidate_name.as_str()),
@@ -7987,8 +8013,7 @@ fn assert_fix_lifecycle_graph(
     {
         fail("FIX_REPRODUCTION_GRAPH_MISMATCH");
     }
-    if record_str(&worktree, "/head_commit", &worktree_name) != candidate_commit
-        || record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
+    if record_str(&candidate, "/scope_hash", &candidate_name) != scope_hash
         || record_str(review, "/review_kind", "review-record.json") != "architecture"
         || record_str(review, "/fix_candidate_id", "review-record.json")
             != record_str(&candidate, "/fix_candidate_id", &candidate_name)

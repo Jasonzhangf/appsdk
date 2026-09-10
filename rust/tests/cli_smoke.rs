@@ -3806,6 +3806,28 @@ fn file_digest(path: &Path) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn stable_review_id(
+    promotion_id: &str,
+    fix_candidate_id: &str,
+    reviewer: &Value,
+    verdict: &str,
+    evidence_ids: &[&str],
+) -> String {
+    let identity = serde_json::json!({
+        "promotion_id": promotion_id,
+        "fix_candidate_id": fix_candidate_id,
+        "reviewer": reviewer,
+        "verdict": verdict,
+        "evidence_ids": evidence_ids
+    });
+    format!(
+        "review-{}",
+        digest(&canonical(&identity))
+            .strip_prefix("sha256:")
+            .unwrap()
+    )
+}
+
 fn install_authoritative_bug_fixture(root: &Path, issue_id: &str) -> PathBuf {
     let fake_bin = root.with_extension("fake-git-bug");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -3888,6 +3910,13 @@ fn write_records(
     fs::create_dir_all(&evidence_dir).unwrap();
     let commit = git_test_value(root, &["rev-parse", "HEAD"]);
     let tree = git_test_value(root, &["rev-parse", "HEAD^{tree}"]);
+    let review_id = stable_review_id(
+        "promotion-1",
+        "candidate-1",
+        &serde_json::json!({"adapter":"test","identity":"test"}),
+        "pass",
+        &["candidate-evidence-1", "positive-1", "negative-1"],
+    );
     let map_root = root.join(".appsdk/maps");
     let evidence = |id: &str, phase: &str, kind: &str, created_at: &str| {
         serde_json::json!({
@@ -4096,7 +4125,7 @@ fn write_records(
     fs::write(
         records.join(format!("review-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
-            "review_id":"review-1","issue_id":issue_id,"promotion_id":"promotion-1",
+            "review_id":review_id,"issue_id":issue_id,"promotion_id":"promotion-1",
             "review_kind":"architecture","fix_candidate_id":"candidate-1",
             "pre_review_validation_id":"pre-review-validation-1",
             "reviewer":{"adapter":"test","identity":"test"},"verdict":"pass",
@@ -4117,7 +4146,7 @@ fn write_records(
         records.join(format!("effectiveness-record-{module_id}.json")),
         serde_json::to_string_pretty(&serde_json::json!({
             "effectiveness_id":"effectiveness-1","issue_id":issue_id,"module_id":module_id,
-            "fix_candidate_id":"candidate-1","architecture_review_id":"review-1",
+            "fix_candidate_id":"candidate-1","architecture_review_id":review_id,
             "reviewed_commit":commit,"reviewed_tree_hash":tree,
             "reproduction_input_hashes":["input-1"],"baseline_evidence_id":"baseline-1",
             "fixed_replay_evidence_id":"effective-1","positive_evidence_ids":["post-positive-1"],
@@ -4146,11 +4175,11 @@ fn write_records(
         "module_id":module_id,"base_commit":commit,"source_commit":commit,
         "candidate_commit":commit,"merged_commit":commit,
         "worktree_record_id":"worktree-1","reproduction_record_id":"reproduction-1",
-        "fix_candidate_id":"candidate-1","architecture_review_id":"review-1",
+        "fix_candidate_id":"candidate-1","architecture_review_id":review_id,
         "effectiveness_record_id":"effectiveness-1","merge_record_id":"merge-1",
         "previous_active_version":null,"new_active_version":"active-v1",
         "artifact_hash":artifact_hash,"scope_hash":"scope-1","public_api_hash":"api-1",
-        "review_id":"review-1","evidence_ids":["candidate-evidence-1","effective-1"],
+        "review_id":review_id,"evidence_ids":["candidate-evidence-1","effective-1"],
         "required_gate_results":[{"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"}],
         "change_set_id":"change-1","compatibility_level":"compatible","root_cause":"test root cause",
         "design_id":"design-1","change_reason_comment":"test reason",
@@ -4172,8 +4201,8 @@ fn write_records(
         fs::write(
             records.join(format!("freeze-record-{module_id}.json")),
             format!(
-                r#"{{"freeze_id":"freeze-1","issue_id":"{}","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"candidate-evidence-1","source_commit_or_tag":"{}","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"review-1","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"{}","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:08:00Z"}}"#,
-                issue_id, module_id, promotion_hash, commit, artifact_hash, commit
+                r#"{{"freeze_id":"freeze-1","issue_id":"{}","module_id":"{}","promotion_id":"promotion-1","promotion_record_hash":"{}","artifact_record_id":"candidate-evidence-1","source_commit_or_tag":"{}","active_version":"active-v1","previous_active_version":null,"library_hash":"{}","public_api_hash":"api-1","review_id":"{}","previous_active_immutable":false,"git_clean":true,"clean_scope":{{"base_commit":"{}","changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"}},"owners":{{"vcs":"test","compiler":"test","api_extractor":"test","review":"test","artifact_registry":"test"}},"created_at":"2026-01-01T00:08:00Z"}}"#,
+                issue_id, module_id, promotion_hash, commit, artifact_hash, review_id, commit
             ),
         )
         .unwrap();
@@ -4508,7 +4537,13 @@ fn write_v2_records(root: &Path, module_id: &str, base_hash: &str, artifact_hash
         "previous_active_version": "active-v1",
         "library_hash": artifact_hash,
         "public_api_hash": "api-2",
-        "review_id": "review-1",
+        "review_id": stable_review_id(
+            "promotion-1",
+            "candidate-1",
+            &serde_json::json!({"adapter":"test","identity":"test"}),
+            "pass",
+            &["candidate-evidence-1", "positive-1", "negative-1"],
+        ),
         "previous_active_immutable": true,
         "git_clean": true,
         "clean_scope": {"base_commit":commit,"changed_paths":[],"ignored_paths":[],"generated_policy":"tracked_hash"},

@@ -709,6 +709,518 @@ fn lifecycle_chain_accepts_committed_candidate_records() {
 }
 
 #[test]
+fn lifecycle_chain_merge_rejects_effectiveness_mismatch_before_writing_record() {
+    let root = temp_root("lifecycle-chain-merge-gate");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    fs::remove_file(root.join(".appsdk/records/merge-record-app-core.json")).unwrap();
+    let effectiveness_file = root.join(".appsdk/records/effectiveness-record-app-core.json");
+    let mut effectiveness: Value =
+        serde_json::from_str(&fs::read_to_string(&effectiveness_file).unwrap()).unwrap();
+    effectiveness["fix_candidate_id"] = Value::String("forged-candidate".into());
+    fs::write(
+        &effectiveness_file,
+        serde_json::to_string_pretty(&effectiveness).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("merge-input.json");
+    fs::write(&input, r#"{"merge":{"mainline_ref":"HEAD"}}"#).unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "merge",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH"));
+    assert!(!root
+        .join(".appsdk/records/merge-record-app-core.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_promotion_rejects_merge_graph_mismatch_before_writing_record() {
+    let root = temp_root("lifecycle-chain-promotion-gate");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    fs::remove_file(root.join(".appsdk/records/promotion-record-app-core.json")).unwrap();
+    let merge_file = root.join(".appsdk/records/merge-record-app-core.json");
+    let mut merge: Value = serde_json::from_str(&fs::read_to_string(&merge_file).unwrap()).unwrap();
+    merge["effectiveness_id"] = Value::String("forged-effectiveness".into());
+    fs::write(
+        &merge_file,
+        serde_json::to_string_pretty(&merge).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("promotion-input.json");
+    let input_value = serde_json::json!({
+        "promotion": {
+            "experiment_id": "experiment-1",
+            "new_active_version": "active-v2",
+            "previous_active_version": null,
+            "compatibility_level": "compatible",
+            "evidence_ids": ["candidate-evidence-1"],
+            "required_gate_results": [
+                {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"},
+                {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"forged"},
+                {"gate_id":"mainline_merge_identity","result":"pass","producer":"forged"}
+            ],
+            "change_set_id": "change-2",
+            "root_cause": "root cause",
+            "design_id": "design-1",
+            "change_reason_comment": "reason",
+            "playground_cleanup_record_id": "cleanup-1",
+            "artifact_hash": artifact_hash
+        }
+    });
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&input_value).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("MAINLINE_MERGE_RECORD_MISMATCH"));
+    assert!(!root
+        .join(".appsdk/records/promotion-record-app-core.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_promotion_writes_bound_record_for_project_module() {
+    let root = temp_root("lifecycle-chain-promotion-success");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    fs::remove_file(root.join(".appsdk/records/promotion-record-app-core.json")).unwrap();
+    let input = root.join("promotion-input.json");
+    let input_value = serde_json::json!({
+        "promotion": {
+            "experiment_id": "experiment-1",
+            "new_active_version": "active-v2",
+            "previous_active_version": null,
+            "compatibility_level": "compatible",
+            "evidence_ids": ["candidate-evidence-1"],
+            "required_gate_results": [
+                {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
+                {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
+            ],
+            "change_set_id": "change-2",
+            "root_cause": "root cause",
+            "design_id": "design-1",
+            "change_reason_comment": "reason",
+            "playground_cleanup_record_id": "cleanup-1",
+            "artifact_hash": artifact_hash
+        }
+    });
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&input_value).unwrap() + "\n",
+    )
+    .unwrap();
+    let produced = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        produced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&produced.stderr)
+    );
+    let promotion: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/promotion-record-app-core.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(promotion["module_id"], "app-core");
+    assert_eq!(promotion["issue_id"], "issue-1");
+    assert_eq!(promotion["fix_candidate_id"], "candidate-1");
+    assert_eq!(promotion["merge_record_id"], "merge-1");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_accepts_committed_records_after_candidate() {
+    let root = temp_root("lifecycle-chain-record-commit");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    fs::remove_file(records.join("effectiveness-record-app-core.json")).unwrap();
+    let candidate_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "lifecycle records"])
+        .status()
+        .unwrap()
+        .success());
+    let architecture_input = root.join("architecture-input.json");
+    fs::write(
+        &architecture_input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let architecture = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        architecture_input.to_str().unwrap(),
+    ]);
+    assert!(
+        architecture.status.success(),
+        "candidate={candidate_commit} stdout={} stderr={}",
+        String::from_utf8_lossy(&architecture.stdout),
+        String::from_utf8_lossy(&architecture.stderr)
+    );
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "add",
+            ".appsdk/records/review-record-app-core.json"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "architecture record"])
+        .status()
+        .unwrap()
+        .success());
+    let effectiveness_input = root.join("effectiveness-input.json");
+    fs::write(
+        &effectiveness_input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "effectiveness": {
+                "fixed_replay_evidence_id": "effective-1",
+                "positive_evidence_ids": ["post-positive-1"],
+                "negative_evidence_ids": ["post-negative-1"],
+                "blackbox_evidence_ids": ["effective-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let effectiveness = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "effectiveness",
+        "--input",
+        effectiveness_input.to_str().unwrap(),
+    ]);
+    assert!(
+        effectiveness.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&effectiveness.stdout),
+        String::from_utf8_lossy(&effectiveness.stderr)
+    );
+    assert!(records.join("effectiveness-record-app-core.json").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_rejects_controlled_source_after_candidate() {
+    let root = temp_root("lifecycle-chain-controlled-drift");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    fs::remove_file(records.join("effectiveness-record-app-core.json")).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "lifecycle records"])
+        .status()
+        .unwrap()
+        .success());
+    let drift = root.join("playground/experiments/committed-candidate-drift.txt");
+    fs::write(&drift, "controlled drift\n").unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", drift.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "controlled source drift"])
+        .status()
+        .unwrap()
+        .success());
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("CANDIDATE_CONTROLLED_SOURCE_DRIFT"));
+    assert!(!records.join("review-record-app-core.json").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_rejects_candidate_tree_mismatch() {
+    let root = temp_root("lifecycle-chain-tree-drift");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    let candidate_file = records.join("fix-candidate-record-app-core.json");
+    let mut candidate: Value =
+        serde_json::from_str(&fs::read_to_string(&candidate_file).unwrap()).unwrap();
+    candidate["tree_hash"] = Value::String("sha256:forged-candidate-tree".into());
+    fs::write(
+        &candidate_file,
+        serde_json::to_string_pretty(&candidate).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("FIX_CANDIDATE_TREE_MISMATCH"));
+    assert!(!records.join("review-record-app-core.json").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_rejects_non_ancestor_candidate() {
+    let root = temp_root("lifecycle-chain-non-ancestor");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    fs::remove_file(records.join("effectiveness-record-app-core.json")).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "lifecycle records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "checkout", "-b", "candidate-side"])
+        .status()
+        .unwrap()
+        .success());
+    fs::write(records.join("candidate-side-record.json"), "{}\n").unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "add",
+            ".appsdk/records/candidate-side-record.json"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "candidate side"])
+        .status()
+        .unwrap()
+        .success());
+    let side_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    let side_tree = git_test_value(&root, &["rev-parse", "HEAD^{tree}"]);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "checkout", "codex/test"])
+        .status()
+        .unwrap()
+        .success());
+    let candidate_file = records.join("fix-candidate-record-app-core.json");
+    let mut candidate: Value =
+        serde_json::from_str(&fs::read_to_string(&candidate_file).unwrap()).unwrap();
+    candidate["head_commit"] = Value::String(side_commit.clone());
+    candidate["tree_hash"] = Value::String(side_tree);
+    fs::write(
+        &candidate_file,
+        serde_json::to_string_pretty(&candidate).unwrap() + "\n",
+    )
+    .unwrap();
+    let validation_file = records.join("pre-review-validation-record-app-core.json");
+    let mut validation: Value =
+        serde_json::from_str(&fs::read_to_string(&validation_file).unwrap()).unwrap();
+    validation["candidate_commit"] = Value::String(side_commit.clone());
+    validation["candidate_tree_hash"] = candidate["tree_hash"].clone();
+    fs::write(
+        &validation_file,
+        serde_json::to_string_pretty(&validation).unwrap() + "\n",
+    )
+    .unwrap();
+    let evidence_dir = records.join("evidence/app-core");
+    for entry in fs::read_dir(&evidence_dir).unwrap() {
+        let path = entry.unwrap().path();
+        let mut evidence: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        evidence["source_commit"] = Value::String(side_commit.clone());
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&evidence).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("LIFECYCLE_CHAIN_CANDIDATE_DRIFT"));
+    assert!(!records.join("review-record-app-core.json").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_promotion_rejects_tampered_project_promotion_gate_map() {
+    let root = temp_root("lifecycle-chain-promotion-map-tamper");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    fs::remove_file(root.join(".appsdk/records/promotion-record-app-core.json")).unwrap();
+    let map_file = root.join(".appsdk/maps/verification-map.json");
+    let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_file).unwrap()).unwrap();
+    let gate = map["gates"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|gate| gate["gate_id"] == "contract_valid")
+        .unwrap();
+    gate["required_for"] = serde_json::json!(["compile"]);
+    fs::write(
+        &map_file,
+        serde_json::to_string_pretty(&map).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("promotion-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("LIFECYCLE_PRODUCER_MAP_TAMPERED:verification-map.json"));
+    assert!(!root
+        .join(".appsdk/records/promotion-record-app-core.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_record_producer_rejects_drifted_project_map_before_records() {
     let root = temp_root("lifecycle-record-producer-map-drift");
     let root_text = root.to_str().unwrap();
@@ -2095,6 +2607,49 @@ fn pin_test_lock(root: &str) {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+fn prepare_lifecycle_chain_fixture(root: &PathBuf) -> String {
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(root);
+    let goal_file = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_file,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    pin_test_lock(root_text);
+    for stage in ["source_implemented", "contract_bound"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    assert!(run(&["compile", root_text]).status.success());
+    for stage in ["compiled", "controlled_verified"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage,
+        ])
+        .status
+        .success());
+    }
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let artifact_hash = artifact["artifact_hash"].as_str().unwrap().to_string();
+    write_records(root, "app-core", &artifact_hash, false, "issue-1");
+    artifact_hash
 }
 
 fn install_legacy_governance_maps(root: &Path) {
@@ -9211,6 +9766,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -9569,6 +10125,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -9593,6 +10150,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -9622,6 +10180,7 @@ esac
         .current_dir(&root)
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
@@ -10866,6 +11425,7 @@ fn longhorizon_bug_permission_failure_remains_explicit() {
         .args(["longhorizon", "show", "--json"])
         .current_dir(&root)
         .env("PATH", &path)
+        .env_remove("GIT_BUG_BIN")
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();

@@ -1126,6 +1126,12 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
                                 | "baseline_reproduced"
                                 | "lifecycle_chain_record_producer"
                         )
+                    }) || entry
+                    .get("required_for")
+                    .and_then(Value::as_array)
+                    .is_some_and(|uses| {
+                        uses.iter()
+                            .any(|use_case| use_case.as_str() == Some("promotion"))
                     }),
                 _ => false,
             };
@@ -5824,6 +5830,44 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
     println!("{}", serde_json::to_string_pretty(&effectiveness).unwrap());
 }
 
+fn assert_lifecycle_chain_promotion_gates(gates: &[Value]) {
+    let verification_map: Value = serde_json::from_str(canonical_governance_map("verification-map.json"))
+        .unwrap_or_else(|_| fail("PROMOTION_VERIFICATION_MAP_INVALID"));
+    let expected = record_array(&verification_map, "/gates", "verification-map.json")
+        .iter()
+        .filter(|gate| {
+            gate.get("required_for")
+                .and_then(Value::as_array)
+                .is_some_and(|uses| {
+                    uses.iter()
+                        .any(|use_case| use_case.as_str() == Some("promotion"))
+                })
+        })
+        .map(|gate| record_str(gate, "/gate_id", "verification-map.json"))
+        .collect::<Vec<_>>();
+    if expected.is_empty() {
+        fail("PROMOTION_GATES_UNDECLARED");
+    }
+    let mut actual = std::collections::HashSet::new();
+    for gate in gates {
+        let gate_id = record_str(gate, "/gate_id", "PROMOTION_GATE_INVALID");
+        if !actual.insert(gate_id) || gate.get("result").and_then(Value::as_str) != Some("pass") {
+            fail("PROMOTION_GATE_INVALID");
+        }
+        if gate
+            .get("producer")
+            .and_then(Value::as_str)
+            .filter(|producer| !producer.is_empty())
+            .is_none()
+        {
+            fail("PROMOTION_GATE_INVALID");
+        }
+    }
+    if actual.len() != expected.len() || expected.iter().any(|gate_id| !actual.contains(gate_id)) {
+        fail("PROMOTION_GATE_SET_MISMATCH");
+    }
+}
+
 fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -5835,6 +5879,7 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
     let (worktree, _reproduction, candidate, _validation) =
         lifecycle_chain_candidate(root, module_id);
     let effectiveness = read_record(root, &module_record_name("effectiveness-record", module_id));
+    assert_fix_effectiveness_gate(root, module_id);
     let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
     let candidate_id =
         producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
@@ -5918,6 +5963,7 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
     let project = read_project(root);
     assert_declared_contracts(root, &project, true);
     assert_goal_confirmed(root);
+    assert_lifecycle_producer_map_binding(root, &project, module_id);
     let observation = lifecycle_chain_input(root, input_path, "promotion");
     let (worktree, reproduction, candidate, _validation) =
         lifecycle_chain_candidate(root, module_id);
@@ -5996,6 +6042,7 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         .filter(|values| !values.is_empty())
         .cloned()
         .unwrap_or_else(|| fail("PROMOTION_GATES_MISSING"));
+    assert_lifecycle_chain_promotion_gates(&gates);
     for gate in &gates {
         if producer_string(gate, "/gate_id", "PROMOTION_GATE_INVALID") == ""
             || producer_string(gate, "/producer", "PROMOTION_GATE_INVALID") == ""
@@ -6009,6 +6056,7 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         "/playground_cleanup_record_id",
         "PROMOTION_CLEANUP_MISSING",
     );
+    assert_fix_merge_gate(root, module_id);
     let cleanup = read_record(root, &format!("playground-cleanup-{}.json", cleanup_id));
     if producer_string(&cleanup, "/cleanup_id", "playground-cleanup-record") != cleanup_id {
         fail("PROMOTION_CLEANUP_MISMATCH");
@@ -6438,7 +6486,7 @@ fn assert_lifecycle_chain_candidate_at_head(
         &["rev-parse", "HEAD"],
         "PRODUCER_HEAD_COMMIT_UNAVAILABLE",
     );
-    let ancestry = Command::new("git")
+    if !Command::new("git")
         .arg("-C")
         .arg(root)
         .args([
@@ -6448,8 +6496,8 @@ fn assert_lifecycle_chain_candidate_at_head(
             &head_commit,
         ])
         .status()
-        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
-    if !ancestry.success() {
+        .is_ok_and(|status| status.success())
+    {
         fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
     }
     assert_candidate_source_identity(root, module, candidate_commit);

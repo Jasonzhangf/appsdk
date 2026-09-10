@@ -4387,10 +4387,8 @@ fn lifecycle_chain_review_identity(
 }
 
 fn assert_lifecycle_chain_review_identity(review: &Value) {
-    let Some(project_bindings) = review.get("project_bindings") else {
-        return;
-    };
-    if !project_bindings.is_object() {
+    let project_bindings = review.get("project_bindings");
+    if project_bindings.is_some_and(|value| !value.is_object()) {
         fail("INVALID_REVIEW_PROJECT_BINDINGS");
     }
     let reviewer = review
@@ -4412,7 +4410,7 @@ fn assert_lifecycle_chain_review_identity(review: &Value) {
         reviewer,
         record_str(review, "/verdict", "review-record.json"),
         &Value::Array(record_array(review, "/evidence_ids", "review-record.json").clone()),
-        Some(project_bindings),
+        project_bindings,
     );
     if record_str(review, "/review_id", "review-record.json")
         != producer_stable_id("review", &identity)
@@ -7204,7 +7202,6 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
     }
-    assert_lifecycle_chain_review_identity(&review);
     assert_review_map_bindings(root, module_id, &review, &review_name);
     let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
     let baseline = evidence_by_id(root, module_id, baseline_id);
@@ -7259,6 +7256,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
             fail("ARCHITECTURE_REVIEW_EVIDENCE_MISMATCH");
         }
     }
+    assert_lifecycle_chain_review_identity(&review);
     if git_value(
         root,
         &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],

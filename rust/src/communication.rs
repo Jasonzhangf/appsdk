@@ -1826,7 +1826,7 @@ impl CommunicationStore {
             })
             .cloned()
         {
-            let notification = self.notification_for(&message, &message.created_at, None)?;
+            let notification = self.recover_message_notification(&message)?;
             return Ok(json!({
                 "message": message,
                 "notification": notification.map(|value| value.summary())

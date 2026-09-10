@@ -1786,6 +1786,100 @@ fn idempotent_bug_retry_rehydrates_missing_loop_and_notification() {
 }
 
 #[test]
+fn stale_bug_retry_preserves_newer_coalesced_notification_and_window() {
+    let root = temp_root("bug-stale-retry");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    let old_request = json!({
+        "op": "report_bug",
+        "bug": {
+            "bugId": "bug-old",
+            "scopeId": "scope",
+            "title": "old bug summary",
+            "priority": "p3",
+            "description": "old bug details",
+            "reporter": { "scopeId": "scope", "sessionId": "master" }
+        }
+    });
+    call(&root, old_request.clone());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let new_request = json!({
+        "op": "report_bug",
+        "bug": {
+            "bugId": "bug-new",
+            "scopeId": "scope",
+            "title": "new bug summary",
+            "priority": "p1",
+            "description": "new bug details",
+            "reporter": { "scopeId": "scope", "sessionId": "master" }
+        }
+    });
+    call(&root, new_request);
+
+    let status = call(&root, json!({ "op": "status" }));
+    let pending = status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let current = pending
+        .iter()
+        .find(|notification| notification["issueId"] == "bug-new")
+        .unwrap();
+    let notification_id = current["notificationId"].as_str().unwrap().to_string();
+    let created_at = current["createdAt"].as_str().unwrap().to_string();
+    let available_at = current["availableAt"].as_str().unwrap().to_string();
+    assert_eq!(current["title"], "bug reported: new bug summary");
+    assert_eq!(current["priority"], "p1");
+
+    let retry = call(&root, old_request);
+    assert_eq!(retry["idempotent"], true);
+    assert_eq!(
+        retry["notification"]["notification"]["title"],
+        "bug reported: new bug summary"
+    );
+    assert_eq!(retry["notification"]["notification"]["priority"], "p1");
+
+    let status = call(&root, json!({ "op": "status" }));
+    let pending = status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let current = pending
+        .iter()
+        .find(|notification| notification["issueId"] == "bug-new")
+        .unwrap();
+    assert_eq!(current["notificationId"], notification_id);
+    assert_eq!(current["createdAt"], created_at);
+    assert_eq!(current["availableAt"], available_at.clone());
+    assert_eq!(current["title"], "bug reported: new bug summary");
+    assert_eq!(current["priority"], "p1");
+
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 2);
+
+    let flushed = call(
+        &root,
+        json!({ "op": "flush_notifications", "now": available_at }),
+    );
+    assert_eq!(flushed["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        flushed["batches"][0]["items"][0]["title"],
+        "bug reported: new bug summary"
+    );
+    assert_eq!(flushed["batches"][0]["items"][0]["priority"], "p1");
+    let status = call(&root, json!({ "op": "status" }));
+    assert!(status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        status["notificationProjection"]["emitted"][0]["title"],
+        "bug reported: new bug summary"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn idle_coalesce_preserves_first_window_and_latest_summary() {
     let root = temp_root("idle-window");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);

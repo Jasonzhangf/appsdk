@@ -1280,6 +1280,109 @@ fn lifecycle_chain_architecture_rejects_non_object_project_bindings() {
 }
 
 #[test]
+fn lifecycle_chain_rejects_tampered_persisted_review_identity() {
+    for (label, tamper, command, expected_error) in [
+        (
+            "project-bindings",
+            "project_bindings",
+            "effectiveness",
+            "ARCHITECTURE_REVIEW_IDENTITY_MISMATCH",
+        ),
+        (
+            "review-id",
+            "review_id",
+            "architecture_stable",
+            "ARCHITECTURE_REVIEW_IDENTITY_MISMATCH",
+        ),
+    ] {
+        let root = temp_root(&format!("lifecycle-chain-review-identity-{label}"));
+        let root_text = root.to_str().unwrap();
+        prepare_lifecycle_chain_fixture(&root);
+        let records = root.join(".appsdk/records");
+        let review_file = records.join("review-record-app-core.json");
+        fs::remove_file(&review_file).unwrap();
+        let input = root.join("architecture-input.json");
+        fs::write(
+            &input,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "architecture": {
+                    "reviewer": {"adapter": "test", "identity": "chain-reviewer"},
+                    "verdict": "pass",
+                    "evidence_ids": ["candidate-evidence-1", "positive-1", "negative-1"],
+                    "project_bindings": {
+                        "v4_product_map_root": "docs/architecture/maps",
+                        "v4_product_map_hashes": {
+                            "resource_map_hash": "sha256:resource",
+                            "function_map_hash": "sha256:function",
+                            "mainline_call_map_hash": "sha256:mainline",
+                            "verification_map_hash": "sha256:verification"
+                        }
+                    }
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        let produced = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(
+            produced.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&produced.stdout),
+            String::from_utf8_lossy(&produced.stderr)
+        );
+        let mut review: Value =
+            serde_json::from_str(&fs::read_to_string(&review_file).unwrap()).unwrap();
+        if tamper == "project_bindings" {
+            review["project_bindings"]["v4_product_map_root"] =
+                Value::String("docs/architecture/forged".into());
+        } else {
+            review["review_id"] = Value::String("review-forged".into());
+        }
+        fs::write(
+            &review_file,
+            serde_json::to_string_pretty(&review).unwrap() + "\n",
+        )
+        .unwrap();
+        let rejected = if command == "effectiveness" {
+            let effectiveness_input = root.join("effectiveness-input.json");
+            fs::write(&effectiveness_input, r#"{"effectiveness":{}}"#).unwrap();
+            run(&[
+                "produce-lifecycle-chain",
+                root_text,
+                "--module",
+                "app-core",
+                "--phase",
+                "effectiveness",
+                "--input",
+                effectiveness_input.to_str().unwrap(),
+            ])
+        } else {
+            run(&[
+                "promote-module",
+                root_text,
+                "--module",
+                "app-core",
+                "--to",
+                command,
+            ])
+        };
+        assert!(!rejected.status.success(), "unexpected success for {label}");
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains(expected_error));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn lifecycle_chain_promotion_rejects_tampered_project_promotion_gate_map() {
     let root = temp_root("lifecycle-chain-promotion-map-tamper");
     let root_text = root.to_str().unwrap();

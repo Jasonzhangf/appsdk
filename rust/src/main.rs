@@ -4365,6 +4365,62 @@ fn producer_stable_id(prefix: &str, value: &Value) -> String {
     )
 }
 
+fn lifecycle_chain_review_identity(
+    promotion_id: &str,
+    fix_candidate_id: &str,
+    reviewer: &Value,
+    verdict: &str,
+    evidence_ids: &Value,
+    project_bindings: Option<&Value>,
+) -> Value {
+    let mut identity = serde_json::json!({
+        "promotion_id": promotion_id,
+        "fix_candidate_id": fix_candidate_id,
+        "reviewer": reviewer,
+        "verdict": verdict,
+        "evidence_ids": evidence_ids
+    });
+    if let Some(bindings) = project_bindings {
+        identity["project_bindings"] = bindings.clone();
+    }
+    identity
+}
+
+fn assert_lifecycle_chain_review_identity(review: &Value) {
+    let Some(project_bindings) = review.get("project_bindings") else {
+        return;
+    };
+    if !project_bindings.is_object() {
+        fail("INVALID_REVIEW_PROJECT_BINDINGS");
+    }
+    let reviewer = review
+        .get("reviewer")
+        .filter(|value| {
+            value
+                .get("adapter")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+                && value
+                    .get("identity")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| fail("INVALID_REVIEW_RECORD"));
+    let identity = lifecycle_chain_review_identity(
+        record_str(review, "/promotion_id", "review-record.json"),
+        record_str(review, "/fix_candidate_id", "review-record.json"),
+        reviewer,
+        record_str(review, "/verdict", "review-record.json"),
+        &Value::Array(record_array(review, "/evidence_ids", "review-record.json").clone()),
+        Some(project_bindings),
+    );
+    if record_str(review, "/review_id", "review-record.json")
+        != producer_stable_id("review", &identity)
+    {
+        fail("ARCHITECTURE_REVIEW_IDENTITY_MISMATCH");
+    }
+}
+
 fn producer_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
     root.join(".appsdk")
         .join("transactions")
@@ -5668,17 +5724,18 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
         fail("ARCHITECTURE_REVIEW_VERDICT_INVALID");
     }
     let promotion_id = lifecycle_chain_promotion_id(&issue_id, module_id, &candidate_id);
-    let mut review_identity = serde_json::json!({
-        "promotion_id": promotion_id,
-        "fix_candidate_id": candidate_id,
-        "reviewer": reviewer,
-        "verdict": verdict,
-        "evidence_ids": evidence_ids
-    });
-    if let Some(bindings) = &project_bindings {
-        review_identity["project_bindings"] = bindings.clone();
-    }
-    let review_id = producer_stable_id("review", &review_identity);
+    let review_evidence_ids = serde_json::json!(evidence_ids);
+    let review_id = producer_stable_id(
+        "review",
+        &lifecycle_chain_review_identity(
+            &promotion_id,
+            &candidate_id,
+            &reviewer,
+            &verdict,
+            &review_evidence_ids,
+            project_bindings.as_ref(),
+        ),
+    );
     let mut review = serde_json::json!({
         "review_id": review_id,
         "review_kind": "architecture",
@@ -6268,6 +6325,7 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
     {
         fail("INVALID_REVIEW_RECORD");
     }
+    assert_lifecycle_chain_review_identity(review);
     if !promotion
         .get("previous_active_version")
         .map(|value| value.is_null() || value.as_str().is_some())
@@ -7146,6 +7204,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     {
         fail("ARCHITECTURE_REVIEW_INPUT_MISMATCH");
     }
+    assert_lifecycle_chain_review_identity(&review);
     assert_review_map_bindings(root, module_id, &review, &review_name);
     let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
     let baseline = evidence_by_id(root, module_id, baseline_id);

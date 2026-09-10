@@ -12483,11 +12483,6 @@ fn verified_goal_master(root: &Path) -> Result<String, String> {
     if worker["identity_valid"].as_bool() != Some(true) {
         return Err("GOAL_OWNER_IDENTITY_INVALID:verified Collab owner identity is invalid".into());
     }
-    if worker["suspected_offline"].as_bool() != Some(false) {
-        return Err(
-            "GOAL_OWNER_SUSPECTED_OFFLINE:verified Collab owner is suspected offline".into(),
-        );
-    }
 
     let master_status = collab_master_status(root)?;
     let master = master_status
@@ -12520,6 +12515,15 @@ fn verified_goal_master(root: &Path) -> Result<String, String> {
             "GOAL_OWNER_PANE_MISMATCH:context={} master={}",
             context_pane, master_pane
         ));
+    }
+    match worker["suspected_offline"].as_bool() {
+        Some(false) => {}
+        Some(true) if master_owner == owner && master["endpoint_live"].as_bool() == Some(true) => {}
+        _ => {
+            return Err(
+                "GOAL_OWNER_SUSPECTED_OFFLINE:verified Collab owner is suspected offline".into(),
+            );
+        }
     }
     Ok(owner.to_string())
 }

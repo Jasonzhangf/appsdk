@@ -10872,7 +10872,10 @@ fn goal_owner_gate_rejects_authoritative_master_mismatch() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all")
-    printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}'
+    case "${STATUS_VARIANT:-live}" in
+      stale) printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
+      *) printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+    esac
     ;;
   "master status")
     printf '%s\n' "{\"master\":{\"worker_id\":\"${MASTER_WORKER:-master-peer}\",\"endpoint_live\":${MASTER_LIVE:-true},\"pane\":\"${MASTER_PANE:-%42}\"}}"
@@ -10880,6 +10883,7 @@ case "$1 $2" in
   "context ")
     printf '%s\n' "{\"identity\":{\"worker_id\":\"master-peer\",\"pane\":\"${CONTEXT_PANE:-%42}\"}}"
     ;;
+  "notify status") printf '%s\n' '{"subscriptions":[]}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"owner-gate-sub"}' ;;
   *) exit 64 ;;
 esac
@@ -10915,12 +10919,14 @@ esac
     assert_eq!(offline_master.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&offline_master.stderr).contains("GOAL_OWNER_MASTER_NOT_LIVE"));
 
-    let valid = run(&[]);
+    let stale_master_projection = run(&[("STATUS_VARIANT", "stale")]);
     assert!(
-        valid.status.success(),
+        stale_master_projection.status.success(),
         "{}",
-        String::from_utf8_lossy(&valid.stderr)
+        String::from_utf8_lossy(&stale_master_projection.stderr)
     );
+    let stale_payload: Value = serde_json::from_slice(&stale_master_projection.stdout).unwrap();
+    assert_eq!(stale_payload["active"], true);
 
     fs::remove_dir_all(root).unwrap();
 }

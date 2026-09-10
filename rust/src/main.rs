@@ -5601,19 +5601,13 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     let candidate_commit = producer_string(&candidate, "/head_commit", "fix-candidate-record.json");
     let candidate_tree = producer_string(&candidate, "/tree_hash", "fix-candidate-record.json");
     let scope_hash = producer_string(&candidate, "/scope_hash", "fix-candidate-record.json");
-    if git_value(
+    assert_lifecycle_chain_candidate_at_head(
         root,
-        &["rev-parse", "HEAD"],
-        "PRODUCER_HEAD_COMMIT_UNAVAILABLE",
-    ) != candidate_commit
-        || git_value(
-            root,
-            &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
-            "PRODUCER_CANDIDATE_TREE_UNAVAILABLE",
-        ) != candidate_tree
-    {
-        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
-    }
+        &project,
+        module_id,
+        &candidate_commit,
+        &candidate_tree,
+    );
     let evidence_ids = lifecycle_chain_required_array(
         &observation,
         "/evidence_ids",
@@ -5732,19 +5726,13 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
     let candidate_commit = producer_string(&candidate, "/head_commit", "fix-candidate-record.json");
     let candidate_tree = producer_string(&candidate, "/tree_hash", "fix-candidate-record.json");
     let scope_hash = producer_string(&candidate, "/scope_hash", "fix-candidate-record.json");
-    if git_value(
+    assert_lifecycle_chain_candidate_at_head(
         root,
-        &["rev-parse", "HEAD"],
-        "PRODUCER_HEAD_COMMIT_UNAVAILABLE",
-    ) != candidate_commit
-        || git_value(
-            root,
-            &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
-            "PRODUCER_CANDIDATE_TREE_UNAVAILABLE",
-        ) != candidate_tree
-    {
-        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
-    }
+        &project,
+        module_id,
+        &candidate_commit,
+        &candidate_tree,
+    );
     let fixed_id = producer_string(
         &observation,
         "/fixed_replay_evidence_id",
@@ -6418,6 +6406,65 @@ fn assert_candidate_source_identity(root: &Path, module: &Value, candidate_commi
         .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
     if !untracked.status.success() || !untracked.stdout.is_empty() {
         fail("CANDIDATE_CONTROLLED_SOURCE_DRIFT");
+    }
+}
+
+fn assert_lifecycle_chain_candidate_at_head(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    candidate_commit: &str,
+    candidate_tree: &str,
+) {
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("UNKNOWN_MODULE:{}", module_id)));
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "PRODUCER_CANDIDATE_TREE_UNAVAILABLE",
+    ) != candidate_tree
+    {
+        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
+    }
+    let head_commit = git_value(
+        root,
+        &["rev-parse", "HEAD"],
+        "PRODUCER_HEAD_COMMIT_UNAVAILABLE",
+    );
+    let ancestry = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            candidate_commit,
+            &head_commit,
+        ])
+        .status()
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    if !ancestry.success() {
+        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
+    }
+    assert_candidate_source_identity(root, module, candidate_commit);
+    let changed = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-only", candidate_commit, &head_commit])
+        .output()
+        .unwrap_or_else(|_| fail("CANDIDATE_SOURCE_GIT_UNAVAILABLE"));
+    if !changed.status.success()
+        || String::from_utf8_lossy(&changed.stdout)
+            .lines()
+            .any(|path| !path.starts_with(".appsdk/records/"))
+    {
+        fail("LIFECYCLE_CHAIN_CANDIDATE_DRIFT");
     }
 }
 

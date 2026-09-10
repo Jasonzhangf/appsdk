@@ -614,6 +614,100 @@ fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn prepare_lifecycle_chain_fixture(root: &PathBuf) {
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(root);
+    let goal_file = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_file).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_file,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    pin_test_lock(root_text);
+    for stage in ["source_implemented", "contract_bound"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    assert!(run(&["compile", root_text]).status.success());
+    for stage in ["compiled", "controlled_verified"] {
+        assert!(run(&["promote", root_text, "--to", stage]).status.success());
+    }
+    for stage in ["contract_bound", "compiled", "controlled_verified"] {
+        assert!(run(&[
+            "promote-module",
+            root_text,
+            "--module",
+            "app-core",
+            "--to",
+            stage,
+        ])
+        .status
+        .success());
+    }
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("generated/modules/app-core/module.compiled.json")).unwrap(),
+    )
+    .unwrap();
+    let artifact_hash = artifact["artifact_hash"].as_str().unwrap();
+    write_records(root, "app-core", artifact_hash, false, "issue-1");
+}
+
+#[test]
+fn lifecycle_chain_accepts_committed_candidate_records() {
+    let root = temp_root("lifecycle-chain-record-commit");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("review-record-app-core.json")).unwrap();
+    fs::remove_file(records.join("effectiveness-record-app-core.json")).unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", ".appsdk/records"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "lifecycle records"])
+        .status()
+        .unwrap()
+        .success());
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"chain-reviewer"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let architecture = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        architecture.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&architecture.stdout),
+        String::from_utf8_lossy(&architecture.stderr)
+    );
+    assert!(records.join("review-record-app-core.json").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn lifecycle_record_producer_rejects_drifted_project_map_before_records() {
     let root = temp_root("lifecycle-record-producer-map-drift");

@@ -524,6 +524,32 @@ fn install_bundle_resources(root: &Path) {
     atomic_write_json(&record_path, &record, "SDK_RESOURCE_RECORD_WRITE_FAILED");
 }
 
+fn reconcile_authoring_bundle_manifest(root: &Path) {
+    let authoring = root.join("contracts/sdk-bundle.manifest.json");
+    if !authoring.exists() {
+        return;
+    }
+    assert_no_symlink_components(root, &authoring, "sdk_authoring_bundle_manifest");
+    let installed = root.join(".appsdk/contracts/sdk-bundle.manifest.json");
+    assert_no_symlink_components(root, &installed, "sdk_installed_bundle_manifest");
+    let authoring_value: Value = serde_json::from_slice(
+        &fs::read(&authoring).unwrap_or_else(|_| fail("SDK_AUTHORING_BUNDLE_MIRROR_READ_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("SDK_AUTHORING_BUNDLE_MIRROR_INVALID"));
+    let installed_value: Value = serde_json::from_slice(
+        &fs::read(&installed).unwrap_or_else(|_| fail("SDK_INSTALLED_BUNDLE_MIRROR_READ_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("SDK_INSTALLED_BUNDLE_MIRROR_INVALID"));
+    if authoring_value != installed_value {
+        fail("SDK_AUTHORING_BUNDLE_MIRROR_DRIFT");
+    }
+    atomic_write_bytes(
+        &authoring,
+        SDK_BUNDLE_MANIFEST.as_bytes(),
+        "SDK_AUTHORING_BUNDLE_MIRROR_WRITE_FAILED",
+    );
+}
+
 fn fail(message: impl AsRef<str>) -> ! {
     eprintln!("{}", message.as_ref());
     std::process::exit(1);
@@ -9973,6 +9999,7 @@ fn pin_lock(root: &Path, binary: &Path) {
     {
         fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
     }
+    reconcile_authoring_bundle_manifest(root);
     if matches!(project_version, "0.1.3" | "0.1.4") {
         write_legacy_migration_step(root, project_version);
         project["sdk"]["version"] = Value::String("0.1.5".into());

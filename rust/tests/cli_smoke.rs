@@ -2623,6 +2623,101 @@ fn pin_lock_migrates_stale_project_record_contracts() {
 }
 
 #[test]
+fn pin_lock_reconciles_matching_authoring_bundle_mirror() {
+    let root = temp_root("pin-lock-authoring-bundle-mirror");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["sdk"]["version"] = Value::String("0.1.5".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    install_legacy_governance_maps(&root);
+
+    let previous_manifest = serde_json::json!({
+        "schema_version": 1,
+        "sdk": "appsdk",
+        "version": "0.1.5",
+        "runtime_entrypoint": "rust-binary"
+    });
+    fs::create_dir_all(root.join("contracts")).unwrap();
+    let previous_bytes = serde_json::to_vec_pretty(&previous_manifest).unwrap();
+    fs::write(
+        root.join("contracts/sdk-bundle.manifest.json"),
+        &previous_bytes,
+    )
+    .unwrap();
+    fs::write(
+        root.join(".appsdk/contracts/sdk-bundle.manifest.json"),
+        &previous_bytes,
+    )
+    .unwrap();
+
+    let migrated = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("contracts/sdk-bundle.manifest.json")).unwrap(),
+        include_str!("../../contracts/sdk-bundle.manifest.json")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_drifted_authoring_bundle_mirror_before_migration() {
+    let root = temp_root("pin-lock-authoring-bundle-drift");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    project["sdk"]["version"] = Value::String("0.1.5".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    install_legacy_governance_maps(&root);
+
+    fs::create_dir_all(root.join("contracts")).unwrap();
+    fs::write(
+        root.join("contracts/sdk-bundle.manifest.json"),
+        br#"{"schema_version":1,"sdk":"appsdk","version":"0.1.5","runtime_entrypoint":"rust-binary"}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join(".appsdk/contracts/sdk-bundle.manifest.json"),
+        br#"{"schema_version":1,"sdk":"appsdk","version":"0.1.5","runtime_entrypoint":"other"}
+"#,
+    )
+    .unwrap();
+    let original_project = fs::read_to_string(&project_file).unwrap();
+    let rejected = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SDK_AUTHORING_BUNDLE_MIRROR_DRIFT"));
+    assert_eq!(fs::read_to_string(&project_file).unwrap(), original_project);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn migrated_project_verifies_without_local_sdk_witness_or_binary_digest_match() {
     let root = temp_root("global-sdk-no-local-witness");
     let root_text = root.to_str().unwrap();

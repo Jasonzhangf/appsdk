@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/communication/communication-event.schema.json",
+  "type": "object",
+  "required": ["protocol", "eventId", "at", "kind", "data"],
+  "properties": {
+    "protocol": {"const": "appsdk-comm/v1"},
+    "eventId": {"type": "string", "minLength": 1},
+    "at": {"type": "string", "format": "date-time"},
+    "kind": {
+      "enum": [
+        "scope.registered",
+        "scope.unregistered",
+        "adapter.registered",
+        "agent.registered",
+        "agent.refreshed",
+        "agent.state",
+        "message.created",
+        "message.state",
+        "notification.queued",
+        "notification.emitted",
+        "notification.batch_emitted",
+        "notification.delivery_failed",
+        "wakeup.updated",
+        "wakeup.reminder",
+        "bug.reported",
+        "bug.updated",
+        "loop.created",
+        "loop.updated",
+        "error.recorded"
+      ]
+    },
+    "data": {"type": "object"}
+  },
+  "additionalProperties": false
+}

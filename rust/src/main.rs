@@ -22,6 +22,8 @@ mod memory;
 use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, POLICY};
 use long_horizon_role::execution_role;
 
+mod communication;
+
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_MAP_MIGRATION_MANIFEST: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
@@ -42,6 +44,21 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/project.schema.json",
         "contracts",
         include_str!("../../contracts/project.schema.json"),
+    ),
+    (
+        "contracts/communication/communication-request.schema.json",
+        "contracts",
+        include_str!("../../contracts/communication/communication-request.schema.json"),
+    ),
+    (
+        "contracts/communication/communication-event.schema.json",
+        "contracts",
+        include_str!("../../contracts/communication/communication-event.schema.json"),
+    ),
+    (
+        "contracts/communication/communication-capabilities.schema.json",
+        "contracts",
+        include_str!("../../contracts/communication/communication-capabilities.schema.json"),
     ),
     (
         "contracts/development-scenarios.manifest.json",
@@ -232,6 +249,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "docs/design/appsdk-project-integration.md",
         "docs",
         include_str!("../../docs/design/appsdk-project-integration.md"),
+    ),
+    (
+        "docs/design/apps-sdk-communication.md",
+        "docs",
+        include_str!("../../docs/design/apps-sdk-communication.md"),
     ),
     (
         "docs/design/fix-lifecycle-v2.md",
@@ -14503,6 +14525,11 @@ fn main() {
                 fail("USAGE: appsdk prepare [workspace]");
             }
             prepare_project(&workspace);
+        }
+        Some("communication") | Some("comm") => {
+            if let Err(error) = communication::run_cli(args.collect()) {
+                fail(error.to_string());
+            }
         }
         _ => fail(CLI_USAGE),
     }

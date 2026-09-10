@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/communication/communication-request.schema.json",
+  "type": "object",
+  "required": ["op"],
+  "properties": {
+    "op": {
+      "enum": [
+        "capabilities",
+        "status",
+        "register_adapter",
+        "register_scope",
+        "register_agent",
+        "refresh_agent",
+        "send",
+        "set_agent_state",
+        "tick",
+        "flush_notifications",
+        "report_bug",
+        "update_bug",
+        "create_loop",
+        "advance_loop",
+        "record_error"
+      ]
+    },
+    "address": {"$ref": "#/$defs/address"},
+    "message": {"$ref": "#/$defs/message"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "agent": {"$ref": "#/$defs/agent"},
+    "adapter": {"$ref": "#/$defs/adapter"},
+    "actor": {"$ref": "#/$defs/address"},
+    "loopId": {"type": "string", "minLength": 1},
+    "evidence": {"type": "object", "minProperties": 1},
+    "priority": {"$ref": "#/$defs/priority"},
+    "deliveryMode": {"$ref": "#/$defs/deliveryMode"}
+  },
+  "$defs": {
+    "address": {
+      "type": "object",
+      "required": ["scopeId", "sessionId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+    "deliveryMode": {"enum": ["direct", "idle", "batched"]},
+    "message": {
+      "type": "object",
+      "required": ["from", "to", "title", "priority", "body"],
+      "properties": {
+        "from": {"$ref": "#/$defs/address"},
+        "to": {"$ref": "#/$defs/address"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"$ref": "#/$defs/priority"},
+        "body": {"type": "string", "minLength": 1},
+        "deliveryMode": {"$ref": "#/$defs/deliveryMode"},
+        "coalesceKey": {"type": "string", "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "conversationId": {"type": ["string", "null"]},
+        "messageId": {"type": ["string", "null"]},
+        "createdAt": {"type": ["string", "null"]},
+        "adapterId": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["scopeId", "appserverId", "namespace", "endpoint", "projectRoot"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "appserverId": {"type": "string", "minLength": 1},
+        "namespace": {"enum": ["codex_app", "codex_tui"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "projectRoot": {"type": "string", "minLength": 1},
+        "sessionIds": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "required": ["scopeId", "sessionId", "agentId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1},
+        "agentId": {"type": "string", "minLength": 1},
+        "role": {"enum": ["master", "peer", "subagent"]},
+        "masterGrant": {"type": ["string", "null"]},
+        "parent": {"$ref": "#/$defs/address"},
+        "leaseMs": {"type": ["integer", "null"], "minimum": 1000}
+      },
+      "additionalProperties": false
+    },
+    "adapter": {
+      "type": "object",
+      "required": ["adapterId", "kind"],
+      "properties": {
+        "adapterId": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["mailbox", "tmux", "appserver"]},
+        "target": {"type": ["string", "null"]},
+        "enabled": {"type": ["boolean", "null"]},
+        "execute": {"type": ["boolean", "null"]},
+        "recipient": {"$ref": "#/$defs/address"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

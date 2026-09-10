@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/communication/communication-capabilities.schema.json",
+  "type": "object",
+  "required": [
+    "protocol",
+    "execution",
+    "query",
+    "namespaces",
+    "roles",
+    "routeRules",
+    "deliveryStates",
+    "notification",
+    "facts",
+    "adapters",
+    "adapterBinding",
+    "completionEvidence"
+  ],
+  "properties": {
+    "protocol": {"const": "appsdk-comm/v1"},
+    "execution": {"type": "array", "items": {"type": "string"}},
+    "query": {"type": "array", "items": {"type": "string"}},
+    "namespaces": {"const": ["codex_app", "codex_tui"]},
+    "roles": {"const": ["master", "peer", "subagent"]},
+    "routeRules": {"type": "array", "items": {"type": "string"}},
+    "deliveryStates": {"type": "array", "items": {"type": "string"}},
+    "notification": {
+      "type": "object",
+      "required": ["batchWindowSeconds", "masterReminderLimit", "p0Breakthrough"],
+      "properties": {
+        "batchWindowSeconds": {"const": 120},
+        "masterReminderLimit": {"const": 3},
+        "p0Breakthrough": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "facts": {
+      "type": "object",
+      "required": ["format", "path", "projection"],
+      "properties": {
+        "format": {"const": "jsonl"},
+        "path": {"const": ".appsdk-control/communication/mailbox.jsonl"},
+        "projection": {"const": "replayed"},
+        "lock": {"const": "exclusive-command-lifecycle"}
+      },
+      "additionalProperties": false
+    },
+    "adapters": {"const": ["mailbox", "tmux", "appserver"]},
+    "adapterBinding": {"const": "recipient-address"},
+    "completionEvidence": {
+      "type": "object",
+      "required": ["bug", "loop"],
+      "properties": {
+        "bug": {"const": ["fix", "verification", "merge"]},
+        "loop": {"const": ["gate", "verification"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

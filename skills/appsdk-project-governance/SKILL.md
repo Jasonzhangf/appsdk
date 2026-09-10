@@ -24,6 +24,20 @@ when useful. Missing auxiliary state does not fail independent development.
 Default flow: understand goal/scope → implement → relevant verification →
 review → authorized delivery. Require applicable quality, safety and evidence
 integrity gates; do not turn every available command into a mandatory phase.
+- External AppSDK: compiler, CLI, schemas, harness, adapters, immutable rules.
+- `.appsdk/`: committed project governance contract, maps, goal, records, verification, and `sdk.lock`.
+- `.appsdk-control/`: ignored local run state, review cache, temporary harness output, and worker state.
+- `playground/`: mutable experiment source.
+- `active/lib/`: immutable consumable library.
+- `protected/`: frozen source, contracts, and history.
+- `generated/` or the project-declared artifact root: compiler output only; never hand-edit.
+- AppSDK communication control: `appsdk::communication` owns the stable `appsdk-comm/v1`
+  request/event/capabilities contracts and the replayed notification/Loop projections.
+  Keep `.appsdk-control/communication/mailbox.jsonl` local and ignored; host integrations
+  select a registered adapter (mailbox, tmux, or appserver) instead of copying transport
+  logic into a project. tmux/appserver adapters must bind their target to a registered
+ recipient. Detailed route, batching, wakeup, receipt, and Bug/Loop gate semantics live in
+ [`docs/design/apps-sdk-communication.md`](../../docs/design/apps-sdk-communication.md).
 
 Run project commands from project cwd. An explicit optional project path is for
 operators intentionally working elsewhere; no project-root environment variable.

@@ -3087,6 +3087,22 @@ impl CommunicationStore {
                         "delivery attempt id does not match attempt record",
                     ));
                 }
+                if !matches!(
+                    attempt.operation.as_str(),
+                    "notification.emitted" | "notification.batch_emitted"
+                ) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "delivery attempt operation is unsupported",
+                    ));
+                }
+                if (attempt.operation == "notification.batch_emitted") != attempt.batch_id.is_some()
+                {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "delivery attempt batch id does not match operation",
+                    ));
+                }
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new(
@@ -3136,17 +3152,14 @@ impl CommunicationStore {
                 let attempt_id = event
                     .data
                     .get("attemptId")
-                    .filter(|value| !value.is_null())
-                    .map(|value| {
-                        value.as_str().ok_or_else(|| {
-                            CommError::new(
-                                "event_data_invalid",
-                                "notification emitted attempt id is not a string",
-                            )
-                        })
-                    })
-                    .transpose()?;
-                let completed_attempt_id = attempt_id.map(str::to_owned);
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "notification emitted attempt id missing or is not a string",
+                        )
+                    })?;
+                let completed_attempt_id = attempt_id.to_owned();
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
@@ -3161,7 +3174,7 @@ impl CommunicationStore {
                             })?;
                         validate_terminal_attempt(
                             notification,
-                            attempt_id,
+                            Some(attempt_id),
                             "notification.emitted",
                         )?;
                         notification.status = "emitted".into();
@@ -3171,11 +3184,9 @@ impl CommunicationStore {
                             notification.transport_receipt = Some(receipt);
                         }
                     }
-                    if let Some(attempt_id) = completed_attempt_id.as_ref() {
-                        self.projection
-                            .completed_attempts
-                            .insert(key.into(), attempt_id.clone());
-                    }
+                    self.projection
+                        .completed_attempts
+                        .insert(key.into(), completed_attempt_id.clone());
                 }
             }
             "notification.batch_emitted" => {
@@ -3204,17 +3215,14 @@ impl CommunicationStore {
                 let attempt_id = event
                     .data
                     .get("attemptId")
-                    .filter(|value| !value.is_null())
-                    .map(|value| {
-                        value.as_str().ok_or_else(|| {
-                            CommError::new(
-                                "event_data_invalid",
-                                "notification batch attempt id is not a string",
-                            )
-                        })
-                    })
-                    .transpose()?;
-                let completed_attempt_id = attempt_id.map(str::to_owned);
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "notification batch attempt id missing or is not a string",
+                        )
+                    })?;
+                let completed_attempt_id = attempt_id.to_owned();
                 for value in keys {
                     let key = value.as_str().ok_or_else(|| {
                         CommError::new("event_data_invalid", "notification key is not a string")
@@ -3238,7 +3246,7 @@ impl CommunicationStore {
                         };
                         validate_terminal_attempt(
                             notification,
-                            attempt_id,
+                            Some(attempt_id),
                             "notification.batch_emitted",
                         )?;
                         notification.status = "emitted".into();
@@ -3248,11 +3256,9 @@ impl CommunicationStore {
                             notification.transport_receipt = Some(receipt);
                         }
                     }
-                    if let Some(attempt_id) = completed_attempt_id.as_ref() {
-                        self.projection
-                            .completed_attempts
-                            .insert(key.into(), attempt_id.clone());
-                    }
+                    self.projection
+                        .completed_attempts
+                        .insert(key.into(), completed_attempt_id.clone());
                 }
                 self.projection.batches.push(batch);
             }
@@ -3354,17 +3360,22 @@ impl CommunicationStore {
                 let operation = event
                     .data
                     .get("operation")
-                    .filter(|value| !value.is_null())
-                    .map(|value| {
-                        value.as_str().ok_or_else(|| {
-                            CommError::new(
-                                "event_data_invalid",
-                                "notification failure operation is not a string",
-                            )
-                        })
-                    })
-                    .transpose()?
-                    .unwrap_or("notification.delivery_failed");
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "notification failure operation missing or is not a string",
+                        )
+                    })?;
+                if !matches!(
+                    operation,
+                    "notification.emitted" | "notification.batch_emitted"
+                ) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "notification failure operation is unsupported",
+                    ));
+                }
                 let error: ErrorRecord = decode(
                     event.data.get("error").unwrap_or(&Value::Null),
                     "notification failure error",
@@ -3866,6 +3877,14 @@ fn is_valid_loop_evidence_value(value: &Value) -> bool {
         }
         Value::Object(values) => {
             if values.is_empty() {
+                return false;
+            }
+            let has_result_field = [
+                "status", "result", "outcome", "state", "passed", "success", "ok", "verified",
+            ]
+            .iter()
+            .any(|key| values.contains_key(*key));
+            if !has_result_field {
                 return false;
             }
             for key in ["status", "result", "outcome", "state"] {

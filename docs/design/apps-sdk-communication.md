@@ -89,14 +89,19 @@ adapter 或宿主只知道“已尝试”时，receipt 使用 `intent` 或 `acce
   `delivered`、`executed`、`replied`、`read` 或 `consumed`。
 
 adapter 调用前先追加独立的 `notification.delivery_attempt` 事实（包含 attempt ID、操作、
-adapter 和开始时间；批量发送还包含 batch ID）。`notification.queued` 只记录通知本身，
-idle flush 不会因为开始一次投递而重复写 queued。重放要求先看到对应的 queued，再应用
-delivery attempt；缺少通知、attempt 无效或 attempt 的 adapter 与通知记录不一致时
-fail-closed。进程在这条 attempt 事实之后崩溃时，重放会把仍带有未完成 attempt 且没有
-terminal receipt 的通知投影为 `unknown`；它不能被当成成功，也不能在相同 `messageId` 的
-幂等恢复中自动重发。`notification.emitted` 或 `notification.delivery_failed` 是该次
-attempt 的终态事实：前者清除 attempt 并记录 receipt，后者清除 attempt、保留 `pending`
-和错误。
+adapter 和开始时间；批量发送还包含 batch ID）。事件顶层的 `attemptId` 必须与嵌套
+attempt 的 ID 相同；`notification.queued` 只记录通知本身，idle flush 不会因为开始一次
+投递而重复写 queued。重放要求先看到对应的 queued，再应用 delivery attempt；缺少通知、
+attempt 无效或 attempt 的 adapter 与通知记录不一致时 fail-closed。
+
+`notification.emitted` 和 `notification.batch_emitted` 都必须带本次 attempt 的顶层
+`attemptId`，重放时必须与待完成 attempt 相同；缺失、错配或在没有对应 attempt 时出现的
+终态事实都会 fail-closed。`notification.delivery_failed` 必须记录实际操作；只有适配器调用
+已经开始时才带 `attemptId`，此时同样必须与待完成 attempt 相同。适配器解析、绑定等调用前
+失败没有 delivery attempt，可以只保留 operation 和错误事实。进程在 attempt 事实之后崩溃时，
+重放会把仍带有未完成 attempt 且没有 terminal receipt 的通知投影为 `unknown`；它不能被当成
+成功，也不能在相同 `messageId` 的幂等恢复中自动重发。终态事实清除 attempt；失败保留
+`pending` 和错误。
 
 ## 通知聚合、直达和唤醒
 
@@ -191,8 +196,8 @@ projection；变更返回投影和本次写入的事实 ID。
 - 相同 `messageId` 的 crash-prefix 重试覆盖“只有 created”和“created + accepted”，
   并确认 direct/P0 独立通知、idle 原 bucket、pending/emitted projection 和
   `message_id_conflict`。
-- completion evidence 覆盖缺失、null、false、空对象、空字符串、有效 gate/verification
-  和重开后仍存在的 `completionEvidence`。
+- completion evidence 覆盖缺失、null、false、空对象、空字符串、缺少显式结果字段、未知或
+  失败状态、有效 gate/verification 和重开后仍存在的 `completionEvidence`。
 - Bug Loop collision 覆盖无关预存 Loop：返回 `bug_loop_conflict`，不写 Bug，旧 Loop
   保持不变；合法 Bug Loop 才能幂等复用。
 - route matrix 覆盖同 scope peer、parent/subagent、master、跨 scope master，以及
@@ -200,7 +205,8 @@ projection；变更返回投影和本次写入的事实 ID。
 - direct、idle 120 秒、P0 breakthrough、按 adapter 分组的 batch、失败后 pending
   保留和 master 三次唤醒上限都有正反测试。
 - 每次真实 adapter 调用只追加一个 `notification.delivery_attempt`；idle flush 重复执行
-  不重复写 `notification.queued`，attempt 后崩溃会得到 `unknown`，不能自动重发或冒充成功。
+  不重复写 `notification.queued`，attempt 与 terminal event 的 `attemptId` 必须一致；
+  attempt 后崩溃会得到 `unknown`，不能自动重发或冒充成功。
 - `cargo` 定向通信测试、全量测试、release build、JSON Schema 语法检查和实际 CLI
   黑盒入口均绑定同一个最终 commit/tree；codexapp 未被修改，也没有外部通信实现
   编译依赖。

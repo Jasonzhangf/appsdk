@@ -350,8 +350,9 @@
     },
     "notificationEmittedEvent": {
       "type": "object",
-      "required": ["keys", "at"],
+      "required": ["attemptId", "keys", "at"],
       "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
         "keys": {
           "type": "array",
           "minItems": 1,
@@ -454,8 +455,9 @@
     },
     "deliveryAttemptEvent": {
       "type": "object",
-      "required": ["keys", "attempt"],
+      "required": ["attemptId", "keys", "attempt"],
       "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
         "keys": {
           "type": "array",
           "minItems": 1,
@@ -482,8 +484,9 @@
     },
     "notificationBatchEmittedEvent": {
       "type": "object",
-      "required": ["batch", "at"],
+      "required": ["attemptId", "batch", "at"],
       "properties": {
+        "attemptId": {"type": "string", "minLength": 1},
         "batch": {"$ref": "#/$defs/notificationBatch"},
         "notificationKeys": {
           "type": "array",
@@ -511,7 +514,7 @@
     },
     "notificationFailureEvent": {
       "type": "object",
-      "required": ["keys", "adapterId", "error"],
+      "required": ["keys", "adapterId", "operation", "error"],
       "properties": {
         "keys": {
           "type": "array",
@@ -519,7 +522,9 @@
           "items": {"type": "string", "minLength": 1}
         },
         "adapterId": {"type": "string", "minLength": 1},
+        "operation": {"enum": ["notification.emitted", "notification.batch_emitted"]},
         "error": {"$ref": "#/$defs/errorRecord"},
+        "attemptId": {"type": "string", "minLength": 1},
         "messageId": {"type": "string", "minLength": 1},
         "notificationKey": {"type": "string", "minLength": 1},
         "notificationId": {"type": "string", "minLength": 1},

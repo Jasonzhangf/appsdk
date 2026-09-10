@@ -798,6 +798,21 @@ fn worker_idle_retries_notification_after_master_registration() {
     );
     assert_eq!(retry["idempotent"], true);
     assert_eq!(retry["notification"]["message"]["state"], "accepted");
+    let message_id = retry["notification"]["message"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let repeated = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:20Z"
+        }),
+    );
+    assert_eq!(repeated["idempotent"], true);
+    assert!(repeated["notification"].is_null());
     let status = call(&root, json!({ "op": "status" }));
     assert_eq!(
         status["notificationProjection"]["pending"]
@@ -806,6 +821,61 @@ fn worker_idle_retries_notification_after_master_registration() {
             .len(),
         1
     );
+    assert_eq!(status["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(status["messages"][0]["messageId"], message_id);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worker_idle_replay_after_message_created_prefix_reuses_message_id() {
+    let root = temp_root("worker-idle-replay");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let first = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+    );
+    let message_id = first["notification"]["message"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    retain_mailbox_through(&root, "message.created");
+
+    let recovered = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:10Z"
+        }),
+    );
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(
+        recovered["notification"]["message"]["messageId"],
+        message_id
+    );
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"message.state\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 

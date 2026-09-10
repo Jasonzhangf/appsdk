@@ -1121,7 +1121,8 @@ impl CommunicationStore {
                     .notifications
                     .contains_key(&notification_key)
                 {
-                    let message = worker_idle_message(&current, master_address, &at);
+                    let message =
+                        worker_idle_message(&current, master_address, &current.last_state_at);
                     let notification = self.send(message)?;
                     return Ok(json!({
                         "agent": current,
@@ -3312,7 +3313,11 @@ fn validate_message_request(request: &MessageRequest) -> CommResult<()> {
     Ok(())
 }
 
-fn worker_idle_message(current: &AgentRecord, master_address: Address, at: &str) -> MessageRequest {
+fn worker_idle_message(
+    current: &AgentRecord,
+    master_address: Address,
+    transition_at: &str,
+) -> MessageRequest {
     MessageRequest {
         from: current.address(),
         to: master_address,
@@ -3326,10 +3331,18 @@ fn worker_idle_message(current: &AgentRecord, master_address: Address, at: &str)
         coalesce_key: Some(format!("idle:{}", current.address().key())),
         issue_id: None,
         conversation_id: None,
-        message_id: None,
-        created_at: Some(at.into()),
+        message_id: Some(worker_idle_message_id(current, transition_at)),
+        created_at: Some(transition_at.into()),
         adapter_id: None,
     }
+}
+
+fn worker_idle_message_id(current: &AgentRecord, transition_at: &str) -> String {
+    let address_key = current.address().key();
+    format!(
+        "worker-idle:{}",
+        structured_key(&[&address_key, transition_at])
+    )
 }
 
 fn message_matches_request(

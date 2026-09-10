@@ -1082,33 +1082,53 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
         let canonical: Value = serde_json::from_str(canonical_governance_map(name))
             .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name)));
         let required = canonical.get(key).unwrap().as_array().unwrap();
-        let is_required = |entry: &Value| match name {
-            "resource-map.json" => entry
-                .get("resource_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| {
-                    matches!(
-                        id,
-                        "lifecycle_record_producer_input"
-                            | "fix_worktree"
-                            | "fix_evidence_set"
-                            | "fix_reproduction"
-                    )
-                }),
-            "function-map.json" => {
-                entry.get("function_id").and_then(Value::as_str)
-                    == Some("lifecycle_record_producer")
-            }
-            "mainline-call-map.json" => {
-                entry.get("chain_id").and_then(Value::as_str)
-                    == Some("lifecycle-record-production-v1")
-            }
-            "verification-map.json" => entry
-                .get("gate_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| matches!(id, "worktree_clean" | "baseline_reproduced")),
-            _ => false,
-        };
+        let is_required =
+            |entry: &Value| match name {
+                "resource-map.json" => entry
+                    .get("resource_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        matches!(
+                            id,
+                            "lifecycle_record_producer_input"
+                                | "lifecycle_chain_producer_input"
+                                | "fix_worktree"
+                                | "fix_evidence_set"
+                                | "fix_reproduction"
+                        )
+                    }),
+                "function-map.json" => entry
+                    .get("function_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        matches!(
+                            id,
+                            "lifecycle_record_producer" | "lifecycle_chain_record_producer"
+                        )
+                    }),
+                "mainline-call-map.json" => entry
+                    .get("chain_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        matches!(
+                            id,
+                            "lifecycle-record-production-v1"
+                                | "lifecycle-record-chain-production-v1"
+                        )
+                    }),
+                "verification-map.json" => entry
+                    .get("gate_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| {
+                        matches!(
+                            id,
+                            "worktree_clean"
+                                | "baseline_reproduced"
+                                | "lifecycle_chain_record_producer"
+                        )
+                    }),
+                _ => false,
+            };
         let shares_required_identity = |candidate: &Value| {
             required.iter().any(|entry| match name {
                 "resource-map.json" => candidate.get("resource_id") == entry.get("resource_id"),

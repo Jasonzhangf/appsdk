@@ -331,6 +331,16 @@ a new evidence set and invalidates the old one. No adapter may accept a
 hand-entered hash, relabel whitebox output as blackbox output, or use an
 artifact from another worktree/project/version.
 
+For the downstream lifecycle records, the typed AppSDK adapter is
+`produce-lifecycle-chain`. It is invoked once per phase (`architecture`,
+`effectiveness`, `merge`, or `promotion`) with an observation declaration. The
+adapter reads the already-produced candidate/evidence records, rechecks their
+commit, tree, scope, expiry, and real Git/mainline identity, and computes the
+new record IDs and cross-record bindings. It does not execute a review, invent
+evidence, or treat the observation declaration as evidence. A missing or stale
+upstream record fails closed. Freeze and Active publication remain owned by the
+existing lifecycle adapter, which performs their real artifact and VCS gates.
+
 `produce-lifecycle-records` accepts a declaration containing the confirmed
 `goal_id`, the module and issue scope, bug-triage evidence, and a baseline
 command with a non-zero expected exit status plus an `expected_error_token`.

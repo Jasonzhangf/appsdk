@@ -553,6 +553,29 @@ fn lifecycle_record_producer_is_bound_in_canonical_and_embedded_maps() {
             .unwrap()["symbol_owners"]["produce_lifecycle_records"],
         "appsdk::fix_lifecycle"
     );
+    assert!(function_map["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["function_id"] == "lifecycle_chain_record_producer"));
+    assert!(resource_map["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["resource_id"] == "lifecycle_chain_producer_input"));
+    assert!(mainline_map["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["chain_id"] == "lifecycle-record-chain-production-v1"));
+    assert!(serde_json::from_str::<Value>(
+        &fs::read_to_string(root.join(".appsdk/maps/verification-map.json")).unwrap()
+    )
+    .unwrap()["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["gate_id"] == "lifecycle_chain_record_producer"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -729,6 +752,34 @@ fn lifecycle_record_producer_rejects_tampered_canonical_entry_in_each_map() {
             "gate_id",
             "worktree_clean",
             "command",
+        ),
+        (
+            "function-map.json",
+            "functions",
+            "function_id",
+            "lifecycle_chain_record_producer",
+            "owner",
+        ),
+        (
+            "mainline-call-map.json",
+            "edges",
+            "chain_id",
+            "lifecycle-record-chain-production-v1",
+            "caller",
+        ),
+        (
+            "verification-map.json",
+            "gates",
+            "gate_id",
+            "lifecycle_chain_record_producer",
+            "command",
+        ),
+        (
+            "resource-map.json",
+            "resources",
+            "resource_id",
+            "lifecycle_chain_producer_input",
+            "owner",
         ),
     ];
     for (map_name, key, id_key, id, field) in cases {

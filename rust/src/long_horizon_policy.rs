@@ -42,11 +42,54 @@ THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待
 "#,
         goal_path.display(),
         interval_str,
-        MASTER_CHARTER.trim(),
-        FLEET_RULES.trim(),
-        NOTIFY_RULES.trim(),
+        POLICY.master_charter().trim(),
+        POLICY.fleet_rules().trim(),
+        POLICY.notification_rules().trim(),
     )
 }
+
+pub(crate) struct PolicySource {
+    master_charter: &'static str,
+    fleet_rules: &'static str,
+    notification_rules: &'static str,
+    worker_charter: &'static str,
+    managed_subagent_charter: &'static str,
+    unknown_charter: &'static str,
+}
+
+impl PolicySource {
+    pub(crate) const fn new() -> Self {
+        Self {
+            master_charter: MASTER_CHARTER,
+            fleet_rules: FLEET_RULES,
+            notification_rules: NOTIFY_RULES,
+            worker_charter: WORKER_CHARTER,
+            managed_subagent_charter: SUBAGENT_CHARTER,
+            unknown_charter: UNKNOWN_CHARTER,
+        }
+    }
+
+    pub(crate) const fn master_charter(&self) -> &'static str {
+        self.master_charter
+    }
+    pub(crate) const fn fleet_rules(&self) -> &'static str {
+        self.fleet_rules
+    }
+    pub(crate) const fn notification_rules(&self) -> &'static str {
+        self.notification_rules
+    }
+    pub(crate) const fn worker_charter(&self) -> &'static str {
+        self.worker_charter
+    }
+    pub(crate) const fn managed_subagent_charter(&self) -> &'static str {
+        self.managed_subagent_charter
+    }
+    pub(crate) const fn unknown_charter(&self) -> &'static str {
+        self.unknown_charter
+    }
+}
+
+pub(crate) const POLICY: PolicySource = PolicySource::new();
 
 const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务不是写代码，而是调度：
 
@@ -126,16 +169,16 @@ impl ExecutionRole {
 
     pub(crate) fn charter(self) -> &'static str {
         match self {
-            Self::Master => MASTER_CHARTER,
-            Self::Worker => WORKER_CHARTER,
-            Self::ManagedSubagent => SUBAGENT_CHARTER,
-            Self::Unknown => UNKNOWN_CHARTER,
+            Self::Master => POLICY.master_charter(),
+            Self::Worker => POLICY.worker_charter(),
+            Self::ManagedSubagent => POLICY.managed_subagent_charter(),
+            Self::Unknown => POLICY.unknown_charter(),
         }
     }
 
     pub(crate) fn fleet_rules(self) -> &'static str {
         match self {
-            Self::Master => FLEET_RULES,
+            Self::Master => POLICY.fleet_rules(),
             Self::Worker | Self::ManagedSubagent | Self::Unknown => "",
         }
     }
@@ -152,7 +195,7 @@ mod tests {
         assert!(prompt.contains("你是本项目的 master"));
         assert!(prompt.contains("Worker / subagent 处理规则"));
         assert!(prompt.contains("通知处理准则"));
-        assert_eq!(ExecutionRole::Master.fleet_rules(), FLEET_RULES);
+        assert_eq!(ExecutionRole::Master.fleet_rules(), POLICY.fleet_rules());
         assert!(ExecutionRole::Worker.fleet_rules().is_empty());
         assert_ne!(
             ExecutionRole::Master.charter(),

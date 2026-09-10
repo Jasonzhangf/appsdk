@@ -16,9 +16,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod guidance;
 mod long_horizon_policy;
+mod long_horizon_role;
 mod memory;
 
-use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, NOTIFY_RULES};
+use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, POLICY};
+use long_horizon_role::execution_role;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_MAP_MIGRATION_MANIFEST: &str =
@@ -11108,123 +11110,6 @@ fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("GOAL_DURATION_OVERFLOW:{}", s))
 }
 
-/// The role must come from verified Collab identity. If context or status does
-/// not prove the current peer, AppSDK must not fall back to a master brief.
-fn collab_context(root: &Path) -> Result<Value, String> {
-    let mut command = Command::new("collab");
-    command.arg("context").current_dir(root);
-    let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
-        .map_err(|error| format!("COLLAB_CONTEXT_UNAVAILABLE:{}", error))?;
-    if !out.status.success() {
-        return Err(format!(
-            "COLLAB_CONTEXT_FAILED:exit={}",
-            out.status.code().unwrap_or(1)
-        ));
-    }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|error| format!("COLLAB_CONTEXT_JSON_INVALID:{}", error))
-}
-
-fn collab_master_matches_context(root: &Path, peer: &str, context: &Value) -> Option<bool> {
-    let master_status = match collab_master_status(root) {
-        Ok(status) => status,
-        Err(_) => return None,
-    };
-    let master = match master_status
-        .get("master")
-        .filter(|value| value.is_object())
-    {
-        Some(master) => master,
-        None => return None,
-    };
-    let master_peer = match master["worker_id"]
-        .as_str()
-        .filter(|id| !id.trim().is_empty())
-    {
-        Some(peer) => peer,
-        None => return None,
-    };
-    if master["endpoint_live"].as_bool() != Some(true) {
-        return None;
-    }
-    if master_peer != peer {
-        return Some(false);
-    }
-    let master_pane = match master["pane"]
-        .as_str()
-        .filter(|pane| !pane.trim().is_empty())
-    {
-        Some(pane) => pane,
-        None => return None,
-    };
-    let context_pane = match context["identity"]["pane"]
-        .as_str()
-        .filter(|pane| !pane.trim().is_empty())
-    {
-        Some(pane) => pane,
-        None => return None,
-    };
-    if master_pane != context_pane {
-        return None;
-    }
-    Some(true)
-}
-
-fn execution_role(root: &Path, status: &Option<Value>) -> ExecutionRole {
-    let context = match collab_context(root) {
-        Ok(context) => context,
-        Err(error) => {
-            eprintln!("{}", error);
-            return ExecutionRole::Unknown;
-        }
-    };
-    let Some(peer) = context["identity"]["worker_id"].as_str().map(str::to_owned) else {
-        return ExecutionRole::Unknown;
-    };
-
-    let Some(status) = status.as_ref() else {
-        return ExecutionRole::Unknown;
-    };
-    if let Some(subagents) = status["subagents"].as_array() {
-        if subagents.iter().any(|sub| {
-            sub["peer"].as_str() == Some(peer.as_str())
-                && sub["status"].as_str().unwrap_or("") != "closed"
-        }) {
-            return ExecutionRole::ManagedSubagent;
-        }
-    }
-
-    let Some(worker) = status["workers"].as_array().and_then(|workers| {
-        workers
-            .iter()
-            .find(|worker| worker["id"].as_str() == Some(peer.as_str()))
-    }) else {
-        return ExecutionRole::Unknown;
-    };
-    let worker_is_live = worker["endpoint_live"].as_bool() == Some(true)
-        && worker["identity_valid"].as_bool() == Some(true)
-        && worker["suspected_offline"].as_bool() == Some(false);
-    if !worker_is_live {
-        return ExecutionRole::Unknown;
-    }
-
-    let master_matches_context = collab_master_matches_context(root, &peer, &context);
-    if master_matches_context == Some(true) {
-        return ExecutionRole::Master;
-    }
-
-    match worker["role"].as_str() {
-        // Collab calls independent peers `peer`; AppSDK exposes that
-        // verified identity as the worker execution view.
-        Some("peer") | Some("worker") => ExecutionRole::Worker,
-        // A valid authoritative master status proves this peer is a worker
-        // when it names a different live master.
-        _ if master_matches_context == Some(false) => ExecutionRole::Worker,
-        // A worker record cannot establish master authority by itself.
-        _ => ExecutionRole::Unknown,
-    }
-}
-
 fn long_horizon_record(root: &Path) -> Result<Option<Value>, String> {
     let file = root.join(".appsdk-control/long-task-goal.json");
     let content = match fs::read_to_string(&file) {
@@ -12161,7 +12046,7 @@ fn longhorizon_show(root: &Path, format_json: bool) {
             "role_label": role_label,
             "charter": charter,
             "fleet_rules": fleet_rules,
-            "notification_rules": NOTIFY_RULES,
+            "notification_rules": POLICY.notification_rules(),
             "goal": {
                 "registered": record.is_some(),
                 "record_error": record_error.as_deref(),
@@ -12195,7 +12080,7 @@ fn longhorizon_show(root: &Path, format_json: bool) {
     if !fleet_rules.is_empty() {
         println!("\n{}", fleet_rules);
     }
-    println!("\n{}", NOTIFY_RULES);
+    println!("\n{}", POLICY.notification_rules());
 
     println!("\n## 1. 长程目标\n");
     if let Some(error) = record_error.as_deref() {

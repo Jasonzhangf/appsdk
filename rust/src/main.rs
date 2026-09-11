@@ -10123,6 +10123,33 @@ fn existing_init_target(workspace: &Path, project_root: Option<&str>) -> Option<
     Some(root)
 }
 
+fn canonical_init_target(workspace: &Path, project_root: Option<&str>) -> PathBuf {
+    let root = if let Some(project_root) = project_root {
+        resolve_init_target(workspace, Some(project_root))
+    } else {
+        workspace.to_path_buf()
+    };
+    assert_init_workspace_safe(&root);
+    if !root.exists() {
+        return root.canonicalize().unwrap_or(root);
+    }
+    assert_no_symlink_components(workspace, &root, "existing_init_project");
+    root.canonicalize()
+        .unwrap_or_else(|_| fail(format!("PROJECT_ROOT_MISSING:{}", root.display())))
+}
+
+fn fresh_init_recovery_pending(root: &Path) -> bool {
+    let transaction_dir = reset_transaction_dir(root);
+    match fs::symlink_metadata(&transaction_dir) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => fail(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}:{error}",
+            transaction_dir.display()
+        )),
+    }
+}
+
 fn preparation_file(workspace: &Path) -> PathBuf {
     workspace.join(".appsdk-prepare.json")
 }
@@ -10299,7 +10326,9 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         if !discard_legacy {
             fail("INIT_FRESH_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
         }
-        if !root.is_dir() || !root.join(".appsdk/project.json").is_file() {
+        if !root.is_dir()
+            || (!root.join(".appsdk/project.json").is_file() && !fresh_init_recovery_pending(root))
+        {
             fail("INIT_FRESH_REQUIRES_EXISTING_PROJECT");
         }
     }
@@ -15600,12 +15629,13 @@ fn main() {
                 fail("INIT_DISCARD_LEGACY_REQUIRES_FRESH");
             }
             let workspace_path = workspace.as_path();
-            if let Some(root) = existing_init_target(workspace_path, project_root.as_deref()) {
-                init_project(&root, fresh, discard_legacy);
+            if fresh {
+                let root = canonical_init_target(workspace_path, project_root.as_deref());
+                init_project(&root, true, discard_legacy);
+            } else if let Some(root) = existing_init_target(workspace_path, project_root.as_deref())
+            {
+                init_project(&root, false, false);
             } else {
-                if fresh {
-                    fail("INIT_FRESH_REQUIRES_EXISTING_PROJECT");
-                }
                 let (preparation, preparation_workspace) = read_init_preparation(workspace_path);
                 let prepared_root = preparation
                     .get("project_root")

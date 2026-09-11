@@ -11914,6 +11914,20 @@ fn reset_transaction_write_bytes(
     Ok(())
 }
 
+fn reset_transaction_is_marker_temp(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix("marker.staging.") else {
+        return false;
+    };
+    let mut parts = suffix.split('.');
+    let (Some(pid), Some(nonce), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !pid.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && !nonce.is_empty()
+        && nonce.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn reset_transaction_write_json(
     transaction_dir: &Path,
     target: &Path,
@@ -12081,24 +12095,80 @@ fn reset_transaction_validate_cleanup_layout(transaction_dir: &Path) -> Result<(
             )
         })?;
         let name = entry.file_name();
-        if !matches!(
-            name.to_str(),
-            Some("marker.json" | "quarantine" | "staging")
-        ) {
+        let name = name.to_str().ok_or_else(|| {
+            format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:unexpected transaction entry {}",
+                entry.path().display()
+            )
+        })?;
+        let marker_temp = reset_transaction_is_marker_temp(name);
+        if !marker_temp && !matches!(name, "marker.json" | "quarantine" | "staging") {
             return Err(format!(
                 "GOVERNANCE_RESET_CLEANUP_FAILED:unexpected transaction entry {}",
                 entry.path().display()
             ));
         }
-        if fs::symlink_metadata(entry.path())
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:transaction entry {}:{error}",
+                entry.path().display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
             return Err(format!(
                 "GOVERNANCE_RESET_CLEANUP_FAILED:symlink transaction entry {}",
                 entry.path().display()
             ));
         }
+        if marker_temp && !metadata.is_file() {
+            return Err(format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:invalid marker temporary file {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reset_transaction_remove_marker_temps(transaction_dir: &Path) -> Result<(), String> {
+    let mut entries = fs::read_dir(transaction_dir).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_CLEANUP_FAILED:transaction read {}:{error}",
+            transaction_dir.display()
+        )
+    })?;
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:transaction read {}:{error}",
+                transaction_dir.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !reset_transaction_is_marker_temp(name) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:marker temporary file {}:{error}",
+                entry.path().display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:invalid marker temporary file {}",
+                entry.path().display()
+            ));
+        }
+        fs::remove_file(entry.path()).map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:marker temporary file {}:{error}",
+                entry.path().display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -12108,6 +12178,7 @@ fn reset_transaction_cleanup_committed(transaction_dir: &Path) -> Result<(), Str
     for relative in ["quarantine", "staging"] {
         reset_transaction_remove_path(transaction_dir, &transaction_dir.join(relative))?;
     }
+    reset_transaction_remove_marker_temps(transaction_dir)?;
     reset_transaction_validate_cleanup_layout(transaction_dir)?;
     reset_transaction_remove_path(transaction_dir, &transaction_dir.join("marker.json"))?;
     match fs::remove_dir(transaction_dir) {
@@ -12127,6 +12198,7 @@ fn reset_transaction_recover_unmarked(transaction_dir: &Path) -> Result<Option<b
             transaction_dir.display()
         )
     })?;
+    let mut marker_temps = Vec::new();
     while let Some(entry) = entries.next() {
         let entry = entry.map_err(|error| {
             format!(
@@ -12144,6 +12216,21 @@ fn reset_transaction_recover_unmarked(transaction_dir: &Path) -> Result<Option<b
                     );
                 }
             }
+            Some(name) if reset_transaction_is_marker_temp(name) => {
+                let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+                    format!(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:marker temporary file {}:{error}",
+                        entry.path().display()
+                    )
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(format!(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid marker temporary file {}",
+                        entry.path().display()
+                    ));
+                }
+                marker_temps.push(entry.path());
+            }
             _ => {
                 return Err(format!(
                     "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing marker with unexpected transaction entry {}",
@@ -12151,6 +12238,14 @@ fn reset_transaction_recover_unmarked(transaction_dir: &Path) -> Result<Option<b
                 ));
             }
         }
+    }
+    for marker_temp in marker_temps {
+        fs::remove_file(&marker_temp).map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:marker temporary file {}:{error}",
+                marker_temp.display()
+            )
+        })?;
     }
     reset_transaction_remove_path(
         transaction_dir.parent().unwrap_or(transaction_dir),
@@ -12366,7 +12461,7 @@ fn reset_transaction_recover(root: &Path) -> Result<Option<bool>, String> {
             }
         }
     }
-    reset_transaction_remove_path(transaction_dir.parent().unwrap_or(root), &transaction_dir)?;
+    reset_transaction_cleanup_committed(&transaction_dir)?;
     Ok(Some(false))
 }
 

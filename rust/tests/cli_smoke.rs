@@ -646,6 +646,7 @@ fn init_fresh_recovers_after_quarantine_rename_before_marker_update() {
             + "\n",
     )
     .unwrap();
+    fs::write(transaction.join("marker.staging.123.456"), "partial\n").unwrap();
 
     let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(!recovered.status.success());
@@ -695,6 +696,7 @@ fn init_fresh_recovers_after_rollback_before_marker_update() {
             + "\n",
     )
     .unwrap();
+    fs::write(transaction.join("marker.staging.123.456"), "partial\n").unwrap();
 
     let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(!recovered.status.success());
@@ -726,6 +728,7 @@ fn init_fresh_recovers_markerless_empty_transaction() {
     ));
     fs::create_dir_all(transaction.join("quarantine")).unwrap();
     fs::create_dir_all(transaction.join("staging")).unwrap();
+    fs::write(transaction.join("marker.staging.123.456"), "partial\n").unwrap();
 
     let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(!recovered.status.success());
@@ -801,6 +804,7 @@ fn init_fresh_committed_cleanup_uses_marker_roots_after_legacy_contract_is_gone(
             + "\n",
     )
     .unwrap();
+    fs::write(transaction.join("marker.staging.123.456"), "partial\n").unwrap();
 
     let resumed = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(

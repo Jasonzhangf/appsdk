@@ -11,6 +11,30 @@ For a requested prompt, clarify material unknowns:
 5. Wait for confirmation when scope, risk, permission, or irreversible behavior is unclear.
 6. Write `docs/goals/<feature-name>-plan.md` before emitting the prompt.
 
+For an MVP→M1 migration or closeout, the plan is the single implementation
+source and must additionally bind:
+
+- the current MVP baseline and the intended M1 target;
+- the owning endpoint/project scope, allowed and forbidden paths, and the
+  authorized master/worker boundaries;
+- the legacy control-plane inventory, retained evidence, chosen preserve/reset
+  route, and exact destructive authorization (if any);
+- the five Loop parts (`Trigger`, `Work`, `Gate`, `State`, `Stop`) and the
+  per-round order `Discover → Hand off → Verify → Persist → Schedule`;
+- the AppSDK source-repository versus managed-project boundary, Codex TUI
+  identity and route evidence, two-way replay, and explicit failure/unknown
+  handling;
+- exact candidate, merge, install, daemon-restart, and deployed replay gates.
+
+Use the [AppSDK migration Skill](../../appsdk-migration/SKILL.md) for the complete
+inspect/snapshot/migrate-or-reset/rebind/restart/verify procedure. Do not copy
+that state machine into the prompt or into this reference. A prompt cannot
+register a goal or grant a role: Desktop never runs `appsdk goal subscribe`;
+only the authorized live TUI/master endpoint may register the existing plan.
+If the plan is absent, unconfirmed, or not admitted, stop before emitting a
+usable execution prompt. A periodic interval is a scheduling choice, not a
+ten-second liveness probe or permission to retry a blocked command.
+
 Use this compact output:
 
 ```text

@@ -42,6 +42,36 @@ integrity gates; do not turn every available command into a mandatory phase.
 Run project commands from project cwd. An explicit optional project path is for
 operators intentionally working elsewhere; no project-root environment variable.
 
+## SDK source repository and managed project boundary
+
+This Skill is used in two different contexts and must not blur them:
+
+- **AppSDK source repository:** a checkout containing the SDK implementation,
+  release scripts, contracts, docs, and Skills (for example, `rust/` and
+  `scripts/install-global-appsdk.sh`). Its root is an SDK development and
+  release surface. A missing `.appsdk/project.json` at that root is expected;
+  do not run `appsdk init` or `appsdk reset-governance` there merely to make the
+  SDK repository look like a consumer project. A `playground/<slug>` worktree
+  used to develop the SDK remains an SDK source worktree. Its source, Git
+  history, and release gates are governed as SDK work; any local
+  `.appsdk-control/` state is inspected as local runtime state and is not a
+  reason to delete the source repository's files.
+- **AppSDK-managed business project:** a consumer root with an explicit
+  `.appsdk/project.json` and its project-owned goal, maps, records, module
+  contracts, and `sdk.lock`. `appsdk prepare`, `init`, `verify`, `compile`,
+  promotion, freeze, and an authorized governance reset operate on this root.
+  A source repository or an arbitrary `cwd` is never treated as a business
+  project without that contract. To govern a child project inside a larger
+  checkout, first name that relative root through the preparation flow and
+  bind it in the resulting contract.
+
+The SDK source repository can still use an explicitly enabled Collab route for
+its own TUI development, but that route proves agent communication only; it
+does not create an AppSDK consumer contract or authorize a governance reset.
+Conversely, initializing a managed business project does not grant authority
+over the SDK source repository. Keep source/release evidence, project
+governance truth, and Collab runtime state in their respective owners.
+
 ## One global AppSDK binary
 
 Do not copy or select AppSDK binaries by hand. The AppSDK repository's only
@@ -65,61 +95,53 @@ An AppSDK binary install does not restart a daemon. Use the daemon's official
 maintenance command separately when the running process must load the new
 binary. Never start v2 or create a second global AppSDK entry as a workaround.
 
-## Reset legacy governance
+## Legacy governance inventory and reset boundary
 
-When an old version has left incompatible records, stale audit reports, or
-rebuildable delivery output, do not patch or hand-edit those files. In a clean
-non-`main` owner worktree, after the user explicitly authorizes discarding the
-named legacy control plane, run once:
+The canonical inspect, snapshot, freeze, reset or migrate, identity rebind,
+restart, and verify state machine belongs to the
+[AppSDK migration Skill](../appsdk-migration/SKILL.md). This project Skill only
+defines what a managed project may classify, preserve, and hand to that Skill;
+do not copy the migration state machine into this file or into a project.
 
-```bash
-appsdk reset-governance --discard-legacy
-appsdk init
-appsdk guide init --task governance-reset --mode bootstrap --module app-core
-appsdk guide compile
-appsdk verify
-appsdk compile
-```
+Before choosing a route, record an inventory of every exact path and runtime
+object in the run note. At minimum include the AppSDK contract root and its
+records/maps, `.appsdk-control/`, declared generated roots, Active/Protected,
+business source/runtime data, every Collab initialization root, daemon
+PID/socket, identity and route binding, mailbox/journal, claims, tasks, and
+worktrees. For each item record its owner, observed status, content or
+identity digest when applicable, retention class, proposed disposition, and
+the evidence that makes the classification trustworthy. A filename, stale
+screen, or successful daemon status is not an inventory decision.
 
-`reset-governance` is idempotent. It removes the old `.appsdk/` records and
-maps (including old audit/migration reports), `.appsdk-control/`, and the
-rebuildable `generated/` projection, then creates a fresh current contract and
-writes a reset record. It preserves business source, runtime data, `active/`,
-and `protected/` by default. Existing Active/Protected artifacts are not
-silently deleted; if they are obsolete, request exact paths and perform a
-separate authorized cleanup with its own evidence. Never run reset in `main`,
-on a dirty worktree, against another worker's claim, or while inventing a
-migration record. A reset is a new governance baseline, not proof that old
-delivery or review was completed.
+Choose exactly one of these routes for a managed business project:
 
-### Legacy audit and delivery output handling
+- **Preserve and migrate:** retain immutable project evidence, resolve one
+  owner for ambiguous state, and invoke the canonical migration Skill. Old
+  PASS, hashes, receipts, and review claims are historical witnesses; they are
+  never copied into a new record or treated as proof for the new binary.
+- **Reset and reinitialize:** only after the user authorizes discarding the
+  named legacy control plane, from a clean non-`main` owner worktree with no
+  competing claim. Invoke `appsdk reset-governance --discard-legacy` once
+  through the migration Skill, then initialize and rebuild the current project
+  contract from current source truth. The reset is idempotent and records the
+  reset; it does not inherit delivery, review, freeze, or deployment claims.
 
-Before reset, classify every old item; do not treat a filename as proof of
-current truth:
+Reset may remove the old `.appsdk/` records/transactions and declared
+rebuildable generated projections, plus local `.appsdk-control/` state owned by
+that managed project. It preserves business source, runtime data, `active/`,
+and `protected/` by default. Failed staging belonging to a live task must go
+through that task's retry/abort owner first. `dist/`, `.deploy/`, `build/`,
+`tmp/`, custom reports, vendor outputs, and other external paths require an
+exact-path rebuildability decision and a separate authorization/cleanup
+record.
 
-- `.appsdk/records/**`, `.appsdk/transactions/**`, and AppSDK audit/migration
-  reports are legacy control-plane state. Preserve a small inventory or
-  immutable snapshot in the run note when audit history matters; then let
-  `reset-governance --discard-legacy` remove the old control plane. Do not
-  copy old PASS, hashes, receipts, or review results into the new baseline.
-- The project-declared `governance.generated_root` and module-declared
-  rebuildable outputs are disposable delivery projections. The reset command
-  removes the declared generated root (plus the standard `generated/` root)
-  without deleting business source or published state.
-- Failed transaction staging under `.appsdk/` is removed with the discarded
-  control plane. If it belongs to a still-valid current task, use that task's
-  canonical retry/abort operation before reset; never delete staging by hand.
-- Reports or outputs outside those declared roots (`dist/`, `.deploy/`,
-  `build/`, `tmp/`, custom report folders, or vendor output) are not assumed
-  disposable. Retain them or archive them until the project owner identifies
-  the exact path as rebuildable and authorizes its separate cleanup.
-- `active/`, `protected/`, runtime data, source, and human project documents
-  are retained by reset. Removing obsolete Active/Protected or historical
-  documents requires exact paths, explicit authorization, and a separate
-  cleanup record.
-
-After reset, report removed and retained classes separately. A clean directory
-is not evidence that delivery, review, install, restart, or freeze happened.
+`.agent-collab/`, its journal/mailbox, identity tokens, daemon PID/socket,
+claims, task records, and worktrees remain Collab-owned. This Skill never
+deletes or hand-edits them to make a migration appear clean; use the Collab
+migration/recovery contract and preserve its evidence. After either route,
+report retained and removed classes separately and verify one current truth.
+A clean directory is not evidence of delivery, review, install, restart, or
+live communication.
 
 ## Working loop
 
@@ -258,6 +280,45 @@ Keep automatic communication and file/task collaboration enabled; a serial
 merge queue is required only when the project selects that integration mode.
 Its ownership and tested-integration protections remain mandatory.
 
+### SDK-source Codex TUI identity and route proof
+
+The AppSDK source repository may opt into Collab for its own TUI development,
+but source-repository communication and AppSDK consumer-project governance are
+separate facts. In the source repository, use the standalone official Collab
+registration once from the live Codex TUI pane when that route is explicitly
+enabled; do not run `appsdk init` merely to manufacture a consumer contract.
+For a managed project, the one bootstrap path remains `appsdk init .`. Never
+run either initialization twice for the same live endpoint.
+
+Identity is accepted only when the same live pane proves all of the following:
+
+1. The pane and process are live, owned by the expected TUI, and their `cwd`
+   is the intended SDK worktree or managed project root. A process listing,
+   screenshot, `TMUX_PANE` value copied from another pane, or a shared directory
+   alone is diagnostic evidence, not registration. Project scope is derived
+   from that live `cwd`; an appserver or session name cannot override it.
+2. `collab context` exposes the registered address and authority: `scopeId`,
+   stable `sessionId`, `appserverId`/namespace when supplied, project root,
+   role, `identity_valid`, and `endpoint_live`. `collab who` must show the
+   expected registered peer(s). `collab status --all` proves daemon health only;
+   it does not prove identity or a route.
+3. The global Collab daemon has one authoritative PID/socket, and the route
+   points to the same registered endpoint. A per-project or second daemon is
+   not a recovery path. `PROJECT_SCOPE_UNKNOWN`, timeout, `identity-mismatch`,
+   absent endpoint, or an unbound pane is a failed identity gate and must remain
+   visible.
+4. A two-way replay completes with separate evidence: the sender's durable
+   message/notification ID and `accepted` result, delivery/consume evidence in
+   the receiving TUI (`collab recv`), and a reply that the sender consumes.
+   Do not call mailbox append, tmux preview, `accepted`, ACK, or daemon health
+   a bidirectional reply by itself. Use a title and priority on each message.
+
+The address is the registered `scopeId/sessionId`; compression, fork, model
+name, or a changed pane does not silently preserve it. A new runtime address
+must complete the official re-registration/rebind path and a fresh route proof.
+Only an explicit user grant can make that registered peer a `master`; the SDK
+repository, TUI root, first registration, and goal text cannot grant it.
+
 ## Universal Bug Tracking & Defect Governance
 
 All user inputs—whether bug reports or new feature requests—are tracked through `appsdk bug` backed by `git-bug`.
@@ -319,6 +380,19 @@ Register complex or long-running goals with a required markdown target and perio
 appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
 ```
 - Path must point to an existing markdown file (`.md`).
+- A goal prompt is only an execution pointer to that plan; it does not contain
+  a second plan or register itself. Follow
+  [goal-prompt.md](references/goal-prompt.md) and emit the prompt only after
+  the plan exists and the goal is confirmed/admitted.
+- For an MVP→M1 migration or closeout, the referenced plan must bind the MVP
+  baseline, M1 target, owner/scope, legacy inventory and authorized route,
+  identity/route proof, the Loop's Trigger/Work/Gate/State/Stop components,
+  exact positive/negative gates, and post-merge/install/restart replay. The
+  canonical migration state machine remains in the
+  [AppSDK migration Skill](../appsdk-migration/SKILL.md).
+- Desktop must not call `appsdk goal subscribe`. Goal registration belongs to
+  the authorized live TUI/master endpoint; a prompt, appserver status, or
+  daemon health cannot substitute for that authority.
 - Master is awakened periodically to:
   1. Inspect worker states (`collab who` / `appsdk subagent status`); dispatch decomposed tasks to keep workers saturated whenever any worker is idle.
   2. Enforce AppSDK lifecycle governance across all subagent tasks.

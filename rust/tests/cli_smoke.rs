@@ -714,6 +714,37 @@ fn init_fresh_recovers_after_rollback_before_marker_update() {
 }
 
 #[test]
+fn init_fresh_recovers_markerless_empty_transaction() {
+    let root = temp_root("init-fresh-markerless-empty-transaction");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    fs::create_dir_all(transaction.join("staging")).unwrap();
+
+    let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!recovered.status.success());
+    assert!(
+        String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!transaction.exists());
+    assert!(root.join(".appsdk/project.json").is_file());
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_fresh_committed_cleanup_uses_marker_roots_after_legacy_contract_is_gone() {
     let root = temp_root("init-fresh-committed-custom-root");
     let root_text = root.to_str().unwrap();
@@ -789,7 +820,13 @@ fn init_fresh_committed_cleanup_uses_marker_roots_after_legacy_contract_is_gone(
 
 #[test]
 fn init_fresh_rejects_orphan_quarantine_when_marker_plan_is_empty() {
-    for phase in ["prepared", "committed"] {
+    for phase in [
+        "building",
+        "build_failed",
+        "preflight_failed",
+        "prepared",
+        "committed",
+    ] {
         let root = temp_root(&format!("init-fresh-orphan-quarantine-{phase}"));
         let root_text = root.to_str().unwrap();
         assert!(run(&["new", root_text]).status.success());

@@ -11616,6 +11616,13 @@ fn reset_transaction_validate_marker(
                         "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink backup {relative}"
                     ));
                 }
+                if (expected_kind == "dir" && !metadata.is_dir())
+                    || (expected_kind == "file" && !metadata.is_file())
+                {
+                    return Err(format!(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid backup kind {relative}"
+                    ));
+                }
                 true
             }
             Err(error) if error.kind() == ErrorKind::NotFound => false,
@@ -11811,6 +11818,8 @@ fn reset_transaction_validate_marker(
             }
         }
     }
+    reset_transaction_validate_quarantine_entries(&transaction_dir, values)?;
+    let early_phase = matches!(phase, "building" | "build_failed" | "preflight_failed");
     let plan_phase = matches!(
         phase,
         "prepared"
@@ -11820,11 +11829,15 @@ fn reset_transaction_validate_marker(
             | "cleanup_failed"
             | "rollback_failed"
     );
-    if plan_phase {
+    if early_phase {
+        if !reset_transaction_directory_empty(&transaction_dir.join("quarantine"))? {
+            return Err(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:early phase quarantine is not empty".into(),
+            );
+        }
+    } else if plan_phase {
         if values.is_empty() {
-            if !reset_transaction_directory_empty(&transaction_dir.join("quarantine"))?
-                || !reset_transaction_directory_empty(&transaction_dir.join("staging"))?
-            {
+            if !reset_transaction_directory_empty(&transaction_dir.join("staging"))? {
                 return Err(
                     "GOVERNANCE_RESET_RECOVERY_REQUIRED:incomplete transaction plan".into(),
                 );
@@ -11984,6 +11997,168 @@ fn reset_transaction_directory_empty(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+fn reset_transaction_validate_quarantine_entries(
+    transaction_dir: &Path,
+    values: &[Value],
+) -> Result<(), String> {
+    let quarantine = transaction_dir.join("quarantine");
+    reset_transaction_symlink_components(transaction_dir, &quarantine)?;
+    let metadata = match fs::symlink_metadata(&quarantine) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:quarantine metadata {}:{error}",
+                quarantine.display()
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid quarantine directory {}",
+            quarantine.display()
+        ));
+    }
+    let expected = values
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("target-{index}"))
+        .collect::<BTreeSet<_>>();
+    let mut entries = fs::read_dir(&quarantine).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:quarantine read {}:{error}",
+            quarantine.display()
+        )
+    })?;
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:quarantine read {}:{error}",
+                quarantine.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid quarantine entry {}",
+                entry.path().display()
+            )
+        })?;
+        let entry_metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:quarantine entry {}:{error}",
+                entry.path().display()
+            )
+        })?;
+        if entry_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink quarantine entry {}",
+                entry.path().display()
+            ));
+        }
+        if !expected.contains(name) {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:unexpected quarantine entry {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reset_transaction_validate_cleanup_layout(transaction_dir: &Path) -> Result<(), String> {
+    let mut entries = fs::read_dir(transaction_dir).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_CLEANUP_FAILED:transaction read {}:{error}",
+            transaction_dir.display()
+        )
+    })?;
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:transaction read {}:{error}",
+                transaction_dir.display()
+            )
+        })?;
+        let name = entry.file_name();
+        if !matches!(
+            name.to_str(),
+            Some("marker.json" | "quarantine" | "staging")
+        ) {
+            return Err(format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:unexpected transaction entry {}",
+                entry.path().display()
+            ));
+        }
+        if fs::symlink_metadata(entry.path())
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "GOVERNANCE_RESET_CLEANUP_FAILED:symlink transaction entry {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reset_transaction_cleanup_committed(transaction_dir: &Path) -> Result<(), String> {
+    reset_transaction_validate_cleanup_layout(transaction_dir)?;
+    for relative in ["quarantine", "staging"] {
+        reset_transaction_remove_path(transaction_dir, &transaction_dir.join(relative))?;
+    }
+    reset_transaction_validate_cleanup_layout(transaction_dir)?;
+    reset_transaction_remove_path(transaction_dir, &transaction_dir.join("marker.json"))?;
+    match fs::remove_dir(transaction_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "RESET_TRANSACTION_REMOVE_FAILED:{}:{error}",
+            transaction_dir.display()
+        )),
+    }
+}
+
+fn reset_transaction_recover_unmarked(transaction_dir: &Path) -> Result<Option<bool>, String> {
+    let mut entries = fs::read_dir(transaction_dir).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:transaction read {}:{error}",
+            transaction_dir.display()
+        )
+    })?;
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:transaction read {}:{error}",
+                transaction_dir.display()
+            )
+        })?;
+        let name = entry.file_name();
+        match name.to_str() {
+            Some("quarantine") | Some("staging") => {
+                if !reset_transaction_directory_empty(&entry.path())? {
+                    return Err(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing marker with transaction data"
+                            .into(),
+                    );
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing marker with unexpected transaction entry {}",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    reset_transaction_remove_path(
+        transaction_dir.parent().unwrap_or(transaction_dir),
+        transaction_dir,
+    )?;
+    Ok(Some(false))
+}
+
 fn reset_transaction_target_value(
     target: &ResetTransactionTarget,
     transaction_dir: &Path,
@@ -12111,6 +12286,19 @@ fn reset_transaction_recover(root: &Path) -> Result<Option<bool>, String> {
             ));
         }
     }
+    let marker_path = transaction_dir.join("marker.json");
+    match fs::symlink_metadata(&marker_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return reset_transaction_recover_unmarked(&transaction_dir)
+        }
+        Err(error) => {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}:{error}",
+                marker_path.display()
+            ))
+        }
+    }
     let marker = reset_transaction_read_marker(&transaction_dir)?;
     reset_transaction_validate_marker(root, &transaction_dir, &marker)?;
     let phase = marker
@@ -12119,7 +12307,7 @@ fn reset_transaction_recover(root: &Path) -> Result<Option<bool>, String> {
         .ok_or_else(|| "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing phase".to_string())?;
     let committed = matches!(phase, "committed" | "cleanup_failed");
     if committed {
-        reset_transaction_remove_path(transaction_dir.parent().unwrap_or(root), &transaction_dir)?;
+        reset_transaction_cleanup_committed(&transaction_dir)?;
         return Ok(Some(true));
     }
     let values = marker
@@ -12553,7 +12741,7 @@ fn reset_transaction_fresh(
             ));
         }
     }
-    fs::create_dir_all(transaction_dir.join("quarantine"))
+    fs::create_dir_all(&transaction_dir)
         .map_err(|error| format!("GOVERNANCE_RESET_TRANSACTION_CREATE_FAILED:{error}"))?;
     let transaction_id = reset_transaction_id()?;
     let empty_targets = Vec::new();
@@ -12568,6 +12756,8 @@ fn reset_transaction_fresh(
         &empty_created,
         generated_roots,
     )?;
+    fs::create_dir_all(transaction_dir.join("quarantine"))
+        .map_err(|error| format!("GOVERNANCE_RESET_TRANSACTION_CREATE_FAILED:{error}"))?;
     if let Err(error) = reset_transaction_build_staging(
         root,
         &transaction_dir,
@@ -12783,8 +12973,21 @@ fn reset_transaction_fresh(
             return Err(cleanup);
         }
     }
-    reset_transaction_remove_path(transaction_dir.parent().unwrap_or(root), &transaction_dir)
-        .map_err(|error| format!("GOVERNANCE_RESET_CLEANUP_FAILED:{error}"))
+    if let Err(error) = reset_transaction_cleanup_committed(&transaction_dir) {
+        let cleanup = format!("GOVERNANCE_RESET_CLEANUP_FAILED:{error}");
+        let _ = reset_transaction_marker(
+            &transaction_dir,
+            &transaction_id,
+            root,
+            "cleanup_failed",
+            Some(&cleanup),
+            &targets,
+            &created_dirs,
+            generated_roots,
+        );
+        return Err(cleanup);
+    }
+    Ok(())
 }
 
 fn pin_lock(root: &Path, binary: &Path) {

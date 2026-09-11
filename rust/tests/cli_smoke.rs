@@ -212,6 +212,177 @@ fn reset_governance_discards_only_control_plane_and_is_idempotent() {
 }
 
 #[test]
+fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
+    let root = temp_root("init-fresh-governance-epoch");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    fs::write(root.join("protected/history/legacy.txt"), "retain\n").unwrap();
+    fs::write(root.join("active/legacy.txt"), "retain-active\n").unwrap();
+    fs::create_dir_all(root.join("generated/legacy-output")).unwrap();
+    fs::write(root.join("generated/legacy-output/result"), "rebuild\n").unwrap();
+    let (_, _) = install_previous_bundle_migration_record(&root);
+
+    let worktree_contract = root.join("contracts/records/worktree-record.schema.json");
+    let mut stale_contract: Value =
+        serde_json::from_str(&fs::read_to_string(&worktree_contract).unwrap()).unwrap();
+    stale_contract["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bug_triage");
+    fs::write(
+        &worktree_contract,
+        serde_json::to_string_pretty(&stale_contract).unwrap() + "\n",
+    )
+    .unwrap();
+    let transition_contract = root.join("contracts/transitions/zone-transition.manifest.json");
+    fs::write(&transition_contract, "{\"stale\":true}\n").unwrap();
+    fs::write(
+        root.join(".appsdk/records/reset-governance-record.json"),
+        "{\"schema_version\":1,\"mode\":\"discard_legacy_control_plane\"}\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(String::from_utf8_lossy(&initialized.stdout).contains("fresh"));
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("protected/history/legacy.txt")).unwrap(),
+        "retain\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("active/legacy.txt")).unwrap(),
+        "retain-active\n"
+    );
+    assert!(!root.join("generated/legacy-output").exists());
+    assert!(!root
+        .join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")
+        .exists());
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&worktree_contract).unwrap()).unwrap(),
+        serde_json::from_str::<Value>(include_str!(
+            "../../contracts/records/worktree-record.schema.json"
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&transition_contract).unwrap()).unwrap(),
+        serde_json::from_str::<Value>(include_str!(
+            "../../contracts/transitions/zone-transition.manifest.json"
+        ))
+        .unwrap()
+    );
+    let reset: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reset["mode"], "fresh_init");
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_requires_explicit_legacy_discard_and_preserves_state_on_rejection() {
+    let root = temp_root("init-fresh-confirmation");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    let (_, _) = install_previous_bundle_migration_record(&root);
+    init_git(&root);
+    let migration_record =
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("INIT_FRESH_REQUIRES_DISCARD_LEGACY_CONFIRMATION"));
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        migration_record
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_refuses_main_worktree_without_mutating_governance() {
+    let root = temp_root("init-fresh-main-worktree");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "branch", "-M", "main"])
+        .status()
+        .unwrap()
+        .success());
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("RESET_REQUIRES_NON_MAIN_WORKTREE"));
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_refuses_dirty_worktree_without_mutating_governance() {
+    let root = temp_root("init-fresh-dirty-worktree");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    fs::write(root.join("uncommitted.txt"), "must remain\n").unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("RESET_REQUIRES_CLEAN_WORKTREE"));
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("uncommitted.txt")).unwrap(),
+        "must remain\n"
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_requires_an_existing_governance_project() {
+    let root = temp_root("init-fresh-missing-project");
+    let root_text = root.to_str().unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("INIT_FRESH_REQUIRES_EXISTING_PROJECT")
+    );
+    assert!(!root.exists());
+}
+
+#[test]
 fn reset_governance_init_and_compile_do_not_require_pin_lock() {
     let root = temp_root("reset-governance-unbound-lock");
     let root_text = root.to_str().unwrap();

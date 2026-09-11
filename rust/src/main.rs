@@ -10278,7 +10278,7 @@ fn initialize_collab_peer() {
     }
 }
 
-fn init_project(root: &Path) {
+fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     if root.exists()
         && fs::symlink_metadata(root)
             .map(|metadata| metadata.file_type().is_symlink())
@@ -10286,7 +10286,18 @@ fn init_project(root: &Path) {
     {
         fail(format!("TARGET_SYMLINK:{}", root.display()));
     }
+    if fresh {
+        if !discard_legacy {
+            fail("INIT_FRESH_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
+        }
+        if !root.is_dir() || !root.join(".appsdk/project.json").is_file() {
+            fail("INIT_FRESH_REQUIRES_EXISTING_PROJECT");
+        }
+    }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    if fresh {
+        reset_governance_internal(root, true, true);
+    }
     let fresh_governance = !root.join(".appsdk/project.json").is_file();
     let existing_project_needs_guidance = !fresh_governance
         && serde_json::from_str::<Value>(
@@ -10304,11 +10315,18 @@ fn init_project(root: &Path) {
     }
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
+    if fresh {
+        install_current_governance_contracts(root);
+    }
     initialize_collab_peer();
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
     }
-    println!("initialized {}", root.display());
+    if fresh {
+        println!("initialized fresh governance epoch {}", root.display());
+    } else {
+        println!("initialized {}", root.display());
+    }
     if existing_project_needs_guidance {
         println!(
             "next appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>"
@@ -10891,13 +10909,13 @@ fn write_legacy_migration_step(root: &Path, source_version: &str) {
         .unwrap_or_else(|_| fail("SDK_LEGACY_MIGRATION_WRITE_FAILED"));
 }
 
-fn install_current_record_contracts(root: &Path) {
+fn install_current_project_contracts(root: &Path, prefixes: &[&str]) {
     for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
         .iter()
-        .filter(|(path, _, _)| path.starts_with("contracts/records/"))
+        .filter(|(path, _, _)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
     {
         let target = root.join(relative);
-        assert_no_symlink_components(root, &target, "record_contract_migration");
+        assert_no_symlink_components(root, &target, "governance_contract_migration");
         let canonical: Value = serde_json::from_str(canonical)
             .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
         if !target.is_file() {
@@ -10920,6 +10938,14 @@ fn install_current_record_contracts(root: &Path) {
             "SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED",
         );
     }
+}
+
+fn install_current_record_contracts(root: &Path) {
+    install_current_project_contracts(root, &["contracts/records/"]);
+}
+
+fn install_current_governance_contracts(root: &Path) {
+    install_current_project_contracts(root, &["contracts/records/", "contracts/transitions/"]);
 }
 
 fn pin_lock(root: &Path, binary: &Path) {
@@ -11071,6 +11097,10 @@ fn reset_generated_roots(root: &Path) -> Vec<String> {
 }
 
 fn reset_governance(root: &Path, discard_legacy: bool) {
+    reset_governance_internal(root, discard_legacy, false);
+}
+
+fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool) {
     if !discard_legacy {
         fail("RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
     }
@@ -11096,7 +11126,7 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
     if branch.is_empty() || branch == "main" || branch == "master" {
         fail("RESET_REQUIRES_NON_MAIN_WORKTREE");
     }
-    if reset_record.exists() {
+    if reset_record.exists() && !fresh_init {
         println!("governance reset already applied");
         return;
     }
@@ -11138,7 +11168,11 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
         &serde_json::json!({
             "schema_version": 1,
             "reset_id": format!("reset-{}", std::process::id()),
-            "mode": "discard_legacy_control_plane",
+            "mode": if fresh_init {
+                "fresh_init"
+            } else {
+                "discard_legacy_control_plane"
+            },
             "preserved": ["business_source", "runtime_data", "active", "protected"],
             "removed": removed,
             "branch": branch,
@@ -11146,7 +11180,11 @@ fn reset_governance(root: &Path, discard_legacy: bool) {
         }),
         "GOVERNANCE_RESET_RECORD_FAILED",
     );
-    println!("governance reset applied");
+    if fresh_init {
+        println!("governance fresh init applied");
+    } else {
+        println!("governance reset applied");
+    }
 }
 
 fn locate_git_bug_binary() -> Result<PathBuf, String> {
@@ -14289,7 +14327,9 @@ fn print_cli_help(command: Option<&str>) {
         Some("reset-governance") => {
             "Usage: appsdk reset-governance [project] --discard-legacy"
         }
-        Some("init") => "Usage: appsdk init [workspace] [--project-root <relative-path>]",
+        Some("init") => {
+            "Usage: appsdk init [workspace] [--project-root <relative-path>] [--fresh --discard-legacy]"
+        }
         Some("prepare") => "Usage: appsdk prepare [workspace]",
         Some("new") => "Usage: appsdk new [project]",
         Some("memory") | Some("project-memory") => {
@@ -14669,20 +14709,51 @@ fn main() {
         }
         Some("init") => {
             let workspace = project_root_or_cwd(&mut args);
-            let project_root = match args.next().as_deref() {
-                None => None,
-                Some("--project-root") => Some(args.next().unwrap_or_else(|| {
-                    fail("USAGE: appsdk init [workspace] --project-root <relative-path>")
-                })),
-                Some(_) => fail("USAGE: appsdk init [workspace] [--project-root <relative-path>]"),
-            };
-            if args.next().is_some() {
-                fail("USAGE: appsdk init [workspace] [--project-root <relative-path>]");
+            let usage =
+                "USAGE: appsdk init [workspace] [--project-root <relative-path>] [--fresh --discard-legacy]";
+            let mut project_root = None;
+            let mut fresh = false;
+            let mut discard_legacy = false;
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--project-root" => {
+                        if project_root.is_some() {
+                            fail(usage);
+                        }
+                        let value = args.next().unwrap_or_else(|| fail(usage));
+                        if value.starts_with('-') {
+                            fail(usage);
+                        }
+                        project_root = Some(value);
+                    }
+                    "--fresh" => {
+                        if fresh {
+                            fail(usage);
+                        }
+                        fresh = true;
+                    }
+                    "--discard-legacy" => {
+                        if discard_legacy {
+                            fail(usage);
+                        }
+                        discard_legacy = true;
+                    }
+                    _ => fail(usage),
+                }
+            }
+            if fresh && !discard_legacy {
+                fail("INIT_FRESH_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
+            }
+            if discard_legacy && !fresh {
+                fail("INIT_DISCARD_LEGACY_REQUIRES_FRESH");
             }
             let workspace_path = workspace.as_path();
             if let Some(root) = existing_init_target(workspace_path, project_root.as_deref()) {
-                init_project(&root);
+                init_project(&root, fresh, discard_legacy);
             } else {
+                if fresh {
+                    fail("INIT_FRESH_REQUIRES_EXISTING_PROJECT");
+                }
                 let (preparation, preparation_workspace) = read_init_preparation(workspace_path);
                 let prepared_root = preparation
                     .get("project_root")
@@ -14698,7 +14769,7 @@ fn main() {
                     fail("PREPARATION_PROJECT_ROOT_MISMATCH");
                 }
                 let root = resolve_init_target(&preparation_workspace, Some(prepared_root));
-                init_project(&root);
+                init_project(&root, false, false);
             }
         }
         Some("prepare") => {

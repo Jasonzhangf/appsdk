@@ -4441,6 +4441,80 @@ fn assert_lifecycle_chain_review_identity(review: &Value) {
     }
 }
 
+fn assert_lifecycle_chain_review_identity_or_frozen_legacy(
+    root: &Path,
+    module_id: &str,
+    review: &Value,
+) {
+    let review_id = record_str(review, "/review_id", "review-record.json");
+    let identity_matches = review.get("project_bindings").is_none_or(Value::is_object)
+        && review
+            .get("reviewer")
+            .and_then(Value::as_object)
+            .and_then(|reviewer| {
+                Some((
+                    reviewer.get("adapter")?.as_str()?,
+                    reviewer.get("identity")?.as_str()?,
+                ))
+            })
+            .is_some_and(|(adapter, identity)| !adapter.is_empty() && !identity.is_empty())
+        && review.get("promotion_id").and_then(Value::as_str).is_some()
+        && review
+            .get("fix_candidate_id")
+            .and_then(Value::as_str)
+            .is_some()
+        && review.get("verdict").and_then(Value::as_str).is_some()
+        && review
+            .get("evidence_ids")
+            .and_then(Value::as_array)
+            .is_some()
+        && producer_stable_id(
+            "review",
+            &lifecycle_chain_review_identity(
+                review["promotion_id"].as_str().unwrap(),
+                review["fix_candidate_id"].as_str().unwrap(),
+                review.get("reviewer").unwrap(),
+                review["verdict"].as_str().unwrap(),
+                &review["evidence_ids"],
+                review.get("project_bindings"),
+            ),
+        ) == review_id;
+    if identity_matches {
+        return;
+    }
+
+    let project = read_project(root);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    if !matches!(
+        module.get("stage").and_then(Value::as_str),
+        Some("frozen" | "retired")
+    ) {
+        fail("ARCHITECTURE_REVIEW_IDENTITY_MISMATCH");
+    }
+
+    let freeze_name = module_record_name("freeze-record", module_id);
+    let freeze = read_record(root, &freeze_name);
+    let promotion_name = module_record_name("promotion-record", module_id);
+    let promotion = read_record(root, &promotion_name);
+    if record_str(&freeze, "/module_id", &freeze_name) != module_id
+        || record_str(&freeze, "/review_id", &freeze_name) != review_id
+        || record_str(&freeze, "/promotion_id", &freeze_name)
+            != record_str(&promotion, "/promotion_id", &promotion_name)
+        || record_str(&promotion, "/review_id", &promotion_name) != review_id
+        || review.get("verdict").and_then(Value::as_str) != Some("pass")
+    {
+        fail("ARCHITECTURE_REVIEW_IDENTITY_MISMATCH");
+    }
+}
+
 fn producer_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
     root.join(".appsdk")
         .join("transactions")
@@ -6222,7 +6296,12 @@ fn record_array<'a>(record: &'a Value, path: &str, name: &str) -> &'a Vec<Value>
         .unwrap_or_else(|| fail(format!("INVALID_RECORD:{}:{}", name, path)))
 }
 
-fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
+fn assert_record_schema(
+    evidence: &Value,
+    review: &Value,
+    promotion: &Value,
+    allow_legacy_rehydrate_bindings: bool,
+) {
     for (record, name, fields) in [
         (
             evidence,
@@ -6345,7 +6424,9 @@ fn assert_record_schema(evidence: &Value, review: &Value, promotion: &Value) {
     {
         fail("INVALID_REVIEW_RECORD");
     }
-    assert_lifecycle_chain_review_identity(review);
+    if !allow_legacy_rehydrate_bindings {
+        assert_lifecycle_chain_review_identity(review);
+    }
     if !promotion
         .get("previous_active_version")
         .map(|value| value.is_null() || value.as_str().is_some())
@@ -7299,7 +7380,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
             fail("ARCHITECTURE_REVIEW_EVIDENCE_MISMATCH");
         }
     }
-    assert_lifecycle_chain_review_identity(&review);
+    assert_lifecycle_chain_review_identity_or_frozen_legacy(root, module_id, &review);
     if git_value(
         root,
         &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
@@ -8242,7 +8323,12 @@ fn assert_record_graph_mode(
     let evidence = read_record(root, &evidence_name);
     let review = read_record(root, &review_name);
     let promotion = read_record(root, &promotion_name);
-    assert_record_schema(&evidence, &review, &promotion);
+    assert_record_schema(
+        &evidence,
+        &review,
+        &promotion,
+        allow_legacy_rehydrate_bindings,
+    );
     if enforce_current_lifecycle {
         if let Some(module_id) = module_id {
             assert_fix_lifecycle_graph(root, module_id, &review, &promotion, artifact);

@@ -83,22 +83,24 @@ scripts/install-global-appsdk.sh
 
 ```
 
-旧版本治理已失效或拖住开发时，在干净的非 `main` owner worktree 中，经用户明确授权后使用幂等 reset；不要手改旧 records/hash：
+旧版本治理已失效或拖住开发时，在干净的非 `main` owner worktree 中，经用户明确授权后用 fresh init 重新建立当前治理 epoch；不要手改旧 records/hash：
 
 ```bash
-appsdk reset-governance --discard-legacy
-appsdk init
+appsdk init ./existing-project --fresh --discard-legacy
 appsdk guide init --task governance-reset --mode bootstrap --module app-core
 appsdk guide compile
 appsdk verify
 appsdk compile
 ```
 
-reset 清除旧 `.appsdk/` 审计与迁移记录、`.appsdk-control/` 和可重建的
-`generated/`，保留业务源码、运行数据、`active/`、`protected/`。旧 Active/Protected
-若确实废弃，必须另行指定精确路径并授权清理。
+fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` worktree，
+并清除旧 `.appsdk/` 审计与迁移记录、`.appsdk-control/` 和声明的可重建 generated
+root，刷新当前 record/transition contracts，记录 `mode: "fresh_init"`，保留业务源码、
+运行数据、`active/`、`protected/`。普通 `appsdk init` 与底层
+`appsdk reset-governance --discard-legacy` 的既有非破坏/幂等语义保持不变；旧
+Active/Protected 若确实废弃，必须另行指定精确路径并授权清理。
 
-`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，`appsdk init` 才允许执行。`appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；在 live tmux Agent 中还通过同环境官方 `collab init` 完成 Collab/daemon/peer/default direct-message subscription 的一次性初始化。
+`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，新建或 relocated `appsdk init` 才允许执行。普通 `appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；在 live tmux Agent 中还通过同环境官方 `collab init` 完成 Collab/daemon/peer/default direct-message subscription 的一次性初始化。需要放弃旧治理 epoch 时，改用上面的显式 `--fresh --discard-legacy`，它不要求复制旧证据。
 
 治理设计：
 
@@ -115,7 +117,7 @@ reset 清除旧 `.appsdk/` 审计与迁移记录、`.appsdk-control/` 和可重�
 
 目标提示词：收到一个新开发/debug目标时，先澄清并确认目标，再写 `docs/goals/<feature-name>-plan.md`，最后输出短 `/goal`。固定规范见 [`skills/appsdk-project-governance/references/goal-prompt.md`](./skills/appsdk-project-governance/references/goal-prompt.md)。
 
-可复用 Skill：[`skills/appsdk-project-governance/SKILL.md`](./skills/appsdk-project-governance/SKILL.md)。它定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze。
+可复用 Skill：[`skills/appsdk-project-governance/SKILL.md`](./skills/appsdk-project-governance/SKILL.md) 与 [`skills/appsdk-migration/SKILL.md`](./skills/appsdk-migration/SKILL.md)。前者定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze；后者定义 preserve/migrate 或 fresh-init/reset 的迁移闭环。
 
 内部通信接口：[`docs/design/apps-sdk-communication.md`](./docs/design/apps-sdk-communication.md)。
 `appsdk communication <project> --json '<request>'` 提供稳定的 `appsdk-comm/v1`

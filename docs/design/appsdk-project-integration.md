@@ -263,6 +263,26 @@ AI 使用 `.appsdk-prepare.json` 模板向用户确认：这是新项目、模�
 创建 preparation record，也不覆盖项目合同或 lifecycle truth。新建、迁移到新 root、
 或通过 `--project-root` 创建尚不存在的治理根仍必须走 confirmed preparation。
 
+如果旧 migration witness、reset receipt 或 control-plane 记录已经阻断当前 `verify`，
+且用户明确选择“忽略历史包袱、按当前版本重新开始”，使用显式 fresh 初始化入口：
+
+```bash
+appsdk init ./existing-project --fresh --discard-legacy
+```
+
+这不是普通 `init` 的隐式行为。它只接受已有 `.appsdk/project.json` 的项目，并且必须在
+clean、非 `main`/`master` worktree 执行；缺少 `--discard-legacy`、项目不存在、主分支或
+dirty worktree 都 fail-closed，拒绝写入。命令只通过 AppSDK 的 canonical reset owner
+移除 `.appsdk/`、`.appsdk-control/` 和声明的 generated root，保留业务源码、runtime、
+`active/`、`protected/` 与人类文档，随后重建当前 `.appsdk` contract 和
+`contracts/records/**`、`contracts/transitions/**` projection，并写入
+`.appsdk/records/reset-governance-record.json`（`mode: "fresh_init"`）。
+
+fresh 初始化不会复制旧 migration witness、reset receipt、PASS、hash、review 或
+lifecycle record；新的 `verify`、`guide compile`、`compile` 和下游 candidate evidence
+必须从当前版本重新产生。重复执行仍然是一次新的、明确授权的 reset，普通 `init` 和
+`reset-governance --discard-legacy` 的既有幂等语义不变。
+
 对已有工作区，confirmed preparation 后必须先进入旧状态迁移预检：
 
 ```text

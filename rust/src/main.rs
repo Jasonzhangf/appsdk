@@ -28,6 +28,8 @@ const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manif
 const SDK_MAP_MIGRATION_MANIFEST: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
+const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
+    include_str!("../../contracts/transitions/zone-transition.manifest.json");
 const GOVERNANCE_MAP_NAMES: [&str; 4] = [
     "resource-map.json",
     "function-map.json",
@@ -128,7 +130,7 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "contracts/transitions/zone-transition.manifest.json",
         "contracts",
-        include_str!("../../contracts/transitions/zone-transition.manifest.json"),
+        CANONICAL_ZONE_TRANSITION_CONTRACT,
     ),
     (
         "contracts/lifecycle-state-machines.manifest.json",
@@ -341,6 +343,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "skills/appsdk-project-governance/references/review-delivery.md",
         "skills",
         include_str!("../../skills/appsdk-project-governance/references/review-delivery.md"),
+    ),
+    (
+        "skills/appsdk-migration/SKILL.md",
+        "skills",
+        include_str!("../../skills/appsdk-migration/SKILL.md"),
     ),
     (
         "skills/project-memory/SKILL.md",
@@ -639,12 +646,12 @@ fn bootstrap_contracts(root: &Path) {
     write_embedded_contract(
         root,
         "contracts/transitions/zone-transition-manifest.json",
-        include_str!("../../contracts/transitions/zone-transition.manifest.json"),
+        CANONICAL_ZONE_TRANSITION_CONTRACT,
     );
     write_embedded_contract(
         root,
         "contracts/transitions/zone-transition.manifest.json",
-        include_str!("../../contracts/transitions/zone-transition.manifest.json"),
+        CANONICAL_ZONE_TRANSITION_CONTRACT,
     );
     for (relative, content) in [
         (
@@ -899,10 +906,8 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     } else {
         canonical_path
     };
-    let canonical_value: Value = serde_json::from_str(include_str!(
-        "../../contracts/transitions/zone-transition.manifest.json"
-    ))
-    .unwrap_or_else(|_| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+    let canonical_value: Value = serde_json::from_str(CANONICAL_ZONE_TRANSITION_CONTRACT)
+        .unwrap_or_else(|_| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
     if canonical_project && zone_value != canonical_value {
         fail("DECLARED_ZONE_CONTRACT_MISMATCH");
     }
@@ -10296,6 +10301,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
     if fresh {
+        assert_fresh_project_contract_targets(root);
         reset_governance_internal(root, true, true);
     }
     let fresh_governance = !root.join(".appsdk/project.json").is_file();
@@ -10327,7 +10333,12 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     } else {
         println!("initialized {}", root.display());
     }
-    if existing_project_needs_guidance {
+    if fresh {
+        println!("next appsdk guide compile");
+        println!(
+            "then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>"
+        );
+    } else if existing_project_needs_guidance {
         println!(
             "next appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>"
         );
@@ -10909,43 +10920,95 @@ fn write_legacy_migration_step(root: &Path, source_version: &str) {
         .unwrap_or_else(|_| fail("SDK_LEGACY_MIGRATION_WRITE_FAILED"));
 }
 
-fn install_current_project_contracts(root: &Path, prefixes: &[&str]) {
-    for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
-        .iter()
-        .filter(|(path, _, _)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
-    {
-        let target = root.join(relative);
-        assert_no_symlink_components(root, &target, "governance_contract_migration");
-        let canonical: Value = serde_json::from_str(canonical)
-            .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
-        if !target.is_file() {
-            continue;
-        }
+fn install_current_project_contract(
+    root: &Path,
+    relative: &str,
+    canonical: &str,
+    replace_legacy: bool,
+) {
+    let target = root.join(relative);
+    assert_no_symlink_components(root, &target, "governance_contract_migration");
+    let canonical: Value = serde_json::from_str(canonical)
+        .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+    if !target.is_file() {
+        return;
+    }
+    if !replace_legacy {
         let current: Value = serde_json::from_str(
             &fs::read_to_string(&target)
                 .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED")),
         )
         .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
         if current == canonical {
-            continue;
+            return;
         }
-        let mut content = serde_json::to_vec_pretty(&canonical)
-            .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
-        content.push(b'\n');
-        atomic_write_bytes(
-            &target,
-            &content,
-            "SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED",
-        );
+    }
+    let mut content = serde_json::to_vec_pretty(&canonical)
+        .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
+    content.push(b'\n');
+    atomic_write_bytes(
+        &target,
+        &content,
+        "SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED",
+    );
+}
+
+fn install_current_project_contracts(root: &Path, prefixes: &[&str], replace_legacy: bool) {
+    for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
+        .iter()
+        .filter(|(path, _, _)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
+    {
+        install_current_project_contract(root, relative, canonical, replace_legacy);
     }
 }
 
 fn install_current_record_contracts(root: &Path) {
-    install_current_project_contracts(root, &["contracts/records/"]);
+    install_current_project_contracts(root, &["contracts/records/"], false);
+}
+
+fn assert_fresh_project_contract_target(root: &Path, relative: &str) {
+    let target = root.join(relative);
+    assert_no_symlink_components(root, &target, "governance_contract_migration");
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if !metadata.is_file() => {
+            fail(format!("GOVERNANCE_CONTRACT_NOT_FILE:{}", relative));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            fail(format!("GOVERNANCE_CONTRACT_METADATA_FAILED:{}", relative));
+        }
+        Err(_) => {}
+    }
+}
+
+fn assert_fresh_project_contract_targets(root: &Path) {
+    for &(relative, _, _) in SDK_BUNDLE_RESOURCES.iter().filter(|(path, _, _)| {
+        path.starts_with("contracts/records/") || path.starts_with("contracts/transitions/")
+    }) {
+        assert_fresh_project_contract_target(root, relative);
+    }
+    assert_fresh_project_contract_target(
+        root,
+        "contracts/transitions/zone-transition-manifest.json",
+    );
 }
 
 fn install_current_governance_contracts(root: &Path) {
-    install_current_project_contracts(root, &["contracts/records/", "contracts/transitions/"]);
+    // Fresh init intentionally replaces legacy project projections without
+    // parsing them; malformed historical JSON is part of the discarded epoch.
+    install_current_project_contracts(
+        root,
+        &["contracts/records/", "contracts/transitions/"],
+        true,
+    );
+    // Existing projects may declare the historical hyphenated transition path.
+    // Keep it as a projection of the one canonical transition contract.
+    install_current_project_contract(
+        root,
+        "contracts/transitions/zone-transition-manifest.json",
+        CANONICAL_ZONE_TRANSITION_CONTRACT,
+        true,
+    );
 }
 
 fn pin_lock(root: &Path, binary: &Path) {
@@ -11082,7 +11145,14 @@ fn reset_generated_roots(root: &Path) -> Vec<String> {
     {
         fail("INVALID_GOVERNANCE_ROOT:/governance/generated_root");
     }
-    let protected = [".appsdk", ".appsdk-control", "active", "protected"];
+    let protected = [
+        ".appsdk",
+        ".appsdk-control",
+        ".git",
+        ".agent-collab",
+        "active",
+        "protected",
+    ];
     if protected
         .iter()
         .any(|reserved| relative == *reserved || relative.starts_with(&format!("{reserved}/")))
@@ -11143,17 +11213,30 @@ fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool
     let generated_roots = reset_generated_roots(root);
     let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
     removed.extend(generated_roots.iter().cloned());
-    for relative in [".appsdk", ".appsdk-control"]
+    let reset_targets = [".appsdk", ".appsdk-control"]
         .into_iter()
         .chain(generated_roots.iter().map(String::as_str))
-    {
-        let target = root.join(relative);
-        if fs::symlink_metadata(&target)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            fail(format!("GOVERNANCE_PATH_SYMLINK:{}", relative));
+        .map(|relative| (relative.to_string(), root.join(relative)))
+        .collect::<Vec<_>>();
+    // Validate every deletion target before removing the first one. A later
+    // symlink or reserved-root failure must leave the legacy control plane
+    // untouched.
+    for (relative, target) in &reset_targets {
+        match fs::symlink_metadata(target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fail(format!("GOVERNANCE_PATH_SYMLINK:{}", relative));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                fail(format!("GOVERNANCE_PATH_NOT_DIRECTORY:{}", relative));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() != ErrorKind::NotFound => {
+                fail(format!("GOVERNANCE_PATH_METADATA_FAILED:{}", relative));
+            }
+            Err(_) => {}
         }
+    }
+    for (_, target) in reset_targets {
         if target.exists() {
             fs::remove_dir_all(&target).unwrap_or_else(|_| fail("GOVERNANCE_RESET_FAILED"));
         }

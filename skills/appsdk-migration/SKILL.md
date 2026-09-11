@@ -138,7 +138,8 @@ of `retain`, `migrate`, `discard-through-canonical-command`, or `unknown`.
 | `discard-through-canonical-command` | Remove only after authorization and freeze | old `.appsdk/` records/transactions/maps, stale audit or migration reports, `.appsdk-control/`, declared rebuildable generated projections |
 | `unknown` | Retain and escalate; do not mutate | ambiguous PID/socket, external report, failed staging tied to an active task, unrecognized state file |
 
-For a reset route, the exact command is:
+For the idempotent reset route that discards the named legacy control plane,
+the exact command is:
 
 ```sh
 appsdk reset-governance --discard-legacy
@@ -148,6 +149,27 @@ Run it once, only in the clean non-`main` owner worktree after the named
 objects and authorization are recorded. The command is idempotent and owns
 removal of its declared legacy control set. Do not replace it with `rm`, a
 glob, a directory rename, manual JSON edits, or a second reset attempt.
+
+When the user explicitly chooses to abandon the old governance epoch and start
+the existing project from the current SDK baseline, use the fresh-init entry:
+
+```sh
+appsdk init <project> --fresh --discard-legacy
+```
+
+This is the only init path that discards a legacy control plane. It requires an
+existing `.appsdk/project.json`, a clean non-`main`/`master` worktree, and the
+explicit `--discard-legacy` confirmation. It removes the same AppSDK-owned
+`.appsdk/`, `.appsdk-control/`, and declared generated roots, then rebuilds the
+current `.appsdk` state and refreshes SDK-managed record/transition contracts.
+It records `mode: "fresh_init"`. Ordinary `appsdk init` remains non-destructive;
+the lower-level reset command remains idempotent. A rejected fresh-init must
+leave the old state untouched.
+
+The canonical transition contract is `contracts/transitions/zone-transition.manifest.json`.
+The historical `contracts/transitions/zone-transition-manifest.json` path remains
+supported as a project declaration and must always be refreshed from that same
+canonical content; it is not a separate governance history.
 
 The reset does not authorize removal of `active/`, `protected/`, runtime data,
 business source, `dist/`, `.deploy/`, `build/`, `tmp/`, or custom reports.

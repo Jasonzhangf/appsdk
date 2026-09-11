@@ -128,23 +128,28 @@ inventory + immutable audit snapshot
 -> classify retained business source and Protected artifacts
 -> request exact reset/delete authority
 -> clean non-main owner worktree
--> appsdk reset-governance --discard-legacy
+-> appsdk init <project> --fresh --discard-legacy
 -> old .appsdk audit/migration records and generated projection removed
--> appsdk init with current SDK
+-> current .appsdk contract, record contracts, and transition manifest rebuilt
 -> rebuild maps/goal/module/owner from current project truth
 -> appsdk guide compile
 -> appsdk guide init for the current task/domain
 -> appsdk verify
 ```
 
-The reset command is idempotent and preserves business source, runtime data,
-Active, and Protected by default. It removes stale audit/migration reports,
-control state, and rebuildable generated output. If old Active/Protected
-artifacts are also obsolete, name exact paths and authorize a separate
-cleanup; reset must not silently delete them. Do not hand-edit
-version/hash/ReviewRecord to imitate migration, and do not retain two active
-governance roots. The new reset record proves the reset operation only; it does
-not inherit old PASS, review, delivery, or freeze claims.
+`--fresh --discard-legacy` is an explicit existing-project initialization route,
+not ordinary `init` behavior. It requires `.appsdk/project.json`, a clean
+non-`main`/`master` worktree, and the discard confirmation. It preserves
+business source, runtime data, `active/`, `protected/`, and human documents;
+only the named AppSDK control plane and declared generated roots are removed.
+The new reset record has `mode: "fresh_init"` and proves the reset operation
+only. It does not inherit old PASS, review, delivery, or freeze claims.
+
+The lower-level `appsdk reset-governance --discard-legacy` command remains
+available for its existing idempotent reset route. Neither command authorizes
+manual deletion or hand-editing of version/hash/ReviewRecord, and neither
+permits two active governance roots. If old Active/Protected artifacts are also
+obsolete, name exact paths and authorize a separate cleanup.
 
 ### What to do with old reports and delivery output
 

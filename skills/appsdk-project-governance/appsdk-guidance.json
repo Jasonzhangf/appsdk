@@ -38,8 +38,8 @@
       "entry_node": "inspect_legacy",
       "nodes": [
         {"node_id": "inspect_legacy", "instruction": "Inventory old governance truth and disposable runtime state.", "owner": "project", "evidence": ["legacy-inventory"]},
-        {"node_id": "choose_route", "instruction": "Choose preserve-and-migrate or authorized reset-and-reinitialize.", "owner": "project", "evidence": ["migration-route"]},
-        {"node_id": "apply_route", "instruction": "Execute the canonical migration or authorized reset once.", "owner": "project", "evidence": ["migration-record"]},
+        {"node_id": "choose_route", "instruction": "Choose preserve-and-migrate or the explicitly authorized fresh-init/reset route for the named legacy control plane.", "owner": "project", "evidence": ["migration-route"]},
+        {"node_id": "apply_route", "instruction": "Execute the canonical migration once, or for a clean non-main existing project run appsdk init --fresh --discard-legacy once.", "owner": "project", "evidence": ["migration-record"]},
         {"node_id": "migration_verify", "instruction": "Verify the resulting single governance truth.", "owner": "project", "evidence": ["verify-result"]}
       ],
       "edges": [{"from": "inspect_legacy", "to": "choose_route"}, {"from": "choose_route", "to": "apply_route"}, {"from": "apply_route", "to": "migration_verify"}]

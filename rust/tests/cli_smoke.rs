@@ -235,7 +235,7 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
         serde_json::to_string_pretty(&stale_contract).unwrap() + "\n",
     )
     .unwrap();
-    let transition_contract = root.join("contracts/transitions/zone-transition.manifest.json");
+    let transition_contract = root.join("contracts/transitions/zone-transition-manifest.json");
     fs::write(&transition_contract, "{\"stale\":true}\n").unwrap();
     fs::write(
         root.join(".appsdk/records/reset-governance-record.json"),
@@ -252,6 +252,7 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
         String::from_utf8_lossy(&initialized.stderr)
     );
     assert!(String::from_utf8_lossy(&initialized.stdout).contains("fresh"));
+    assert!(String::from_utf8_lossy(&initialized.stdout).contains("next appsdk guide compile"));
     assert_eq!(
         fs::read_to_string(root.join("business.txt")).unwrap(),
         "keep\n"
@@ -287,6 +288,51 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
     )
     .unwrap();
     assert_eq!(reset["mode"], "fresh_init");
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_rebuilds_malformed_project_contracts_from_canonical_content() {
+    let root = temp_root("init-fresh-malformed-project-contracts");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join("contracts/records/worktree-record.schema.json"),
+        "{\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("contracts/transitions/zone-transition-manifest.json"),
+        "{\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    for relative in [
+        "contracts/records/worktree-record.schema.json",
+        "contracts/transitions/zone-transition-manifest.json",
+        "contracts/transitions/zone-transition.manifest.json",
+    ] {
+        assert_eq!(
+            serde_json::from_str::<Value>(&fs::read_to_string(root.join(relative)).unwrap())
+                .unwrap(),
+            serde_json::from_str::<Value>(match relative {
+                "contracts/records/worktree-record.schema.json" => {
+                    include_str!("../../contracts/records/worktree-record.schema.json")
+                }
+                _ => include_str!("../../contracts/transitions/zone-transition.manifest.json"),
+            })
+            .unwrap()
+        );
+    }
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
 }
@@ -366,6 +412,90 @@ fn init_fresh_refuses_dirty_worktree_without_mutating_governance() {
     assert!(!root
         .join(".appsdk/records/reset-governance-record.json")
         .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_rejects_control_symlink_before_removing_legacy_state() {
+    let root = temp_root("init-fresh-control-symlink");
+    let outside = temp_root("init-fresh-control-symlink-target");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/records/reset-governance-record.json"),
+        "legacy-reset\n",
+    )
+    .unwrap();
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    let record_before =
+        fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap();
+    let mut gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    gitignore.push_str("\n.appsdk-control\n");
+    fs::write(root.join(".gitignore"), gitignore).unwrap();
+    fs::remove_dir_all(root.join(".appsdk-control")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("sentinel"), "outside\n").unwrap();
+    symlink(&outside, root.join(".appsdk-control")).unwrap();
+    init_git(&root);
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("GOVERNANCE_PATH_SYMLINK:.appsdk-control"));
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
+        record_before
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("sentinel")).unwrap(),
+        "outside\n"
+    );
+    assert!(root.join(".appsdk-control").is_symlink());
+    fs::remove_file(root.join(".appsdk-control")).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn init_fresh_rejects_non_directory_control_target_before_removing_legacy_state() {
+    let root = temp_root("init-fresh-control-file");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(
+        root.join(".appsdk/records/reset-governance-record.json"),
+        "legacy-reset\n",
+    )
+    .unwrap();
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    let record_before =
+        fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap();
+    let mut gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    gitignore.push_str("\n.appsdk-control\n");
+    fs::write(root.join(".gitignore"), gitignore).unwrap();
+    fs::remove_dir_all(root.join(".appsdk-control")).unwrap();
+    fs::write(root.join(".appsdk-control"), "legacy-control-file\n").unwrap();
+    init_git(&root);
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("GOVERNANCE_PATH_NOT_DIRECTORY:.appsdk-control"));
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
+        record_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk-control")).unwrap(),
+        "legacy-control-file\n"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -532,6 +662,47 @@ fn reset_governance_removes_declared_generated_root_without_touching_protected()
         "keep\n"
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_governance_refuses_git_and_collab_generated_roots_without_mutating_state() {
+    for reserved in [".git", ".agent-collab"] {
+        let root = temp_root(&format!("reset-reserved-generated-{reserved}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let project_path = root.join(".appsdk/project.json");
+        let project = fs::read_to_string(&project_path).unwrap();
+        fs::write(
+            &project_path,
+            project.replace(
+                "\"generated_root\": \"generated/**\"",
+                &format!("\"generated_root\": \"{reserved}/**\""),
+            ),
+        )
+        .unwrap();
+        fs::write(root.join(".appsdk/legacy-record.json"), "legacy\n").unwrap();
+        if reserved == ".agent-collab" {
+            let mut gitignore = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+            gitignore.push_str("\n.agent-collab/\n");
+            fs::write(root.join(".gitignore"), gitignore).unwrap();
+        }
+        init_git(&root);
+        let marker = root.join(reserved).join("keep");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, "must-remain\n").unwrap();
+        let project_before = fs::read_to_string(&project_path).unwrap();
+
+        let rejected = run(&["reset-governance", root_text, "--discard-legacy"]);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("RESET_GENERATED_ROOT_CONFLICT"));
+        assert_eq!(fs::read_to_string(&project_path).unwrap(), project_before);
+        assert_eq!(
+            fs::read_to_string(root.join(".appsdk/legacy-record.json")).unwrap(),
+            "legacy\n"
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "must-remain\n");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

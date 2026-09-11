@@ -121,10 +121,13 @@ Choose exactly one of these routes for a managed business project:
   never copied into a new record or treated as proof for the new binary.
 - **Reset and reinitialize:** only after the user authorizes discarding the
   named legacy control plane, from a clean non-`main` owner worktree with no
-  competing claim. Invoke `appsdk reset-governance --discard-legacy` once
-  through the migration Skill, then initialize and rebuild the current project
-  contract from current source truth. The reset is idempotent and records the
-  reset; it does not inherit delivery, review, freeze, or deployment claims.
+  competing claim. For an existing project that must start a new governance
+  epoch, use the single explicit entry
+  `appsdk init <project> --fresh --discard-legacy`; it performs the canonical
+  reset and current-contract rebuild together, and records `mode: "fresh_init"`.
+  The lower-level `appsdk reset-governance --discard-legacy` remains available
+  for its existing idempotent reset route. Neither route inherits delivery,
+  review, freeze, or deployment claims.
 
 Reset may remove the old `.appsdk/` records/transactions and declared
 rebuildable generated projections, plus local `.appsdk-control/` state owned by
@@ -256,9 +259,13 @@ Do not fabricate a successful step to close a plan.
 
 For a requested setup/upgrade, `guide init --mode bootstrap` is read-only.
 Compare current project-owned sources with the advisory standard template;
-apply only authorized rule changes. `appsdk init` refreshes SDK resources but
-never overwrites project AGENTS, Skills, records, Active or Protected. Merely
-auditing rules does not require running initialization or changing setup.
+apply only authorized rule changes. Ordinary `appsdk init` refreshes SDK
+resources but never overwrites project AGENTS, Skills, records, Active or
+Protected. The explicit `appsdk init --fresh --discard-legacy` route is the
+user-authorized exception: it removes only the named legacy control plane and
+rebuilds current SDK-managed contracts; it still preserves business source,
+runtime, Active and Protected. Merely auditing rules does not require running
+initialization or changing setup.
 
 ## Automatic Collab
 

@@ -35,6 +35,83 @@ fn reset_transaction_lock_path(root: &Path) -> PathBuf {
     PathBuf::from(format!("{}.lock", transaction_dir.display()))
 }
 
+fn fresh_reset_marker_targets(root: &Path, generated_roots: &[&str]) -> Vec<Value> {
+    let mut generated = Vec::new();
+    for relative in generated_roots {
+        if generated.iter().any(|existing: &&str| {
+            *relative == *existing || relative.starts_with(&format!("{existing}/"))
+        }) {
+            continue;
+        }
+        generated.retain(|existing: &&str| !existing.starts_with(&format!("{relative}/")));
+        generated.push(*relative);
+    }
+
+    let mut contract_relatives = Vec::new();
+    for directory in ["contracts/records", "contracts/transitions"] {
+        for entry in fs::read_dir(root.join(directory)).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                contract_relatives.push(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    for relative in [
+        "contracts/records/plan-record.schema.json",
+        "contracts/records/plan-revision-record.schema.json",
+        "contracts/records/step-execution-record.schema.json",
+    ] {
+        if !contract_relatives
+            .iter()
+            .any(|existing| existing == relative)
+        {
+            contract_relatives.push(relative.to_string());
+        }
+    }
+    contract_relatives.sort();
+
+    let mut relatives = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
+    relatives.extend(generated.iter().map(|relative| (*relative).to_string()));
+    relatives.extend(contract_relatives);
+    relatives.push(".gitignore".to_string());
+    relatives
+        .iter()
+        .enumerate()
+        .map(|(index, relative)| {
+            let kind = if relative == ".appsdk"
+                || relative == ".appsdk-control"
+                || generated.iter().any(|root| *root == relative)
+            {
+                "dir"
+            } else {
+                "file"
+            };
+            let staged =
+                if generated.iter().any(|root| *root == relative) && relative != "generated" {
+                    Value::Null
+                } else {
+                    Value::String(format!("staging/{relative}"))
+                };
+            serde_json::json!({
+                "relative": relative,
+                "kind": kind,
+                "original_exists": fs::symlink_metadata(root.join(relative)).is_ok(),
+                "backup": format!("quarantine/target-{index}"),
+                "staged": staged,
+                "quarantined": false,
+                "published": false
+            })
+        })
+        .collect()
+}
+
 fn temp_root(name: &str) -> PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -421,7 +498,7 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
             "schema_version": 1,
             "transaction_id": "fresh-init-test",
             "root": root.to_string_lossy(),
-            "phase": "prepared",
+            "phase": "building",
             "error": null,
             "targets": [],
             "updated_at": "2026-01-01T00:00:00Z"
@@ -479,25 +556,19 @@ fn init_fresh_recovers_quarantined_transaction_across_relative_and_absolute_root
         transaction.join("quarantine/target-0"),
     )
     .unwrap();
+    let mut targets = fresh_reset_marker_targets(&root, &["generated"]);
+    targets[0]["original_exists"] = Value::Bool(true);
     fs::write(
         transaction.join("marker.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "schema_version": 1,
             "transaction_id": "fresh-init-quarantined-test",
             "root": canonical_root.to_string_lossy(),
-            "phase": "quarantining",
+            "phase": "prepared",
             "error": null,
             "created_dirs": [],
             "generated_roots": ["generated"],
-            "targets": [{
-                "relative": ".appsdk",
-                "kind": "dir",
-                "original_exists": true,
-                "backup": "quarantine/target-0",
-                "staged": "staging/.appsdk",
-                "quarantined": true,
-                "published": false
-            }],
+            "targets": targets,
             "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap()
@@ -515,7 +586,12 @@ fn init_fresh_recovers_quarantined_transaction_across_relative_and_absolute_root
         ],
     );
     assert!(!recovered.status.success());
-    assert!(String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"));
+    assert!(
+        String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
     assert!(!transaction.exists());
     assert!(root.join(".appsdk/project.json").is_file());
     assert_eq!(
@@ -532,6 +608,301 @@ fn init_fresh_recovers_quarantined_transaction_across_relative_and_absolute_root
     );
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_recovers_after_quarantine_rename_before_marker_update() {
+    let root = temp_root("init-fresh-quarantine-marker-lag");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    fs::rename(
+        root.join(".appsdk"),
+        transaction.join("quarantine/target-0"),
+    )
+    .unwrap();
+    let mut targets = fresh_reset_marker_targets(&root, &["generated"]);
+    targets[0]["original_exists"] = Value::Bool(true);
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": "fresh-init-quarantine-marker-lag",
+            "root": root.to_string_lossy(),
+            "phase": "prepared",
+            "error": null,
+            "created_dirs": [],
+            "generated_roots": ["generated"],
+            "targets": targets,
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!recovered.status.success());
+    assert!(
+        String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!transaction.exists());
+    assert!(root.join(".appsdk/project.json").is_file());
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_recovers_after_rollback_before_marker_update() {
+    let root = temp_root("init-fresh-rollback-marker-lag");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    let mut targets = fresh_reset_marker_targets(&root, &["generated"]);
+    targets[0]["quarantined"] = Value::Bool(true);
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": "fresh-init-rollback-marker-lag",
+            "root": root.to_string_lossy(),
+            "phase": "quarantining",
+            "error": null,
+            "created_dirs": [],
+            "generated_roots": ["generated"],
+            "targets": targets,
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!recovered.status.success());
+    assert!(
+        String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!transaction.exists());
+    assert!(root.join(".appsdk/project.json").is_file());
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_committed_cleanup_uses_marker_roots_after_legacy_contract_is_gone() {
+    let root = temp_root("init-fresh-committed-custom-root");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["governance"]["generated_root"] = Value::String("build-output/**".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("build-output")).unwrap();
+    fs::write(root.join("build-output/legacy.bin"), "legacy\n").unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let reset_path = root.join(".appsdk/records/reset-governance-record.json");
+    let reset: Value = serde_json::from_str(&fs::read_to_string(&reset_path).unwrap()).unwrap();
+    let transaction_id = reset["transaction_id"].as_str().unwrap();
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    let mut targets = fresh_reset_marker_targets(&root, &["generated", "build-output"]);
+    for target in &mut targets {
+        target["original_exists"] = Value::Bool(true);
+        target["quarantined"] = Value::Bool(true);
+        target["published"] = Value::Bool(target["staged"].is_string());
+    }
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": transaction_id,
+            "root": root.to_string_lossy(),
+            "phase": "committed",
+            "error": null,
+            "created_dirs": [],
+            "generated_roots": ["generated", "build-output"],
+            "targets": targets,
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let resumed = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        resumed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(!transaction.exists());
+    assert!(!root.join("build-output").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_rejects_orphan_quarantine_when_marker_plan_is_empty() {
+    for phase in ["prepared", "committed"] {
+        let root = temp_root(&format!("init-fresh-orphan-quarantine-{phase}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        fs::write(root.join("business.txt"), "keep\n").unwrap();
+        init_git(&root);
+        let transaction = root.parent().unwrap().join(format!(
+            ".appsdk-reset-transaction-{}",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir_all(transaction.join("quarantine")).unwrap();
+        fs::write(transaction.join("quarantine/target-0"), "orphan\n").unwrap();
+        fs::write(
+            transaction.join("marker.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "transaction_id": format!("fresh-init-orphan-{phase}"),
+                "root": root.to_string_lossy(),
+                "phase": phase,
+                "error": null,
+                "created_dirs": [],
+                "generated_roots": ["generated"],
+                "targets": [],
+                "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+
+        let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+        assert!(!rejected.status.success(), "phase={phase}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains("GOVERNANCE_RESET_RECOVERY_REQUIRED"),
+            "phase={phase} stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(transaction.exists());
+        assert!(transaction.join("quarantine/target-0").is_file());
+        assert_eq!(
+            fs::read_to_string(root.join("business.txt")).unwrap(),
+            "keep\n"
+        );
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(transaction).unwrap();
+        let _ = fs::remove_file(reset_transaction_lock_path(&root));
+    }
+}
+
+#[test]
+fn init_fresh_preflights_all_original_paths_before_restoring_any_target() {
+    let root = temp_root("init-fresh-preflight-all-originals");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let outside = temp_root("init-fresh-preflight-all-originals-outside");
+    fs::create_dir_all(&outside).unwrap();
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    fs::rename(
+        root.join(".appsdk"),
+        transaction.join("quarantine/target-0"),
+    )
+    .unwrap();
+    fs::remove_dir_all(root.join(".appsdk-control")).unwrap();
+    symlink(&outside, root.join(".appsdk-control")).unwrap();
+    let mut targets = fresh_reset_marker_targets(&root, &["generated"]);
+    targets[0]["original_exists"] = Value::Bool(true);
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": "fresh-init-preflight-all-originals",
+            "root": root.to_string_lossy(),
+            "phase": "prepared",
+            "error": null,
+            "created_dirs": [],
+            "generated_roots": ["generated"],
+            "targets": targets,
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("GOVERNANCE_RESET_RECOVERY_REQUIRED"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(!root.join(".appsdk").exists());
+    assert!(transaction.join("quarantine/target-0").is_dir());
+    assert!(fs::symlink_metadata(root.join(".appsdk-control"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(transaction).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+    let _ = fs::remove_file(reset_transaction_lock_path(&root));
 }
 
 #[test]

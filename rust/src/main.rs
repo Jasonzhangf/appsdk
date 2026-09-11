@@ -11277,7 +11277,6 @@ fn reset_transaction_recovery_project_contract(
         if value.get("relative").and_then(Value::as_str) != Some(".appsdk")
             || value.get("kind").and_then(Value::as_str) != Some("dir")
             || value.get("original_exists").and_then(Value::as_bool) != Some(true)
-            || value.get("quarantined").and_then(Value::as_bool) != Some(true)
         {
             continue;
         }
@@ -11340,49 +11339,113 @@ fn reset_transaction_recovery_generated_roots(
     root: &Path,
     transaction_dir: &Path,
     marker: &Value,
+    phase: &str,
 ) -> Result<Vec<String>, String> {
-    let project = reset_transaction_recovery_project_contract(root, transaction_dir, marker)?;
+    let marker_roots = reset_transaction_marker_generated_roots(marker)?;
+    let project = reset_transaction_recovery_project_contract(root, transaction_dir, marker);
     let project_path = project_file(root);
-    let case_insensitive = if project_path.is_file() {
-        reset_root_filesystem_is_case_insensitive(root)
-    } else {
-        // The old `.appsdk` may already be quarantined. Rejecting case variants
-        // conservatively keeps recovery from treating an alias as a new root.
-        true
-    };
-    let roots = reset_transaction_parse_generated_roots(&project, case_insensitive)?;
-    for relative in &roots {
-        reset_transaction_symlink_components(root, &root.join(relative))?;
-    }
+    let derived = project.and_then(|project| {
+        let case_insensitive = if project_path.is_file() {
+            reset_root_filesystem_is_case_insensitive(root)
+        } else {
+            // The old `.appsdk` may already be quarantined. Rejecting case
+            // variants conservatively keeps recovery from treating an alias
+            // as a new root.
+            true
+        };
+        reset_transaction_parse_generated_roots(&project, case_insensitive)
+    });
 
-    if let Some(values) = marker.get("generated_roots") {
-        let values = values.as_array().ok_or_else(|| {
+    match (derived, marker_roots) {
+        (Ok(roots), Some(marker_roots)) => {
+            if roots.iter().cloned().collect::<BTreeSet<_>>() == marker_roots {
+                for relative in &roots {
+                    reset_transaction_symlink_components(root, &root.join(relative))?;
+                }
+                return Ok(roots);
+            }
+            if matches!(phase, "committed" | "cleanup_failed")
+                && reset_transaction_committed_record_matches(root, marker)
+            {
+                return Ok(marker_roots.into_iter().collect());
+            }
+            Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:generated root binding mismatch".into())
+        }
+        (Ok(roots), None) => {
+            for relative in &roots {
+                reset_transaction_symlink_components(root, &root.join(relative))?;
+            }
+            Ok(roots)
+        }
+        (Err(_error), Some(marker_roots))
+            if matches!(phase, "committed" | "cleanup_failed")
+                && reset_transaction_committed_record_matches(root, marker) =>
+        {
+            Ok(marker_roots.into_iter().collect())
+        }
+        (Err(error), _) => Err(error),
+    }
+}
+
+fn reset_transaction_marker_generated_roots(
+    marker: &Value,
+) -> Result<Option<BTreeSet<String>>, String> {
+    let Some(values) = marker.get("generated_roots") else {
+        return Ok(None);
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid generated_roots".to_string())?;
+    let mut roots = BTreeSet::new();
+    for value in values {
+        let relative = value.as_str().ok_or_else(|| {
             "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid generated_roots".to_string()
         })?;
-        let mut marker_roots = BTreeSet::new();
-        for value in values {
-            let relative = value.as_str().ok_or_else(|| {
-                "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid generated_roots".to_string()
-            })?;
-            reset_transaction_validate_relative(relative)?;
-            if !reset_transaction_generated_root_allowed(relative) {
-                return Err(format!(
-                    "GOVERNANCE_RESET_RECOVERY_REQUIRED:illegal generated root {relative}"
-                ));
-            }
-            if !marker_roots.insert(relative.to_string()) {
-                return Err(format!(
-                    "GOVERNANCE_RESET_RECOVERY_REQUIRED:duplicate generated root {relative}"
-                ));
-            }
+        reset_transaction_validate_relative(relative)?;
+        if !reset_transaction_generated_root_allowed(relative) {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:illegal generated root {relative}"
+            ));
         }
-        if marker_roots != roots.iter().cloned().collect::<BTreeSet<_>>() {
-            return Err(
-                "GOVERNANCE_RESET_RECOVERY_REQUIRED:generated root binding mismatch".into(),
-            );
+        if !roots.insert(relative.to_string()) {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:duplicate generated root {relative}"
+            ));
         }
     }
-    Ok(roots)
+    if !roots.contains("generated") {
+        return Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:missing generated root".into());
+    }
+    Ok(Some(roots))
+}
+
+fn reset_transaction_committed_record_matches(root: &Path, marker: &Value) -> bool {
+    let transaction_id = marker
+        .get("transaction_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let Some(transaction_id) = transaction_id else {
+        return false;
+    };
+    let path = root
+        .join(".appsdk")
+        .join("records")
+        .join("reset-governance-record.json");
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(record) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    record.get("mode").and_then(Value::as_str) == Some("fresh_init")
+        && record.get("transaction_id").and_then(Value::as_str) == Some(transaction_id)
+        && record.get("reset_id").and_then(Value::as_str) == Some(transaction_id)
 }
 
 fn reset_transaction_marker_root_matches(
@@ -11459,7 +11522,7 @@ fn reset_transaction_validate_marker(
         ));
     }
     let generated_roots =
-        reset_transaction_recovery_generated_roots(root, transaction_dir, marker)?;
+        reset_transaction_recovery_generated_roots(root, transaction_dir, marker, phase)?;
     let created_dirs = marker
         .get("created_dirs")
         .and_then(Value::as_array)
@@ -11578,9 +11641,102 @@ fn reset_transaction_validate_marker(
                 "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid staged binding {relative}"
             ));
         }
+        let original = root.join(relative);
+        reset_transaction_symlink_components(root, &original)?;
+        let original_present = match fs::symlink_metadata(&original) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink original {relative}"
+                    ));
+                }
+                if (expected_kind == "dir" && !metadata.is_dir())
+                    || (expected_kind == "file" && !metadata.is_file())
+                {
+                    return Err(format!(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid original kind {relative}"
+                    ));
+                }
+                true
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!(
+                    "GOVERNANCE_RESET_RECOVERY_REQUIRED:original metadata {relative}:{error}"
+                ))
+            }
+        };
+        let staged_present = if let Some(staged_relative) = staged_relative.as_ref() {
+            let staged = transaction_dir.join(staged_relative);
+            match fs::symlink_metadata(&staged) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() {
+                        return Err(format!(
+                            "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink staged {relative}"
+                        ));
+                    }
+                    if (expected_kind == "dir" && !metadata.is_dir())
+                        || (expected_kind == "file" && !metadata.is_file())
+                    {
+                        return Err(format!(
+                            "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid staged kind {relative}"
+                        ));
+                    }
+                    true
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(format!(
+                        "GOVERNANCE_RESET_RECOVERY_REQUIRED:staged metadata {relative}:{error}"
+                    ))
+                }
+            }
+        } else {
+            false
+        };
+        let quarantine_marker_lag =
+            original_exists && !original_present && !quarantined && backup_exists;
+        let rollback_marker_lag =
+            original_exists && original_present && quarantined && !backup_exists;
         if !original_exists && (quarantined || backup_exists) {
             return Err(format!(
                 "GOVERNANCE_RESET_RECOVERY_REQUIRED:absent target has quarantine state {relative}"
+            ));
+        }
+        if original_exists
+            && !original_present
+            && !backup_exists
+            && !(matches!(phase, "committed" | "cleanup_failed")
+                && !published
+                && staged_relative.is_none())
+        {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing original state {relative}"
+            ));
+        }
+        if original_exists && original_present && backup_exists && !quarantined {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:ambiguous original and backup state {relative}"
+            ));
+        }
+        if !original_exists && original_present && staged_present {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:absent target has original and staging {relative}"
+            ));
+        }
+        if !original_exists
+            && original_present
+            && !published
+            && !staged_present
+            && !matches!(phase, "quarantining" | "publishing")
+        {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:unexpected original state {relative}"
+            ));
+        }
+        if original_exists && published && !original_present && !backup_exists {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:published target missing original {relative}"
             ));
         }
         if published && staged_relative.is_none() {
@@ -11593,7 +11749,11 @@ fn reset_transaction_validate_marker(
                 "GOVERNANCE_RESET_RECOVERY_REQUIRED:published target not quarantined {relative}"
             ));
         }
-        if !matches!(phase, "committed" | "cleanup_failed") && quarantined != backup_exists {
+        if !matches!(phase, "committed" | "cleanup_failed")
+            && quarantined != backup_exists
+            && !quarantine_marker_lag
+            && !rollback_marker_lag
+        {
             return Err(format!(
                 "GOVERNANCE_RESET_RECOVERY_REQUIRED:backup state mismatch {relative}"
             ));
@@ -11605,7 +11765,7 @@ fn reset_transaction_validate_marker(
                 "GOVERNANCE_RESET_RECOVERY_REQUIRED:early phase state mismatch {relative}"
             ));
         }
-        if phase == "prepared" && (quarantined || published || backup_exists) {
+        if phase == "prepared" && (published || (quarantined && !rollback_marker_lag)) {
             return Err(format!(
                 "GOVERNANCE_RESET_RECOVERY_REQUIRED:prepared phase state mismatch {relative}"
             ));
@@ -11636,7 +11796,7 @@ fn reset_transaction_validate_marker(
             ));
         }
     }
-    let relatives = seen.into_iter().collect::<Vec<_>>();
+    let relatives = seen.iter().cloned().collect::<Vec<_>>();
     for i in 0..relatives.len() {
         for j in (i + 1)..relatives.len() {
             let parent = &relatives[i];
@@ -11650,6 +11810,33 @@ fn reset_transaction_validate_marker(
                 ));
             }
         }
+    }
+    let plan_phase = matches!(
+        phase,
+        "prepared"
+            | "quarantining"
+            | "publishing"
+            | "committed"
+            | "cleanup_failed"
+            | "rollback_failed"
+    );
+    if plan_phase {
+        if values.is_empty() {
+            if !reset_transaction_directory_empty(&transaction_dir.join("quarantine"))?
+                || !reset_transaction_directory_empty(&transaction_dir.join("staging"))?
+            {
+                return Err(
+                    "GOVERNANCE_RESET_RECOVERY_REQUIRED:incomplete transaction plan".into(),
+                );
+            }
+        } else if seen != reset_transaction_expected_target_relatives(&generated_roots) {
+            return Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:incomplete transaction plan".into());
+        }
+    }
+    if matches!(phase, "committed" | "cleanup_failed")
+        && !reset_transaction_committed_record_matches(root, marker)
+    {
+        return Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:missing committed reset record".into());
     }
     Ok(())
 }
@@ -11748,6 +11935,53 @@ fn reset_transaction_remove_path(base: &Path, path: &Path) -> Result<(), String>
         fs::remove_file(path)
             .map_err(|error| format!("RESET_TRANSACTION_REMOVE_FAILED:{}:{error}", path.display()))
     }
+}
+
+fn reset_transaction_directory_empty(path: &Path) -> Result<bool, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+        Err(error) => {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:directory metadata {}:{error}",
+                path.display()
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid transaction directory {}",
+            path.display()
+        ));
+    }
+    let mut entries = fs::read_dir(path).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:directory read {}:{error}",
+            path.display()
+        )
+    })?;
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:directory read {}:{error}",
+                path.display()
+            )
+        })?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:directory entry {}:{error}",
+                entry.path().display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "GOVERNANCE_RESET_RECOVERY_REQUIRED:symlink transaction entry {}",
+                entry.path().display()
+            ));
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn reset_transaction_target_value(
@@ -11961,6 +12195,18 @@ fn reset_transaction_fresh_project_targets() -> Vec<String> {
         targets.push(alias);
     }
     targets
+}
+
+fn reset_transaction_expected_target_relatives(generated_roots: &[String]) -> BTreeSet<String> {
+    let mut expected = BTreeSet::new();
+    expected.insert(".appsdk".to_string());
+    expected.insert(".appsdk-control".to_string());
+    expected.insert(".gitignore".to_string());
+    expected.extend(reset_transaction_quarantine_generated_roots(
+        generated_roots,
+    ));
+    expected.extend(reset_transaction_fresh_project_targets());
+    expected
 }
 
 fn reset_transaction_add_target(

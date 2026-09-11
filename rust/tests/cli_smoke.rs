@@ -423,8 +423,6 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
             "root": root.to_string_lossy(),
             "phase": "prepared",
             "error": null,
-            "created_dirs": [],
-            "generated_roots": ["generated"],
             "targets": [],
             "updated_at": "2026-01-01T00:00:00Z"
         }))
@@ -436,7 +434,12 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
 
     let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(!recovered.status.success());
-    assert!(String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"));
+    assert!(
+        String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
     assert!(!transaction.exists());
     assert_eq!(
         fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
@@ -641,6 +644,96 @@ fn init_fresh_rejects_invalid_recovery_marker_before_deleting_active_or_business
     assert!(transaction.exists());
     fs::remove_dir_all(&root).unwrap();
     fs::remove_dir_all(transaction).unwrap();
+    let _ = fs::remove_file(reset_transaction_lock_path(&root));
+}
+
+#[test]
+fn init_fresh_does_not_trust_marker_generated_roots_for_recovery_deletion() {
+    let root = temp_root("init-fresh-marker-generated-root");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    fs::create_dir_all(root.join("victim")).unwrap();
+    fs::write(root.join("victim/keep.txt"), "must-remain\n").unwrap();
+    init_git(&root);
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": "fresh-init-marker-generated-root",
+            "root": root.to_string_lossy(),
+            "phase": "prepared",
+            "error": null,
+            "created_dirs": [],
+            "generated_roots": ["victim"],
+            "targets": [{
+                "relative": "victim",
+                "kind": "dir",
+                "original_exists": true,
+                "backup": "quarantine/target-0",
+                "staged": null,
+                "quarantined": false,
+                "published": false
+            }],
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("GOVERNANCE_RESET_RECOVERY_REQUIRED")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("victim/keep.txt")).unwrap(),
+        "must-remain\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(transaction.exists());
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(transaction).unwrap();
+    let _ = fs::remove_file(reset_transaction_lock_path(&root));
+}
+
+#[test]
+fn init_fresh_rejects_dangling_transaction_symlink_before_recovery() {
+    let root = temp_root("init-fresh-dangling-transaction");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    symlink(transaction.with_extension("missing-target"), &transaction).unwrap();
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("GOVERNANCE_RESET_RECOVERY_REQUIRED")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(fs::symlink_metadata(&transaction)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_file(transaction).unwrap();
     let _ = fs::remove_file(reset_transaction_lock_path(&root));
 }
 

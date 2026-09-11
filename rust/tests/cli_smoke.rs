@@ -348,6 +348,107 @@ fn init_fresh_rebuilds_malformed_project_contracts_from_canonical_content() {
 }
 
 #[test]
+fn init_fresh_rejects_malformed_project_contract_before_resetting_state() {
+    for (name, project_contents, expected_error) in [
+        ("malformed", "{not-json}\n", "INVALID_PROJECT_CONTRACT"),
+        (
+            "missing-generated-root",
+            "{\"schema_version\":1,\"project_id\":\"test\",\"governance\":{}}\n",
+            "INVALID_GOVERNANCE_ROOT:/governance/generated_root",
+        ),
+    ] {
+        let root = temp_root(&format!("init-fresh-invalid-project-{name}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        fs::write(root.join("business.txt"), "keep\n").unwrap();
+        fs::write(root.join("generated/legacy-output"), "retain\n").unwrap();
+        let project_path = root.join(".appsdk/project.json");
+        fs::write(&project_path, project_contents).unwrap();
+        init_git(&root);
+        let project_before = fs::read_to_string(&project_path).unwrap();
+        let reset_path = root.join(".appsdk/records/reset-governance-record.json");
+        let reset_before = fs::read_to_string(&reset_path).ok();
+
+        let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+        assert!(
+            !rejected.status.success(),
+            "case={name} stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(expected_error),
+            "case={name} stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(fs::read_to_string(&project_path).unwrap(), project_before);
+        assert_eq!(fs::read_to_string(&reset_path).ok(), reset_before);
+        assert_eq!(
+            fs::read_to_string(root.join("business.txt")).unwrap(),
+            "keep\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("generated/legacy-output")).unwrap(),
+            "retain\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn init_fresh_recovers_prepared_transaction_before_retrying() {
+    let root = temp_root("init-fresh-prepared-transaction");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": "fresh-init-test",
+            "root": root.to_string_lossy(),
+            "phase": "prepared",
+            "error": null,
+            "targets": [],
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+
+    let recovered = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!recovered.status.success());
+    assert!(String::from_utf8_lossy(&recovered.stderr).contains("GOVERNANCE_RESET_RECOVERED_RETRY"));
+    assert!(!transaction.exists());
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_fresh_requires_explicit_legacy_discard_and_preserves_state_on_rejection() {
     let root = temp_root("init-fresh-confirmation");
     let root_text = root.to_str().unwrap();

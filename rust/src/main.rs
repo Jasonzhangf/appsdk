@@ -9819,21 +9819,13 @@ const APPSDK_GITIGNORE_END: &str = "# END APPSDK MANAGED";
 const APPSDK_GITIGNORE_BLOCK: &str =
     "# BEGIN APPSDK MANAGED\n.appsdk-control/\n.appsdk/sdk.bin\n/active/lib/\n/generated/\n# END APPSDK MANAGED\n";
 
-fn ensure_appsdk_gitignore(root: &Path) {
-    let path = root.join(".gitignore");
-    if fs::symlink_metadata(&path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        fail("GOVERNANCE_PATH_SYMLINK:gitignore");
-    }
-    let mut content = fs::read_to_string(&path).unwrap_or_default();
+fn render_appsdk_gitignore(mut content: String) -> Result<String, String> {
     if let Some(begin) = content.find(APPSDK_GITIGNORE_BEGIN) {
         let end_start = begin + APPSDK_GITIGNORE_BEGIN.len();
         let end = content[end_start..]
             .find(APPSDK_GITIGNORE_END)
             .map(|offset| end_start + offset)
-            .unwrap_or_else(|| fail("INVALID_APPSDK_GITIGNORE_BLOCK"));
+            .ok_or_else(|| "INVALID_APPSDK_GITIGNORE_BLOCK".to_string())?;
         let end_after = end + APPSDK_GITIGNORE_END.len();
         let mut updated = String::with_capacity(content.len());
         updated.push_str(&content[..begin]);
@@ -9842,10 +9834,7 @@ fn ensure_appsdk_gitignore(root: &Path) {
         if !suffix.trim().is_empty() {
             updated.push_str(suffix);
         }
-        if updated != content {
-            fs::write(path, updated).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
-        }
-        return;
+        return Ok(updated);
     }
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
@@ -9854,7 +9843,22 @@ fn ensure_appsdk_gitignore(root: &Path) {
         content.push('\n');
     }
     content.push_str(APPSDK_GITIGNORE_BLOCK);
-    fs::write(path, content).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    Ok(content)
+}
+
+fn ensure_appsdk_gitignore(root: &Path) {
+    let path = root.join(".gitignore");
+    if fs::symlink_metadata(&path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:gitignore");
+    }
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    let updated = render_appsdk_gitignore(content.clone()).unwrap_or_else(|error| fail(error));
+    if content != updated {
+        fs::write(path, updated).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    }
 }
 
 fn ensure_governance_layout(root: &Path) {
@@ -10303,6 +10307,16 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     if fresh {
         assert_fresh_project_contract_targets(root);
         reset_governance_internal(root, true, true);
+        initialize_collab_peer();
+        if let Err(reason) = memory::initialize_project(root) {
+            eprintln!("{}; optional project memory initialization skipped", reason);
+        }
+        println!("initialized fresh governance epoch {}", root.display());
+        println!("next appsdk guide compile");
+        println!(
+            "then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>"
+        );
+        return;
     }
     let fresh_governance = !root.join(".appsdk/project.json").is_file();
     let existing_project_needs_guidance = !fresh_governance
@@ -10328,17 +10342,8 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
     }
-    if fresh {
-        println!("initialized fresh governance epoch {}", root.display());
-    } else {
-        println!("initialized {}", root.display());
-    }
-    if fresh {
-        println!("next appsdk guide compile");
-        println!(
-            "then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>"
-        );
-    } else if existing_project_needs_guidance {
+    println!("initialized {}", root.display());
+    if existing_project_needs_guidance {
         println!(
             "next appsdk guide init --task guidance-setup --mode bootstrap --module <module-id>"
         );
@@ -11011,6 +11016,729 @@ fn install_current_governance_contracts(root: &Path) {
     );
 }
 
+#[derive(Clone)]
+struct ResetTransactionTarget {
+    relative: String,
+    original: PathBuf,
+    backup: PathBuf,
+    staged: Option<PathBuf>,
+    kind: &'static str,
+    original_exists: bool,
+    quarantined: bool,
+    published: bool,
+}
+
+fn reset_transaction_dir(root: &Path) -> PathBuf {
+    let name = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("project");
+    root.parent()
+        .unwrap_or(root)
+        .join(format!(".appsdk-reset-transaction-{name}"))
+}
+
+fn reset_transaction_id() -> Result<String, String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("RESET_TRANSACTION_NONCE_FAILED:{error}"))?
+        .as_nanos();
+    Ok(format!("fresh-init-{}-{nonce}", std::process::id()))
+}
+
+fn reset_transaction_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "RESET_TRANSACTION_TARGET_INVALID".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("RESET_TRANSACTION_PARENT_CREATE_FAILED:{error}"))?;
+    if fs::symlink_metadata(target)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "RESET_TRANSACTION_TARGET_SYMLINK:{}",
+            target.display()
+        ));
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("RESET_TRANSACTION_NONCE_FAILED:{error}"))?
+        .as_nanos();
+    let staging = target.with_extension(format!("staging.{}.{}", std::process::id(), nonce));
+    fs::write(&staging, bytes).map_err(|error| {
+        format!(
+            "RESET_TRANSACTION_WRITE_FAILED:{}:{error}",
+            target.display()
+        )
+    })?;
+    if let Err(error) = fs::rename(&staging, target) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "RESET_TRANSACTION_PUBLISH_FAILED:{}:{error}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
+fn reset_transaction_write_json(target: &Path, value: &Value) -> Result<(), String> {
+    let content = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("RESET_TRANSACTION_JSON_FAILED:{error}"))?;
+    let mut bytes = content;
+    bytes.push(b'\n');
+    reset_transaction_write_bytes(target, &bytes)
+}
+
+fn reset_transaction_remove_path(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "RESET_TRANSACTION_METADATA_FAILED:{}:{error}",
+                path.display()
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(format!("RESET_TRANSACTION_PATH_SYMLINK:{}", path.display()));
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("RESET_TRANSACTION_REMOVE_FAILED:{}:{error}", path.display()))
+    } else {
+        fs::remove_file(path)
+            .map_err(|error| format!("RESET_TRANSACTION_REMOVE_FAILED:{}:{error}", path.display()))
+    }
+}
+
+fn reset_transaction_target_value(
+    target: &ResetTransactionTarget,
+    transaction_dir: &Path,
+) -> Value {
+    let backup = target
+        .backup
+        .strip_prefix(transaction_dir)
+        .unwrap_or(&target.backup)
+        .to_string_lossy()
+        .to_string();
+    let staged = target.staged.as_ref().map(|path| {
+        path.strip_prefix(transaction_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string()
+    });
+    serde_json::json!({
+        "relative": target.relative,
+        "kind": target.kind,
+        "original_exists": target.original_exists,
+        "backup": backup,
+        "staged": staged,
+        "quarantined": target.quarantined,
+        "published": target.published
+    })
+}
+
+fn reset_transaction_marker(
+    transaction_dir: &Path,
+    transaction_id: &str,
+    root: &Path,
+    phase: &str,
+    error: Option<&str>,
+    targets: &[ResetTransactionTarget],
+) -> Result<(), String> {
+    let marker = serde_json::json!({
+        "schema_version": 1,
+        "transaction_id": transaction_id,
+        "root": root.to_string_lossy(),
+        "phase": phase,
+        "error": error,
+        "targets": targets.iter().map(|target| reset_transaction_target_value(target, transaction_dir)).collect::<Vec<_>>(),
+        "updated_at": Utc::now().to_rfc3339()
+    });
+    reset_transaction_write_json(&transaction_dir.join("marker.json"), &marker)
+}
+
+fn reset_transaction_read_marker(transaction_dir: &Path) -> Result<Value, String> {
+    let marker_path = transaction_dir.join("marker.json");
+    if fs::symlink_metadata(&marker_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}",
+            marker_path.display()
+        ));
+    }
+    let text = fs::read_to_string(&marker_path).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}:{error}",
+            marker_path.display()
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}:{error}",
+            marker_path.display()
+        )
+    })
+}
+
+fn reset_transaction_target_kind(value: &Value) -> Result<&'static str, String> {
+    match value.get("kind").and_then(Value::as_str) {
+        Some("dir") => Ok("dir"),
+        Some("file") => Ok("file"),
+        _ => Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid target kind".into()),
+    }
+}
+
+fn reset_transaction_validate_relative(relative: &str) -> Result<(), String> {
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid target {relative}"
+        ));
+    }
+    Ok(())
+}
+
+fn reset_transaction_recover(root: &Path) -> Result<Option<bool>, String> {
+    let transaction_dir = reset_transaction_dir(root);
+    if !transaction_dir.exists() {
+        return Ok(None);
+    }
+    if fs::symlink_metadata(&transaction_dir)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}",
+            transaction_dir.display()
+        ));
+    }
+    let marker = reset_transaction_read_marker(&transaction_dir)?;
+    if marker.get("root").and_then(Value::as_str) != Some(root.to_string_lossy().as_ref()) {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}",
+            transaction_dir.display()
+        ));
+    }
+    let phase = marker
+        .get("phase")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing phase".to_string())?;
+    let committed = matches!(phase, "committed" | "cleanup_failed");
+    if committed {
+        reset_transaction_remove_path(&transaction_dir)?;
+        return Ok(Some(true));
+    }
+    let values = marker
+        .get("targets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing targets".to_string())?;
+    for value in values.iter().rev() {
+        let relative = value
+            .get("relative")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing target".to_string())?;
+        reset_transaction_validate_relative(relative)?;
+        let _kind = reset_transaction_target_kind(value)?;
+        let original = root.join(relative);
+        let backup_rel = value
+            .get("backup")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "GOVERNANCE_RESET_RECOVERY_REQUIRED:missing backup".to_string())?;
+        reset_transaction_validate_relative(backup_rel)?;
+        let backup = transaction_dir.join(backup_rel);
+        if backup.exists() {
+            reset_transaction_remove_path(&original)?;
+            fs::rename(&backup, &original).map_err(|error| {
+                format!("GOVERNANCE_RESET_ROLLBACK_FAILED:{}:{error}", relative)
+            })?;
+        } else if value.get("original_exists").and_then(Value::as_bool) == Some(false) {
+            let staged_rel = value.get("staged").and_then(Value::as_str);
+            let staged_exists = staged_rel
+                .map(|relative| transaction_dir.join(relative).exists())
+                .unwrap_or(false);
+            if value.get("published").and_then(Value::as_bool) == Some(true) || !staged_exists {
+                reset_transaction_remove_path(&original)?;
+            }
+        }
+    }
+    reset_transaction_remove_path(&transaction_dir)?;
+    Ok(Some(false))
+}
+
+fn reset_transaction_fresh_project_targets() -> Vec<String> {
+    let mut targets = SDK_BUNDLE_RESOURCES
+        .iter()
+        .filter(|(path, _, _)| {
+            path.starts_with("contracts/records/") || path.starts_with("contracts/transitions/")
+        })
+        .map(|(path, _, _)| (*path).to_string())
+        .collect::<Vec<_>>();
+    let alias = "contracts/transitions/zone-transition-manifest.json".to_string();
+    if !targets.iter().any(|target| target == &alias) {
+        targets.push(alias);
+    }
+    targets
+}
+
+fn reset_transaction_add_target(
+    root: &Path,
+    transaction_dir: &Path,
+    relative: String,
+    kind: &'static str,
+    staged: Option<PathBuf>,
+    targets: &mut Vec<ResetTransactionTarget>,
+) -> Result<(), String> {
+    let original = root.join(&relative);
+    let metadata = match fs::symlink_metadata(&original) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!("GOVERNANCE_PATH_SYMLINK:{relative}"));
+            }
+            if (kind == "dir" && !metadata.is_dir()) || (kind == "file" && !metadata.is_file()) {
+                let error = match kind {
+                    "dir" => "GOVERNANCE_PATH_NOT_DIRECTORY",
+                    "file" => "GOVERNANCE_PATH_NOT_FILE",
+                    _ => "GOVERNANCE_PATH_NOT_TARGET",
+                };
+                return Err(format!("{error}:{relative}"));
+            }
+            Some(metadata)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "GOVERNANCE_PATH_METADATA_FAILED:{relative}:{error}"
+            ))
+        }
+    };
+    let index = targets.len();
+    targets.push(ResetTransactionTarget {
+        relative,
+        original,
+        backup: transaction_dir
+            .join("quarantine")
+            .join(format!("target-{index}")),
+        staged,
+        kind,
+        original_exists: metadata.is_some(),
+        quarantined: false,
+        published: false,
+    });
+    Ok(())
+}
+
+fn reset_transaction_build_targets(
+    root: &Path,
+    transaction_dir: &Path,
+    staging_root: &Path,
+    generated_roots: &[String],
+) -> Result<Vec<ResetTransactionTarget>, String> {
+    let mut targets = Vec::new();
+    reset_transaction_add_target(
+        root,
+        transaction_dir,
+        ".appsdk".into(),
+        "dir",
+        Some(staging_root.join(".appsdk")),
+        &mut targets,
+    )?;
+    reset_transaction_add_target(
+        root,
+        transaction_dir,
+        ".appsdk-control".into(),
+        "dir",
+        Some(staging_root.join(".appsdk-control")),
+        &mut targets,
+    )?;
+    for relative in generated_roots {
+        let staged = (relative == "generated").then(|| staging_root.join(relative));
+        if !targets.iter().any(|target| target.relative == *relative) {
+            reset_transaction_add_target(
+                root,
+                transaction_dir,
+                relative.clone(),
+                "dir",
+                staged,
+                &mut targets,
+            )?;
+        }
+    }
+    for relative in reset_transaction_fresh_project_targets() {
+        if !targets.iter().any(|target| target.relative == relative) {
+            reset_transaction_add_target(
+                root,
+                transaction_dir,
+                relative.clone(),
+                "file",
+                Some(staging_root.join(&relative)),
+                &mut targets,
+            )?;
+        }
+    }
+    reset_transaction_add_target(
+        root,
+        transaction_dir,
+        ".gitignore".into(),
+        "file",
+        Some(staging_root.join(".gitignore")),
+        &mut targets,
+    )?;
+    Ok(targets)
+}
+
+fn reset_transaction_build_staging(
+    root: &Path,
+    transaction_dir: &Path,
+    generated_roots: &[String],
+    transaction_id: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let staging_root = transaction_dir.join("staging");
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("GOVERNANCE_RESET_STAGING_CREATE_FAILED:{error}"))?;
+    let binary = env::current_exe()
+        .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BINARY_FAILED:{error}"))?;
+    let output = Command::new(binary)
+        .args(["new", staging_root.to_str().unwrap_or("")])
+        .env_remove("TMUX_PANE")
+        .output()
+        .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BUILD_FAILED:{error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if detail.len() > 512 {
+            &detail[..512]
+        } else {
+            detail.as_str()
+        };
+        return Err(format!(
+            "GOVERNANCE_RESET_STAGING_BUILD_FAILED:exit={}:{}",
+            output.status.code().unwrap_or(-1),
+            detail
+        ));
+    }
+    // `appsdk new` bootstraps the stable project scaffold.  Fresh reset also
+    // replaces every root contract declared by the current bundle, including
+    // record contracts added after the scaffold template was published.  Write
+    // those canonical bytes into staging before any project path is moved.
+    for &(relative, _, content) in SDK_BUNDLE_RESOURCES.iter().filter(|(path, _, _)| {
+        path.starts_with("contracts/records/") || path.starts_with("contracts/transitions/")
+    }) {
+        reset_transaction_write_bytes(&staging_root.join(relative), content.as_bytes())?;
+    }
+    reset_transaction_write_bytes(
+        &staging_root.join("contracts/transitions/zone-transition-manifest.json"),
+        CANONICAL_ZONE_TRANSITION_CONTRACT.as_bytes(),
+    )?;
+    let gitignore = root.join(".gitignore");
+    if fs::symlink_metadata(&gitignore)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("GOVERNANCE_PATH_SYMLINK:gitignore".into());
+    }
+    let content = if gitignore.exists() {
+        fs::read_to_string(&gitignore)
+            .map_err(|error| format!("GOVERNANCE_RESET_GITIGNORE_READ_FAILED:{error}"))?
+    } else {
+        String::new()
+    };
+    let updated = render_appsdk_gitignore(content)?;
+    reset_transaction_write_bytes(&staging_root.join(".gitignore"), updated.as_bytes())?;
+    let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
+    removed.extend(generated_roots.iter().cloned());
+    let reset_record = serde_json::json!({
+        "schema_version": 1,
+        "reset_id": transaction_id,
+        "transaction_id": transaction_id,
+        "mode": "fresh_init",
+        "preserved": ["business_source", "runtime_data", "active", "protected"],
+        "removed": removed,
+        "branch": branch,
+        "created_at": Utc::now().to_rfc3339()
+    });
+    reset_transaction_write_json(
+        &staging_root.join(".appsdk/records/reset-governance-record.json"),
+        &reset_record,
+    )?;
+    Ok(())
+}
+
+fn reset_transaction_rollback(
+    root: &Path,
+    transaction_dir: &Path,
+    transaction_id: &str,
+    targets: &[ResetTransactionTarget],
+    cause: &str,
+) -> Result<(), String> {
+    let mut first_error = None;
+    for target in targets.iter().rev() {
+        let result = if target.backup.exists() {
+            reset_transaction_remove_path(&target.original).and_then(|_| {
+                fs::rename(&target.backup, &target.original).map_err(|error| {
+                    format!(
+                        "GOVERNANCE_RESET_ROLLBACK_FAILED:{}:{error}",
+                        target.relative
+                    )
+                })
+            })
+        } else if !target.original_exists && target.published {
+            reset_transaction_remove_path(&target.original)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Err(error) = reset_transaction_remove_path(&transaction_dir.join("staging")) {
+        first_error.get_or_insert(error);
+    }
+    if let Some(error) = first_error {
+        let combined = format!("{cause};{error}");
+        let _ = reset_transaction_marker(
+            transaction_dir,
+            transaction_id,
+            root,
+            "rollback_failed",
+            Some(&combined),
+            targets,
+        );
+        return Err(format!("GOVERNANCE_RESET_ROLLBACK_FAILED:{combined}"));
+    }
+    if let Err(error) = reset_transaction_remove_path(transaction_dir) {
+        let combined = format!("{cause};{error}");
+        let _ = reset_transaction_marker(
+            transaction_dir,
+            transaction_id,
+            root,
+            "rollback_failed",
+            Some(&combined),
+            targets,
+        );
+        return Err(format!("GOVERNANCE_RESET_ROLLBACK_FAILED:{combined}"));
+    }
+    Ok(())
+}
+
+fn reset_transaction_rollback_or_combine(
+    root: &Path,
+    transaction_dir: &Path,
+    transaction_id: &str,
+    targets: &[ResetTransactionTarget],
+    cause: &str,
+) -> String {
+    match reset_transaction_rollback(root, transaction_dir, transaction_id, targets, cause) {
+        Ok(()) => cause.to_string(),
+        Err(error) => format!("{cause};{error}"),
+    }
+}
+
+fn reset_transaction_fresh(
+    root: &Path,
+    branch: &str,
+    generated_roots: &[String],
+) -> Result<(), String> {
+    let transaction_dir = reset_transaction_dir(root);
+    if transaction_dir.exists() {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}",
+            transaction_dir.display()
+        ));
+    }
+    if fs::symlink_metadata(&transaction_dir)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "GOVERNANCE_RESET_RECOVERY_REQUIRED:{}",
+            transaction_dir.display()
+        ));
+    }
+    fs::create_dir_all(transaction_dir.join("quarantine"))
+        .map_err(|error| format!("GOVERNANCE_RESET_TRANSACTION_CREATE_FAILED:{error}"))?;
+    let transaction_id = reset_transaction_id()?;
+    let empty_targets = Vec::new();
+    reset_transaction_marker(
+        &transaction_dir,
+        &transaction_id,
+        root,
+        "building",
+        None,
+        &empty_targets,
+    )?;
+    if let Err(error) = reset_transaction_build_staging(
+        root,
+        &transaction_dir,
+        generated_roots,
+        &transaction_id,
+        branch,
+    ) {
+        let _ = reset_transaction_marker(
+            &transaction_dir,
+            &transaction_id,
+            root,
+            "build_failed",
+            Some(&error),
+            &empty_targets,
+        );
+        return Err(error);
+    }
+    let staging_root = transaction_dir.join("staging");
+    let mut targets = match reset_transaction_build_targets(
+        root,
+        &transaction_dir,
+        &staging_root,
+        generated_roots,
+    ) {
+        Ok(targets) => targets,
+        Err(error) => {
+            let _ = reset_transaction_marker(
+                &transaction_dir,
+                &transaction_id,
+                root,
+                "preflight_failed",
+                Some(&error),
+                &empty_targets,
+            );
+            return Err(error);
+        }
+    };
+    reset_transaction_marker(
+        &transaction_dir,
+        &transaction_id,
+        root,
+        "prepared",
+        None,
+        &targets,
+    )?;
+    for index in 0..targets.len() {
+        if !targets[index].original_exists {
+            continue;
+        }
+        if let Err(error) = fs::rename(&targets[index].original, &targets[index].backup) {
+            let cause = format!(
+                "GOVERNANCE_RESET_QUARANTINE_FAILED:{}:{error}",
+                targets[index].relative
+            );
+            let failure = reset_transaction_rollback_or_combine(
+                root,
+                &transaction_dir,
+                &transaction_id,
+                &targets,
+                &cause,
+            );
+            return Err(failure);
+        }
+        targets[index].quarantined = true;
+        if let Err(error) = reset_transaction_marker(
+            &transaction_dir,
+            &transaction_id,
+            root,
+            "quarantining",
+            None,
+            &targets,
+        ) {
+            let failure = reset_transaction_rollback_or_combine(
+                root,
+                &transaction_dir,
+                &transaction_id,
+                &targets,
+                &error,
+            );
+            return Err(failure);
+        }
+    }
+    for index in 0..targets.len() {
+        let Some(staged) = targets[index].staged.clone() else {
+            continue;
+        };
+        if !staged.exists() {
+            let cause = format!(
+                "GOVERNANCE_RESET_STAGED_TARGET_MISSING:{}",
+                targets[index].relative
+            );
+            let failure = reset_transaction_rollback_or_combine(
+                root,
+                &transaction_dir,
+                &transaction_id,
+                &targets,
+                &cause,
+            );
+            return Err(failure);
+        }
+        if let Err(error) = fs::rename(&staged, &targets[index].original) {
+            let cause = format!(
+                "GOVERNANCE_RESET_PUBLISH_FAILED:{}:{error}",
+                targets[index].relative
+            );
+            let failure = reset_transaction_rollback_or_combine(
+                root,
+                &transaction_dir,
+                &transaction_id,
+                &targets,
+                &cause,
+            );
+            return Err(failure);
+        }
+        targets[index].published = true;
+        if let Err(error) = reset_transaction_marker(
+            &transaction_dir,
+            &transaction_id,
+            root,
+            "publishing",
+            None,
+            &targets,
+        ) {
+            let failure = reset_transaction_rollback_or_combine(
+                root,
+                &transaction_dir,
+                &transaction_id,
+                &targets,
+                &error,
+            );
+            return Err(failure);
+        }
+    }
+    reset_transaction_marker(
+        &transaction_dir,
+        &transaction_id,
+        root,
+        "committed",
+        None,
+        &targets,
+    )?;
+    for target in &targets {
+        if let Err(error) = reset_transaction_remove_path(&target.backup) {
+            let cleanup = format!("GOVERNANCE_RESET_CLEANUP_FAILED:{}", error);
+            let _ = reset_transaction_marker(
+                &transaction_dir,
+                &transaction_id,
+                root,
+                "cleanup_failed",
+                Some(&cleanup),
+                &targets,
+            );
+            return Err(cleanup);
+        }
+    }
+    reset_transaction_remove_path(&transaction_dir)
+        .map_err(|error| format!("GOVERNANCE_RESET_CLEANUP_FAILED:{error}"))
+}
+
 fn pin_lock(root: &Path, binary: &Path) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -11147,7 +11875,7 @@ fn reset_root_filesystem_is_case_insensitive(root: &Path) -> bool {
     }
 }
 
-fn reset_generated_roots(root: &Path, allow_default_roots: bool) -> Vec<String> {
+fn reset_generated_roots(root: &Path) -> Vec<String> {
     let mut roots = vec!["generated".to_string()];
     let project = project_file(root);
     if fs::symlink_metadata(&project)
@@ -11156,23 +11884,14 @@ fn reset_generated_roots(root: &Path, allow_default_roots: bool) -> Vec<String> 
     {
         fail("GOVERNANCE_PATH_SYMLINK:project");
     }
-    let text = match fs::read_to_string(&project) {
-        Ok(text) => text,
-        Err(_) if allow_default_roots => return roots,
-        Err(_) => fail(format!("PROJECT_CONTRACT_MISSING:{}", project.display())),
-    };
-    let value = match serde_json::from_str::<Value>(&text) {
-        Ok(value) => value,
-        Err(_) if allow_default_roots => return roots,
-        Err(_) => fail("INVALID_PROJECT_CONTRACT"),
-    };
+    let text = fs::read_to_string(&project)
+        .unwrap_or_else(|_| fail(format!("PROJECT_CONTRACT_MISSING:{}", project.display())));
+    let value: Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| fail("INVALID_PROJECT_CONTRACT"));
     let Some(declared) = value
         .pointer("/governance/generated_root")
         .and_then(Value::as_str)
     else {
-        if allow_default_roots {
-            return roots;
-        }
         fail("INVALID_GOVERNANCE_ROOT:/governance/generated_root");
     };
     let relative = declared.trim_end_matches("/**").trim_end_matches('/');
@@ -11229,6 +11948,17 @@ fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool
     if branch.is_empty() || branch == "main" || branch == "master" {
         fail("RESET_REQUIRES_NON_MAIN_WORKTREE");
     }
+    if fresh_init {
+        match reset_transaction_recover(root) {
+            Ok(Some(true)) => {
+                println!("governance fresh init already applied");
+                return;
+            }
+            Ok(Some(false)) => fail("GOVERNANCE_RESET_RECOVERED_RETRY"),
+            Ok(None) => {}
+            Err(error) => fail(error),
+        }
+    }
     if reset_record.exists() && !fresh_init {
         println!("governance reset already applied");
         return;
@@ -11243,7 +11973,13 @@ fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool
     if !status.stdout.is_empty() {
         fail("RESET_REQUIRES_CLEAN_WORKTREE");
     }
-    let generated_roots = reset_generated_roots(root, fresh_init);
+    let generated_roots = reset_generated_roots(root);
+    if fresh_init {
+        reset_transaction_fresh(root, &branch, &generated_roots)
+            .unwrap_or_else(|error| fail(error));
+        println!("governance fresh init applied");
+        return;
+    }
     let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
     removed.extend(generated_roots.iter().cloned());
     let reset_targets = [".appsdk", ".appsdk-control"]

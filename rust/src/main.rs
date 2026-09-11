@@ -11111,7 +11111,43 @@ fn pin_lock(root: &Path, binary: &Path) {
     println!("pinned {}", binary.display());
 }
 
-fn reset_generated_roots(root: &Path) -> Vec<String> {
+fn reset_root_first_segment(relative: &str) -> &str {
+    relative.split('/').next().unwrap_or(relative)
+}
+
+fn reset_root_conflicts_with_reserved(relative: &str, case_insensitive: bool) -> bool {
+    let protected = [
+        ".appsdk",
+        ".appsdk-control",
+        ".git",
+        ".agent-collab",
+        "active",
+        "protected",
+    ];
+    let first = reset_root_first_segment(relative);
+    protected.iter().any(|reserved| {
+        if case_insensitive {
+            first.eq_ignore_ascii_case(reserved)
+        } else {
+            first == *reserved
+        }
+    })
+}
+
+fn reset_root_filesystem_is_case_insensitive(root: &Path) -> bool {
+    // A governance reset always has `.appsdk` present when it reaches this
+    // check. Comparing its canonical path with a case variant gives us the
+    // root filesystem's actual behavior without creating probe files.
+    match (
+        fs::canonicalize(root.join(".appsdk")),
+        fs::canonicalize(root.join(".APPSDK")),
+    ) {
+        (Ok(actual), Ok(variant)) => actual == variant,
+        _ => false,
+    }
+}
+
+fn reset_generated_roots(root: &Path, allow_default_roots: bool) -> Vec<String> {
     let mut roots = vec!["generated".to_string()];
     let project = project_file(root);
     if fs::symlink_metadata(&project)
@@ -11120,17 +11156,24 @@ fn reset_generated_roots(root: &Path) -> Vec<String> {
     {
         fail("GOVERNANCE_PATH_SYMLINK:project");
     }
-    let Ok(text) = fs::read_to_string(&project) else {
-        return roots;
+    let text = match fs::read_to_string(&project) {
+        Ok(text) => text,
+        Err(_) if allow_default_roots => return roots,
+        Err(_) => fail(format!("PROJECT_CONTRACT_MISSING:{}", project.display())),
     };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return roots;
+    let value = match serde_json::from_str::<Value>(&text) {
+        Ok(value) => value,
+        Err(_) if allow_default_roots => return roots,
+        Err(_) => fail("INVALID_PROJECT_CONTRACT"),
     };
     let Some(declared) = value
         .pointer("/governance/generated_root")
         .and_then(Value::as_str)
     else {
-        return roots;
+        if allow_default_roots {
+            return roots;
+        }
+        fail("INVALID_GOVERNANCE_ROOT:/governance/generated_root");
     };
     let relative = declared.trim_end_matches("/**").trim_end_matches('/');
     let path = Path::new(relative);
@@ -11145,17 +11188,7 @@ fn reset_generated_roots(root: &Path) -> Vec<String> {
     {
         fail("INVALID_GOVERNANCE_ROOT:/governance/generated_root");
     }
-    let protected = [
-        ".appsdk",
-        ".appsdk-control",
-        ".git",
-        ".agent-collab",
-        "active",
-        "protected",
-    ];
-    if protected
-        .iter()
-        .any(|reserved| relative == *reserved || relative.starts_with(&format!("{reserved}/")))
+    if reset_root_conflicts_with_reserved(relative, reset_root_filesystem_is_case_insensitive(root))
     {
         fail("RESET_GENERATED_ROOT_CONFLICT");
     }
@@ -11210,7 +11243,7 @@ fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool
     if !status.stdout.is_empty() {
         fail("RESET_REQUIRES_CLEAN_WORKTREE");
     }
-    let generated_roots = reset_generated_roots(root);
+    let generated_roots = reset_generated_roots(root, fresh_init);
     let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
     removed.extend(generated_roots.iter().cloned());
     let reset_targets = [".appsdk", ".appsdk-control"]

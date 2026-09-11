@@ -134,6 +134,16 @@ fn run_memory(root: &Path, args: &[&str], home: &Path) -> std::process::Output {
         .unwrap()
 }
 
+fn filesystem_merges_case(root: &Path) -> bool {
+    match (
+        fs::canonicalize(root.join(".appsdk")),
+        fs::canonicalize(root.join(".APPSDK")),
+    ) {
+        (Ok(actual), Ok(variant)) => actual == variant,
+        _ => false,
+    }
+}
+
 #[test]
 fn project_commands_default_to_cwd_and_help_never_resolves_a_project() {
     let root = temp_root("cwd-default");
@@ -701,6 +711,207 @@ fn reset_governance_refuses_git_and_collab_generated_roots_without_mutating_stat
             "legacy\n"
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "must-remain\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn reset_governance_refuses_case_variant_reserved_roots_when_filesystem_merges_names() {
+    for reserved in [".Git", ".Appsdk", ".AGENT-COLLAB", "Active", "Protected"] {
+        let root = temp_root(&format!("reset-reserved-generated-case-{reserved}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let project_path = root.join(".appsdk/project.json");
+        let project = fs::read_to_string(&project_path).unwrap();
+        fs::write(
+            &project_path,
+            project.replace(
+                "\"generated_root\": \"generated/**\"",
+                &format!("\"generated_root\": \"{reserved}/**\""),
+            ),
+        )
+        .unwrap();
+        fs::write(root.join(".appsdk/legacy-record.json"), "legacy\n").unwrap();
+        fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        init_git(&root);
+
+        let case_insensitive = filesystem_merges_case(&root);
+        let project_before = fs::read_to_string(&project_path).unwrap();
+        let legacy_before = fs::read_to_string(root.join(".appsdk/legacy-record.json")).unwrap();
+        let rejected = run(&["reset-governance", root_text, "--discard-legacy"]);
+        if case_insensitive {
+            assert!(
+                !rejected.status.success(),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&rejected.stdout),
+                String::from_utf8_lossy(&rejected.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&rejected.stderr).contains("RESET_GENERATED_ROOT_CONFLICT")
+            );
+            assert_eq!(fs::read_to_string(&project_path).unwrap(), project_before);
+            assert_eq!(
+                fs::read_to_string(root.join(".appsdk/legacy-record.json")).unwrap(),
+                legacy_before
+            );
+            assert!(root.join(reserved).is_dir());
+        } else {
+            assert!(
+                rejected.status.success(),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&rejected.stdout),
+                String::from_utf8_lossy(&rejected.stderr)
+            );
+            assert!(!root.join(reserved).exists());
+            assert!(project_path.is_file());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn reset_governance_accepts_generated_subdirectory_roots() {
+    let root = temp_root("reset-generated-subdirectory");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let project = fs::read_to_string(&project_path).unwrap();
+    fs::write(
+        &project_path,
+        project.replace(
+            "\"generated_root\": \"generated/**\"",
+            "\"generated_root\": \"generated/modules/**\"",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("generated/modules/app-core")).unwrap();
+    fs::write(
+        root.join("generated/modules/app-core/module.compiled.json"),
+        "old\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("protected/history")).unwrap();
+    fs::write(root.join("protected/history/keep.txt"), "keep\n").unwrap();
+    init_git(&root);
+
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(
+        reset.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reset.stdout),
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert!(!root.join("generated/modules").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("protected/history/keep.txt")).unwrap(),
+        "keep\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_governance_refuses_missing_invalid_or_unreadable_project_contract_without_mutating_state()
+{
+    for (name, expected_error) in [
+        ("missing", "PROJECT_CONTRACT_MISSING"),
+        ("malformed", "INVALID_PROJECT_CONTRACT"),
+        (
+            "type-error",
+            "INVALID_GOVERNANCE_ROOT:/governance/generated_root",
+        ),
+        ("unreadable", "PROJECT_CONTRACT_MISSING"),
+    ] {
+        let root = temp_root(&format!("reset-invalid-project-{name}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let project_path = root.join(".appsdk/project.json");
+        let project = fs::read_to_string(&project_path).unwrap();
+        match name {
+            "missing" => fs::remove_file(&project_path).unwrap(),
+            "malformed" => fs::write(&project_path, "{not-json}\n").unwrap(),
+            "type-error" => fs::write(
+                &project_path,
+                project.replace(
+                    "\"generated_root\": \"generated/**\"",
+                    "\"generated_root\": 42",
+                ),
+            )
+            .unwrap(),
+            // `fs::read_to_string` on a directory fails even when tests run as
+            // root, while chmod-based unreadability is not deterministic and
+            // can dirty the test repo before the CLI performs its clean check.
+            "unreadable" => {
+                fs::remove_file(&project_path).unwrap();
+                fs::create_dir_all(&project_path).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let receipt_path = root.join(".appsdk/records/evidence/reset-canary-receipt.json");
+        fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+        fs::write(
+            &receipt_path,
+            r#"{"receipt_id":"reset-canary","status":"preserved"}
+"#,
+        )
+        .unwrap();
+        let marker_path = root.join(".appsdk/transactions/canary/marker.json");
+        fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+        fs::write(&marker_path, "marker-canary\n").unwrap();
+        fs::create_dir_all(root.join("generated/old-artifact")).unwrap();
+        fs::write(root.join("generated/old-artifact/artifact.bin"), "old\n").unwrap();
+        init_git(&root);
+        let project_before = if project_path.is_file() {
+            Some(fs::read_to_string(&project_path).unwrap())
+        } else {
+            None
+        };
+        let receipt_before = fs::read_to_string(&receipt_path).unwrap();
+        let marker_before = fs::read_to_string(&marker_path).unwrap();
+        let rejected = run(&["reset-governance", root_text, "--discard-legacy"]);
+        assert!(
+            !rejected.status.success(),
+            "case={name} stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(expected_error),
+            "case={name} stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        match (name, project_before) {
+            ("missing", None) => assert!(!project_path.exists(), "case={name}"),
+            ("unreadable", None) => assert!(project_path.is_dir(), "case={name}"),
+            (_, Some(project_before)) => {
+                assert_eq!(
+                    fs::read_to_string(&project_path).unwrap(),
+                    project_before,
+                    "case={name}"
+                );
+            }
+            (_, None) => unreachable!(),
+        }
+        assert_eq!(
+            fs::read_to_string(&receipt_path).unwrap(),
+            receipt_before,
+            "case={name}"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker_path).unwrap(),
+            marker_before,
+            "case={name}"
+        );
+        assert!(
+            root.join("generated/old-artifact/artifact.bin").is_file(),
+            "case={name}"
+        );
+        assert!(
+            !root
+                .join(".appsdk/records/reset-governance-record.json")
+                .exists(),
+            "case={name}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

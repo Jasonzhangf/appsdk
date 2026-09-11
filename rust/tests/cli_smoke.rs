@@ -256,6 +256,106 @@ fn project_commands_default_to_cwd_and_help_never_resolves_a_project() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn sdk_source_registry_result(
+    name: &str,
+    modules: Value,
+    source_paths: &[&str],
+) -> std::process::Output {
+    let root = temp_root(name);
+    fs::create_dir_all(root.join("contracts/maps")).unwrap();
+    fs::write(
+        root.join("contracts/maps/module-registry.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "modules": modules,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    for source_path in source_paths {
+        let path = root.join(source_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "").unwrap();
+    }
+    init_git(&root);
+    let output = run_in(&root, &["verify-sdk-source-registry", "."]);
+    fs::remove_dir_all(root).unwrap();
+    output
+}
+
+#[test]
+fn sdk_source_registry_enforces_single_active_owner_for_long_horizon_sources() {
+    let architecture_registry = serde_json::json!({
+        "module_id": "architecture-registry",
+        "status": "active",
+        "owner": "appsdk::architecture",
+        "owned_paths": ["contracts/maps/**"],
+        "forbidden_paths": ["active/lib/**", "protected/**"]
+    });
+
+    let owned = sdk_source_registry_result(
+        "sdk-source-registry-owned",
+        serde_json::json!([
+            architecture_registry.clone(),
+            {
+                "module_id": "runtime-core",
+                "status": "active",
+                "owner": "appsdk::runtime",
+                "owned_paths": [
+                    "rust/src/long_horizon_policy.rs",
+                    "rust/src/long_horizon_role.rs"
+                ],
+                "forbidden_paths": ["active/lib/**", "protected/**"]
+            }
+        ]),
+        &[
+            "rust/src/long_horizon_policy.rs",
+            "rust/src/long_horizon_role.rs",
+        ],
+    );
+    assert!(
+        owned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&owned.stderr)
+    );
+    assert!(String::from_utf8_lossy(&owned.stdout).contains("\"gate\":\"sdk_source_registry\""));
+
+    let unowned = sdk_source_registry_result(
+        "sdk-source-registry-unowned",
+        serde_json::json!([architecture_registry.clone()]),
+        &["rust/src/long_horizon_policy.rs"],
+    );
+    assert!(!unowned.status.success());
+    assert!(String::from_utf8_lossy(&unowned.stderr)
+        .contains("SDK_SOURCE_OWNER_CARDINALITY:rust/src/long_horizon_policy.rs:"));
+
+    let multiply_owned = sdk_source_registry_result(
+        "sdk-source-registry-multiply-owned",
+        serde_json::json!([
+            architecture_registry,
+            {
+                "module_id": "runtime-core-a",
+                "status": "active",
+                "owner": "appsdk::runtime_a",
+                "owned_paths": ["rust/src/long_horizon_role.rs"],
+                "forbidden_paths": ["active/lib/**", "protected/**"]
+            },
+            {
+                "module_id": "runtime-core-b",
+                "status": "active",
+                "owner": "appsdk::runtime_b",
+                "owned_paths": ["rust/src/long_horizon_role.rs"],
+                "forbidden_paths": ["active/lib/**", "protected/**"]
+            }
+        ]),
+        &["rust/src/long_horizon_role.rs"],
+    );
+    assert!(!multiply_owned.status.success());
+    assert!(String::from_utf8_lossy(&multiply_owned.stderr).contains(
+        "SDK_SOURCE_OWNER_CARDINALITY:rust/src/long_horizon_role.rs:runtime-core-a,runtime-core-b"
+    ));
+}
+
 fn confirm_preparation(root: &PathBuf, project_root: &str, change_kind: &str) {
     fs::write(
         root.join(".appsdk-prepare.json"),

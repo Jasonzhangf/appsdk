@@ -256,21 +256,42 @@ fn has_registered_version(
         }
         let event: RegistrationEvent = serde_json::from_str(line)
             .map_err(|error| format!("GLOBAL_REGISTRY_INVALID_LINE:{}:{}", index + 1, error))?;
+        let stored_root = Path::new(&event.project_root);
         if event.schema_version != REGISTRY_SCHEMA_VERSION
             || event.event != REGISTRY_EVENT
             || event.source != REGISTRY_SOURCE
-            || !Path::new(&event.project_root).is_absolute()
+            || !stored_root.is_absolute()
             || event.project_root.trim().is_empty()
             || event.project_id.trim().is_empty()
             || event.sdk_version.trim().is_empty()
-            || event.project_id != project_id(Path::new(&event.project_root))
         {
             return Err(format!(
                 "GLOBAL_REGISTRY_INVALID_EVENT:{}:unsupported registration shape",
                 index + 1
             ));
         }
-        if event.project_root == project_root {
+
+        let canonical_stored_root = fs::canonicalize(stored_root).map_err(|error| {
+            format!(
+                "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root canonicalization failed:{error}",
+                index + 1
+            )
+        })?;
+        let canonical_stored_root_text = canonical_stored_root.to_str().ok_or_else(|| {
+            format!(
+                "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not UTF-8",
+                index + 1
+            )
+        })?;
+        if canonical_stored_root_text != event.project_root
+            || event.project_id != project_id(&canonical_stored_root)
+        {
+            return Err(format!(
+                "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not canonical",
+                index + 1
+            ));
+        }
+        if canonical_stored_root_text == project_root {
             if event.sdk_version == sdk_version {
                 matching_version = true;
             }
@@ -435,6 +456,35 @@ mod tests {
             first.project_id,
             project_id(&project.canonicalize().unwrap())
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn noncanonical_registry_project_root_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-noncanonical-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let registry = root.join("registry");
+        fs::create_dir_all(&project).unwrap();
+        register_project_at(&project, &registry, "0.1.6").unwrap();
+
+        let path = registry.join(REGISTRY_FILE);
+        let mut event: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let noncanonical_root = project.join("..").join("project");
+        let noncanonical_root_text = noncanonical_root.to_str().unwrap();
+        event["project_root"] = Value::String(noncanonical_root_text.to_string());
+        event["project_id"] = Value::String(project_id(&noncanonical_root));
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+
+        let error = register_project_at(&project, &registry, "0.1.6").unwrap_err();
+        assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_EVENT:1:"));
         fs::remove_dir_all(root).ok();
     }
 

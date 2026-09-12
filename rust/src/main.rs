@@ -15,6 +15,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod global_registry;
 mod guidance;
 mod long_horizon_policy;
 mod long_horizon_role;
@@ -26,6 +27,7 @@ use long_horizon_role::execution_role;
 mod communication;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
+const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SDK_MAP_MIGRATION_MANIFEST: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
@@ -292,6 +294,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "docs/design/project-memory.md",
         "docs",
         include_str!("../../docs/design/project-memory.md"),
+    ),
+    (
+        "docs/design/appsdk-global-registry.md",
+        "docs",
+        include_str!("../../docs/design/appsdk-global-registry.md"),
     ),
     (
         "skills/appsdk-project-governance/SKILL.md",
@@ -10315,6 +10322,15 @@ fn initialize_collab_peer() {
     }
 }
 
+fn register_global_project(root: &Path) {
+    let receipt = global_registry::register_project(root, SDK_VERSION)
+        .unwrap_or_else(|error| fail(format!("GLOBAL_PROJECT_REGISTRATION_FAILED:{error}")));
+    println!(
+        "appsdk-registration {}",
+        serde_json::to_string(&global_registry::receipt_json(&receipt)).unwrap()
+    );
+}
+
 fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     if root.exists()
         && fs::symlink_metadata(root)
@@ -10334,6 +10350,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         }
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    register_global_project(root);
     if fresh {
         reset_governance_internal(root, true, true).unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
@@ -10390,7 +10407,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     }
 }
 
-fn new_project(root: &Path) {
+fn new_project(root: &Path, register: bool) {
     if root.exists() {
         if fs::symlink_metadata(root)
             .map(|m| m.file_type().is_symlink())
@@ -10423,6 +10440,10 @@ fn new_project(root: &Path) {
         {
             fail(format!("TARGET_PARENT_SYMLINK:{}", ancestor.display()));
         }
+    }
+    fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    if register {
+        register_global_project(root);
     }
     ensure_governance_layout(root);
     write_project_scaffold(root);
@@ -12634,7 +12655,15 @@ fn reset_transaction_build_staging(
     let binary = env::current_exe()
         .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BINARY_FAILED:{error}"))?;
     let output = Command::new(binary)
-        .args(["new", staging_root.to_str().unwrap_or("")])
+        // The staging scaffold is an internal reset transaction artifact. It
+        // uses the same scaffold code as `appsdk new`, but it is not a user
+        // project and therefore must not claim a host-wide registration.
+        .args([
+            "new",
+            staging_root.to_str().unwrap_or(""),
+            "--internal-reset-staging",
+        ])
+        .env("APPSDK_INTERNAL_RESET_STAGING", transaction_id)
         .env_remove("TMUX_PANE")
         .output()
         .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BUILD_FAILED:{error}"))?;
@@ -16917,10 +16946,22 @@ fn main() {
         }
         Some("new") => {
             let root = project_root_or_cwd(&mut args);
+            let internal_staging = match args.next() {
+                None => false,
+                Some(option) if option == "--internal-reset-staging" => {
+                    if env::var_os("APPSDK_INTERNAL_RESET_STAGING")
+                        .is_none_or(|value| value.is_empty())
+                    {
+                        fail("USAGE: appsdk new [project]");
+                    }
+                    true
+                }
+                Some(_) => fail("USAGE: appsdk new [project]"),
+            };
             if args.next().is_some() {
                 fail("USAGE: appsdk new [project]");
             }
-            new_project(&root);
+            new_project(&root, !internal_staging);
         }
         Some("init") => {
             let workspace = project_root_or_cwd(&mut args);

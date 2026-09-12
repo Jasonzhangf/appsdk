@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
@@ -15,6 +16,30 @@ fn binary() -> PathBuf {
 
 fn memory_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_project-memory"))
+}
+
+fn test_global_registry_root_for_project(project: &Path) -> PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    project.to_string_lossy().hash(&mut hasher);
+    std::env::temp_dir().join(format!(
+        "appsdk-rust-global-registry-tests-{}-{:016x}",
+        std::process::id(),
+        hasher.finish()
+    ))
+}
+
+fn test_global_registry_root_for_args(args: &[&str]) -> PathBuf {
+    args.iter()
+        .skip(1)
+        .map(Path::new)
+        .find(|path| path.is_absolute())
+        .map(test_global_registry_root_for_project)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "appsdk-rust-global-registry-tests-{}-default",
+                std::process::id()
+            ))
+        })
 }
 
 #[cfg(unix)]
@@ -201,6 +226,7 @@ fn init_git(root: &PathBuf) {
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(binary())
         .args(args)
+        .env("APPSDK_HOME", test_global_registry_root_for_args(args))
         .env_remove("TMUX_PANE")
         .output()
         .unwrap()
@@ -210,6 +236,7 @@ fn run_in(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary())
         .args(args)
         .current_dir(root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(root))
         .env_remove("TMUX_PANE")
         .output()
         .unwrap()
@@ -220,6 +247,7 @@ fn run_bug_in(root: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(root)
         .env("APPSDK_ROOT", root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(root))
         .env_remove("TMUX_PANE")
         .output()
         .unwrap()
@@ -535,6 +563,97 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
     assert_eq!(reset["mode"], "fresh_init");
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_creation_and_initialization_persist_host_registration() {
+    let root = temp_root("global-registration-cli");
+    let registry = temp_root("global-registration-home");
+    let root_text = root.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    let created = Command::new(binary())
+        .args(["new", root_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let first_receipt = String::from_utf8_lossy(&created.stdout)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("appsdk-registration ")
+                .map(|value| serde_json::from_str::<Value>(value).unwrap())
+        })
+        .expect("new must emit a registration receipt");
+    assert_eq!(
+        first_receipt["registry_root"],
+        registry.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        first_receipt["project_root"],
+        root.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(first_receipt["sdk_version"], "0.1.6");
+    assert_eq!(first_receipt["idempotent"], false);
+
+    let initialized = Command::new(binary())
+        .args(["init", root_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let second_receipt = String::from_utf8_lossy(&initialized.stdout)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("appsdk-registration ")
+                .map(|value| serde_json::from_str::<Value>(value).unwrap())
+        })
+        .expect("init must emit a registration receipt");
+    assert_eq!(second_receipt["idempotent"], true);
+
+    init_git(&root);
+    let fresh = Command::new(binary())
+        .args(["init", root_text, "--fresh", "--discard-legacy"])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        fresh.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let fresh_receipt = String::from_utf8_lossy(&fresh.stdout)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("appsdk-registration ")
+                .map(|value| serde_json::from_str::<Value>(value).unwrap())
+        })
+        .expect("fresh init must emit a registration receipt");
+    assert_eq!(fresh_receipt["idempotent"], true);
+
+    let lines = fs::read_to_string(registry.join("projects.jsonl")).unwrap();
+    assert_eq!(lines.lines().count(), 1);
+    let event: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+    assert_eq!(event["event"], "project.registered");
+    assert_eq!(event["project_root"], first_receipt["project_root"]);
+    assert_eq!(event["project_id"], first_receipt["project_id"]);
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(registry).unwrap();
 }
 
 #[test]
@@ -3888,6 +4007,7 @@ exit 73
     let output = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", search_path)
         .env("TMUX_PANE", "%42")
         .env("APPSDK_COLLAB_ENV_PROBE", "same-environment")
@@ -3909,6 +4029,7 @@ exit 73
     let repeated = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env(
             "PATH",
             std::env::join_paths(
@@ -3946,6 +4067,7 @@ exit 73
     let ready = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
         .env("TMUX_PANE", "%42")
         .output()
@@ -3956,6 +4078,7 @@ exit 73
     let unavailable = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
         .env("TMUX_PANE", "%42")
         .output()

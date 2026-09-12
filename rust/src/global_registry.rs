@@ -249,12 +249,16 @@ fn ensure_registry_root(root: &Path) -> Result<PathBuf, String> {
                 }
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(|error| {
-                    format!(
-                        "GLOBAL_REGISTRY_CREATE_FAILED:{}:{error}",
-                        current.display()
-                    )
-                })?;
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "GLOBAL_REGISTRY_CREATE_FAILED:{}:{error}",
+                            current.display()
+                        ));
+                    }
+                }
                 let metadata = fs::symlink_metadata(&current).map_err(|error| {
                     format!(
                         "GLOBAL_REGISTRY_ROOT_STAT_FAILED:{}:{error}",
@@ -467,6 +471,8 @@ pub fn receipt_json(receipt: &RegistrationReceipt) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn registration_is_idempotent_and_append_only() {
@@ -489,6 +495,50 @@ mod tests {
         assert!(older_again.idempotent);
         assert_eq!(
             fs::read_to_string(home.join(REGISTRY_FILE))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concurrent_first_registrations_share_new_registry_root() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-concurrent-first-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        let registry = root.join("new").join("registry");
+        fs::create_dir_all(&project_a).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+
+        let start = Arc::new(Barrier::new(2));
+        let handles = [project_a, project_b].map(|project| {
+            let registry = registry.clone();
+            let start = Arc::clone(&start);
+            thread::spawn(move || {
+                start.wait();
+                for _ in 0..100 {
+                    match register_project_at(&project, &registry, "0.1.6") {
+                        Ok(receipt) => return receipt,
+                        Err(error) if error.starts_with("GLOBAL_REGISTRY_BUSY:") => {
+                            thread::yield_now();
+                        }
+                        Err(error) => panic!("concurrent first registration failed: {error}"),
+                    }
+                }
+                panic!("concurrent first registration stayed busy")
+            })
+        });
+        let receipts = handles.map(|handle| handle.join().unwrap());
+
+        assert_ne!(receipts[0].project_id, receipts[1].project_id);
+        assert_eq!(
+            fs::read_to_string(registry.join(REGISTRY_FILE))
                 .unwrap()
                 .lines()
                 .count(),

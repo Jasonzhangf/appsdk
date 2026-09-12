@@ -2525,6 +2525,56 @@ fn read_module_artifact(root: &Path, project: &Value, module_id: &str) -> Value 
     .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"))
 }
 
+fn read_historical_module_artifact(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+) -> Value {
+    let freeze_name = freeze_record_name(module_id);
+    let freeze = read_record(root, &freeze_name);
+    let active_version = record_str(&freeze, "/active_version", &freeze_name);
+    assert_version(active_version, "INVALID_ACTIVE_VERSION");
+    let expected_hash = record_str(&freeze, "/library_hash", &freeze_name).to_string();
+    let protected_root = contract_root(root, project, "/governance/protected_root");
+    let current_archive = protected_root.join("history").join(module_id);
+    let version_archive = protected_root
+        .join("history-versions")
+        .join(module_id)
+        .join(active_version);
+    let mut selected: Option<(PathBuf, Value)> = None;
+    let candidates = [
+        (current_archive, "protected_archive"),
+        (version_archive, "protected_version_history"),
+    ];
+    for (archive, label) in candidates {
+        assert_no_symlink_components(root, &archive, label);
+        let artifact_file = archive.join("module-artifact.json");
+        assert_no_symlink_components(root, &artifact_file, "module_artifact_history");
+        if !artifact_file.is_file() {
+            continue;
+        }
+        let artifact: Value = serde_json::from_str(
+            &fs::read_to_string(&artifact_file)
+                .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+        if artifact.get("artifact_hash").and_then(Value::as_str) != Some(&expected_hash) {
+            continue;
+        }
+        if selected.is_some() {
+            fail(format!("MODULE_ARTIFACT_HISTORY_AMBIGUOUS:{}", module_id));
+        }
+        assert_protected_not_ignored(root, &archive);
+        module_artifact_matches_project(module, &artifact);
+        assert_protected_archive_matches(root, module, &artifact, &archive);
+        selected = Some((archive, artifact));
+    }
+    selected
+        .map(|(_, artifact)| artifact)
+        .unwrap_or_else(|| fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id)))
+}
+
 fn write_module_artifact_value(root: &Path, project: &Value, module_id: &str, artifact: &Value) {
     let dir = module_generated_dir(root, project, module_id);
     fs::create_dir_all(&dir).unwrap_or_else(|_| fail("MODULE_ARTIFACT_WRITE_FAILED"));
@@ -5527,7 +5577,11 @@ fn producer_try_reuse_records(
     {
         fail("PRODUCER_REUSE_BASELINE_OUTPUT_INVALID");
     }
-    assert_evidence_record(&existing[2], baseline_id, Utc::now());
+    assert_evidence_record(
+        &existing[2],
+        baseline_id,
+        EvidenceValidationMode::Current(Utc::now()),
+    );
     let now = Utc::now();
     for (record, name) in [
         (&existing[0], "worktree-record"),
@@ -6421,7 +6475,11 @@ fn lifecycle_chain_validate_evidence(
     source_commit: &str,
 ) -> Value {
     let evidence = evidence_by_id(root, module_id, evidence_id);
-    assert_evidence_record(&evidence, evidence_id, Utc::now());
+    assert_evidence_record(
+        &evidence,
+        evidence_id,
+        EvidenceValidationMode::Current(Utc::now()),
+    );
     if producer_string(&evidence, "/evidence_id", evidence_id) != evidence_id
         || producer_string(&evidence, "/issue_id", evidence_id) != issue_id
         || producer_string(&evidence, "/scope/module_id", evidence_id) != module_id
@@ -7253,6 +7311,7 @@ fn assert_record_schema(
     review: &Value,
     promotion: &Value,
     allow_legacy_rehydrate_bindings: bool,
+    validation: EvidenceValidationMode,
 ) {
     for (record, name, fields) in [
         (
@@ -7322,7 +7381,7 @@ fn assert_record_schema(
             record_str(record, &format!("/{}", field), name);
         }
     }
-    assert_evidence_record(evidence, "evidence-record.json", Utc::now());
+    assert_evidence_record(evidence, "evidence-record.json", validation);
     for path in [
         "/reviewer/adapter",
         "/reviewer/identity",
@@ -7705,7 +7764,12 @@ fn record_datetime(record: &Value, path: &str, name: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn assert_evidence_record(evidence: &Value, name: &str, admission_time: DateTime<Utc>) {
+enum EvidenceValidationMode {
+    Current(DateTime<Utc>),
+    Historical,
+}
+
+fn assert_evidence_record(evidence: &Value, name: &str, validation: EvidenceValidationMode) {
     for path in [
         "/evidence_id",
         "/issue_id",
@@ -7748,7 +7812,12 @@ fn assert_evidence_record(evidence: &Value, name: &str, admission_time: DateTime
     }
     let created_at = record_time(evidence, name);
     let expires_at = record_datetime(evidence, "/expires_at", name);
-    if created_at > expires_at || admission_time > expires_at {
+    if created_at > expires_at
+        || matches!(
+            validation,
+            EvidenceValidationMode::Current(admission_time) if admission_time > expires_at
+        )
+    {
         fail(format!("EXPIRED_EVIDENCE_RECORD:{}", name));
     }
 }
@@ -7782,7 +7851,11 @@ fn deployment_receipt_time(
     producer: &Value,
 ) -> DateTime<Utc> {
     let evidence = evidence_by_id(root, module_id, evidence_id);
-    assert_evidence_record(&evidence, evidence_id, Utc::now());
+    assert_evidence_record(
+        &evidence,
+        evidence_id,
+        EvidenceValidationMode::Current(Utc::now()),
+    );
     if record_str(&evidence, "/issue_id", evidence_id) != issue_id
         || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
         || record_str(&evidence, "/scope_hash", evidence_id) != scope_hash
@@ -7937,7 +8010,7 @@ fn assert_pre_review_validation_gate(root: &Path, module_id: &str, artifact: &Va
                 fail("PRE_REVIEW_EVIDENCE_NOT_DISJOINT");
             }
             let evidence = evidence_by_id(root, module_id, id);
-            assert_evidence_record(&evidence, id, Utc::now());
+            assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
             if record_str(&evidence, "/issue_id", id) != issue_id
                 || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
                 || record_str(&evidence, "/scope_hash", id) != scope_hash
@@ -8023,6 +8096,31 @@ fn verify_review_admission(root: &Path, module_id: &str) {
                 .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
         })
         .unwrap_or_else(|| fail(format!("UNKNOWN_MODULE:{}", module_id)));
+    let stage = record_str(module, "/stage", "module");
+    if matches!(stage, "frozen" | "retired") {
+        // Frozen and retired modules are immutable publications. Their
+        // generated checkout projection may have been intentionally removed,
+        // so review admission must resolve the artifact from the immutable
+        // historical archive and validate the publication graph only.
+        verify_internal(root, true, false);
+        let artifact = read_historical_module_artifact(root, &project, module, module_id);
+        if !matches!(
+            artifact.get("stage").and_then(Value::as_str),
+            Some("frozen" | "retired")
+        ) {
+            fail(format!(
+                "HISTORICAL_MODULE_ARTIFACT_STAGE_MISMATCH:{}",
+                module_id
+            ));
+        }
+        assert_historical_frozen_record_graph(root, module_id, &artifact);
+        println!(
+            "{{\"ok\":true,\"gate\":\"review_admission\",\"module_id\":\"{}\",\"mode\":\"historical\"}}",
+            module_id
+        );
+        return;
+    }
+
     let artifact = read_module_artifact(root, &project, module_id);
     module_artifact_matches_project(module, &artifact);
     explain_review_admission_preflight(root, module_id, module);
@@ -8281,7 +8379,11 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
     assert_review_map_bindings(root, module_id, &review, &review_name);
     let baseline_id = record_str(&reproduction, "/baseline_evidence_id", &reproduction_name);
     let baseline = evidence_by_id(root, module_id, baseline_id);
-    assert_evidence_record(&baseline, baseline_id, Utc::now());
+    assert_evidence_record(
+        &baseline,
+        baseline_id,
+        EvidenceValidationMode::Current(Utc::now()),
+    );
     if record_str(&baseline, "/phase", baseline_id) != "baseline_reproduction"
         || baseline.get("result").and_then(Value::as_str) != Some("pass")
         || baseline.get("input_hashes") != reproduction.get("input_hashes")
@@ -8294,7 +8396,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
             .as_str()
             .unwrap_or_else(|| fail("INVALID_CANDIDATE_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
-        assert_evidence_record(&evidence, id, Utc::now());
+        assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
         if record_str(&evidence, "/issue_id", id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", id) != scope_hash
@@ -8320,7 +8422,7 @@ fn assert_fix_architecture_gate(root: &Path, module_id: &str, artifact: &Value) 
             .as_str()
             .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
-        assert_evidence_record(&evidence, id, Utc::now());
+        assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
         if record_str(&evidence, "/issue_id", id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", id) != scope_hash
@@ -8412,7 +8514,7 @@ fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
     let mut phases = Vec::new();
     for id in ids {
         let evidence = evidence_by_id(root, module_id, &id);
-        assert_evidence_record(&evidence, &id, Utc::now());
+        assert_evidence_record(&evidence, &id, EvidenceValidationMode::Current(Utc::now()));
         if record_str(&evidence, "/issue_id", &id) != issue_id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/scope_hash", &id) != scope_hash
@@ -9124,7 +9226,7 @@ fn assert_fix_lifecycle_graph(
     let mut phases = Vec::new();
     for id in &required_evidence {
         let evidence = evidence_by_id(root, module_id, id);
-        assert_evidence_record(&evidence, id, Utc::now());
+        assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
         if record_str(&evidence, "/evidence_id", id) != id
             || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
             || record_str(&evidence, "/issue_id", id) != issue_id
@@ -9151,7 +9253,7 @@ fn assert_fix_lifecycle_graph(
             .as_str()
             .unwrap_or_else(|| fail("INVALID_REVIEW_EVIDENCE_ID"));
         let evidence = evidence_by_id(root, module_id, id);
-        assert_evidence_record(&evidence, id, Utc::now());
+        assert_evidence_record(&evidence, id, EvidenceValidationMode::Current(Utc::now()));
         if record_str(&evidence, "/phase", id) == "post_architecture_effectiveness"
             || record_time(&evidence, id) > record_time(review, "review-record.json")
         {
@@ -9239,7 +9341,15 @@ fn assert_record_graph(
     artifact: &Value,
     require_freeze: bool,
 ) {
-    assert_record_graph_mode(root, module_id, artifact, require_freeze, true, false);
+    assert_record_graph_mode(
+        root,
+        module_id,
+        artifact,
+        require_freeze,
+        true,
+        false,
+        EvidenceValidationMode::Current(Utc::now()),
+    );
 }
 
 // Frozen rehydration republishes an already accepted historical artifact. It
@@ -9254,7 +9364,15 @@ fn assert_historical_frozen_record_graph(root: &Path, module_id: &str, artifact:
     // The merge/mainline binding remains authoritative and must still be
     // resolved before a historical publication is rehydrated.
     assert_fix_merge_gate(root, module_id);
-    assert_record_graph_mode(root, Some(module_id), artifact, true, false, true);
+    assert_record_graph_mode(
+        root,
+        Some(module_id),
+        artifact,
+        true,
+        false,
+        true,
+        EvidenceValidationMode::Historical,
+    );
 }
 
 fn assert_record_graph_mode(
@@ -9264,6 +9382,7 @@ fn assert_record_graph_mode(
     require_freeze: bool,
     enforce_current_lifecycle: bool,
     allow_legacy_rehydrate_bindings: bool,
+    validation: EvidenceValidationMode,
 ) {
     if let Some(module_id) = module_id {
         let _ = read_record(root, &module_record_name("worktree-record", module_id));
@@ -9285,6 +9404,7 @@ fn assert_record_graph_mode(
         &review,
         &promotion,
         allow_legacy_rehydrate_bindings,
+        validation,
     );
     if enforce_current_lifecycle {
         if let Some(module_id) = module_id {
@@ -9371,13 +9491,6 @@ fn assert_record_graph_mode(
         .any(|gate| gate.get("result").and_then(Value::as_str) != Some("pass"))
     {
         fail("PROMOTION_GATE_NOT_PASSED");
-    }
-    let expires_at = record_str(&evidence, "/expires_at", "evidence-record.json");
-    let expires_at = DateTime::parse_from_rfc3339(expires_at)
-        .unwrap_or_else(|_| fail("INVALID_EVIDENCE_EXPIRY"))
-        .with_timezone(&Utc);
-    if expires_at <= Utc::now() {
-        fail("EVIDENCE_EXPIRED");
     }
     if require_freeze {
         let module_id = module_id.unwrap_or_else(|| fail("FREEZE_RECORD_MODULE_REQUIRED"));

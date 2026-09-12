@@ -9870,7 +9870,56 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
 
     fs::remove_dir_all(root.join("generated")).unwrap();
     fs::remove_dir_all(root.join("active")).unwrap();
+
+    // Review admission for an immutable module must resolve the published
+    // artifact from protected history after the rebuildable checkout
+    // projection has been removed. Historical evidence may also be expired
+    // now; it remains admissible only through the historical graph path.
+    let evidence_file = root.join(".appsdk/records/evidence-record-app-core.json");
+    let mut expired_historical_evidence: Value =
+        serde_json::from_str(&fs::read_to_string(&evidence_file).unwrap()).unwrap();
+    expired_historical_evidence["expires_at"] = Value::String("2026-01-02T00:00:00Z".into());
+    fs::write(
+        &evidence_file,
+        serde_json::to_string_pretty(&expired_historical_evidence).unwrap() + "\n",
+    )
+    .unwrap();
+    let historical_admission = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        historical_admission.status.success(),
+        "{}",
+        String::from_utf8_lossy(&historical_admission.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&historical_admission.stdout).contains("\"mode\":\"historical\"")
+    );
+
+    // A damaged or missing immutable archive must fail closed. The verifier
+    // must not fall back to source or recreate a generated artifact during
+    // review admission.
+    let historical_archive = root.join("protected/history/app-core/module-artifact.json");
+    let historical_archive_text = fs::read_to_string(&historical_archive).unwrap();
+    fs::write(&historical_archive, "{}\n").unwrap();
+    let tampered_history = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!tampered_history.status.success());
+    assert!(String::from_utf8_lossy(&tampered_history.stderr)
+        .contains("MODULE_ARTIFACT_HISTORY_MISSING:app-core"));
+    fs::write(&historical_archive, historical_archive_text).unwrap();
+
     fs::remove_dir_all(root.join("protected/history")).unwrap();
+
     let blocked = run(&[
         "begin-version",
         root_text,

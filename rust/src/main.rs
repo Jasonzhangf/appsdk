@@ -6184,6 +6184,17 @@ fn lifecycle_chain_record_is_pass(kind: &str, record: &Value) -> bool {
     }
 }
 
+fn lifecycle_chain_attempt_identity(module_id: &str, kind: &str, record_hash: &str) -> String {
+    producer_stable_id(
+        "lifecycle-attempt",
+        &serde_json::json!({
+            "module_id": module_id,
+            "phase": kind,
+            "record_hash": record_hash
+        }),
+    )
+}
+
 fn lifecycle_chain_attempt_path(root: &Path, module_id: &str, kind: &str) -> PathBuf {
     root.join(".appsdk")
         .join("records")
@@ -6194,93 +6205,17 @@ fn lifecycle_chain_attempt_path(root: &Path, module_id: &str, kind: &str) -> Pat
 
 fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, record: &Value) {
     let target = lifecycle_chain_attempt_path(root, module_id, kind);
-    assert_no_symlink_components(root, &target, "lifecycle_chain_attempt");
-    if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-        }
-    }
-
     let record_hash = sha256(&canonical(record));
-    let attempt_id = producer_stable_id(
-        "lifecycle-attempt",
-        &serde_json::json!({
-            "module_id": module_id,
-            "phase": kind,
-            "record_hash": record_hash
-        }),
-    );
-    if target.is_file() {
-        let contents = fs::read_to_string(&target)
-            .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
-        let mut matching_attempt = false;
-        let mut seen_attempt_ids = BTreeSet::new();
-        for line in contents.lines() {
-            if line.trim().is_empty() {
-                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-            }
-            let existing: Value = serde_json::from_str(line)
-                .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
-            if existing.get("schema_version").and_then(Value::as_u64) != Some(1)
-                || existing.get("module_id").and_then(Value::as_str) != Some(module_id)
-                || existing.get("phase").and_then(Value::as_str) != Some(kind)
-                || existing.get("result").and_then(Value::as_str) != Some("non_pass")
-                || existing.get("attempt_id").and_then(Value::as_str).is_none()
-                || existing.get("record").is_none()
-                || existing
-                    .get("record_hash")
-                    .and_then(Value::as_str)
-                    .is_none()
-                || existing
-                    .get("archived_at")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .is_none()
-            {
-                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-            }
-            let archived_at = existing.get("archived_at").and_then(Value::as_str).unwrap();
-            let archived_at = DateTime::parse_from_rfc3339(archived_at)
-                .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"))
-                .with_timezone(&Utc);
-            if archived_at > Utc::now() {
-                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-            }
-            let existing_attempt_id = existing.get("attempt_id").and_then(Value::as_str).unwrap();
-            if !seen_attempt_ids.insert(existing_attempt_id.to_string()) {
-                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-            }
-            let existing_record = existing
-                .get("record")
-                .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
-            let existing_record_hash = sha256(&canonical(existing_record));
-            let stored_record_hash = existing.get("record_hash").and_then(Value::as_str).unwrap();
-            if stored_record_hash != existing_record_hash {
-                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-            }
-            let expected_existing_attempt_id = producer_stable_id(
-                "lifecycle-attempt",
-                &serde_json::json!({
-                    "module_id": module_id,
-                    "phase": kind,
-                    "record_hash": existing_record_hash
-                }),
-            );
-            if existing.get("attempt_id").and_then(Value::as_str)
-                != Some(expected_existing_attempt_id.as_str())
-            {
-                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
-            }
-            if expected_existing_attempt_id == attempt_id {
-                if existing_record_hash != record_hash || existing_record != record {
-                    fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_CONFLICT");
-                }
-                matching_attempt = true;
-            }
-        }
-        if matching_attempt {
-            return;
-        }
+    let attempt_id = lifecycle_chain_attempt_identity(module_id, kind, &record_hash);
+    if lifecycle_chain_validate_attempt_ledger(
+        root,
+        module_id,
+        kind,
+        &attempt_id,
+        &record_hash,
+        record,
+    ) {
+        return;
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_WRITE_FAILED"));
@@ -6313,6 +6248,82 @@ fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, reco
     }
 }
 
+fn lifecycle_chain_validate_attempt_ledger(
+    root: &Path,
+    module_id: &str,
+    kind: &str,
+    attempt_id: &str,
+    record_hash: &str,
+    record: &Value,
+) -> bool {
+    let target = lifecycle_chain_attempt_path(root, module_id, kind);
+    assert_no_symlink_components(root, &target, "lifecycle_chain_attempt");
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return false,
+        Err(_) => fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"),
+    }
+    let contents = fs::read_to_string(&target)
+        .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+    let mut matching_attempt = false;
+    let mut seen_attempt_ids = BTreeSet::new();
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+        let existing: Value = serde_json::from_str(line)
+            .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+        if existing.get("schema_version").and_then(Value::as_u64) != Some(1)
+            || existing.get("module_id").and_then(Value::as_str) != Some(module_id)
+            || existing.get("phase").and_then(Value::as_str) != Some(kind)
+            || existing.get("result").and_then(Value::as_str) != Some("non_pass")
+            || existing.get("attempt_id").and_then(Value::as_str).is_none()
+            || existing.get("record").is_none()
+            || existing
+                .get("record_hash")
+                .and_then(Value::as_str)
+                .is_none()
+            || existing
+                .get("archived_at")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+        {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+        let archived_at = DateTime::parse_from_rfc3339(existing["archived_at"].as_str().unwrap())
+            .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"))
+            .with_timezone(&Utc);
+        if archived_at > Utc::now() {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+        let existing_attempt_id = existing["attempt_id"].as_str().unwrap();
+        if !seen_attempt_ids.insert(existing_attempt_id.to_string()) {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+        let existing_record = &existing["record"];
+        let existing_record_hash = sha256(&canonical(existing_record));
+        if existing["record_hash"].as_str().unwrap() != existing_record_hash {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+        let expected_existing_attempt_id =
+            lifecycle_chain_attempt_identity(module_id, kind, &existing_record_hash);
+        if existing_attempt_id != expected_existing_attempt_id {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+        if expected_existing_attempt_id == attempt_id {
+            if existing_record_hash != record_hash || existing_record != record {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_CONFLICT");
+            }
+            matching_attempt = true;
+        }
+    }
+    matching_attempt
+}
+
 fn lifecycle_chain_assert_reusable_record(
     existing: &Value,
     expected: &Value,
@@ -6342,6 +6353,17 @@ fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record
     if target.exists() {
         let existing = producer_read_record_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
             .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_RECORD_INVALID"));
+        let existing_record_hash = sha256(&canonical(&existing));
+        let existing_attempt_id =
+            lifecycle_chain_attempt_identity(module_id, kind, &existing_record_hash);
+        lifecycle_chain_validate_attempt_ledger(
+            root,
+            module_id,
+            kind,
+            &existing_attempt_id,
+            &existing_record_hash,
+            &existing,
+        );
         let existing_pass = lifecycle_chain_record_is_pass(kind, &existing);
         let expected_pass = lifecycle_chain_record_is_pass(kind, record);
         if existing_pass {
@@ -6567,6 +6589,17 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     {
         assert_lifecycle_chain_review_identity(&existing);
         if lifecycle_chain_record_is_pass("review-record", &existing) {
+            let existing_record_hash = sha256(&canonical(&existing));
+            let existing_attempt_id =
+                lifecycle_chain_attempt_identity(module_id, "review-record", &existing_record_hash);
+            lifecycle_chain_validate_attempt_ledger(
+                root,
+                module_id,
+                "review-record",
+                &existing_attempt_id,
+                &existing_record_hash,
+                &existing,
+            );
             if verdict != "pass" {
                 fail("LIFECYCLE_CHAIN_PASS_IMMUTABLE");
             }
@@ -6726,6 +6759,20 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
         lifecycle_chain_read_record_if_present(root, module_id, "effectiveness-record")
     {
         if lifecycle_chain_record_is_pass("effectiveness-record", &existing) {
+            let existing_record_hash = sha256(&canonical(&existing));
+            let existing_attempt_id = lifecycle_chain_attempt_identity(
+                module_id,
+                "effectiveness-record",
+                &existing_record_hash,
+            );
+            lifecycle_chain_validate_attempt_ledger(
+                root,
+                module_id,
+                "effectiveness-record",
+                &existing_attempt_id,
+                &existing_record_hash,
+                &existing,
+            );
             // A cache hit must satisfy the same complete effectiveness gate
             // as a downstream consumer.  This catches evidence timestamp or
             // reference drift before returning reused=true.
@@ -6897,6 +6944,17 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
     if let Some(existing) = lifecycle_chain_read_record_if_present(root, module_id, "merge-record")
     {
         if lifecycle_chain_record_is_pass("merge-record", &existing) {
+            let existing_record_hash = sha256(&canonical(&existing));
+            let existing_attempt_id =
+                lifecycle_chain_attempt_identity(module_id, "merge-record", &existing_record_hash);
+            lifecycle_chain_validate_attempt_ledger(
+                root,
+                module_id,
+                "merge-record",
+                &existing_attempt_id,
+                &existing_record_hash,
+                &existing,
+            );
             lifecycle_chain_assert_reusable_record(
                 &existing,
                 &merge,
@@ -7116,6 +7174,20 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         lifecycle_chain_read_record_if_present(root, module_id, "promotion-record")
     {
         if lifecycle_chain_record_is_pass("promotion-record", &existing) {
+            let existing_record_hash = sha256(&canonical(&existing));
+            let existing_attempt_id = lifecycle_chain_attempt_identity(
+                module_id,
+                "promotion-record",
+                &existing_record_hash,
+            );
+            lifecycle_chain_validate_attempt_ledger(
+                root,
+                module_id,
+                "promotion-record",
+                &existing_attempt_id,
+                &existing_record_hash,
+                &existing,
+            );
             lifecycle_chain_assert_reusable_record(
                 &existing,
                 &promotion,

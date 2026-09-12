@@ -2943,6 +2943,96 @@ fn lifecycle_chain_reenters_non_pass_review_and_preserves_attempt_history() {
 }
 
 #[test]
+fn lifecycle_chain_rejects_invalid_attempt_history_before_reusing_canonical_record() {
+    let root = temp_root("lifecycle-chain-attempt-integrity");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let review = root.join(".appsdk/records/review-record-app-core.json");
+    fs::remove_file(&review).unwrap();
+    let input = root.join("architecture-input.json");
+    let write_input = |verdict: &str| {
+        fs::write(
+            &input,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "architecture": {
+                    "reviewer": {"adapter":"test","identity":"test"},
+                    "verdict": verdict,
+                    "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    };
+    let produce = || {
+        run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ])
+    };
+
+    write_input("fail");
+    assert!(produce().status.success());
+    write_input("pass");
+    assert!(produce().status.success());
+
+    let attempts = root.join(".appsdk/records/attempts/app-core/review-record.jsonl");
+    let canonical_before = fs::read(&review).unwrap();
+    let valid_ledger = fs::read_to_string(&attempts).unwrap();
+    let valid_attempt: Value = serde_json::from_str(valid_ledger.lines().next().unwrap()).unwrap();
+    for (label, invalid_ledger) in [
+        ("wrong-result", {
+            let mut attempt = valid_attempt.clone();
+            attempt["result"] = Value::String("pass".into());
+            serde_json::to_string(&attempt).unwrap() + "\n"
+        }),
+        ("missing-archived-at", {
+            let mut attempt = valid_attempt.clone();
+            attempt.as_object_mut().unwrap().remove("archived_at");
+            serde_json::to_string(&attempt).unwrap() + "\n"
+        }),
+        ("invalid-archived-at", {
+            let mut attempt = valid_attempt.clone();
+            attempt["archived_at"] = Value::String("not-a-timestamp".into());
+            serde_json::to_string(&attempt).unwrap() + "\n"
+        }),
+        (
+            "duplicate-attempt-id",
+            format!("{valid_ledger}{valid_ledger}"),
+        ),
+    ] {
+        fs::write(&attempts, &invalid_ledger).unwrap();
+        let rejected = produce();
+        assert!(
+            !rejected.status.success(),
+            "case={label} stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"),
+            "case={label} stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(fs::read(&review).unwrap(), canonical_before, "case={label}");
+        assert_eq!(
+            fs::read_to_string(&attempts).unwrap(),
+            invalid_ledger,
+            "case={label}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_reenters_non_pass_downstream_stages_and_preserves_attempt_history() {
     let root = temp_root("lifecycle-chain-downstream-reentry");
     let root_text = root.to_str().unwrap();

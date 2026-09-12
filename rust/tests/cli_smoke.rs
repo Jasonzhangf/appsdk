@@ -9975,7 +9975,7 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     // successful admission above); an expiry before the publication terminal
     // timestamp is invalid and must not be resurrected by Historical mode.
     let mut expired_before_publication = expired_historical_evidence.clone();
-    expired_before_publication["expires_at"] = Value::String("2025-12-31T23:59:59Z".into());
+    expired_before_publication["expires_at"] = Value::String("2026-01-01T00:03:01Z".into());
     fs::write(
         &evidence_file,
         serde_json::to_string_pretty(&expired_before_publication).unwrap() + "\n",

@@ -230,10 +230,14 @@ fn ensure_registry_root(root: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(root).map_err(|error| format!("GLOBAL_REGISTRY_CANONICALIZE_FAILED:{error}"))
 }
 
-fn read_latest(path: &Path, project_root: &str) -> Result<Option<RegistrationEvent>, String> {
+fn has_registered_version(
+    path: &Path,
+    project_root: &str,
+    sdk_version: &str,
+) -> Result<bool, String> {
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(format!("GLOBAL_REGISTRY_READ_FAILED:{error}")),
     };
     let mut text = String::new();
@@ -242,7 +246,7 @@ fn read_latest(path: &Path, project_root: &str) -> Result<Option<RegistrationEve
     if !text.is_empty() && !text.as_bytes().ends_with(b"\n") {
         return Err("GLOBAL_REGISTRY_INVALID_LINE:missing final newline".into());
     }
-    let mut latest = None;
+    let mut matching_version = false;
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             return Err(format!(
@@ -267,10 +271,12 @@ fn read_latest(path: &Path, project_root: &str) -> Result<Option<RegistrationEve
             ));
         }
         if event.project_root == project_root {
-            latest = Some(event);
+            if event.sdk_version == sdk_version {
+                matching_version = true;
+            }
         }
     }
-    Ok(latest)
+    Ok(matching_version)
 }
 
 /// Record one project registration in the host-wide AppSDK registry.
@@ -304,17 +310,16 @@ pub fn register_project_at(
     ensure_no_symlink(&lock_path, "registry_lock")?;
     let _lock = lock_registry(&lock_path)?;
     let id = project_id(&canonical_root);
-    if let Some(existing) = read_latest(&path, &canonical_root_text)? {
-        if existing.project_id == id && existing.sdk_version == sdk_version {
-            return Ok(RegistrationReceipt {
-                registry_root: registry_root.to_path_buf(),
-                registry_path: path,
-                project_id: id,
-                project_root: canonical_root,
-                sdk_version: sdk_version.to_string(),
-                idempotent: true,
-            });
-        }
+    let matching_version = has_registered_version(&path, &canonical_root_text, sdk_version)?;
+    if matching_version {
+        return Ok(RegistrationReceipt {
+            registry_root: registry_root.to_path_buf(),
+            registry_path: path,
+            project_id: id,
+            project_root: canonical_root,
+            sdk_version: sdk_version.to_string(),
+            idempotent: true,
+        });
     }
     let event = RegistrationEvent {
         schema_version: REGISTRY_SCHEMA_VERSION,
@@ -369,12 +374,16 @@ mod tests {
         let second = register_project_at(&project, &home, "0.1.6").unwrap();
         assert!(!first.idempotent);
         assert!(second.idempotent);
+        let newer = register_project_at(&project, &home, "0.1.7").unwrap();
+        assert!(!newer.idempotent);
+        let older_again = register_project_at(&project, &home, "0.1.6").unwrap();
+        assert!(older_again.idempotent);
         assert_eq!(
             fs::read_to_string(home.join(REGISTRY_FILE))
                 .unwrap()
                 .lines()
                 .count(),
-            1
+            2
         );
         fs::remove_dir_all(root).ok();
     }

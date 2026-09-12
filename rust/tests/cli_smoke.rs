@@ -652,6 +652,21 @@ fn project_creation_and_initialization_persist_host_registration() {
     assert_eq!(event["project_root"], first_receipt["project_root"]);
     assert_eq!(event["project_id"], first_receipt["project_id"]);
 
+    let unauthorized_root = temp_root("global-registration-internal-bypass");
+    let unauthorized = Command::new(binary())
+        .args([
+            "new",
+            unauthorized_root.to_str().unwrap(),
+            "--internal-reset-staging",
+        ])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!unauthorized.status.success());
+    assert!(String::from_utf8_lossy(&unauthorized.stderr).contains("USAGE: appsdk new"));
+    assert!(!unauthorized_root.exists());
+
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(registry).unwrap();
 }

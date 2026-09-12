@@ -10459,6 +10459,41 @@ fn new_project(root: &Path, register: bool) {
     println!("then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>");
 }
 
+fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &str) {
+    let expected_transaction_dir = reset_transaction_dir(root);
+    if transaction_dir != expected_transaction_dir
+        || transaction_id.trim().is_empty()
+        || !root.is_absolute()
+        || !transaction_dir.is_absolute()
+    {
+        fail("GOVERNANCE_RESET_STAGING_AUTH_FAILED");
+    }
+    let marker_path = transaction_dir.join("marker.json");
+    if fs::symlink_metadata(transaction_dir)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(true)
+        || fs::symlink_metadata(&marker_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        fail("GOVERNANCE_RESET_STAGING_AUTH_FAILED");
+    }
+    let marker: Value = serde_json::from_str(
+        &fs::read_to_string(&marker_path)
+            .unwrap_or_else(|_| fail("GOVERNANCE_RESET_STAGING_AUTH_FAILED")),
+    )
+    .unwrap_or_else(|_| fail("GOVERNANCE_RESET_STAGING_AUTH_FAILED"));
+    let root_text = root.to_string_lossy();
+    if marker.get("transaction_id").and_then(Value::as_str) != Some(transaction_id)
+        || marker.get("root").and_then(Value::as_str) != Some(root_text.as_ref())
+        || marker.get("phase").and_then(Value::as_str) != Some("building")
+    {
+        fail("GOVERNANCE_RESET_STAGING_AUTH_FAILED");
+    }
+    let staging_root = transaction_dir.join("staging");
+    new_project(&staging_root, false);
+}
+
 fn sdk_map_migration_root(root: &Path) -> PathBuf {
     root.join(".appsdk")
         .join("migrations")
@@ -12655,15 +12690,12 @@ fn reset_transaction_build_staging(
     let binary = env::current_exe()
         .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BINARY_FAILED:{error}"))?;
     let output = Command::new(binary)
-        // The staging scaffold is an internal reset transaction artifact. It
-        // uses the same scaffold code as `appsdk new`, but it is not a user
-        // project and therefore must not claim a host-wide registration.
         .args([
-            "new",
-            staging_root.to_str().unwrap_or(""),
-            "--internal-reset-staging",
+            "reset-staging-scaffold",
+            root.to_str().unwrap_or(""),
+            transaction_dir.to_str().unwrap_or(""),
+            transaction_id,
         ])
-        .env("APPSDK_INTERNAL_RESET_STAGING", transaction_id)
         .env_remove("TMUX_PANE")
         .output()
         .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BUILD_FAILED:{error}"))?;
@@ -16944,24 +16976,27 @@ fn main() {
             }
             publish_active(&root, &module_id, &version);
         }
+        Some("reset-staging-scaffold") => {
+            let root = PathBuf::from(args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk reset-staging-scaffold <project> <transaction-dir> <transaction-id>")
+            }));
+            let transaction_dir = PathBuf::from(args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk reset-staging-scaffold <project> <transaction-dir> <transaction-id>")
+            }));
+            let transaction_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk reset-staging-scaffold <project> <transaction-dir> <transaction-id>")
+            });
+            if args.next().is_some() {
+                fail("USAGE: appsdk reset-staging-scaffold <project> <transaction-dir> <transaction-id>");
+            }
+            reset_staging_scaffold(&root, &transaction_dir, &transaction_id);
+        }
         Some("new") => {
             let root = project_root_or_cwd(&mut args);
-            let internal_staging = match args.next() {
-                None => false,
-                Some(option) if option == "--internal-reset-staging" => {
-                    if env::var_os("APPSDK_INTERNAL_RESET_STAGING")
-                        .is_none_or(|value| value.is_empty())
-                    {
-                        fail("USAGE: appsdk new [project]");
-                    }
-                    true
-                }
-                Some(_) => fail("USAGE: appsdk new [project]"),
-            };
             if args.next().is_some() {
                 fail("USAGE: appsdk new [project]");
             }
-            new_project(&root, !internal_staging);
+            new_project(&root, true);
         }
         Some("init") => {
             let workspace = project_root_or_cwd(&mut args);

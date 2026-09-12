@@ -29,6 +29,7 @@ rust/src/global_registry.rs
 rust/src/main.rs
 rust/tests/cli_smoke.rs
 contracts/sdk-bundle.manifest.json
+contracts/maps/module-registry.json
 docs/design/appsdk-global-registry.md
 docs/goals/appsdk-m1-identity-migration-20260910-plan.md
 docs/migrations/appsdk-m1-identity-migration-20260910-inventory.md

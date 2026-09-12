@@ -2430,6 +2430,292 @@ fn lifecycle_record_producer_is_bound_in_canonical_and_embedded_maps() {
 }
 
 #[test]
+fn lifecycle_producers_accept_project_maps_without_sdk_producer_projection() {
+    let root = temp_root("lifecycle-producer-custom-project-maps");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    for (map_name, key) in [
+        ("resource-map.json", "resources"),
+        ("function-map.json", "functions"),
+        ("mainline-call-map.json", "edges"),
+        ("verification-map.json", "gates"),
+    ] {
+        let map_path = root.join(".appsdk/maps").join(map_name);
+        let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+        map[key].as_array_mut().unwrap().retain(|entry| {
+            let id = entry
+                .get("resource_id")
+                .or_else(|| entry.get("function_id"))
+                .or_else(|| entry.get("chain_id"))
+                .or_else(|| entry.get("gate_id"))
+                .and_then(Value::as_str);
+            !match (map_name, id) {
+                ("resource-map.json", Some("lifecycle_record_producer_input"))
+                | ("resource-map.json", Some("lifecycle_chain_producer_input"))
+                | ("resource-map.json", Some("fix_worktree"))
+                | ("resource-map.json", Some("fix_evidence_set"))
+                | ("resource-map.json", Some("fix_reproduction"))
+                | ("function-map.json", Some("lifecycle_record_producer"))
+                | ("function-map.json", Some("lifecycle_chain_record_producer"))
+                | ("mainline-call-map.json", Some("lifecycle-record-production-v1"))
+                | ("mainline-call-map.json", Some("lifecycle-record-chain-production-v1"))
+                | ("verification-map.json", Some("worktree_clean"))
+                | ("verification-map.json", Some("baseline_reproduced"))
+                | ("verification-map.json", Some("lifecycle_chain_record_producer")) => true,
+                _ => false,
+            }
+        });
+        fs::write(
+            &map_path,
+            serde_json::to_string_pretty(&map).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    let input = root.join("producer-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let records = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!records.status.success());
+    assert!(String::from_utf8_lossy(&records.stderr).contains("GOAL_NOT_CONFIRMED:received"));
+    assert!(!String::from_utf8_lossy(&records.stderr).contains("LIFECYCLE_PRODUCER_MAP_TAMPERED"));
+    assert!(!root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .exists());
+
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    let chain = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!chain.status.success());
+    assert!(String::from_utf8_lossy(&chain.stderr).contains("PRODUCER_ARCHITECTURE_INPUT_MISSING"));
+    assert!(!String::from_utf8_lossy(&chain.stderr).contains("LIFECYCLE_PRODUCER_MAP_TAMPERED"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_producers_accept_v4_project_map_projection_shape() {
+    let root = temp_root("lifecycle-producer-v4-project-maps");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let resource_map_path = root.join(".appsdk/maps/resource-map.json");
+    let mut resource_map: Value =
+        serde_json::from_str(&fs::read_to_string(&resource_map_path).unwrap()).unwrap();
+    resource_map["resources"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| {
+            !matches!(
+                entry.get("resource_id").and_then(Value::as_str),
+                Some("lifecycle_record_producer_input")
+                    | Some("lifecycle_chain_producer_input")
+                    | Some("fix_reproduction")
+            )
+        });
+    for id in ["fix_worktree", "fix_evidence_set"] {
+        resource_map["resources"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["resource_id"] == id)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("relations");
+    }
+    fs::write(
+        &resource_map_path,
+        serde_json::to_string_pretty(&resource_map).unwrap() + "\n",
+    )
+    .unwrap();
+
+    for (map_name, key, ids) in [
+        (
+            "function-map.json",
+            "functions",
+            vec![
+                "lifecycle_record_producer",
+                "lifecycle_chain_record_producer",
+            ],
+        ),
+        (
+            "mainline-call-map.json",
+            "edges",
+            vec![
+                "lifecycle-record-production-v1",
+                "lifecycle-record-chain-production-v1",
+            ],
+        ),
+        (
+            "verification-map.json",
+            "gates",
+            vec!["lifecycle_chain_record_producer"],
+        ),
+    ] {
+        let map_path = root.join(".appsdk/maps").join(map_name);
+        let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+        map[key].as_array_mut().unwrap().retain(|entry| {
+            !ids.iter().any(|id| {
+                entry
+                    .get("function_id")
+                    .or_else(|| entry.get("chain_id"))
+                    .or_else(|| entry.get("gate_id"))
+                    .and_then(Value::as_str)
+                    == Some(id)
+            })
+        });
+        fs::write(
+            &map_path,
+            serde_json::to_string_pretty(&map).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    let input = root.join("producer-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let records = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!records.status.success());
+    let records_stderr = String::from_utf8_lossy(&records.stderr);
+    assert!(records_stderr.contains("GOAL_NOT_CONFIRMED:received"));
+    assert!(!records_stderr.contains("LIFECYCLE_PRODUCER_MAP_TAMPERED"));
+
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_str(&fs::read_to_string(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    let chain = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!chain.status.success());
+    let chain_stderr = String::from_utf8_lossy(&chain.stderr);
+    assert!(chain_stderr.contains("PRODUCER_ARCHITECTURE_INPUT_MISSING"));
+    assert!(!chain_stderr.contains("LIFECYCLE_PRODUCER_MAP_TAMPERED"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_producer_rejects_tampered_relations_projection() {
+    let root = temp_root("lifecycle-producer-map-relations-tampered");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let map_path = root.join(".appsdk/maps/resource-map.json");
+    let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+    let entry = map["resources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["resource_id"] == "fix_worktree")
+        .unwrap();
+    entry["relations"] = serde_json::json!({"produced_by":["tampered_producer"]});
+    fs::write(
+        &map_path,
+        serde_json::to_string_pretty(&map).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("producer-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("LIFECYCLE_PRODUCER_MAP_TAMPERED:resource-map.json"));
+    assert!(!root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_producer_rejects_duplicate_compatible_projection() {
+    let root = temp_root("lifecycle-producer-map-duplicate-compatible");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let map_path = root.join(".appsdk/maps/resource-map.json");
+    let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+    let entry = map["resources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["resource_id"] == "fix_worktree")
+        .unwrap();
+    entry.as_object_mut().unwrap().remove("relations");
+    let duplicate = entry.clone();
+    map["resources"].as_array_mut().unwrap().push(duplicate);
+    fs::write(
+        &map_path,
+        serde_json::to_string_pretty(&map).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("producer-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("LIFECYCLE_PRODUCER_MAP_TAMPERED:resource-map.json"));
+    assert!(!root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
     let root = temp_root("lifecycle-chain-invalid-phase");
     let root_text = root.to_str().unwrap();
@@ -4077,34 +4363,6 @@ fn lifecycle_record_producer_rejects_tampered_canonical_entry_in_each_map() {
             "worktree_clean",
             "command",
         ),
-        (
-            "function-map.json",
-            "functions",
-            "function_id",
-            "lifecycle_chain_record_producer",
-            "owner",
-        ),
-        (
-            "mainline-call-map.json",
-            "edges",
-            "chain_id",
-            "lifecycle-record-chain-production-v1",
-            "caller",
-        ),
-        (
-            "verification-map.json",
-            "gates",
-            "gate_id",
-            "lifecycle_chain_record_producer",
-            "command",
-        ),
-        (
-            "resource-map.json",
-            "resources",
-            "resource_id",
-            "lifecycle_chain_producer_input",
-            "owner",
-        ),
     ];
     for (map_name, key, id_key, id, field) in cases {
         let root = temp_root(&format!("lifecycle-record-producer-map-tampered-{id_key}"));
@@ -4151,6 +4409,90 @@ fn lifecycle_record_producer_rejects_tampered_canonical_entry_in_each_map() {
             .join(".appsdk/records/reproduction-record-app-core.json")
             .exists());
         assert!(!root.join(".appsdk/records/evidence/app-core").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn lifecycle_chain_producer_rejects_tampered_chain_contract_entries() {
+    let cases = [
+        (
+            "resource-map.json",
+            "resources",
+            "resource_id",
+            "lifecycle_chain_producer_input",
+            "owner",
+        ),
+        (
+            "function-map.json",
+            "functions",
+            "function_id",
+            "lifecycle_chain_record_producer",
+            "owner",
+        ),
+        (
+            "mainline-call-map.json",
+            "edges",
+            "chain_id",
+            "lifecycle-record-chain-production-v1",
+            "caller",
+        ),
+        (
+            "verification-map.json",
+            "gates",
+            "gate_id",
+            "lifecycle_chain_record_producer",
+            "command",
+        ),
+    ];
+    for (map_name, key, id_key, id, field) in cases {
+        let root = temp_root(&format!("lifecycle-chain-map-tampered-{id_key}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let goal_path = root.join(".appsdk/goal.json");
+        let mut goal: Value =
+            serde_json::from_str(&fs::read_to_string(&goal_path).unwrap()).unwrap();
+        goal["status"] = Value::String("confirmed".into());
+        goal["confirmed_by"] = Value::String("test".into());
+        goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+        fs::write(
+            &goal_path,
+            serde_json::to_string_pretty(&goal).unwrap() + "\n",
+        )
+        .unwrap();
+        let map_path = root.join(".appsdk/maps").join(map_name);
+        let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+        let entry = map[key]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry[id_key] == id)
+            .unwrap();
+        entry[field] = Value::String("tampered_chain_contract".into());
+        fs::write(
+            &map_path,
+            serde_json::to_string_pretty(&map).unwrap() + "\n",
+        )
+        .unwrap();
+        let input = root.join("chain-input.json");
+        fs::write(&input, "{}\n").unwrap();
+        let rejected = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("LIFECYCLE_PRODUCER_MAP_TAMPERED:")
+        );
+        assert!(!root
+            .join(".appsdk/records/review-record-app-core.json")
+            .exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

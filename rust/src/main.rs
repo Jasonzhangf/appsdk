@@ -1238,7 +1238,18 @@ fn assert_governance_maps(root: &Path) {
     }
 }
 
-fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id: &str) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LifecycleProducer {
+    Records,
+    Chain,
+}
+
+fn assert_lifecycle_producer_map_binding(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    producer: LifecycleProducer,
+) {
     for name in GOVERNANCE_MAP_NAMES {
         assert_no_symlink_components(
             root,
@@ -1252,8 +1263,10 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
         "lifecycle_producer_module_registry",
     );
     assert_governance_maps(root);
-    // The producer's entries are compiled into the SDK. A project may extend
-    // maps for other features, but it cannot rewrite or remove this contract.
+    // Governance maps are project-owned projections. A project may omit the
+    // SDK producer projection when it does not publish that control-plane
+    // entry; if a producer-owned identity is present, its declaration must
+    // remain canonical and unique.
     let mut maps = std::collections::HashMap::new();
     for name in GOVERNANCE_MAP_NAMES {
         let path = root.join(".appsdk/maps").join(name);
@@ -1295,78 +1308,108 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
             .unwrap();
         let canonical: Value = serde_json::from_str(canonical_governance_map(name))
             .unwrap_or_else(|_| fail(format!("LIFECYCLE_PRODUCER_MAP_INVALID:{}", name)));
-        let required = canonical.get(key).unwrap().as_array().unwrap();
-        let is_required =
-            |entry: &Value| match name {
+        let canonical_entries: Vec<&Value> = canonical
+            .get(key)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .collect();
+        let entry_id = |entry: &Value| -> Option<String> {
+            match name {
                 "resource-map.json" => entry
                     .get("resource_id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| {
-                        matches!(
-                            id,
-                            "lifecycle_record_producer_input"
-                                | "lifecycle_chain_producer_input"
-                                | "fix_worktree"
-                                | "fix_evidence_set"
-                                | "fix_reproduction"
-                        )
-                    }),
+                    .map(str::to_owned),
                 "function-map.json" => entry
                     .get("function_id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| {
-                        matches!(
-                            id,
-                            "lifecycle_record_producer" | "lifecycle_chain_record_producer"
-                        )
-                    }),
+                    .map(str::to_owned),
                 "mainline-call-map.json" => entry
                     .get("chain_id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| {
+                    .map(str::to_owned),
+                "verification-map.json" => entry
+                    .get("gate_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                _ => None,
+            }
+        };
+        let required_entries: Vec<&Value> = canonical_entries
+            .iter()
+            .copied()
+            .filter(|entry| {
+                let id = entry_id(entry);
+                match (producer, name) {
+                    (LifecycleProducer::Records, "resource-map.json") => matches!(
+                        id.as_deref(),
+                        Some("lifecycle_record_producer_input")
+                            | Some("fix_worktree")
+                            | Some("fix_evidence_set")
+                            | Some("fix_reproduction")
+                    ),
+                    (LifecycleProducer::Chain, "resource-map.json") => {
+                        id.as_deref() == Some("lifecycle_chain_producer_input")
+                    }
+                    (LifecycleProducer::Records, "function-map.json") => {
+                        id.as_deref() == Some("lifecycle_record_producer")
+                    }
+                    (LifecycleProducer::Chain, "function-map.json") => {
+                        id.as_deref() == Some("lifecycle_chain_record_producer")
+                    }
+                    (LifecycleProducer::Records, "mainline-call-map.json") => {
+                        id.as_deref() == Some("lifecycle-record-production-v1")
+                    }
+                    (LifecycleProducer::Chain, "mainline-call-map.json") => {
+                        id.as_deref() == Some("lifecycle-record-chain-production-v1")
+                    }
+                    (LifecycleProducer::Records, "verification-map.json") => {
                         matches!(
-                            id,
-                            "lifecycle-record-production-v1"
-                                | "lifecycle-record-chain-production-v1"
+                            id.as_deref(),
+                            Some("worktree_clean") | Some("baseline_reproduced")
                         )
-                    }),
-                "verification-map.json" => {
-                    entry
-                        .get("gate_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| {
-                            matches!(
-                                id,
-                                "worktree_clean"
-                                    | "baseline_reproduced"
-                                    | "lifecycle_chain_record_producer"
-                            )
-                        })
-                        || entry
-                            .get("required_for")
-                            .and_then(Value::as_array)
-                            .is_some_and(|uses| {
-                                uses.iter()
-                                    .any(|use_case| use_case.as_str() == Some("promotion"))
-                            })
+                    }
+                    (LifecycleProducer::Chain, "verification-map.json") => {
+                        id.as_deref() == Some("lifecycle_chain_record_producer")
+                            || entry
+                                .get("required_for")
+                                .and_then(Value::as_array)
+                                .is_some_and(|uses| {
+                                    uses.iter()
+                                        .any(|use_case| use_case.as_str() == Some("promotion"))
+                                })
+                    }
+                    _ => false,
                 }
-                _ => false,
+            })
+            .collect();
+        let compatible_projection = |candidate: &Value, expected: &Value| {
+            if entry_id(candidate) != entry_id(expected) {
+                return false;
+            }
+            let Some(expected_object) = expected.as_object() else {
+                return false;
             };
-        let shares_required_identity = |candidate: &Value| {
-            required.iter().any(|entry| match name {
-                "resource-map.json" => candidate.get("resource_id") == entry.get("resource_id"),
-                "function-map.json" => candidate.get("function_id") == entry.get("function_id"),
-                "mainline-call-map.json" => candidate.get("chain_id") == entry.get("chain_id"),
-                "verification-map.json" => candidate.get("gate_id") == entry.get("gate_id"),
-                _ => false,
+            let Some(candidate_object) = candidate.as_object() else {
+                return false;
+            };
+            expected_object.iter().all(|(key, value)| {
+                match candidate_object.get(key) {
+                    Some(actual) => actual == value,
+                    // Relations are descriptive metadata. Older project
+                    // projections may omit them, but a supplied value must
+                    // remain canonical.
+                    None => key == "relations",
+                }
             })
         };
-        for entry in required.iter().filter(|entry| is_required(entry)) {
+        for entry in &required_entries {
             if actual
                 .iter()
-                .filter(|candidate| *candidate == entry)
+                .filter(|candidate| compatible_projection(candidate, entry))
                 .count()
-                != 1
+                > 1
             {
                 fail(format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{}", name));
             }
@@ -1374,7 +1417,12 @@ fn assert_lifecycle_producer_map_binding(root: &Path, project: &Value, module_id
         // A project map may extend unrelated entries, but an entry with a
         // producer-owned identity cannot shadow the canonical declaration.
         if actual.iter().any(|candidate| {
-            shares_required_identity(candidate) && !required.iter().any(|entry| candidate == entry)
+            required_entries
+                .iter()
+                .any(|entry| entry_id(candidate) == entry_id(entry))
+                && !required_entries
+                    .iter()
+                    .any(|entry| compatible_projection(candidate, entry))
         }) {
             fail(format!("LIFECYCLE_PRODUCER_MAP_TAMPERED:{}", name));
         }
@@ -5500,7 +5548,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     assert_declared_contracts(root, &project, true);
-    assert_lifecycle_producer_map_binding(root, &project, module_id);
+    assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Records);
     assert_goal_confirmed(root);
     let goal = read_goal(root);
     let input_file = producer_input_path(root, input_path);
@@ -5515,7 +5563,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     // accepted between the read-only preflight and the record transaction.
     let _producer_lock = producer_lock(root);
     assert_declared_contracts(root, &project, true);
-    assert_lifecycle_producer_map_binding(root, &project, module_id);
+    assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Records);
     if producer_string(&input, "/goal_id", "PRODUCER_GOAL_MISSING")
         != producer_string(&goal, "/goal_id", "INVALID_GOAL_CLARIFICATION_RECORD")
     {
@@ -6370,7 +6418,7 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     let project = read_project(root);
     assert_declared_contracts(root, &project, true);
     assert_goal_confirmed(root);
-    assert_lifecycle_producer_map_binding(root, &project, module_id);
+    assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Chain);
     let observation = lifecycle_chain_input(root, input_path, "architecture");
     let (worktree, _reproduction, candidate, validation) =
         lifecycle_chain_candidate(root, module_id);
@@ -6871,7 +6919,7 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
     let project = read_project(root);
     assert_declared_contracts(root, &project, true);
     assert_goal_confirmed(root);
-    assert_lifecycle_producer_map_binding(root, &project, module_id);
+    assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Chain);
     let observation = lifecycle_chain_input(root, input_path, "promotion");
     let (worktree, reproduction, candidate, _validation) =
         lifecycle_chain_candidate(root, module_id);

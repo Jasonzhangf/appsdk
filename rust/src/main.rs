@@ -10335,7 +10335,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
     if fresh {
-        reset_governance_internal(root, true, true);
+        reset_governance_internal(root, true, true).unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
         initialize_collab_peer();
         if let Err(reason) = memory::initialize_project(root) {
@@ -11081,7 +11081,21 @@ fn reset_transaction_lock_path(root: &Path) -> PathBuf {
     PathBuf::from(format!("{}.lock", transaction_dir.display()))
 }
 
-fn reset_transaction_acquire_lock(root: &Path) -> Result<fs::File, String> {
+struct ResetTransactionLock {
+    _file: fs::File,
+    path: PathBuf,
+}
+
+impl Drop for ResetTransactionLock {
+    fn drop(&mut self) {
+        // Keep the advisory lock held while removing its pathname. A new
+        // transaction can only create and lock a replacement inode after the
+        // path is gone, so cleanup cannot remove that replacement.
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn reset_transaction_acquire_lock(root: &Path) -> Result<ResetTransactionLock, String> {
     let lock_path = reset_transaction_lock_path(root);
     if fs::symlink_metadata(&lock_path)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -11113,7 +11127,10 @@ fn reset_transaction_acquire_lock(root: &Path) -> Result<fs::File, String> {
             return Err(format!("GOVERNANCE_RESET_BUSY:{}", lock_path.display()));
         }
     }
-    Ok(file)
+    Ok(ResetTransactionLock {
+        _file: file,
+        path: lock_path,
+    })
 }
 
 fn reset_transaction_expected_target_kind(
@@ -13222,43 +13239,60 @@ fn reset_root_filesystem_is_case_insensitive(root: &Path) -> bool {
     }
 }
 
-fn reset_generated_roots(root: &Path) -> Vec<String> {
+fn reset_generated_roots(root: &Path) -> Result<Vec<String>, String> {
     let project = project_file(root);
     if fs::symlink_metadata(&project)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        fail("GOVERNANCE_PATH_SYMLINK:project");
+        return Err("GOVERNANCE_PATH_SYMLINK:project".into());
     }
     let text = fs::read_to_string(&project)
-        .unwrap_or_else(|_| fail(format!("PROJECT_CONTRACT_MISSING:{}", project.display())));
+        .map_err(|_| format!("PROJECT_CONTRACT_MISSING:{}", project.display()))?;
     let value: Value =
-        serde_json::from_str(&text).unwrap_or_else(|_| fail("INVALID_PROJECT_CONTRACT"));
+        serde_json::from_str(&text).map_err(|_| "INVALID_PROJECT_CONTRACT".to_string())?;
     let roots = reset_transaction_parse_generated_roots(
         &value,
         reset_root_filesystem_is_case_insensitive(root),
-    )
-    .unwrap_or_else(|error| fail(error));
+    )?;
     for relative in roots.iter().skip(1) {
-        assert_no_symlink_components(root, &root.join(relative), "generated_root");
+        let path = root.join(relative);
+        if fs::symlink_metadata(root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err("GOVERNANCE_PATH_SYMLINK:generated_root".into());
+        }
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|_| "GOVERNANCE_PATH_ESCAPE:generated_root".to_string())?;
+        let mut current = root.to_path_buf();
+        for component in relative_path.components() {
+            current.push(component.as_os_str());
+            if fs::symlink_metadata(&current)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err("GOVERNANCE_PATH_SYMLINK:generated_root".into());
+            }
+        }
     }
-    roots
+    Ok(roots)
 }
 
 fn reset_governance(root: &Path, discard_legacy: bool) {
-    reset_governance_internal(root, discard_legacy, false);
+    reset_governance_internal(root, discard_legacy, false).unwrap_or_else(|error| fail(error));
 }
 
-fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool) {
+fn reset_governance_internal(
+    root: &Path,
+    discard_legacy: bool,
+    fresh_init: bool,
+) -> Result<(), String> {
     if !discard_legacy {
-        fail("RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION");
+        return Err("RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION".into());
     }
     assert_project_root_safe(root);
-    let _fresh_lock = if fresh_init {
-        Some(reset_transaction_acquire_lock(root).unwrap_or_else(|error| fail(error)))
-    } else {
-        None
-    };
     let reset_record = root
         .join(".appsdk")
         .join("records")
@@ -13272,45 +13306,57 @@ fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool
             "--show-current",
         ])
         .output()
-        .unwrap_or_else(|_| fail("RESET_GIT_WORKTREE_REQUIRED"));
+        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
     if !branch.status.success() {
-        fail("RESET_GIT_WORKTREE_REQUIRED");
+        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
     }
     let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
     if branch.is_empty() || branch == "main" || branch == "master" {
-        fail("RESET_REQUIRES_NON_MAIN_WORKTREE");
+        return Err("RESET_REQUIRES_NON_MAIN_WORKTREE".into());
     }
+    if reset_record.exists() && !fresh_init {
+        println!("governance reset already applied");
+        return Ok(());
+    }
+
+    let _fresh_lock = if fresh_init {
+        Some(reset_transaction_acquire_lock(root)?)
+    } else {
+        None
+    };
     if fresh_init {
         match reset_transaction_recover(root) {
             Ok(Some(true)) => {
                 println!("governance fresh init already applied");
-                return;
+                return Ok(());
             }
-            Ok(Some(false)) => fail("GOVERNANCE_RESET_RECOVERED_RETRY"),
+            Ok(Some(false)) => return Err("GOVERNANCE_RESET_RECOVERED_RETRY".into()),
             Ok(None) => {}
-            Err(error) => fail(error),
+            Err(error) => return Err(error),
         }
     }
-    if reset_record.exists() && !fresh_init {
-        println!("governance reset already applied");
-        return;
-    }
     let status = Command::new("git")
-        .args(["-C", root.to_str().unwrap_or(""), "status", "--porcelain"])
+        .args([
+            "-C",
+            root.to_str().unwrap_or(""),
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+        ])
         .output()
-        .unwrap_or_else(|_| fail("RESET_GIT_WORKTREE_REQUIRED"));
+        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
     if !status.status.success() {
-        fail("RESET_GIT_WORKTREE_REQUIRED");
+        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
     }
     if !status.stdout.is_empty() {
-        fail("RESET_REQUIRES_CLEAN_WORKTREE");
+        return Err("RESET_REQUIRES_CLEAN_WORKTREE".into());
     }
-    let generated_roots = reset_generated_roots(root);
+    let generated_roots = reset_generated_roots(root)?;
     if fresh_init {
-        reset_transaction_fresh(root, &branch, &generated_roots)
-            .unwrap_or_else(|error| fail(error));
+        reset_transaction_fresh(root, &branch, &generated_roots)?;
         println!("governance fresh init applied");
-        return;
+        return Ok(());
     }
     let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
     removed.extend(generated_roots.iter().cloned());
@@ -13369,6 +13415,7 @@ fn reset_governance_internal(root: &Path, discard_legacy: bool, fresh_init: bool
     } else {
         println!("governance reset applied");
     }
+    Ok(())
 }
 
 fn locate_git_bug_binary() -> Result<PathBuf, String> {

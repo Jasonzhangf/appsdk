@@ -488,6 +488,91 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
 }
 
 #[test]
+fn init_fresh_nested_project_ignores_its_transaction_lock_when_checking_clean_worktree() {
+    let workspace = temp_root("init-fresh-nested-project-lock");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = workspace.join("v4");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&workspace);
+    fs::write(workspace.join("unrelated.txt"), "outside project\n").unwrap();
+
+    let initialized = run(&[
+        "init",
+        workspace.to_str().unwrap(),
+        "--project-root",
+        "v4",
+        "--fresh",
+        "--discard-legacy",
+    ]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let reset: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reset["mode"], "fresh_init");
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(!reset_transaction_lock_path(&root).exists());
+
+    fs::remove_dir_all(&workspace).unwrap();
+    let _ = fs::remove_file(reset_transaction_lock_path(&root));
+}
+
+#[test]
+fn init_fresh_nested_project_rejects_project_dirty_state_without_mutation() {
+    let workspace = temp_root("init-fresh-nested-project-dirty");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = workspace.join("v4");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&workspace);
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    let lock_path = reset_transaction_lock_path(&root);
+    fs::write(root.join("uncommitted.txt"), "must remain\n").unwrap();
+    fs::write(workspace.join("unrelated.txt"), "outside project\n").unwrap();
+
+    let rejected = run(&[
+        "init",
+        workspace.to_str().unwrap(),
+        "--project-root",
+        "v4",
+        "--fresh",
+        "--discard-legacy",
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("RESET_REQUIRES_CLEAN_WORKTREE"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("uncommitted.txt")).unwrap(),
+        "must remain\n"
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    assert!(!lock_path.exists());
+
+    fs::remove_dir_all(&workspace).unwrap();
+    let _ = fs::remove_file(lock_path);
+}
+
+#[test]
 fn init_fresh_rebuilds_malformed_project_contracts_from_canonical_content() {
     let root = temp_root("init-fresh-malformed-project-contracts");
     let root_text = root.to_str().unwrap();
@@ -584,6 +669,7 @@ fn init_fresh_rejects_malformed_project_contract_before_resetting_state() {
 fn init_fresh_recovers_prepared_transaction_before_retrying() {
     let root = temp_root("init-fresh-prepared-transaction");
     let root_text = root.to_str().unwrap();
+    let lock_path = reset_transaction_lock_path(&root);
     assert!(run(&["new", root_text]).status.success());
     fs::write(root.join("business.txt"), "keep\n").unwrap();
     init_git(&root);
@@ -618,6 +704,7 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
         String::from_utf8_lossy(&recovered.stderr)
     );
     assert!(!transaction.exists());
+    assert!(!lock_path.exists());
     assert_eq!(
         fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
         project_before
@@ -635,6 +722,7 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
         String::from_utf8_lossy(&initialized.stderr)
     );
     assert!(run(&["verify", root_text]).status.success());
+    assert!(!lock_path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1402,6 +1490,7 @@ fn init_fresh_refuses_main_worktree_without_mutating_governance() {
         .unwrap()
         .success());
     let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    let lock_path = reset_transaction_lock_path(&root);
 
     let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(!rejected.status.success());
@@ -1413,6 +1502,7 @@ fn init_fresh_refuses_main_worktree_without_mutating_governance() {
     assert!(!root
         .join(".appsdk/records/reset-governance-record.json")
         .exists());
+    assert!(!lock_path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1423,6 +1513,7 @@ fn init_fresh_refuses_dirty_worktree_without_mutating_governance() {
     assert!(run(&["new", root_text]).status.success());
     init_git(&root);
     let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    let lock_path = reset_transaction_lock_path(&root);
     fs::write(root.join("uncommitted.txt"), "must remain\n").unwrap();
 
     let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
@@ -1439,6 +1530,7 @@ fn init_fresh_refuses_dirty_worktree_without_mutating_governance() {
     assert!(!root
         .join(".appsdk/records/reset-governance-record.json")
         .exists());
+    assert!(!lock_path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 

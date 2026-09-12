@@ -9981,6 +9981,20 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     )
     .unwrap();
 
+    // A frozen publication remains recoverable after the delivery evidence
+    // freshness window closes. Rehydration validates the historical graph and
+    // immutable artifact, while current admission still requires fresh
+    // evidence.
+    let historical_evidence = root.join(".appsdk/records/evidence-record-app-core.json");
+    let mut historical_evidence_value: Value =
+        serde_json::from_str(&fs::read_to_string(&historical_evidence).unwrap()).unwrap();
+    historical_evidence_value["expires_at"] = Value::String("2026-01-02T00:00:00Z".into());
+    fs::write(
+        &historical_evidence,
+        serde_json::to_string_pretty(&historical_evidence_value).unwrap() + "\n",
+    )
+    .unwrap();
+
     let restored = run(&["rehydrate-frozen", root_text, "--module", "app-core"]);
     assert!(
         restored.status.success(),
@@ -9994,6 +10008,13 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     assert!(root
         .join("generated/modules/app-core/module.compiled.json")
         .is_file());
+
+    historical_evidence_value["expires_at"] = Value::String("2099-01-01T00:00:00Z".into());
+    fs::write(
+        &historical_evidence,
+        serde_json::to_string_pretty(&historical_evidence_value).unwrap() + "\n",
+    )
+    .unwrap();
     let rehydrated_verify = run(&["verify", root_text]);
     assert!(
         rehydrated_verify.status.success(),

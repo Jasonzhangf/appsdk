@@ -7322,7 +7322,15 @@ fn assert_record_schema(
             record_str(record, &format!("/{}", field), name);
         }
     }
-    assert_evidence_record(evidence, "evidence-record.json", Utc::now());
+    // Historical frozen rehydration restores an already accepted immutable
+    // publication. Its evidence is still checked for shape and ordering, but
+    // its delivery freshness window must not block rebuilding projections.
+    assert_evidence_record_with_freshness(
+        evidence,
+        "evidence-record.json",
+        Utc::now(),
+        !allow_legacy_rehydrate_bindings,
+    );
     for path in [
         "/reviewer/adapter",
         "/reviewer/identity",
@@ -7705,7 +7713,12 @@ fn record_datetime(record: &Value, path: &str, name: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn assert_evidence_record(evidence: &Value, name: &str, admission_time: DateTime<Utc>) {
+fn assert_evidence_record_with_freshness(
+    evidence: &Value,
+    name: &str,
+    admission_time: DateTime<Utc>,
+    require_freshness: bool,
+) {
     for path in [
         "/evidence_id",
         "/issue_id",
@@ -7748,9 +7761,13 @@ fn assert_evidence_record(evidence: &Value, name: &str, admission_time: DateTime
     }
     let created_at = record_time(evidence, name);
     let expires_at = record_datetime(evidence, "/expires_at", name);
-    if created_at > expires_at || admission_time > expires_at {
+    if created_at > expires_at || (require_freshness && admission_time > expires_at) {
         fail(format!("EXPIRED_EVIDENCE_RECORD:{}", name));
     }
+}
+
+fn assert_evidence_record(evidence: &Value, name: &str, admission_time: DateTime<Utc>) {
+    assert_evidence_record_with_freshness(evidence, name, admission_time, true);
 }
 
 fn evidence_by_id(root: &Path, module_id: &str, evidence_id: &str) -> Value {
@@ -9376,7 +9393,7 @@ fn assert_record_graph_mode(
     let expires_at = DateTime::parse_from_rfc3339(expires_at)
         .unwrap_or_else(|_| fail("INVALID_EVIDENCE_EXPIRY"))
         .with_timezone(&Utc);
-    if expires_at <= Utc::now() {
+    if !allow_legacy_rehydrate_bindings && expires_at <= Utc::now() {
         fail("EVIDENCE_EXPIRED");
     }
     if require_freeze {

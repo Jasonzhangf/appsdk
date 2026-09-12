@@ -1452,29 +1452,103 @@ fn assert_lifecycle_producer_map_binding(
                 .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
         })
         .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
-    let registered = registry_modules
-        .iter()
-        .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
-        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISSING"));
-    if registered.get("status").and_then(Value::as_str) != Some("active")
-        || registered.get("owner").and_then(Value::as_str)
-            != project_module.get("source_owner").and_then(Value::as_str)
-    {
-        fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH");
-    }
-    let registered_paths = registered
+    let project_owner = project_module
+        .get("source_owner")
+        .and_then(Value::as_str)
+        .filter(|owner| !owner.is_empty())
+        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"));
+    let project_paths = project_module
         .get("owned_paths")
         .and_then(Value::as_array)
         .filter(|paths| !paths.is_empty())
-        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID"));
-    for path in project_module
-        .get("owned_paths")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"))
-    {
-        if !registered_paths.iter().any(|candidate| candidate == path) {
+        .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"));
+
+    // A project module is a lifecycle scope and may intentionally aggregate
+    // several finer-grained source modules. The registry is the source
+    // ownership projection, so binding is established by active path coverage
+    // rather than by requiring a registry entry with the same module_id.
+    // Preserve the stronger identity check when such an entry does exist.
+    let same_id_entries: Vec<&Value> = registry_modules
+        .iter()
+        .filter(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        .collect();
+    if same_id_entries.len() > 1 {
+        fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID");
+    }
+    if let Some(registered) = same_id_entries.first() {
+        if registered.get("status").and_then(Value::as_str) != Some("active")
+            || registered.get("owner").and_then(Value::as_str) != Some(project_owner)
+        {
             fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH");
         }
+    }
+
+    let active_registry_paths: Vec<Vec<String>> = registry_modules
+        .iter()
+        .filter(|module| module.get("status").and_then(Value::as_str) == Some("active"))
+        .map(|module| {
+            let registry_module_id = module
+                .get("module_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID"));
+            let _registry_owner = module
+                .get("owner")
+                .and_then(Value::as_str)
+                .filter(|owner| !owner.is_empty())
+                .unwrap_or_else(|| {
+                    fail(format!(
+                        "LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID:{}",
+                        registry_module_id
+                    ))
+                });
+            record_array(module, "/owned_paths", "lifecycle_producer_module_registry")
+                .iter()
+                .map(|path| {
+                    path.as_str()
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            fail(format!(
+                                "LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID:{}",
+                                registry_module_id
+                            ))
+                        })
+                })
+                .collect()
+        })
+        .collect();
+    for path in project_paths {
+        let project_path = path
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"));
+        if !active_registry_paths.iter().any(|registered_paths| {
+            registered_paths
+                .iter()
+                .any(|registered_path| registry_pattern_covers(registered_path, project_path))
+        }) {
+            fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH");
+        }
+    }
+}
+
+fn registry_pattern_covers(registry_pattern: &str, project_pattern: &str) -> bool {
+    let registry_is_recursive = registry_pattern.ends_with("/**");
+    let project_is_recursive = project_pattern.ends_with("/**");
+    let registry_root = registry_pattern
+        .trim_end_matches("/**")
+        .trim_end_matches('/');
+    let project_root = project_pattern
+        .trim_end_matches("/**")
+        .trim_end_matches('/');
+    if registry_root.is_empty() || project_root.is_empty() {
+        return false;
+    }
+    if registry_is_recursive {
+        project_root == registry_root || project_root.starts_with(&format!("{}/", registry_root))
+    } else {
+        !project_is_recursive && registry_root == project_root
     }
 }
 

@@ -2716,6 +2716,95 @@ fn lifecycle_producer_rejects_duplicate_compatible_projection() {
 }
 
 #[test]
+fn lifecycle_producer_accepts_project_module_aggregating_registry_modules() {
+    let root = temp_root("lifecycle-producer-aggregated-registry-modules");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["modules"][0]["module_id"] = Value::String("aggregate-core".into());
+    project["modules"][0]["source_owner"] = Value::String("aggregate-core".into());
+    project["modules"][0]["owned_paths"] = serde_json::json!([
+        "playground/experiments/**",
+        "protected/source/**",
+        "tests/core/**"
+    ]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    let mut registry: Value =
+        serde_json::from_str(&fs::read_to_string(&registry_path).unwrap()).unwrap();
+    let app_core = registry["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|module| module["module_id"] == "app-core")
+        .unwrap();
+    app_core["owned_paths"] = serde_json::json!(["playground/experiments/**"]);
+    registry["modules"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "module_id": "source-contracts",
+            "status": "active",
+            "owner": "source-contracts",
+            "owned_paths": ["protected/source/**", "tests/core/**"],
+            "forbidden_paths": ["active/lib/**", "generated/**"]
+        }));
+    fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let input = root.join("producer-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let rejected_for_missing_goal = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "aggregate-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8_lossy(&rejected_for_missing_goal.stderr);
+    assert!(!rejected_for_missing_goal.status.success());
+    assert!(stderr.contains("GOAL_NOT_CONFIRMED:received"), "{stderr}");
+    assert!(
+        !stderr.contains("LIFECYCLE_PRODUCER_MODULE_BINDING"),
+        "{stderr}"
+    );
+
+    let uncovered = root.join(".appsdk/project.json");
+    project["modules"][0]["owned_paths"] =
+        serde_json::json!(["playground/experiments/**", "unregistered/**"]);
+    fs::write(
+        &uncovered,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_for_uncovered_path = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "aggregate-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected_for_uncovered_path.status.success());
+    assert!(String::from_utf8_lossy(&rejected_for_uncovered_path.stderr)
+        .contains("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
     let root = temp_root("lifecycle-chain-invalid-phase");
     let root_text = root.to_str().unwrap();

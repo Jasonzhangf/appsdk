@@ -82,6 +82,40 @@ fn is_lexically_canonical_absolute(path: &Path) -> bool {
     normalized == path
 }
 
+fn canonicalize_missing_root(path: &Path) -> Result<PathBuf, String> {
+    let mut current = path.to_path_buf();
+    let mut suffix = Vec::new();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err("project root existing ancestor is not a directory".into());
+                }
+                let mut canonical = fs::canonicalize(&current)
+                    .map_err(|error| format!("project root canonicalization failed:{error}"))?;
+                for component in suffix.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let component = current
+                    .file_name()
+                    .ok_or_else(|| "project root has no existing ancestor".to_string())?
+                    .to_owned();
+                suffix.push(component);
+                current = current
+                    .parent()
+                    .ok_or_else(|| "project root has no existing ancestor".to_string())?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(format!("project root ancestor stat failed:{error}"));
+            }
+        }
+    }
+}
+
 fn ensure_no_symlink(path: &Path, label: &str) -> Result<(), String> {
     if fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -313,7 +347,24 @@ fn has_registered_version(
                         index + 1
                     ));
                 }
-                if event.project_id != project_id(stored_root) {
+                let canonical_stored_root =
+                    canonicalize_missing_root(stored_root).map_err(|error| {
+                        format!("GLOBAL_REGISTRY_INVALID_EVENT:{}:{error}", index + 1)
+                    })?;
+                let canonical_stored_root_text =
+                    canonical_stored_root.to_str().ok_or_else(|| {
+                        format!(
+                            "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not UTF-8",
+                            index + 1
+                        )
+                    })?;
+                if canonical_stored_root_text != event.project_root {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not canonical",
+                        index + 1
+                    ));
+                }
+                if event.project_id != project_id(&canonical_stored_root) {
                     return Err(format!(
                         "GLOBAL_REGISTRY_INVALID_EVENT:{}:project id does not match stored root",
                         index + 1
@@ -534,10 +585,10 @@ mod tests {
         ));
         let project_a = root.join("project-a");
         let project_b = root.join("project-b");
-        let removed_project = root.join("removed-project");
         let registry = root.join("registry");
         fs::create_dir_all(&project_a).unwrap();
         fs::create_dir_all(&project_b).unwrap();
+        let removed_project = root.canonicalize().unwrap().join("removed-project");
         register_project_at(&project_a, &registry, "0.1.6").unwrap();
 
         let path = registry.join(REGISTRY_FILE);
@@ -582,6 +633,73 @@ mod tests {
         let error = register_project_at(&project, &registry, "0.1.6").unwrap_err();
         assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_EVENT:1:"));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_root_under_symlinked_ancestor_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-missing-symlink-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let registry = root.join("registry");
+        let real_parent = root.join("real");
+        let linked_parent = root.join("linked");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        register_project_at(&project, &registry, "0.1.6").unwrap();
+
+        let path = registry.join(REGISTRY_FILE);
+        let mut event: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let linked_missing_root = linked_parent.join("removed-project");
+        event["project_root"] = Value::String(linked_missing_root.to_str().unwrap().to_string());
+        event["project_id"] = Value::String(project_id(&linked_missing_root));
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+
+        let error = register_project_at(&project, &registry, "0.1.6").unwrap_err();
+        assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_EVENT:1:"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_root_under_tmp_alias_fails_closed() {
+        let root = format!(
+            "/tmp/appsdk-global-registry-missing-tmp-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let project = PathBuf::from(&root).join("project");
+        let registry = PathBuf::from(&root).join("registry");
+        fs::create_dir_all(&project).unwrap();
+        register_project_at(&project, &registry, "0.1.6").unwrap();
+
+        let path = registry.join(REGISTRY_FILE);
+        let mut event: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let missing_root = PathBuf::from(&root).join("removed-project");
+        fs::remove_dir_all(&project).unwrap();
+        event["project_root"] = Value::String(missing_root.to_string_lossy().into_owned());
+        event["project_id"] = Value::String(project_id(&missing_root));
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+
+        let another_project = PathBuf::from(&root).join("another-project");
+        fs::create_dir_all(&another_project).unwrap();
+        let error = register_project_at(&another_project, &registry, "0.1.6").unwrap_err();
+        assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_EVENT:1:"));
+        fs::remove_dir_all(PathBuf::from(&root)).ok();
     }
 
     #[cfg(unix)]

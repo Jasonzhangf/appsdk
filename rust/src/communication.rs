@@ -1436,7 +1436,7 @@ impl CommunicationStore {
         &mut self,
         master: &Address,
         state: &AgentState,
-        at: &str,
+        _at: &str,
     ) -> CommResult<()> {
         let key = master.key();
         let Some(existing) = self.projection.master_wake.get(&key).cloned() else {
@@ -1444,18 +1444,25 @@ impl CommunicationStore {
         };
         let mut updated = existing.clone();
         match state {
-            AgentState::Working => {
-                if updated.pending {
-                    updated.next_due_at = None;
-                }
-            }
+            AgentState::Working => {}
             AgentState::Idle => {
                 if updated.pending
                     && !updated.stopped
                     && !updated.held
                     && updated.next_due_at.is_none()
                 {
-                    updated.next_due_at = Some(validate_time(at)?);
+                    let due_origin = updated
+                        .last_briefing_at
+                        .as_deref()
+                        .or(updated.first_observed_at.as_deref())
+                        .ok_or_else(|| {
+                            CommError::new(
+                                "master_wake_schedule_origin_missing",
+                                format!("master wake has no durable schedule origin: {key}"),
+                            )
+                        })?;
+                    updated.next_due_at =
+                        Some(add_seconds(due_origin, DEFAULT_BATCH_WINDOW_SECONDS)?);
                 }
             }
         }
@@ -1691,7 +1698,17 @@ impl CommunicationStore {
         }
         let at = at.map(validate_time).transpose()?.unwrap_or_else(now);
         let mut updated = existing;
-        match action.trim().to_ascii_lowercase().as_str() {
+        let action = action.trim().to_ascii_lowercase();
+        let terminal_decision = matches!(
+            action.as_str(),
+            "dispatch" | "handled" | "complete" | "completed"
+        );
+        let superseded_keys = if terminal_decision {
+            self.pending_notification_keys_for_master_wake(&updated)
+        } else {
+            Vec::new()
+        };
+        match action.as_str() {
             "hold" => {
                 updated.held = true;
                 updated.next_due_at = None;
@@ -1710,8 +1727,19 @@ impl CommunicationStore {
                 updated.signals.clear();
             }
             "schedule" => {
+                if updated.pending {
+                    updated.generation = updated.generation.checked_add(1).ok_or_else(|| {
+                        CommError::new(
+                            "master_wake_generation_exhausted",
+                            format!("master wake generation exhausted: {key}"),
+                        )
+                    })?;
+                }
                 updated.held = false;
                 updated.stopped = false;
+                updated.reminders_sent = 0;
+                updated.last_briefing_generation = None;
+                updated.last_briefing_at = None;
                 updated.next_due_at = if updated.pending {
                     if actor.state == AgentState::Idle {
                         Some(at.clone())
@@ -1729,13 +1757,23 @@ impl CommunicationStore {
                 ))
             }
         }
+        if !superseded_keys.is_empty() {
+            self.commit(
+                "notification.superseded",
+                json!({
+                    "keys": superseded_keys,
+                    "generation": generation,
+                    "reason": "master_wake_decision"
+                }),
+            )?;
+        }
         self.commit(
             "master_wake.decided",
             json!({ "accumulator": updated, "action": action, "at": at }),
         )?;
         if let Some(wakeup) = self.projection.wakeup.get(&key).cloned() {
             let mut synchronized = wakeup;
-            if action.trim().eq_ignore_ascii_case("schedule") {
+            if action == "schedule" {
                 synchronized.next_due_at = updated.next_due_at.clone();
                 synchronized.stopped = false;
                 synchronized.reminders_sent = 0;
@@ -4194,13 +4232,25 @@ impl CommunicationStore {
                     ),
                 )
             })?;
-        if previous.generation != accumulator.generation {
+        let action = action.trim().to_ascii_lowercase();
+        let generation_is_new_schedule = action == "schedule"
+            && previous.pending
+            && previous
+                .generation
+                .checked_add(1)
+                .is_some_and(|generation| generation == accumulator.generation);
+        let generation_mismatch = if action == "schedule" && previous.pending {
+            !generation_is_new_schedule
+        } else {
+            previous.generation != accumulator.generation
+        };
+        if generation_mismatch {
             return Err(CommError::new(
                 "event_data_invalid",
                 "master wake decision generation does not match prior accumulator",
             ));
         }
-        match action.trim().to_ascii_lowercase().as_str() {
+        match action.as_str() {
             "hold" => {
                 if !accumulator.held || accumulator.next_due_at.is_some() {
                     return Err(CommError::new(
@@ -4218,10 +4268,23 @@ impl CommunicationStore {
                 }
             }
             "schedule" => {
-                if accumulator.held {
+                if accumulator.held
+                    || accumulator.stopped
+                    || accumulator.reminders_sent != 0
+                    || accumulator.last_briefing_generation.is_some()
+                    || accumulator.last_briefing_at.is_some()
+                    || (previous.pending && !generation_is_new_schedule)
+                    || accumulator.pending != previous.pending
+                    || accumulator.first_observed_at != previous.first_observed_at
+                    || accumulator.last_observed_at != previous.last_observed_at
+                    || accumulator.signals != previous.signals
+                    || accumulator.consumed_signals != previous.consumed_signals
+                    || (!accumulator.pending && accumulator.next_due_at.is_some())
+                    || (accumulator.pending && accumulator.next_due_at.is_none())
+                {
                     return Err(CommError::new(
                         "event_data_invalid",
-                        "scheduled master wake decision cannot remain held",
+                        "scheduled master wake decision has inconsistent state",
                     ));
                 }
             }

@@ -2216,6 +2216,178 @@ fn master_wake_consumed_edges_and_hold_are_stable_across_repeated_state_observat
 }
 
 #[test]
+fn master_wake_schedule_after_three_reminders_starts_a_new_generation() {
+    let root = temp_root("master-wake-schedule-reset");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+
+    for (index, seconds) in [120, 240, 360].into_iter().enumerate() {
+        let wake = call(&root, json!({ "op": "tick", "now": after(at, seconds) }));
+        assert_eq!(wake["masterWakeChanged"].as_array().unwrap().len(), 1);
+        assert_eq!(wake["masterWake"][0]["remindersSent"], index + 1);
+    }
+
+    let stopped = call(&root, json!({ "op": "status" }));
+    let old_generation = stopped["masterWake"][0]["generation"].as_u64().unwrap();
+    assert_eq!(stopped["masterWake"][0]["remindersSent"], 3);
+    assert_eq!(stopped["masterWake"][0]["stopped"], true);
+
+    let rescheduled_at = after(at, 361);
+    let scheduled = call(
+        &root,
+        json!({
+            "op": "master_wake_decide",
+            "master": { "scopeId": "scope", "sessionId": "master" },
+            "generation": old_generation,
+            "action": "schedule",
+            "at": rescheduled_at.clone()
+        }),
+    );
+    assert_eq!(scheduled["masterWake"]["generation"], old_generation + 1);
+    assert_eq!(scheduled["masterWake"]["remindersSent"], 0);
+    assert_eq!(scheduled["masterWake"]["stopped"], false);
+    assert_eq!(scheduled["masterWake"]["nextDueAt"], rescheduled_at);
+
+    let next = call(&root, json!({ "op": "tick", "now": after(at, 361) }));
+    assert_eq!(next["masterWakeChanged"].as_array().unwrap().len(), 1);
+    assert_eq!(next["masterWake"][0]["generation"], old_generation + 1);
+    assert_eq!(next["masterWake"][0]["remindersSent"], 1);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"master_wake.briefing\"").count(), 4);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        4
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_wake_window_survives_working_to_idle_transition() {
+    let root = temp_root("master-wake-working-window");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "working",
+            "at": after(at, 1)
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": after(at, 10)
+        }),
+    );
+    let scheduled = call(&root, json!({ "op": "status" }));
+    assert_eq!(scheduled["masterWake"][0]["nextDueAt"], after(at, 120));
+
+    for seconds in [10, 119] {
+        let early = call(&root, json!({ "op": "tick", "now": after(at, seconds) }));
+        assert!(early["masterWakeChanged"].as_array().unwrap().is_empty());
+    }
+    let due = call(&root, json!({ "op": "tick", "now": after(at, 120) }));
+    assert_eq!(due["masterWakeChanged"].as_array().unwrap().len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_wake_terminal_decision_supersedes_pending_notification_before_briefing() {
+    let root = temp_root("master-wake-decision-supersedes");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    let before = call(&root, json!({ "op": "status" }));
+    let generation = before["masterWake"][0]["generation"].as_u64().unwrap();
+    assert_eq!(
+        before["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let decided = call(
+        &root,
+        json!({
+            "op": "master_wake_decide",
+            "master": { "scopeId": "scope", "sessionId": "master" },
+            "generation": generation,
+            "action": "handled",
+            "at": after(at, 1)
+        }),
+    );
+    assert_eq!(decided["masterWake"]["pending"], false);
+    let replayed = call(&root, json!({ "op": "status" }));
+    assert!(replayed["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(replayed["notificationProjection"]["emitted"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let flushed = call(
+        &root,
+        json!({ "op": "flush_notifications", "now": after(at, 120) }),
+    );
+    assert!(flushed["batches"].as_array().unwrap().is_empty());
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.superseded\"").count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn master_wake_flush_and_tick_have_one_notification_owner() {
     let root = temp_root("master-wake-flush-order");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);

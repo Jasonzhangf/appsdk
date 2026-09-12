@@ -142,8 +142,9 @@ generation 不会重新投递或消耗提醒次数；只有看到明确的 termi
 `master_wake_decide` 携带精确 generation 写入 `hold`、`dispatch`、`handled`、
 `complete`、`completed` 或 `schedule`。generation 不匹配直接失败；delivery/ACK
 不能自动清除信号，只有显式调度类 decision 才能清空 accumulator。每个 generation
-最多提醒三次，第三次标记 `stopped`，避免 idle 堆积；新 signal 或 master 的显式
-decision 才开始下一轮。
+最多提醒三次，第三次标记 `stopped`，避免 idle 堆积；对仍有 active signal 的显式
+`schedule` 会保留这些 signal、重置提醒预算并开启新的 generation，确保消息身份和
+投递预算都是新一轮；没有 active signal 时 schedule 只保持空闲状态。
 
 worker 只有在 `working -> idle` 的状态边沿向 scope master 产生一次幂等 idle 通知；
 重复观察 idle 不重复建消息，worker 不参与 master wakeup。没有 live master 时，worker

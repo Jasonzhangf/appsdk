@@ -7812,6 +7812,7 @@ fn record_datetime(record: &Value, path: &str, name: &str) -> DateTime<Utc> {
 enum EvidenceValidationMode {
     Current(DateTime<Utc>),
     Historical,
+    HistoricalAt(DateTime<Utc>),
 }
 
 fn assert_evidence_record(evidence: &Value, name: &str, validation: EvidenceValidationMode) {
@@ -7857,12 +7858,12 @@ fn assert_evidence_record(evidence: &Value, name: &str, validation: EvidenceVali
     }
     let created_at = record_time(evidence, name);
     let expires_at = record_datetime(evidence, "/expires_at", name);
-    if created_at > expires_at
-        || matches!(
-            validation,
-            EvidenceValidationMode::Current(admission_time) if admission_time > expires_at
-        )
-    {
+    let expired = match validation {
+        EvidenceValidationMode::Current(admission_time) => admission_time > expires_at,
+        EvidenceValidationMode::HistoricalAt(as_of) => as_of > expires_at,
+        EvidenceValidationMode::Historical => fail("HISTORICAL_VALIDATION_UNBOUND"),
+    };
+    if created_at > expires_at || expired {
         fail(format!("EXPIRED_EVIDENCE_RECORD:{}", name));
     }
 }
@@ -9444,6 +9445,33 @@ fn assert_record_graph_mode(
     let evidence = read_record(root, &evidence_name);
     let review = read_record(root, &review_name);
     let promotion = read_record(root, &promotion_name);
+    let historical_freeze = if matches!(&validation, EvidenceValidationMode::Historical) {
+        let module_id = module_id.unwrap_or_else(|| fail("HISTORICAL_MODULE_REQUIRED"));
+        let freeze_name = freeze_record_name(module_id);
+        Some((freeze_name.clone(), read_record(root, &freeze_name)))
+    } else {
+        None
+    };
+    let validation = match validation {
+        EvidenceValidationMode::Current(admission_time) => {
+            EvidenceValidationMode::Current(admission_time)
+        }
+        EvidenceValidationMode::Historical => {
+            let (freeze_name, freeze) = historical_freeze
+                .as_ref()
+                .unwrap_or_else(|| fail("HISTORICAL_FREEZE_REQUIRED"));
+            let as_of = [
+                record_time(&review, &review_name),
+                record_time(&promotion, &promotion_name),
+                record_time(freeze, freeze_name),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or_else(|| fail("HISTORICAL_PUBLICATION_TIME_MISSING"));
+            EvidenceValidationMode::HistoricalAt(as_of)
+        }
+        EvidenceValidationMode::HistoricalAt(as_of) => EvidenceValidationMode::HistoricalAt(as_of),
+    };
     assert_record_schema(
         &evidence,
         &review,

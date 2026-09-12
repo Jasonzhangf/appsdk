@@ -9970,6 +9970,35 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         String::from_utf8_lossy(&historical_admission.stdout).contains("\"mode\":\"historical\"")
     );
 
+    // Historical freshness is evaluated as of publication, not as of the
+    // current clock. An expiry after the freeze but before now is valid (the
+    // successful admission above); an expiry before the publication terminal
+    // timestamp is invalid and must not be resurrected by Historical mode.
+    let mut expired_before_publication = expired_historical_evidence.clone();
+    expired_before_publication["expires_at"] = Value::String("2025-12-31T23:59:59Z".into());
+    fs::write(
+        &evidence_file,
+        serde_json::to_string_pretty(&expired_before_publication).unwrap() + "\n",
+    )
+    .unwrap();
+    let historical_expired_before_publication = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!historical_expired_before_publication.status.success());
+    assert!(
+        String::from_utf8_lossy(&historical_expired_before_publication.stderr)
+            .contains("EXPIRED_EVIDENCE_RECORD:evidence-record.json")
+    );
+    fs::write(
+        &evidence_file,
+        serde_json::to_string_pretty(&expired_historical_evidence).unwrap() + "\n",
+    )
+    .unwrap();
+
     // A valid versioned archive and a valid compatibility archive are the
     // same publication, not an ambiguity. Corrupting the lower-priority
     // compatibility copy must not shadow the versioned source.

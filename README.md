@@ -126,6 +126,9 @@ tmux 和 appserver 是可替换的承载 adapter：mailbox 只负责持久化，
 允许执行时发送低干扰提示，appserver 返回宿主待执行意图。adapter receipt、通知
 批处理、master 唤醒和错误都写入同一份 JSONL；同一 mailbox 的命令使用独占锁，忙时
 显式返回 `communication_busy`；队列接受不等于宿主已执行。
+宿主先用 `register_runtime` 在 `~/.appsdk/runtimes.jsonl` 登记稳定 runtime，再用
+`runtimeId` 注册 scope/agent；真实投递、执行、回复和消费通过 `record_delivery` 回写，
+AppSDK 会校验目标 runtime、拒绝身份冲突和状态回退。
 
 `goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 review 前必须同时有开发白盒 PASS、部署后的公开入口黑盒 PASS，以及绑定候选 commit/tree、artifact、environment 和 entrypoint 的 PreReviewValidationRecord；`appsdk verify --review-admission` 是强制 admission 命令，宿主 CI/pre-commit 需要调用它才能物理阻断 Git commit。进入 Active 还必须有架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
 

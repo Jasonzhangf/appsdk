@@ -27,6 +27,7 @@ fn call(root: &Path, request: Value) -> Value {
             "--json",
             &serde_json::to_string(&request).unwrap(),
         ])
+        .env("APPSDK_HOME", root.join(".appsdk-host"))
         .output()
         .unwrap();
     assert!(
@@ -45,6 +46,7 @@ fn call_error(root: &Path, request: Value) -> String {
             "--json",
             &serde_json::to_string(&request).unwrap(),
         ])
+        .env("APPSDK_HOME", root.join(".appsdk-host"))
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -112,6 +114,21 @@ fn register_scope(
     project_root: &str,
     sessions: &[&str],
 ) {
+    let runtime_id = format!("runtime-{scope_id}");
+    call(
+        root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": runtime_id,
+                "appserverId": appserver_id,
+                "namespace": "codex_tui",
+                "endpoint": format!("mock://{scope_id}"),
+                "projectRoot": project_root,
+                "processId": std::process::id()
+            }
+        }),
+    );
     call(
         root,
         json!({
@@ -122,7 +139,8 @@ fn register_scope(
                 "namespace": "codex_tui",
                 "endpoint": format!("mock://{scope_id}"),
                 "projectRoot": project_root,
-                "sessionIds": sessions
+                "sessionIds": sessions,
+                "runtimeId": format!("runtime-{scope_id}")
             }
         }),
     );
@@ -140,7 +158,8 @@ fn register_agent(
         "scopeId": scope_id,
         "sessionId": session_id,
         "agentId": agent_id,
-        "role": role
+        "role": role,
+        "runtimeId": format!("runtime-{scope_id}")
     });
     if role == "master" {
         agent["masterGrant"] = json!("user approved master for this scope");
@@ -164,12 +183,339 @@ fn register_agent_with_lease(
         "sessionId": session_id,
         "agentId": agent_id,
         "role": role,
-        "leaseMs": lease_ms
+        "leaseMs": lease_ms,
+        "runtimeId": format!("runtime-{scope_id}")
     });
     if role == "master" {
         agent["masterGrant"] = json!("user approved master for this scope");
     }
     call(root, json!({ "op": "register_agent", "agent": agent }))
+}
+
+#[test]
+fn communication_runtime_identity_registration_is_required_bound_and_replayed() {
+    let root = temp_root("runtime-identity");
+    let missing_runtime = call_error(
+        &root,
+        json!({
+            "op": "register_scope",
+            "scope": {
+                "scopeId": "scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": "/project",
+                "sessionIds": ["master"]
+            }
+        }),
+    );
+    assert!(missing_runtime.contains("runtime_registration_required"));
+
+    let runtime = call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-a",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": "/project",
+                "processId": std::process::id()
+            }
+        }),
+    );
+    assert_eq!(runtime["receipt"]["idempotent"], false);
+    assert!(runtime["receipt"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .starts_with("runtime-"));
+
+    let conflict = call_error(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-a",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://forged",
+                "projectRoot": "/project",
+                "processId": std::process::id()
+            }
+        }),
+    );
+    assert!(conflict.contains("runtime_identity_conflict"), "{conflict}");
+
+    let scope_mismatch = call_error(
+        &root,
+        json!({
+            "op": "register_scope",
+            "scope": {
+                "scopeId": "scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://forged",
+                "projectRoot": "/project",
+                "sessionIds": ["master"],
+                "runtimeId": "runtime-a"
+            }
+        }),
+    );
+    assert!(
+        scope_mismatch.contains("runtime_scope_mismatch"),
+        "{scope_mismatch}"
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "register_scope",
+            "scope": {
+                "scopeId": "scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": "/project",
+                "sessionIds": ["master"],
+                "runtimeId": "runtime-a"
+            }
+        }),
+    );
+    let agent_mismatch = call_error(
+        &root,
+        json!({
+            "op": "register_agent",
+            "agent": {
+                "scopeId": "scope",
+                "sessionId": "master",
+                "agentId": "master",
+                "role": "master",
+                "masterGrant": "user approved master",
+                "runtimeId": "runtime-forged"
+            }
+        }),
+    );
+    assert!(
+        agent_mismatch.contains("runtime_agent_mismatch"),
+        "{agent_mismatch}"
+    );
+    call(
+        &root,
+        json!({
+            "op": "register_agent",
+            "agent": {
+                "scopeId": "scope",
+                "sessionId": "master",
+                "agentId": "master",
+                "role": "master",
+                "masterGrant": "user approved master",
+                "runtimeId": "runtime-a"
+            }
+        }),
+    );
+
+    let replayed = call(&root, json!({ "op": "status" }));
+    assert_eq!(replayed["scopes"][0]["runtimeId"], "runtime-a");
+    assert_eq!(replayed["agents"][0]["runtimeId"], "runtime-a");
+    let host_registry = root.join(".appsdk-host/runtimes.jsonl");
+    assert_eq!(
+        fs::read_to_string(host_registry).unwrap().lines().count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_runtime_identity_delivery_receipts_are_monotonic() {
+    let root = temp_root("delivery-receipt");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "execute task",
+                "priority": "p1",
+                "body": "run the assigned verification"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let forged = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-forged",
+                "evidence": { "receiptId": "forged" }
+            }
+        }),
+    );
+    assert!(forged.contains("delivery_runtime_mismatch"), "{forged}");
+
+    let empty_evidence = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {}
+            }
+        }),
+    );
+    assert!(
+        empty_evidence.contains("delivery_evidence_required"),
+        "{empty_evidence}"
+    );
+
+    let delivered = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "target-received" }
+            }
+        }),
+    );
+    assert_eq!(delivered["message"]["state"], "delivered");
+    call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": "/project",
+                "tmuxSession": "tui-scope",
+                "tmuxPane": "%7",
+                "processId": std::process::id() + 1
+            }
+        }),
+    );
+    let duplicate = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "target-received" }
+            }
+        }),
+    );
+    assert_eq!(duplicate["idempotent"], true);
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "executed",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "target-executed" }
+            }
+        }),
+    );
+    let unknown_after_delivery = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "unknown",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "delivery-observation-lost" }
+            }
+        }),
+    );
+    assert!(
+        unknown_after_delivery.contains("delivery_state_regression"),
+        "{unknown_after_delivery}"
+    );
+    let regression = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "too-early" }
+            }
+        }),
+    );
+    assert!(
+        regression.contains("delivery_state_regression"),
+        "{regression}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_runtime_identity_replay_rejects_forged_delivery_receipt() {
+    let root = temp_root("delivery-replay-forged");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "replay receipt",
+                "priority": "p1",
+                "body": "verify receipt replay"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "worker-received" }
+            }
+        }),
+    );
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut tampered = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.state"
+            && event["data"]["messageId"] == message_id
+            && event["data"]["state"] == "delivered"
+        {
+            event["data"]["evidence"]["details"]["runtimeId"] = json!("runtime-forged");
+        }
+        tampered.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", tampered.join("\n"))).unwrap();
+    let replay_error = call_error(&root, json!({ "op": "status" }));
+    assert!(replay_error.contains("journal_corrupt"), "{replay_error}");
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn after(timestamp: &str, seconds: i64) -> String {
@@ -698,6 +1044,51 @@ fn tick_wakes_a_live_idle_master_within_its_lease() {
         tick_events[5]["data"]["attemptId"].as_str(),
         Some(attempt_id)
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wakeup_delivery_receipt_prefix_recovers_when_message_is_already_delivered() {
+    let root = temp_root("wakeup-delivery-prefix");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    let registration =
+        register_agent_with_lease(&root, "scope", "master", "master", "master", 600_000);
+    let observed_at = registration["agent"]["lastObservedAt"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": observed_at
+        }),
+    );
+    let due = after(observed_at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    retain_mailbox_through(&root, "notification.emitted");
+    let status = call(&root, json!({ "op": "status" }));
+    let message_id = status["notificationProjection"]["emitted"][0]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "master-received" }
+            }
+        }),
+    );
+    let recovered = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(recovered["changed"].as_array().unwrap().len(), 1);
+    assert_eq!(recovered["wakeup"][0]["remindersSent"], 1);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert!(raw.contains("\"kind\":\"wakeup.reminder\""));
+    assert!(!raw.contains("wakeup_message_state_invalid"));
     fs::remove_dir_all(root).unwrap();
 }
 

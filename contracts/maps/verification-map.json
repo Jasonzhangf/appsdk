@@ -5,6 +5,7 @@
     {"gate_id":"communication_contract","command":"cargo test --manifest-path rust/Cargo.toml --test communication_cli","required_for":["communication_review","communication_delivery"]},
     {"gate_id":"communication_replay","command":"appsdk communication <project> --json '{\"op\":\"status\"}'","human_contract":"reopen the project and replay the JSONL mailbox without dropping invalid events","required_for":["communication_review","communication_delivery"]},
     {"gate_id":"communication_route","command":"cargo test --manifest-path rust/Cargo.toml --test communication_cli routing_requires_explicit_master_and_respects_scope_boundaries","required_for":["communication_review"]},
+    {"gate_id":"communication_runtime_identity","command":"cargo test --manifest-path rust/Cargo.toml --test communication_cli communication_runtime_identity","required_for":["communication_review","communication_delivery"]},
     {"gate_id":"communication_adapter","command":"cargo test --manifest-path rust/Cargo.toml --test communication_cli --quiet","required_for":["communication_review"]},
     {"gate_id":"contract_valid","command":"appsdk verify <project>","required_for":["compile","promotion","freeze"]},
     {"gate_id":"sdk_source_registry","command":"appsdk verify-sdk-source-registry <sdk-repo>","required_for":["build","release"]},

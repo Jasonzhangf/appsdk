@@ -14,6 +14,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::global_registry;
+
 pub const PROTOCOL: &str = "appsdk-comm/v1";
 pub const DEFAULT_BATCH_WINDOW_SECONDS: i64 = 120;
 pub const DEFAULT_MASTER_REMINDER_LIMIT: u8 = 3;
@@ -147,6 +149,8 @@ struct ScopeRequest {
     project_root: String,
     #[serde(default, rename = "sessionIds", alias = "session_ids")]
     session_ids: Vec<String>,
+    #[serde(default, rename = "runtimeId", alias = "runtime_id")]
+    runtime_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +169,26 @@ struct AgentRequest {
     parent: Option<Address>,
     #[serde(default, rename = "leaseMs", alias = "lease_ms")]
     lease_ms: Option<u64>,
+    #[serde(default, rename = "runtimeId", alias = "runtime_id")]
+    runtime_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeRequest {
+    #[serde(rename = "runtimeId", alias = "runtime_id")]
+    runtime_id: String,
+    #[serde(rename = "appserverId", alias = "appserver_id")]
+    appserver_id: String,
+    namespace: String,
+    endpoint: String,
+    #[serde(rename = "projectRoot", alias = "project_root")]
+    project_root: String,
+    #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
+    tmux_session: Option<String>,
+    #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
+    tmux_pane: Option<String>,
+    #[serde(rename = "processId", alias = "process_id")]
+    process_id: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +212,18 @@ struct MessageRequest {
     created_at: Option<String>,
     #[serde(default, rename = "adapterId", alias = "adapter_id")]
     adapter_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeliveryRequest {
+    #[serde(rename = "messageId", alias = "message_id")]
+    message_id: String,
+    state: String,
+    #[serde(rename = "runtimeId", alias = "runtime_id")]
+    runtime_id: String,
+    evidence: Value,
+    #[serde(default, rename = "observedAt", alias = "observed_at")]
+    observed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +294,8 @@ struct ScopeRecord {
     last_observed_at: String,
     #[serde(rename = "masterSessionId")]
     master_session_id: Option<String>,
+    #[serde(default, rename = "runtimeId")]
+    runtime_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +321,8 @@ struct AgentRecord {
     state: AgentState,
     #[serde(rename = "lastStateAt")]
     last_state_at: String,
+    #[serde(default, rename = "runtimeId")]
+    runtime_id: Option<String>,
 }
 
 impl AgentRecord {
@@ -916,6 +956,106 @@ impl CommunicationStore {
             .unwrap_or(Priority::P3)
     }
 
+    fn register_runtime(&mut self, request: RuntimeRequest) -> CommResult<Value> {
+        let identity = global_registry::RuntimeIdentity {
+            runtime_id: request.runtime_id,
+            appserver_id: request.appserver_id,
+            namespace: request.namespace,
+            endpoint: request.endpoint,
+            project_root: request.project_root,
+            tmux_session: request.tmux_session,
+            tmux_pane: request.tmux_pane,
+            process_id: request.process_id,
+        };
+        let receipt = global_registry::register_runtime(&identity).map_err(|error| {
+            CommError::new(
+                if error.starts_with("GLOBAL_RUNTIME_IDENTITY_CONFLICT:") {
+                    "runtime_identity_conflict"
+                } else if error.starts_with("GLOBAL_RUNTIME_NOT_FOUND:") {
+                    "runtime_not_found"
+                } else {
+                    "runtime_registration_failed"
+                },
+                error,
+            )
+        })?;
+        Ok(json!({
+            "runtime": identity,
+            "receipt": serde_json::to_value(receipt).unwrap(),
+            "registry": "host"
+        }))
+    }
+
+    fn require_runtime_for_scope(
+        &self,
+        request: &ScopeRequest,
+    ) -> CommResult<global_registry::RuntimeRecord> {
+        let runtime_id = request.runtime_id.as_deref().ok_or_else(|| {
+            CommError::new(
+                "runtime_registration_required",
+                "scope registration requires a host runtimeId registered in ~/.appsdk",
+            )
+        })?;
+        let runtime = global_registry::runtime(runtime_id)
+            .map_err(|error| CommError::new("runtime_registration_required", error))?;
+        if runtime.identity.appserver_id != request.appserver_id
+            || runtime.identity.namespace != request.namespace
+            || runtime.identity.endpoint != request.endpoint
+            || runtime.identity.project_root != request.project_root
+        {
+            return Err(CommError::new(
+                "runtime_scope_mismatch",
+                format!(
+                    "runtime {} does not match scope transport identity",
+                    runtime_id
+                ),
+            ));
+        }
+        Ok(runtime)
+    }
+
+    fn require_runtime_for_agent(
+        &self,
+        scope: &ScopeRecord,
+        runtime_id: Option<&str>,
+    ) -> CommResult<global_registry::RuntimeRecord> {
+        let expected = scope.runtime_id.as_deref().ok_or_else(|| {
+            CommError::new(
+                "runtime_registration_required",
+                "agent registration requires a scope bound to a host runtime",
+            )
+        })?;
+        let runtime_id = runtime_id.ok_or_else(|| {
+            CommError::new(
+                "runtime_registration_required",
+                "agent registration requires runtimeId",
+            )
+        })?;
+        if runtime_id != expected {
+            return Err(CommError::new(
+                "runtime_agent_mismatch",
+                format!("agent runtimeId does not match scope runtimeId: {runtime_id}"),
+            ));
+        }
+        global_registry::runtime(runtime_id)
+            .map_err(|error| CommError::new("runtime_registration_required", error))
+    }
+
+    fn require_agent_runtime(&self, agent: &AgentRecord) -> CommResult<()> {
+        let runtime_id = agent.runtime_id.as_deref().ok_or_else(|| {
+            CommError::new(
+                "runtime_registration_required",
+                format!(
+                    "agent has no verified runtime identity: {}",
+                    agent.address().key()
+                ),
+            )
+        })?;
+        global_registry::runtime(runtime_id)
+            .map(|_| ())
+            .map_err(|error| CommError::new("runtime_registration_required", error))
+    }
+
     fn register_adapter(&mut self, request: AdapterRequest) -> CommResult<Value> {
         validate_non_empty(&request.adapter_id, "adapterId")?;
         if !matches!(request.kind.as_str(), "mailbox" | "tmux" | "appserver") {
@@ -978,6 +1118,7 @@ impl CommunicationStore {
 
     fn register_scope(&mut self, request: ScopeRequest) -> CommResult<Value> {
         validate_scope_request(&request)?;
+        let _runtime = self.require_runtime_for_scope(&request)?;
         let at = now();
         if let Some(existing) = self.projection.scopes.get(&request.scope_id) {
             if existing.appserver_id == request.appserver_id
@@ -985,6 +1126,7 @@ impl CommunicationStore {
                 && existing.endpoint == request.endpoint
                 && existing.project_root == request.project_root
                 && existing.session_ids == request.session_ids
+                && existing.runtime_id.as_deref() == request.runtime_id.as_deref()
             {
                 return Ok(json!({ "scope": existing, "idempotent": true }));
             }
@@ -1006,6 +1148,7 @@ impl CommunicationStore {
             registered_at: at.clone(),
             last_observed_at: at,
             master_session_id: None,
+            runtime_id: request.runtime_id,
         };
         self.commit("scope.registered", serde_json::to_value(&record).unwrap())?;
         Ok(json!({ "scope": record, "idempotent": false }))
@@ -1029,6 +1172,7 @@ impl CommunicationStore {
                 format!("unsupported agent role: {role}"),
             ));
         }
+        self.require_runtime_for_agent(&scope, request.runtime_id.as_deref())?;
         if !scope.session_ids.is_empty() && !scope.session_ids.contains(&request.session_id) {
             return Err(CommError::new(
                 "session_not_declared",
@@ -1086,6 +1230,7 @@ impl CommunicationStore {
             if existing.role == role
                 && existing.agent_id == request.agent_id
                 && existing.parent == request.parent
+                && existing.runtime_id.as_deref() == request.runtime_id.as_deref()
             {
                 return Ok(json!({ "agent": existing, "idempotent": true }));
             }
@@ -1127,6 +1272,7 @@ impl CommunicationStore {
             expires_at,
             state: AgentState::Working,
             last_state_at: at,
+            runtime_id: request.runtime_id,
         };
         self.commit("agent.registered", serde_json::to_value(&record).unwrap())?;
         Ok(json!({ "agent": record, "idempotent": false }))
@@ -1148,8 +1294,106 @@ impl CommunicationStore {
         validate_message_request(&request)?;
         let source = self.require_live_agent(&request.from)?.clone();
         let target = self.require_live_agent(&request.to)?.clone();
+        self.require_agent_runtime(&source)?;
+        self.require_agent_runtime(&target)?;
         let route = self.resolve_route(&source, &target)?;
         self.enqueue_message(request, route, None)
+    }
+
+    fn record_delivery(&mut self, request: DeliveryRequest) -> CommResult<Value> {
+        validate_non_empty(&request.message_id, "messageId")?;
+        validate_non_empty(&request.runtime_id, "runtimeId")?;
+        validate_non_empty(&request.state, "state")?;
+        if request
+            .evidence
+            .as_object()
+            .is_none_or(|evidence| evidence.is_empty())
+        {
+            return Err(CommError::new(
+                "delivery_evidence_required",
+                "delivery evidence must be a non-empty object",
+            ));
+        }
+        let state = request.state.trim().to_ascii_lowercase();
+        if !matches!(
+            state.as_str(),
+            "delivered" | "executed" | "replied" | "read" | "consumed" | "unknown"
+        ) {
+            return Err(CommError::new(
+                "invalid_delivery_state",
+                format!("unsupported delivery state: {}", request.state),
+            ));
+        }
+        let message = self
+            .projection
+            .messages
+            .get(&request.message_id)
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "message_not_found",
+                    format!("message not found: {}", request.message_id),
+                )
+            })?;
+        let target = self.require_live_agent(&message.to)?.clone();
+        let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
+            CommError::new(
+                "runtime_registration_required",
+                format!(
+                    "message target has no runtime identity: {}",
+                    message.to.key()
+                ),
+            )
+        })?;
+        if target_runtime_id != request.runtime_id {
+            return Err(CommError::new(
+                "delivery_runtime_mismatch",
+                format!(
+                    "delivery runtimeId does not match target runtime: {}",
+                    request.runtime_id
+                ),
+            ));
+        }
+        let runtime = global_registry::runtime(&request.runtime_id)
+            .map_err(|error| CommError::new("runtime_registration_required", error))?;
+        let at = request
+            .observed_at
+            .as_deref()
+            .map(validate_time)
+            .transpose()?
+            .unwrap_or_else(now);
+        let details = json!({
+            "runtimeId": request.runtime_id,
+            "runtimeFingerprint": runtime.fingerprint,
+            "receipt": request.evidence
+        });
+        if message.evidence.iter().any(|evidence| {
+            evidence.state == state
+                && evidence.details.get("runtimeId").and_then(Value::as_str)
+                    == Some(request.runtime_id.as_str())
+                && evidence.details.get("receipt") == Some(&request.evidence)
+        }) {
+            return Ok(json!({ "message": message, "idempotent": true }));
+        }
+        validate_delivery_state_transition(&message.state, &state)?;
+        let evidence = DeliveryEvidence {
+            state: state.clone(),
+            at: at.clone(),
+            details,
+        };
+        self.commit(
+            "message.state",
+            json!({
+                "messageId": request.message_id,
+                "state": state,
+                "evidence": evidence
+            }),
+        )?;
+        Ok(json!({
+            "message": self.projection.messages.get(&request.message_id),
+            "idempotent": false,
+            "observedAt": at
+        }))
     }
 
     pub fn set_agent_state(
@@ -3701,7 +3945,7 @@ impl CommunicationStore {
                         "evidence": accepted
                     }),
                 )?;
-            } else if existing.state != "accepted" {
+            } else if delivery_state_rank(&existing.state).is_none() {
                 return Err(CommError::new(
                     "wakeup_message_state_invalid",
                     format!(
@@ -4498,11 +4742,27 @@ impl CommunicationStore {
                     event.data.get("evidence").unwrap_or(&Value::Null),
                     "evidence",
                 )?;
+                if evidence.state != state {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "message state evidence does not match message state",
+                    ));
+                }
+                let target = self
+                    .projection
+                    .messages
+                    .get(message_id)
+                    .and_then(|message| self.projection.agents.get(&message.to.key()))
+                    .ok_or_else(|| {
+                        CommError::new("event_data_invalid", "message target agent is missing")
+                    })?;
+                validate_replayed_delivery_evidence(state, &evidence, target)?;
                 let message = self
                     .projection
                     .messages
                     .get_mut(message_id)
                     .ok_or_else(|| CommError::new("event_data_invalid", "message not found"))?;
+                validate_delivery_state_transition(&message.state, state)?;
                 message.state = state.into();
                 message.evidence.push(evidence);
             }
@@ -4968,6 +5228,10 @@ impl CommunicationStore {
         match op {
             "capabilities" => Ok(capabilities()),
             "status" => Ok(self.status()),
+            "register_runtime" | "register-runtime" => self.register_runtime(decode(
+                request.get("runtime").unwrap_or(request),
+                "runtime",
+            )?),
             "register_adapter" | "register-adapter" => self.register_adapter(decode(
                 request.get("adapter").unwrap_or(request),
                 "adapter",
@@ -4986,6 +5250,10 @@ impl CommunicationStore {
             "send" => self.send(decode(
                 request.get("message").unwrap_or(request),
                 "message",
+            )?),
+            "record_delivery" | "record-delivery" => self.record_delivery(decode(
+                request.get("delivery").unwrap_or(request),
+                "delivery",
             )?),
             "set_agent_state" | "set-agent-state" => {
                 let address: Address =
@@ -5139,9 +5407,9 @@ pub fn run_cli(args: Vec<String>) -> CommResult<()> {
 pub fn capabilities() -> Value {
     json!({
         "protocol": PROTOCOL,
-            "execution": [
-                "register_adapter", "register_scope", "register_agent", "refresh_agent",
-            "send", "set_agent_state", "tick", "accumulate_wake", "record_wake",
+        "execution": [
+                "register_runtime", "register_adapter", "register_scope", "register_agent", "refresh_agent",
+                "send", "record_delivery", "set_agent_state", "tick", "accumulate_wake", "record_wake",
             "master_wake_decide", "flush_notifications", "report_bug",
             "update_bug", "create_loop", "advance_loop", "record_error"
         ],
@@ -5167,6 +5435,12 @@ pub fn capabilities() -> Value {
             "path": ".appsdk-control/communication/mailbox.jsonl",
             "projection": "replayed",
             "lock": "exclusive-command-lifecycle"
+        },
+        "runtimeIdentity": {
+            "registry": "~/.appsdk/runtimes.jsonl",
+            "stableAcross": ["conversation-compaction", "conversation-fork"],
+            "scopeBinding": "runtimeId",
+            "proof": "host-registration-receipt"
         },
         "adapters": ["mailbox", "tmux", "appserver"],
         "adapterBinding": "recipient-address",
@@ -5194,6 +5468,16 @@ fn validate_scope_request(request: &ScopeRequest) -> CommResult<()> {
     for session in &request.session_ids {
         validate_non_empty(session, "sessionIds[]")?;
     }
+    if request
+        .runtime_id
+        .as_deref()
+        .is_none_or(|runtime_id| runtime_id.trim().is_empty())
+    {
+        return Err(CommError::new(
+            "runtime_registration_required",
+            "scope registration requires runtimeId",
+        ));
+    }
     Ok(())
 }
 
@@ -5210,6 +5494,121 @@ fn validate_message_request(request: &MessageRequest) -> CommResult<()> {
     validate_non_empty(&request.body, "body")?;
     if let Some(key) = request.coalesce_key.as_deref() {
         validate_non_empty(key, "coalesceKey")?;
+    }
+    Ok(())
+}
+
+fn delivery_state_rank(state: &str) -> Option<u8> {
+    match state {
+        "created" => Some(0),
+        "accepted" | "intent" => Some(1),
+        "delivered" => Some(2),
+        "executed" => Some(3),
+        "replied" => Some(4),
+        "read" => Some(5),
+        "consumed" => Some(6),
+        "unknown" => Some(0),
+        _ => None,
+    }
+}
+
+fn validate_delivery_state_transition(current: &str, next: &str) -> CommResult<()> {
+    let current_rank = delivery_state_rank(current).ok_or_else(|| {
+        CommError::new(
+            "delivery_state_invalid",
+            format!("message has invalid current state: {current}"),
+        )
+    })?;
+    let next_rank = delivery_state_rank(next).ok_or_else(|| {
+        CommError::new(
+            "delivery_state_invalid",
+            format!("message has invalid next state: {next}"),
+        )
+    })?;
+    let delivered_rank = delivery_state_rank("delivered").expect("known delivery state");
+    if (next == "unknown" && current_rank >= delivered_rank)
+        || (next != "unknown" && next_rank < current_rank)
+    {
+        return Err(CommError::new(
+            "delivery_state_regression",
+            format!("cannot move message from {current} to {next}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_replayed_delivery_evidence(
+    state: &str,
+    evidence: &DeliveryEvidence,
+    target: &AgentRecord,
+) -> CommResult<()> {
+    if !matches!(
+        state,
+        "delivered" | "executed" | "replied" | "read" | "consumed" | "unknown"
+    ) {
+        return Ok(());
+    }
+    let details = evidence.details.as_object().ok_or_else(|| {
+        CommError::new(
+            "event_data_invalid",
+            "external delivery evidence must be a non-empty object",
+        )
+    })?;
+    if details.is_empty() {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence must be a non-empty object",
+        ));
+    }
+    let runtime_id = details
+        .get("runtimeId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "external delivery evidence runtimeId is missing",
+            )
+        })?;
+    let fingerprint = details
+        .get("runtimeFingerprint")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "external delivery evidence runtimeFingerprint is missing",
+            )
+        })?;
+    if details
+        .get("receipt")
+        .and_then(Value::as_object)
+        .is_none_or(|value| value.is_empty())
+    {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence receipt must be a non-empty object",
+        ));
+    }
+    let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
+        CommError::new(
+            "event_data_invalid",
+            "external delivery evidence target has no runtime identity",
+        )
+    })?;
+    if target_runtime_id != runtime_id {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence runtimeId does not match message target",
+        ));
+    }
+    let known = global_registry::runtime_fingerprint_known(runtime_id, fingerprint)
+        .map_err(|error| CommError::new("event_data_invalid", error))?;
+    if !known {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence runtimeFingerprint is not registered",
+        ));
     }
     Ok(())
 }

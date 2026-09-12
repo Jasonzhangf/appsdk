@@ -12,6 +12,7 @@
     "deliveryStates",
     "notification",
     "facts",
+    "runtimeIdentity",
     "adapters",
     "adapterBinding",
     "completionEvidence"
@@ -43,6 +44,19 @@
         "path": {"const": ".appsdk-control/communication/mailbox.jsonl"},
         "projection": {"const": "replayed"},
         "lock": {"const": "exclusive-command-lifecycle"}
+      },
+      "additionalProperties": false
+    },
+    "runtimeIdentity": {
+      "type": "object",
+      "required": ["registry", "stableAcross", "scopeBinding", "proof"],
+      "properties": {
+        "registry": {"const": "~/.appsdk/runtimes.jsonl"},
+        "stableAcross": {
+          "const": ["conversation-compaction", "conversation-fork"]
+        },
+        "scopeBinding": {"const": "runtimeId"},
+        "proof": {"const": "host-registration-receipt"}
       },
       "additionalProperties": false
     },

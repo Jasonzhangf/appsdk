@@ -13,6 +13,8 @@ The first host-wide record is the append-only project registry:
 ~/.appsdk/
   projects.jsonl
   projects.jsonl.lock
+  runtimes.jsonl
+  runtimes.jsonl.lock
 ```
 
 `projects.jsonl` is the source of truth. The lock file only serializes writers;
@@ -42,6 +44,17 @@ The registry identifies a project root that opted into this AppSDK release. It
 does not register an agent, grant `master`, establish a Collab route, or replace
 the live runtime identity proof. A project can therefore have a valid registry
 entry while its TUI route remains unbound or unavailable.
+
+The host runtime registry is the second append-only stream under the same root.
+`runtimes.jsonl` binds a stable `runtimeId` to one App Server endpoint,
+namespace, project root, optional tmux session/pane, process id and a derived
+fingerprint. `appsdk communication ... register_runtime` appends or reuses one
+binding. A later registration with the same ID but a changed endpoint, cwd or
+namespace fails with `GLOBAL_RUNTIME_IDENTITY_CONFLICT`; it never overwrites the
+old record. A scope or agent may be created only when its `runtimeId` resolves to
+this exact binding. The registry is an identity binding and replay source; it
+does not claim that an appserver delivered a message. The host must report that
+fact through the communication `record_delivery` operation.
 
 ## Event contract
 
@@ -99,7 +112,9 @@ credentials or runtime tokens. Existing project `.appsdk/` contracts,
 `.appsdk-control/` caches, Collab journal/mailbox, and project-memory sources
 follow their own owners and migration contracts. A missing registry is
 recreated by the next successful `init`/`new`; a malformed registry is retained
-and reported until repaired by an explicit migration owner.
+and reported until repaired by an explicit migration owner. The same fail-closed
+rule applies to `runtimes.jsonl`: a missing runtime record blocks communication
+registration while leaving ordinary project governance usable.
 
 Removing a stale registry entry is not part of ordinary initialization. It
 requires a named migration/reset plan, an immutable snapshot, an authorized

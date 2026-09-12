@@ -8,6 +8,15 @@ AppSDK 自己拥有 `appsdk-comm/v1` 的通信协议、身份与 scope、路由�
 `/Users/fanzhang/Documents/github/codexapp` 只提供通信语义参考，不是运行时依赖，
 也不属于本模块的修改范围。
 
+运行时身份由 AppSDK 的 host registry 单独持有：`~/.appsdk/runtimes.jsonl` 是
+append-only 的 `runtime.registered` 事实，记录稳定 `runtimeId`、App Server endpoint、
+namespace、项目 cwd、可选 tmux session/pane、进程和 fingerprint。会话压缩或 fork 只改变
+conversation/session；宿主继续使用同一个 `runtimeId`，不能复制旧 session token。
+`register_runtime` 对相同身份幂等，对同一 ID 的 endpoint、cwd 或 namespace 变化返回
+`runtime_identity_conflict`。scope 和 agent 注册必须引用已经登记且完全匹配的
+`runtimeId`；缺失或不匹配在写入项目 mailbox 前失败。runtime registry 与项目事实分离，
+但所有权仍属于 AppSDK，默认根目录始终是 `~/.appsdk`。
+
 `mailbox`、`tmux` 和 `appserver` 是同一个通信抽象的承载 adapter，不是三套协议或
 三份事实：
 
@@ -20,6 +29,13 @@ AppSDK 自己拥有 `appsdk-comm/v1` 的通信协议、身份与 scope、路由�
 - `appserver` 只向绑定的 endpoint 返回 `intent`，receipt 带
   `hostMustExecute=true`。宿主没有回报执行证据前，状态不能升级为
   `delivered`、`executed` 或 `read`。
+
+宿主完成真实投递或产生回复后，使用 `record_delivery` 把 receipt 回写到同一项目
+JSONL。请求必须带消息 ID、目标 `runtimeId`、状态和非空证据；AppSDK 会核对目标 agent
+绑定的 runtime，并只接受 `delivered -> executed -> replied -> read -> consumed` 的单调
+推进。重复的相同 receipt 幂等，伪造 runtime、状态回退或未知证据明确失败。这样
+`accepted`、adapter `intent`、真实投递、目标执行和消费各自有独立事实，不能用 mailbox
+存在或 tmux 屏幕文本代替后续状态。
 
 本模块不启动第二个 daemon，不读取外部 Collab、mailbox CLI 或 tmux 状态，不把宿主
 的 session、模型名或 endpoint 推断成角色。adapter 失败必须保留原始错误和事实，
@@ -45,7 +61,7 @@ JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`�
 
 ## 地址、scope、角色和 lease
 
-通信地址固定为 `scopeId/sessionId`。Scope 记录 `appserverId`、宿主声明的
+通信地址固定为 `scopeId/sessionId`，运行时绑定使用稳定 `runtimeId`。Scope 记录 `appserverId`、宿主声明的
 `namespace`（`codex_app` 或 `codex_tui`）、由 cwd 确定的 `projectRoot` 和允许的
 `sessionIds`。不同 `scopeId` 即使 appserver 或 project 相同，也属于不同通信 scope。
 
@@ -209,8 +225,8 @@ appsdk communication capabilities
 appsdk comm ...
 ```
 
-请求操作包括 `register_adapter`、`register_scope`、`register_agent`、`refresh_agent`、
-`send`、`set_agent_state`、`tick`、`flush_notifications`、`report_bug`、`update_bug`、
+请求操作包括 `register_runtime`、`register_adapter`、`register_scope`、`register_agent`、`refresh_agent`、
+`send`、`record_delivery`、`set_agent_state`、`tick`、`flush_notifications`、`report_bug`、`update_bug`、
 `create_loop`、`advance_loop`、`accumulate_wake`/`record_wake`、`master_wake_decide`、
 `status` 和 `record_error`。查询只读取 replay
 projection；变更返回投影和本次写入的事实 ID。

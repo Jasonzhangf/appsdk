@@ -6,7 +6,7 @@
 //! `APPSDK_HOME` is an explicit isolated-run override (useful for tests and
 //! sandboxes), never a project-controlled path.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,9 +20,13 @@ use std::path::{Component, Path, PathBuf};
 const REGISTRY_DIR: &str = ".appsdk";
 const REGISTRY_FILE: &str = "projects.jsonl";
 const REGISTRY_LOCK: &str = "projects.jsonl.lock";
+const RUNTIME_FILE: &str = "runtimes.jsonl";
+const RUNTIME_LOCK: &str = "runtimes.jsonl.lock";
 const REGISTRY_SCHEMA_VERSION: u64 = 1;
 const REGISTRY_EVENT: &str = "project.registered";
 const REGISTRY_SOURCE: &str = "appsdk.init";
+const RUNTIME_EVENT: &str = "runtime.registered";
+const RUNTIME_SOURCE: &str = "appsdk.communication";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct RegistrationEvent {
@@ -45,6 +49,51 @@ pub struct RegistrationReceipt {
     pub idempotent: bool,
 }
 
+/// Host runtime identity supplied by a native host or TUI adapter.
+///
+/// The identity is intentionally separate from a conversation/session id.  A
+/// host may create a new conversation after compaction or fork while keeping
+/// the same runtime instance.  AppSDK persists this binding and rejects later
+/// scope/agent registrations that change its transport identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeIdentity {
+    #[serde(rename = "runtimeId", alias = "runtime_id")]
+    pub runtime_id: String,
+    #[serde(rename = "appserverId", alias = "appserver_id")]
+    pub appserver_id: String,
+    pub namespace: String,
+    pub endpoint: String,
+    #[serde(rename = "projectRoot", alias = "project_root")]
+    pub project_root: String,
+    #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
+    pub tmux_session: Option<String>,
+    #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
+    pub tmux_pane: Option<String>,
+    #[serde(rename = "processId", alias = "process_id")]
+    pub process_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRecord {
+    pub schema_version: u64,
+    pub event: String,
+    #[serde(flatten)]
+    pub identity: RuntimeIdentity,
+    #[serde(rename = "registeredAt")]
+    pub registered_at: String,
+    pub fingerprint: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeReceipt {
+    pub registry_root: PathBuf,
+    pub registry_path: PathBuf,
+    pub runtime_id: String,
+    pub fingerprint: String,
+    pub idempotent: bool,
+}
+
 fn registry_root() -> Result<PathBuf, String> {
     let root = env::var_os("APPSDK_HOME")
         .filter(|value| !value.is_empty())
@@ -64,6 +113,72 @@ fn project_id(project_root: &Path) -> String {
     let mut digest = Sha256::new();
     digest.update(project_root.to_string_lossy().as_bytes());
     format!("project-{:x}", digest.finalize())
+}
+
+fn runtime_fingerprint(identity: &RuntimeIdentity) -> String {
+    let mut digest = Sha256::new();
+    digest.update(identity.runtime_id.as_bytes());
+    digest.update([0]);
+    digest.update(identity.appserver_id.as_bytes());
+    digest.update([0]);
+    digest.update(identity.namespace.as_bytes());
+    digest.update([0]);
+    digest.update(identity.endpoint.as_bytes());
+    digest.update([0]);
+    digest.update(identity.project_root.as_bytes());
+    digest.update([0]);
+    if let Some(value) = identity.tmux_session.as_deref() {
+        digest.update(value.as_bytes());
+    }
+    digest.update([0]);
+    if let Some(value) = identity.tmux_pane.as_deref() {
+        digest.update(value.as_bytes());
+    }
+    digest.update([0]);
+    digest.update(identity.process_id.to_string().as_bytes());
+    format!("runtime-{:x}", digest.finalize())
+}
+
+fn validate_runtime_identity(identity: &RuntimeIdentity) -> Result<(), String> {
+    for (label, value) in [
+        ("runtime_id", identity.runtime_id.as_str()),
+        ("appserver_id", identity.appserver_id.as_str()),
+        ("endpoint", identity.endpoint.as_str()),
+        ("project_root", identity.project_root.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("GLOBAL_RUNTIME_IDENTITY_INVALID:{label}:empty"));
+        }
+        if value.chars().count() > 512 {
+            return Err(format!("GLOBAL_RUNTIME_IDENTITY_INVALID:{label}:too_long"));
+        }
+    }
+    if !matches!(identity.namespace.as_str(), "codex_app" | "codex_tui") {
+        return Err(format!(
+            "GLOBAL_RUNTIME_IDENTITY_INVALID:namespace:{}",
+            identity.namespace
+        ));
+    }
+    let project_root = Path::new(&identity.project_root);
+    if !is_lexically_canonical_absolute(project_root) {
+        return Err(format!(
+            "GLOBAL_RUNTIME_IDENTITY_INVALID:project_root_not_canonical:{}",
+            identity.project_root
+        ));
+    }
+    if identity.process_id == 0 {
+        return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:process_id_zero".into());
+    }
+    match (&identity.tmux_session, &identity.tmux_pane) {
+        (Some(session), Some(pane)) if !session.trim().is_empty() && !pane.trim().is_empty() => {}
+        (None, None) => {}
+        _ => {
+            return Err(
+                "GLOBAL_RUNTIME_IDENTITY_INVALID:tmux_session_and_pane_must_be_paired".into(),
+            )
+        }
+    }
+    Ok(())
 }
 
 fn is_lexically_canonical_absolute(path: &Path) -> bool {
@@ -282,6 +397,248 @@ fn ensure_registry_root(root: &Path) -> Result<PathBuf, String> {
     }
     validate_registry_root(root)?;
     fs::canonicalize(root).map_err(|error| format!("GLOBAL_REGISTRY_CANONICALIZE_FAILED:{error}"))
+}
+
+fn read_runtime_records(path: &Path) -> Result<Vec<RuntimeRecord>, String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("GLOBAL_RUNTIME_REGISTRY_READ_FAILED:{error}")),
+    };
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_READ_FAILED:{error}"))?;
+    if !text.is_empty() && !text.as_bytes().ends_with(b"\n") {
+        return Err("GLOBAL_RUNTIME_REGISTRY_INVALID_LINE:missing final newline".into());
+    }
+    let mut records = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            return Err(format!(
+                "GLOBAL_RUNTIME_REGISTRY_INVALID_LINE:{}:blank line",
+                index + 1
+            ));
+        }
+        let event: RuntimeRecord = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_INVALID_LINE:{}:{}",
+                index + 1,
+                error
+            )
+        })?;
+        validate_runtime_identity(&event.identity).map_err(|error| {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:{}:{}",
+                index + 1,
+                error
+            )
+        })?;
+        if event.schema_version != REGISTRY_SCHEMA_VERSION
+            || !matches!(event.event.as_str(), RUNTIME_EVENT | "runtime.refreshed")
+            || event.source != RUNTIME_SOURCE
+            || event.fingerprint != runtime_fingerprint(&event.identity)
+            || event.registered_at.trim().is_empty()
+            || DateTime::parse_from_rfc3339(&event.registered_at).is_err()
+        {
+            return Err(format!(
+                "GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:{}:unsupported runtime event",
+                index + 1
+            ));
+        }
+        let previous = records.iter().rev().find(|record: &&RuntimeRecord| {
+            record.identity.runtime_id == event.identity.runtime_id
+        });
+        match previous {
+            None if event.event != RUNTIME_EVENT => {
+                return Err(format!(
+                    "GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:{}:refresh without registration",
+                    index + 1
+                ));
+            }
+            Some(_previous) if event.event != "runtime.refreshed" => {
+                return Err(format!(
+                    "GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:{}:duplicate runtime registration",
+                    index + 1
+                ));
+            }
+            Some(previous) if previous.identity == event.identity => {
+                return Err(format!(
+                    "GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:{}:no-op runtime refresh",
+                    index + 1
+                ));
+            }
+            Some(previous) => {
+                if !runtime_stable_identity_matches(&previous.identity, &event.identity) {
+                    return Err(format!(
+                        "GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:{}:runtime identity changed",
+                        index + 1
+                    ));
+                }
+            }
+            None => {}
+        }
+        records.push(event);
+    }
+    Ok(records)
+}
+
+/// Register a host runtime in the canonical `~/.appsdk` registry.
+pub fn register_runtime(identity: &RuntimeIdentity) -> Result<RuntimeReceipt, String> {
+    let root = registry_root()?;
+    register_runtime_at(identity, &root)
+}
+
+/// Test/integration variant with an injected host registry root.
+pub fn register_runtime_at(
+    identity: &RuntimeIdentity,
+    registry_root: &Path,
+) -> Result<RuntimeReceipt, String> {
+    validate_runtime_identity(identity)?;
+    let registry_root = ensure_registry_root(registry_root)?;
+    let path = registry_root.join(RUNTIME_FILE);
+    let lock_path = registry_root.join(RUNTIME_LOCK);
+    ensure_no_symlink(&path, "runtime_registry_file")?;
+    ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    let _lock = lock_registry(&lock_path).map_err(|error| {
+        if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_BUSY:{}",
+                &error["GLOBAL_REGISTRY_BUSY:".len()..]
+            )
+        } else {
+            error
+        }
+    })?;
+    let records = read_runtime_records(&path)?;
+    let fingerprint = runtime_fingerprint(identity);
+    if let Some(existing) = records
+        .iter()
+        .rev()
+        .find(|record| record.identity.runtime_id == identity.runtime_id)
+    {
+        if existing.identity == *identity {
+            return Ok(RuntimeReceipt {
+                registry_root,
+                registry_path: path,
+                runtime_id: identity.runtime_id.clone(),
+                fingerprint,
+                idempotent: true,
+            });
+        }
+        if !runtime_stable_identity_matches(&existing.identity, identity) {
+            return Err(format!(
+                "GLOBAL_RUNTIME_IDENTITY_CONFLICT:{}",
+                identity.runtime_id
+            ));
+        }
+    }
+    let record = RuntimeRecord {
+        schema_version: REGISTRY_SCHEMA_VERSION,
+        event: if records
+            .iter()
+            .any(|record| record.identity.runtime_id == identity.runtime_id)
+        {
+            "runtime.refreshed".into()
+        } else {
+            RUNTIME_EVENT.into()
+        },
+        identity: identity.clone(),
+        registered_at: Utc::now().to_rfc3339(),
+        fingerprint: fingerprint.clone(),
+        source: RUNTIME_SOURCE.into(),
+    };
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_OPEN_FAILED:{error}"))?;
+    let mut line = serde_json::to_vec(&record)
+        .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_SERIALIZE_FAILED:{error}"))?;
+    line.push(b'\n');
+    file.write_all(&line)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_WRITE_FAILED:{error}"))?;
+    Ok(RuntimeReceipt {
+        registry_root,
+        registry_path: path,
+        runtime_id: identity.runtime_id.clone(),
+        fingerprint,
+        idempotent: false,
+    })
+}
+
+fn runtime_stable_identity_matches(left: &RuntimeIdentity, right: &RuntimeIdentity) -> bool {
+    left.runtime_id == right.runtime_id
+        && left.appserver_id == right.appserver_id
+        && left.namespace == right.namespace
+        && left.endpoint == right.endpoint
+        && left.project_root == right.project_root
+}
+
+/// Read a previously registered runtime.  This is a read-only projection;
+/// callers must compare the returned fields with their requested scope.
+pub fn runtime(runtime_id: &str) -> Result<RuntimeRecord, String> {
+    let root = registry_root()?;
+    runtime_at(runtime_id, &root)
+}
+
+/// Check a receipt fingerprint against any durable observation of the runtime.
+/// A refresh may change volatile process/pane fields, so a receipt produced by
+/// an earlier observation must remain replayable after the runtime is refreshed.
+pub fn runtime_fingerprint_known(runtime_id: &str, fingerprint: &str) -> Result<bool, String> {
+    if runtime_id.trim().is_empty() {
+        return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:runtime_id:empty".into());
+    }
+    if fingerprint.trim().is_empty() {
+        return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:fingerprint:empty".into());
+    }
+    let root = registry_root()?;
+    let registry_root = ensure_registry_root(&root)?;
+    let path = registry_root.join(RUNTIME_FILE);
+    let lock_path = registry_root.join(RUNTIME_LOCK);
+    ensure_no_symlink(&path, "runtime_registry_file")?;
+    ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    let _lock = lock_registry(&lock_path).map_err(|error| {
+        if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_BUSY:{}",
+                &error["GLOBAL_REGISTRY_BUSY:".len()..]
+            )
+        } else {
+            error
+        }
+    })?;
+    let records = read_runtime_records(&path)?;
+    Ok(records.iter().any(|record| {
+        record.identity.runtime_id == runtime_id && record.fingerprint == fingerprint
+    }))
+}
+
+pub fn runtime_at(runtime_id: &str, registry_root: &Path) -> Result<RuntimeRecord, String> {
+    if runtime_id.trim().is_empty() {
+        return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:runtime_id:empty".into());
+    }
+    let registry_root = ensure_registry_root(registry_root)?;
+    let path = registry_root.join(RUNTIME_FILE);
+    let lock_path = registry_root.join(RUNTIME_LOCK);
+    ensure_no_symlink(&path, "runtime_registry_file")?;
+    ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    let _lock = lock_registry(&lock_path).map_err(|error| {
+        if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_BUSY:{}",
+                &error["GLOBAL_REGISTRY_BUSY:".len()..]
+            )
+        } else {
+            error
+        }
+    })?;
+    let records = read_runtime_records(&path)?;
+    records
+        .into_iter()
+        .rev()
+        .find(|record| record.identity.runtime_id == runtime_id)
+        .ok_or_else(|| format!("GLOBAL_RUNTIME_NOT_FOUND:{runtime_id}"))
 }
 
 fn has_registered_version(
@@ -804,6 +1161,108 @@ mod tests {
                 .count(),
             2
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_registration_is_idempotent_and_conflict_safe() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-registry-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let registry = root.join("host");
+        let identity = RuntimeIdentity {
+            runtime_id: "runtime-a".into(),
+            appserver_id: "server-a".into(),
+            namespace: "codex_tui".into(),
+            endpoint: "unix:///tmp/server-a.sock".into(),
+            project_root: "/workspace/app".into(),
+            tmux_session: Some("tui-a".into()),
+            tmux_pane: Some("%42".into()),
+            process_id: std::process::id(),
+        };
+        let first = register_runtime_at(&identity, &registry).unwrap();
+        let second = register_runtime_at(&identity, &registry).unwrap();
+        assert!(!first.idempotent);
+        assert!(second.idempotent);
+        assert_eq!(
+            runtime_at("runtime-a", &registry).unwrap().identity,
+            identity
+        );
+
+        let mut changed = identity.clone();
+        changed.endpoint = "unix:///tmp/forged.sock".into();
+        let error = register_runtime_at(&changed, &registry).unwrap_err();
+        assert_eq!(error, "GLOBAL_RUNTIME_IDENTITY_CONFLICT:runtime-a");
+        assert_eq!(
+            fs::read_to_string(registry.join(RUNTIME_FILE))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_refresh_preserves_stable_identity_and_replays_latest_volatile_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-refresh-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let identity = RuntimeIdentity {
+            runtime_id: "runtime-refresh".into(),
+            appserver_id: "server-a".into(),
+            namespace: "codex_app".into(),
+            endpoint: "unix:///tmp/server-a.sock".into(),
+            project_root: "/workspace/app".into(),
+            tmux_session: None,
+            tmux_pane: None,
+            process_id: std::process::id(),
+        };
+        register_runtime_at(&identity, &root).unwrap();
+
+        let mut refreshed = identity.clone();
+        refreshed.tmux_session = Some("desktop-a".into());
+        refreshed.tmux_pane = Some("%7".into());
+        refreshed.process_id = std::process::id().saturating_add(1);
+        let receipt = register_runtime_at(&refreshed, &root).unwrap();
+        assert!(!receipt.idempotent);
+        assert_eq!(
+            runtime_at("runtime-refresh", &root).unwrap().identity,
+            refreshed
+        );
+
+        let lines = fs::read_to_string(root.join(RUNTIME_FILE)).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        assert!(lines.lines().nth(1).unwrap().contains("runtime.refreshed"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn malformed_runtime_registry_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-registry-invalid-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(RUNTIME_FILE);
+        fs::write(&path, "{}\n").unwrap();
+        let identity = RuntimeIdentity {
+            runtime_id: "runtime-a".into(),
+            appserver_id: "server-a".into(),
+            namespace: "codex_tui".into(),
+            endpoint: "mock://server-a".into(),
+            project_root: "/workspace/app".into(),
+            tmux_session: None,
+            tmux_pane: None,
+            process_id: std::process::id(),
+        };
+        let error = register_runtime_at(&identity, &root).unwrap_err();
+        assert!(error.starts_with("GLOBAL_RUNTIME_REGISTRY_INVALID_LINE:1:"));
         fs::remove_dir_all(root).ok();
     }
 }

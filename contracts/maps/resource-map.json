@@ -2,6 +2,7 @@
   "schema_version": 1,
   "resources": [
     {"resource_id":"communication_mailbox","owner":"appsdk::communication","truth_store":".appsdk-control/communication/mailbox.jsonl","allowed_operations":["read","append","replay"],"relations":{"projection":"notification_projection"}},
+    {"resource_id":"runtime_identity_registry","owner":"appsdk::runtime","truth_store":"~/.appsdk/runtimes.jsonl","allowed_operations":["read","append","replay"],"relations":{"scope_binding":"communication_mailbox"},"forbidden_relations":["session_token_copy","role_inference","endpoint_fallback"]},
     {"resource_id":"notification_projection","owner":"appsdk::communication","truth_store":"replayed from communication_mailbox","allowed_operations":["read","emit"],"relations":{"facts":"communication_mailbox"}},
     {"resource_id":"communication_adapter_registry","owner":"appsdk::communication","truth_store":"communication_mailbox adapter.registered events","allowed_operations":["read","register"],"relations":{"facts":"communication_mailbox"}},
     {"resource_id":"communication_loop_projection","owner":"appsdk::communication","truth_store":"replayed from communication_mailbox loop.* events","allowed_operations":["read","advance"],"relations":{"facts":"communication_mailbox"}},

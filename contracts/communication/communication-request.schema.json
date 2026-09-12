@@ -8,6 +8,8 @@
       "enum": [
         "capabilities",
         "status",
+        "register_runtime",
+        "register-runtime",
         "register_adapter",
         "register-adapter",
         "register_scope",
@@ -17,6 +19,8 @@
         "refresh_agent",
         "refresh-agent",
         "send",
+        "record_delivery",
+        "record-delivery",
         "set_agent_state",
         "set-agent-state",
         "tick",
@@ -44,6 +48,8 @@
     "message": {"$ref": "#/$defs/message"},
     "scope": {"$ref": "#/$defs/scope"},
     "agent": {"$ref": "#/$defs/agent"},
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "delivery": {"$ref": "#/$defs/delivery"},
     "adapter": {"$ref": "#/$defs/adapter"},
     "actor": {"$ref": "#/$defs/address"},
     "master": {"$ref": "#/$defs/address"},
@@ -242,28 +248,57 @@
     },
     "scope": {
       "type": "object",
-      "required": ["scopeId", "appserverId", "namespace", "endpoint", "projectRoot"],
+      "required": ["scopeId", "appserverId", "namespace", "endpoint", "projectRoot", "runtimeId"],
       "properties": {
         "scopeId": {"type": "string", "minLength": 1},
         "appserverId": {"type": "string", "minLength": 1},
         "namespace": {"enum": ["codex_app", "codex_tui"]},
         "endpoint": {"type": "string", "minLength": 1},
         "projectRoot": {"type": "string", "minLength": 1},
+        "runtimeId": {"type": "string", "minLength": 1},
         "sessionIds": {"type": "array", "items": {"type": "string", "minLength": 1}}
       },
       "additionalProperties": false
     },
     "agent": {
       "type": "object",
-      "required": ["scopeId", "sessionId", "agentId"],
+      "required": ["scopeId", "sessionId", "agentId", "runtimeId"],
       "properties": {
         "scopeId": {"type": "string", "minLength": 1},
         "sessionId": {"type": "string", "minLength": 1},
         "agentId": {"type": "string", "minLength": 1},
+        "runtimeId": {"type": "string", "minLength": 1},
         "role": {"enum": ["master", "peer", "subagent"]},
         "masterGrant": {"type": ["string", "null"]},
         "parent": {"$ref": "#/$defs/address"},
         "leaseMs": {"type": ["integer", "null"], "minimum": 1000}
+      },
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["runtimeId", "appserverId", "namespace", "endpoint", "projectRoot", "processId"],
+      "properties": {
+        "runtimeId": {"type": "string", "minLength": 1},
+        "appserverId": {"type": "string", "minLength": 1},
+        "namespace": {"enum": ["codex_app", "codex_tui"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "projectRoot": {"type": "string", "minLength": 1},
+        "tmuxSession": {"type": ["string", "null"], "minLength": 1},
+        "tmuxPane": {"type": ["string", "null"], "minLength": 1},
+        "processId": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "required": ["messageId", "state", "runtimeId", "evidence"],
+      "properties": {
+        "messageId": {"type": "string", "minLength": 1},
+        "state": {"enum": ["delivered", "executed", "replied", "read", "consumed", "unknown"]},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "evidence": {"type": "object", "minProperties": 1},
+        "observedAt": {"type": ["string", "null"], "format": "date-time"}
       },
       "additionalProperties": false
     },

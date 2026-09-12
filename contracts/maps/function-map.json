@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "functions": [
-    {"function_id":"communication_control","owner":"appsdk::communication","entry_symbols":["communication::run_cli","communication::capabilities"],"required_gates":["communication_contract","communication_replay","communication_route"]},
+    {"function_id":"communication_control","owner":"appsdk::communication","entry_symbols":["communication::run_cli","communication::capabilities"],"required_gates":["communication_contract","communication_replay","communication_route","communication_runtime_identity"]},
+    {"function_id":"runtime_identity_registration","owner":"appsdk::runtime","entry_symbols":["global_registry::register_runtime","global_registry::runtime"],"required_gates":["communication_runtime_identity"]},
     {"function_id":"goal_clarification","owner":"appsdk::goal","entry_symbols":["clarify"],"required_gates":["goal_confirmed"]},
     {"function_id":"compile_artifact","owner":"appsdk::compiler","entry_symbols":["compile"],"required_gates":["contract_valid","sdk_lock_integrity"]},
     {"function_id":"sdk_version_migration","owner":"appsdk::delivery","entry_symbols":["pin_lock","migrate_governance_maps","assert_sdk_migration_record","install_current_governance_maps","install_bundle_resources","write_current_sdk_lock","write_project"],"required_gates":["sdk_migration","governance_map_migration","sdk_lock_integrity"]},

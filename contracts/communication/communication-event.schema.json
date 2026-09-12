@@ -277,7 +277,7 @@
           ]
         },
         "at": {"type": "string", "format": "date-time"},
-        "details": {}
+        "details": {"type": "object", "minProperties": 1}
       },
       "additionalProperties": false
     },

@@ -8,6 +8,40 @@ tokens, rejects mismatched or duplicate identities, and records
 `bug_triage_query_binding` as the SHA-256 binding of issue ID, query, mode, and
 reopen source. Empty, `none`, and `legacy-*` issue IDs remain exempt.
 
+## Module registry binding
+
+Each `project.json#/modules[]` entry has an exact registry binding by default.
+The producer may use only the registry entry whose `module_id` equals the
+project module ID, and that entry must be active and owned by the project's
+`source_owner`. A project module that intentionally spans finer-grained
+registry modules must declare the boundary explicitly:
+
+```json
+{
+  "module_id": "routecodex-v4-runtime",
+  "source_owner": "routecodex-v4-runtime",
+  "registry_binding": {
+    "mode": "aggregate",
+    "modules": [
+      "routecodex-v4-runtime",
+      "routecodex-v4-runtime-bin",
+      "routecodex-v4-provider",
+      "routecodex-v4-router"
+    ]
+  }
+}
+```
+
+`mode: "aggregate"` requires a non-empty, unique module-ID whitelist. Every
+listed entry must exist exactly once, be active, have a non-empty owner and
+valid owned paths, and cover every project `owned_paths` declaration. When a
+same-ID registry entry exists, aggregate mode must list it as well; its active
+status and owner binding remain mandatory. Registry entries outside the
+whitelist never participate in path coverage. The producer validates this
+contract before writing any lifecycle record, and the normalized binding is
+part of the producer scope hash so changing the boundary invalidates record
+reuse.
+
 ## Records
 
 - `GoalClarificationRecord`: raw request, restated objective, acceptance criteria, non-goals, assumptions, ambiguities, questions, scope, confirmation, and admission status;

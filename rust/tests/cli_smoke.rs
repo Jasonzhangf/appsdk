@@ -2731,6 +2731,10 @@ fn lifecycle_producer_accepts_project_module_aggregating_registry_modules() {
         "protected/source/**",
         "tests/core/**"
     ]);
+    project["modules"][0]["registry_binding"] = serde_json::json!({
+        "mode": "aggregate",
+        "modules": ["app-core", "source-contracts"]
+    });
     fs::write(
         &project_path,
         serde_json::to_string_pretty(&project).unwrap() + "\n",
@@ -2780,6 +2784,75 @@ fn lifecycle_producer_accepts_project_module_aggregating_registry_modules() {
         !stderr.contains("LIFECYCLE_PRODUCER_MODULE_BINDING"),
         "{stderr}"
     );
+
+    project["modules"][0]["registry_binding"]["modules"] =
+        serde_json::json!(["app-core", "missing-module"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_registry_module = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "aggregate-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    let missing_registry_stderr = String::from_utf8_lossy(&missing_registry_module.stderr);
+    assert!(!missing_registry_module.status.success());
+    assert!(
+        missing_registry_stderr
+            .contains("LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID:missing-module"),
+        "{missing_registry_stderr}"
+    );
+
+    project["modules"][0]["registry_binding"]["modules"] =
+        serde_json::json!(["app-core", "source-contracts"]);
+    registry["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|module| module["module_id"] == "source-contracts")
+        .unwrap()["status"] = Value::String("inactive".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap() + "\n",
+    )
+    .unwrap();
+    let inactive_registry_module = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "aggregate-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    let inactive_registry_stderr = String::from_utf8_lossy(&inactive_registry_module.stderr);
+    assert!(!inactive_registry_module.status.success());
+    assert!(
+        inactive_registry_stderr
+            .contains("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH:source-contracts"),
+        "{inactive_registry_stderr}"
+    );
+
+    registry["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|module| module["module_id"] == "source-contracts")
+        .unwrap()["status"] = Value::String("active".into());
+    fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap() + "\n",
+    )
+    .unwrap();
 
     let uncovered = root.join(".appsdk/project.json");
     project["modules"][0]["owned_paths"] =
@@ -2867,6 +2940,118 @@ fn lifecycle_producer_rejects_same_id_project_module_borrowing_other_registry_pa
         .join(".appsdk/records/worktree-record-app-core.json")
         .exists());
 
+    project["modules"][0]["owned_paths"] = serde_json::json!(["playground/experiments/**"]);
+    project["modules"][0]["registry_binding"] = serde_json::json!({
+        "mode": "aggregate",
+        "modules": ["other-owner"]
+    });
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let omitted_same_id = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    let omitted_same_id_stderr = String::from_utf8_lossy(&omitted_same_id.stderr);
+    assert!(!omitted_same_id.status.success());
+    assert!(
+        omitted_same_id_stderr.contains("LIFECYCLE_PRODUCER_MODULE_BINDING_MISSING"),
+        "{omitted_same_id_stderr}"
+    );
+    assert!(!root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_contract_rejects_invalid_registry_binding_shapes() {
+    let cases = [
+        (
+            "missing-aggregate-modules",
+            serde_json::json!({"mode": "aggregate"}),
+        ),
+        (
+            "empty-aggregate-modules",
+            serde_json::json!({"mode": "aggregate", "modules": []}),
+        ),
+        (
+            "duplicate-aggregate-modules",
+            serde_json::json!({"mode": "aggregate", "modules": ["app-core", "app-core"]}),
+        ),
+        (
+            "non-string-aggregate-module",
+            serde_json::json!({"mode": "aggregate", "modules": [1]}),
+        ),
+        (
+            "empty-aggregate-module",
+            serde_json::json!({"mode": "aggregate", "modules": [""]}),
+        ),
+        (
+            "exact-modules-forbidden",
+            serde_json::json!({"mode": "exact", "modules": ["app-core"]}),
+        ),
+        ("unknown-mode", serde_json::json!({"mode": "implicit"})),
+        (
+            "unknown-property",
+            serde_json::json!({"mode": "exact", "unexpected": true}),
+        ),
+    ];
+    for (name, binding) in cases {
+        let root = temp_root(&format!("registry-binding-contract-{name}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let project_path = root.join(".appsdk/project.json");
+        let mut project: Value =
+            serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+        project["modules"][0]["registry_binding"] = binding;
+        fs::write(
+            &project_path,
+            serde_json::to_string_pretty(&project).unwrap() + "\n",
+        )
+        .unwrap();
+        let rejected = run(&["verify", root_text]);
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            !rejected.status.success(),
+            "case {name} unexpectedly passed"
+        );
+        assert!(
+            stderr.contains("INVALID_REGISTRY_BINDING:app-core"),
+            "case {name}: stderr={stderr}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn embedded_project_schema_declares_registry_binding_contract() {
+    let root = temp_root("registry-binding-schema");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let schema: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/contracts/project.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let binding = schema
+        .pointer("/properties/modules/items/properties/registry_binding")
+        .unwrap();
+    assert_eq!(binding["type"], "object");
+    assert_eq!(binding["additionalProperties"], false);
+    assert_eq!(binding["required"], serde_json::json!(["mode"]));
+    assert_eq!(
+        binding["properties"]["mode"]["enum"],
+        serde_json::json!(["exact", "aggregate"])
+    );
+    assert_eq!(binding["properties"]["modules"]["uniqueItems"], true);
+    assert_eq!(binding["properties"]["modules"]["minItems"], 1);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -4840,7 +5025,8 @@ fn lifecycle_record_producer_recovers_partial_group_commit() {
     let scope_hash = digest(&canonical(&serde_json::json!({
         "module_id":"app-core",
         "source_hash":artifact["source_hash"],
-        "contract_hash":artifact["contract_hash"]
+        "contract_hash":artifact["contract_hash"],
+        "registry_binding":{"mode":"exact"}
     })));
     let command = serde_json::json!({
         "program":"sh",
@@ -5096,6 +5282,40 @@ fn lifecycle_record_producer_recovers_partial_group_commit() {
     for (target, _) in records {
         assert!(root.join(&target).is_file(), "missing {target}");
     }
+
+    let worktree_record = root.join(".appsdk/records/worktree-record-app-core.json");
+    let original_worktree_record = fs::read_to_string(&worktree_record).unwrap();
+    let project_file = root.join(".appsdk/project.json");
+    let mut drifted_project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    drifted_project["modules"][0]["registry_binding"] = serde_json::json!({
+        "mode": "aggregate",
+        "modules": ["app-core"]
+    });
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&drifted_project).unwrap() + "\n",
+    )
+    .unwrap();
+    let binding_drift = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(!binding_drift.status.success());
+    assert!(
+        String::from_utf8_lossy(&binding_drift.stderr).contains("PRODUCER_SCOPE_MISMATCH"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&binding_drift.stdout),
+        String::from_utf8_lossy(&binding_drift.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&worktree_record).unwrap(),
+        original_worktree_record
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -8290,7 +8510,8 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
     let scope_hash = digest(&canonical(&serde_json::json!({
         "module_id":"app-core",
         "source_hash":artifact["source_hash"],
-        "contract_hash":artifact["contract_hash"]
+        "contract_hash":artifact["contract_hash"],
+        "registry_binding":{"mode":"exact"}
     })));
     let input_path = root.with_extension("producer-input.json");
     let fake_bin = root.with_extension("fake-bin");

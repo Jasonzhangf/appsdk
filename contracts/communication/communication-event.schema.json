@@ -571,7 +571,9 @@
         "stopped",
         "lastBriefingGeneration",
         "lastBriefingAt",
-        "signals"
+        "held",
+        "signals",
+        "consumedSignals"
       ],
       "properties": {
         "address": {"$ref": "#/$defs/address"},
@@ -584,7 +586,12 @@
         "stopped": {"type": "boolean"},
         "lastBriefingGeneration": {"type": ["integer", "null"], "minimum": 0},
         "lastBriefingAt": {"type": ["string", "null"], "format": "date-time"},
+        "held": {"type": "boolean"},
         "signals": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/masterWakeSignal"}
+        },
+        "consumedSignals": {
           "type": "object",
           "additionalProperties": {"$ref": "#/$defs/masterWakeSignal"}
         }

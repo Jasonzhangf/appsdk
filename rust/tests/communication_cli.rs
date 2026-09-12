@@ -1878,12 +1878,10 @@ fn stale_bug_retry_preserves_newer_coalesced_notification_and_window() {
         &root,
         json!({ "op": "flush_notifications", "now": available_at }),
     );
-    assert_eq!(flushed["batches"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        flushed["batches"][0]["items"][0]["title"],
-        "bug reported: new bug summary"
-    );
-    assert_eq!(flushed["batches"][0]["items"][0]["priority"], "p1");
+    assert!(flushed["batches"].as_array().unwrap().is_empty());
+    let wake = call(&root, json!({ "op": "tick", "now": available_at }));
+    assert_eq!(wake["masterWakeChanged"].as_array().unwrap().len(), 1);
+    assert!(wake["masterWake"][0]["pending"].as_bool().unwrap());
     let status = call(&root, json!({ "op": "status" }));
     assert!(status["notificationProjection"]["pending"]
         .as_array()
@@ -1891,7 +1889,7 @@ fn stale_bug_retry_preserves_newer_coalesced_notification_and_window() {
         .is_empty());
     assert_eq!(
         status["notificationProjection"]["emitted"][0]["title"],
-        "bug reported: new bug summary"
+        "master wake: 2 updates (reminder 1/3)"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -2101,6 +2099,415 @@ fn master_wake_signal_is_idempotent_and_requires_matching_decision_generation() 
     let status = call(&root, json!({ "op": "status" }));
     assert_eq!(status["masterWake"][0]["pending"], false);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_wake_consumed_edges_and_hold_are_stable_across_repeated_state_observations() {
+    let root = temp_root("master-wake-consumed-edge");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    let due = after(at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    let generation = call(&root, json!({ "op": "status" }))["masterWake"][0]["generation"]
+        .as_u64()
+        .unwrap();
+    call(
+        &root,
+        json!({
+            "op": "master_wake_decide",
+            "master": { "scopeId": "scope", "sessionId": "master" },
+            "generation": generation,
+            "action": "handled",
+            "at": after(&due, 1)
+        }),
+    );
+    let repeated_worker = call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": after(&due, 2)
+        }),
+    );
+    assert!(repeated_worker["notification"].is_null());
+    let after_handled = call(&root, json!({ "op": "status" }));
+    assert_eq!(after_handled["masterWake"][0]["generation"], generation);
+    assert!(!after_handled["masterWake"][0]["pending"].as_bool().unwrap());
+    assert_eq!(
+        after_handled["masterWake"][0]["consumedSignals"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "working",
+            "at": after(&due, 3)
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": after(&due, 4)
+        }),
+    );
+    let new_cycle = call(&root, json!({ "op": "status" }));
+    assert!(new_cycle["masterWake"][0]["pending"].as_bool().unwrap());
+    assert!(new_cycle["masterWake"][0]["generation"].as_u64().unwrap() > generation);
+
+    let hold_generation = new_cycle["masterWake"][0]["generation"].as_u64().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "master_wake_decide",
+            "master": { "scopeId": "scope", "sessionId": "master" },
+            "generation": hold_generation,
+            "action": "hold",
+            "at": after(&due, 5)
+        }),
+    );
+    for offset in [6, 240] {
+        call(
+            &root,
+            json!({
+                "op": "set_agent_state",
+                "address": { "scopeId": "scope", "sessionId": "master" },
+                "state": "idle",
+                "at": after(&due, offset)
+            }),
+        );
+        let tick = call(&root, json!({ "op": "tick", "now": after(&due, offset) }));
+        assert!(tick["masterWakeChanged"].as_array().unwrap().is_empty());
+    }
+    let held = call(&root, json!({ "op": "status" }));
+    assert_eq!(held["masterWake"][0]["generation"], hold_generation);
+    assert_eq!(held["masterWake"][0]["held"], true);
+    assert_eq!(held["masterWake"][0]["remindersSent"], 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_wake_flush_and_tick_have_one_notification_owner() {
+    let root = temp_root("master-wake-flush-order");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    let due = after(at, 120);
+    let flushed = call(&root, json!({ "op": "flush_notifications", "now": due }));
+    assert!(flushed["batches"].as_array().unwrap().is_empty());
+    let wake = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(wake["masterWakeChanged"].as_array().unwrap().len(), 1);
+    let after_tick = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        after_tick["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let flushed_after = call(
+        &root,
+        json!({ "op": "flush_notifications", "now": after(&due, 1) }),
+    );
+    assert!(flushed_after["batches"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn generic_p0_wake_is_direct_and_unknown_is_not_replayed() {
+    let root = temp_root("generic-p0-wake");
+    register_scope(&root, "scope", "app", "/project", &["master"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    let request = json!({
+        "op": "record_wake",
+        "master": { "scopeId": "scope", "sessionId": "master" },
+        "signal": {
+            "signalId": "urgent-1",
+            "key": "goal:urgent-1",
+            "kind": "goal_due",
+            "title": "urgent goal",
+            "priority": "p0",
+            "summary": "interrupt the master now",
+            "observedAt": "2026-01-01T00:00:00Z"
+        }
+    });
+    let direct = call(&root, request.clone());
+    assert_eq!(direct["masterWake"]["pending"], false);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let repeated = call(&root, request.clone());
+    assert_eq!(repeated["idempotent"], true);
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+
+    let unknown_root = temp_root("generic-p0-unknown");
+    register_scope(&unknown_root, "scope", "app", "/project", &["master"]);
+    register_agent(&unknown_root, "scope", "master", "master", "master", None);
+    call(&unknown_root, request.clone());
+    retain_mailbox_through_last(&unknown_root, "notification.delivery_attempt");
+    let unknown = call(&unknown_root, request);
+    assert_eq!(unknown["masterWake"]["pending"], true);
+    let unknown_status = call(&unknown_root, json!({ "op": "status" }));
+    assert_eq!(
+        unknown_status["notificationProjection"]["unknown"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let unknown_raw =
+        fs::read_to_string(unknown_root.join(".appsdk-control/communication/mailbox.jsonl"))
+            .unwrap();
+    assert_eq!(
+        unknown_raw
+            .matches("\"kind\":\"notification.delivery_attempt\"")
+            .count(),
+        1
+    );
+    assert!(!unknown_raw.contains("\"kind\":\"master_wake.briefing\""));
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(unknown_root).unwrap();
+}
+
+#[test]
+fn peer_owned_loop_error_wakes_scope_master() {
+    let root = temp_root("peer-loop-error");
+    register_scope(&root, "scope", "app", "/project", &["master", "peer"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "peer", "peer", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "create_loop",
+            "loop": {
+                "loopId": "peer-loop",
+                "kind": "peer",
+                "owner": { "scopeId": "scope", "sessionId": "peer" },
+                "trigger": "event",
+                "work": "peer work",
+                "gate": "peer tests",
+                "state": "persist",
+                "stop": "blocked"
+            }
+        }),
+    );
+    let error = call(
+        &root,
+        json!({
+            "op": "record_error",
+            "code": "peer_failure",
+            "message": "peer loop failed",
+            "context": { "source": "peer" },
+            "loopId": "peer-loop"
+        }),
+    );
+    assert_eq!(error["loop"]["status"], "blocked");
+    assert_eq!(error["masterWake"]["address"]["sessionId"], "master");
+    assert_eq!(error["masterWake"]["pending"], true);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_wake_reuses_persisted_briefing_body_after_queue_crash() {
+    let root = temp_root("master-wake-stable-body");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    let due = after(at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let lines: Vec<&str> = contents.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|line| line.contains("\"kind\":\"notification.queued\""))
+        .unwrap();
+    fs::write(&mailbox, format!("{}\n", lines[..=end].join("\n"))).unwrap();
+
+    call(
+        &root,
+        json!({
+            "op": "create_loop",
+            "loop": {
+                "loopId": "new-loop-after-crash",
+                "kind": "master",
+                "owner": { "scopeId": "scope", "sessionId": "master" },
+                "trigger": "event",
+                "work": "new work after crash",
+                "gate": "tests",
+                "state": "persist",
+                "stop": "done"
+            }
+        }),
+    );
+    let recovered = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(recovered["masterWakeChanged"].as_array().unwrap().len(), 1);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(status["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("master wake:")));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_wake_briefing_replay_rejects_missing_fields_and_terminal_delivery() {
+    let make_root = |name: &str| {
+        let root = temp_root(name);
+        register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+        register_agent(&root, "scope", "master", "master", "master", None);
+        register_agent(&root, "scope", "worker", "worker", "peer", None);
+        let at = "2026-01-01T00:00:00Z";
+        call(
+            &root,
+            json!({
+                "op": "set_agent_state",
+                "address": { "scopeId": "scope", "sessionId": "worker" },
+                "state": "idle",
+                "at": at
+            }),
+        );
+        call(
+            &root,
+            json!({
+                "op": "set_agent_state",
+                "address": { "scopeId": "scope", "sessionId": "master" },
+                "state": "idle",
+                "at": at
+            }),
+        );
+        call(&root, json!({ "op": "tick", "now": after(at, 120) }));
+        root
+    };
+
+    let missing = make_root("master-wake-missing-event-field");
+    let mailbox = missing.join(".appsdk-control/communication/mailbox.jsonl");
+    let mut lines: Vec<Value> = fs::read_to_string(&mailbox)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let event = lines
+        .iter_mut()
+        .find(|event| event["kind"] == "master_wake.briefing")
+        .unwrap();
+    event["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("notification");
+    fs::write(
+        &mailbox,
+        lines
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let missing_error = call_error(&missing, json!({ "op": "status" }));
+    assert!(missing_error.contains("master wake event field is missing: notification"));
+    fs::remove_dir_all(missing).unwrap();
+
+    let terminal = make_root("master-wake-missing-terminal");
+    let mailbox = terminal.join(".appsdk-control/communication/mailbox.jsonl");
+    let terminal_contents = fs::read_to_string(&mailbox).unwrap();
+    let retained: Vec<&str> = terminal_contents
+        .lines()
+        .filter(|line| !line.contains("\"kind\":\"notification.emitted\""))
+        .collect();
+    fs::write(&mailbox, format!("{}\n", retained.join("\n"))).unwrap();
+    let terminal_error = call_error(&terminal, json!({ "op": "status" }));
+    assert!(terminal_error.contains("master wake briefing notification"));
+    fs::remove_dir_all(terminal).unwrap();
 }
 
 #[test]

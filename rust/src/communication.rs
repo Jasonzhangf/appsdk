@@ -647,7 +647,11 @@ struct MasterWakeAccumulator {
     #[serde(rename = "lastBriefingAt")]
     last_briefing_at: Option<String>,
     #[serde(default)]
+    held: bool,
+    #[serde(default)]
     signals: BTreeMap<String, MasterWakeSignal>,
+    #[serde(default, rename = "consumedSignals")]
+    consumed_signals: BTreeMap<String, MasterWakeSignal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1163,32 +1167,43 @@ impl CommunicationStore {
                 self.sync_master_wake_schedule(&current.address(), &next, &at)?;
             } else if current.role != "master" && next == AgentState::Idle {
                 let master_address = self.scope_master_address(&current.scope_id)?;
-                self.accumulate_worker_idle(&current, &master_address, &current.last_state_at)?;
-                let notification_key = structured_key(&[
-                    &current.address().key(),
-                    &master_address.key(),
-                    "mailbox",
-                    &format!("idle:{}", current.address().key()),
-                ]);
-                let message = worker_idle_message(&current, master_address, &current.last_state_at);
+                let signal_key = worker_idle_signal_key(&current.address());
+                let message =
+                    worker_idle_message(&current, master_address.clone(), &current.last_state_at);
                 let message_id = message
                     .message_id
                     .as_deref()
                     .expect("worker idle message must have a deterministic message id");
-                let notification_matches_message = self
-                    .projection
-                    .notifications
-                    .get(&notification_key)
-                    .is_some_and(|notification| notification.message_id == message_id);
-                if !self.projection.messages.contains_key(message_id)
-                    || !notification_matches_message
-                {
-                    let notification = self.send(message)?;
-                    return Ok(json!({
-                        "agent": current,
-                        "idempotent": true,
-                        "notification": notification
-                    }));
+                let signal_recorded =
+                    self.master_wake_signal_recorded(&master_address, &signal_key, message_id);
+                if !signal_recorded {
+                    // The state edge was persisted before its wake signal (for example when
+                    // the scope had no master). Repair only that missing step. A consumed edge
+                    // remains consumed and must never be reactivated by observing idle again.
+                    self.accumulate_worker_idle(&current, &master_address, &current.last_state_at)?;
+                }
+                if !self.master_wake_signal_consumed(&master_address, &signal_key, message_id) {
+                    let notification_key = structured_key(&[
+                        &current.address().key(),
+                        &master_address.key(),
+                        "mailbox",
+                        &format!("idle:{}", current.address().key()),
+                    ]);
+                    let notification_matches_message = self
+                        .projection
+                        .notifications
+                        .get(&notification_key)
+                        .is_some_and(|notification| notification.message_id == message_id);
+                    if !self.projection.messages.contains_key(message_id)
+                        || !notification_matches_message
+                    {
+                        let notification = self.send(message)?;
+                        return Ok(json!({
+                            "agent": current,
+                            "idempotent": true,
+                            "notification": notification
+                        }));
+                    }
                 }
             }
             return Ok(json!({
@@ -1329,8 +1344,31 @@ impl CommunicationStore {
             .as_ref()
             .and_then(|accumulator| accumulator.signals.get(&signal.key))
         {
-            if master_wake_signal_matches(existing_signal, &signal) {
+            if master_wake_signal_identity_matches(existing_signal, &signal) {
                 return Ok(existing.expect("master wake accumulator exists"));
+            }
+            if existing_signal.signal_id == signal.signal_id {
+                return Err(CommError::new(
+                    "master_wake_signal_conflict",
+                    format!("master wake signal id conflicts: {}", signal.signal_id),
+                ));
+            }
+        }
+        if let Some(existing_signal) = existing
+            .as_ref()
+            .and_then(|accumulator| accumulator.consumed_signals.get(&signal.key))
+        {
+            if master_wake_signal_identity_matches(existing_signal, &signal) {
+                return Ok(existing.expect("master wake accumulator exists"));
+            }
+            if existing_signal.signal_id == signal.signal_id {
+                return Err(CommError::new(
+                    "master_wake_signal_conflict",
+                    format!(
+                        "consumed master wake signal id conflicts: {}",
+                        signal.signal_id
+                    ),
+                ));
             }
         }
 
@@ -1345,38 +1383,44 @@ impl CommunicationStore {
             stopped: false,
             last_briefing_generation: None,
             last_briefing_at: None,
+            held: false,
             signals: BTreeMap::new(),
+            consumed_signals: BTreeMap::new(),
         });
+        let cycle_start = if accumulator.pending {
+            accumulator
+                .first_observed_at
+                .clone()
+                .unwrap_or_else(|| observed_at.clone())
+        } else {
+            observed_at.clone()
+        };
         accumulator.generation = accumulator.generation.checked_add(1).ok_or_else(|| {
             CommError::new(
                 "master_wake_generation_exhausted",
                 format!("master wake generation exhausted: {}", master.key()),
             )
         })?;
-        accumulator.first_observed_at = accumulator
-            .first_observed_at
-            .clone()
-            .or_else(|| Some(observed_at.clone()));
+        accumulator.first_observed_at = Some(cycle_start.clone());
         accumulator.last_observed_at = Some(observed_at.clone());
         accumulator
             .signals
             .insert(signal.key.clone(), signal.clone());
+        accumulator.consumed_signals.remove(&signal.key);
         accumulator.pending = accumulator
             .signals
             .values()
             .any(|value| !value.direct_dispatched);
         accumulator.reminders_sent = 0;
         accumulator.stopped = false;
+        accumulator.held = false;
         accumulator.last_briefing_generation = None;
         accumulator.last_briefing_at = None;
         accumulator.next_due_at = if accumulator.pending {
-            if signal.priority.is_breakthrough() || master_agent.state == AgentState::Idle {
+            if signal.priority.is_breakthrough() {
                 Some(observed_at)
             } else {
-                Some(add_seconds(
-                    &signal.observed_at,
-                    DEFAULT_BATCH_WINDOW_SECONDS,
-                )?)
+                Some(add_seconds(&cycle_start, DEFAULT_BATCH_WINDOW_SECONDS)?)
             }
         } else {
             None
@@ -1406,7 +1450,11 @@ impl CommunicationStore {
                 }
             }
             AgentState::Idle => {
-                if updated.pending && !updated.stopped && updated.next_due_at.is_none() {
+                if updated.pending
+                    && !updated.stopped
+                    && !updated.held
+                    && updated.next_due_at.is_none()
+                {
                     updated.next_due_at = Some(validate_time(at)?);
                 }
             }
@@ -1435,7 +1483,9 @@ impl CommunicationStore {
             return Ok(());
         }
         let mut updated = existing.clone();
-        updated.signals.remove(signal_key);
+        if let Some(signal) = updated.signals.remove(signal_key) {
+            updated.consumed_signals.insert(signal_key.into(), signal);
+        }
         updated.generation = updated.generation.checked_add(1).ok_or_else(|| {
             CommError::new(
                 "master_wake_generation_exhausted",
@@ -1447,7 +1497,7 @@ impl CommunicationStore {
             .signals
             .values()
             .any(|value| !value.direct_dispatched);
-        updated.next_due_at = if updated.pending {
+        updated.next_due_at = if updated.pending && !updated.held {
             updated.next_due_at.clone()
         } else {
             None
@@ -1487,17 +1537,112 @@ impl CommunicationStore {
             observed_at,
             direct_dispatched: false,
         };
-        let idempotent = self
-            .projection
-            .master_wake
-            .get(&master.key())
-            .and_then(|accumulator| accumulator.signals.get(&signal.key))
-            .is_some_and(|existing| master_wake_signal_matches(existing, &signal));
-        let accumulator = self.accumulate_master_wake(&master, signal)?;
+        let idempotent =
+            self.projection
+                .master_wake
+                .get(&master.key())
+                .is_some_and(|accumulator| {
+                    accumulator
+                        .signals
+                        .get(&signal.key)
+                        .or_else(|| accumulator.consumed_signals.get(&signal.key))
+                        .is_some_and(|existing| {
+                            master_wake_signal_identity_matches(existing, &signal)
+                        })
+                });
+        let accumulator = self.accumulate_master_wake(&master, signal.clone())?;
+        let accumulator = if signal.priority.is_breakthrough() {
+            self.dispatch_breakthrough_master_wake(&master, &signal.key)?
+        } else {
+            accumulator
+        };
         Ok(json!({
             "masterWake": accumulator,
             "idempotent": idempotent
         }))
+    }
+
+    fn dispatch_breakthrough_master_wake(
+        &mut self,
+        master: &Address,
+        signal_key: &str,
+    ) -> CommResult<MasterWakeAccumulator> {
+        let Some(accumulator) = self.projection.master_wake.get(&master.key()).cloned() else {
+            return Err(CommError::new(
+                "master_wake_not_found",
+                format!("master wake not found: {}", master.key()),
+            ));
+        };
+        let Some(signal) = accumulator.signals.get(signal_key).cloned() else {
+            return Ok(accumulator);
+        };
+        if signal.direct_dispatched {
+            return Ok(accumulator);
+        }
+        let Some(agent) = self.require_live_agent(master).ok().cloned() else {
+            return Ok(accumulator);
+        };
+        let (message_id, conversation_id) = master_wake_direct_message_identity(master, &signal);
+        let message = if let Some(existing) = self.projection.messages.get(&message_id).cloned() {
+            if existing.conversation_id != conversation_id
+                || existing.to != agent.address()
+                || existing.from
+                    != (Address {
+                        scope_id: "appsdk".into(),
+                        session_id: "daemon".into(),
+                    })
+                || existing.delivery_mode != DeliveryMode::Direct
+                || existing.coalesce_key.as_deref() != Some("master-wake-direct")
+                || existing.adapter_id != "mailbox"
+                || existing.issue_id.is_some()
+            {
+                return Err(CommError::new(
+                    "wakeup_message_conflict",
+                    format!("direct master wake message id identifies a different message: {message_id}"),
+                ));
+            }
+            self.prepare_wakeup_message(existing)?
+        } else {
+            let mut message = self.system_message(
+                &agent.address(),
+                signal.title.clone(),
+                &format_priority(&signal.priority),
+                &signal.summary,
+                "master-wake-direct",
+                &signal.observed_at,
+                "mailbox",
+            )?;
+            message.message_id = message_id;
+            message.conversation_id = conversation_id;
+            message.delivery_mode = DeliveryMode::Direct;
+            self.prepare_wakeup_message(message)?
+        };
+        let notification =
+            self.notification_for(&message, &signal.observed_at, Some(&signal.observed_at))?;
+        let Some(notification) = notification else {
+            return Ok(accumulator);
+        };
+        if notification.status != "emitted" {
+            return Ok(accumulator);
+        }
+        let mut updated = accumulator;
+        if let Some(stored) = updated.signals.get_mut(signal_key) {
+            stored.direct_dispatched = true;
+        }
+        updated.pending = updated
+            .signals
+            .values()
+            .any(|value| !value.direct_dispatched);
+        updated.next_due_at = if updated.pending && !updated.held {
+            updated.next_due_at.clone()
+        } else {
+            None
+        };
+        self.commit(
+            "master_wake.updated",
+            serde_json::to_value(&updated).unwrap(),
+        )?;
+        Ok(updated)
     }
 
     fn decide_master_wake(
@@ -1548,16 +1693,34 @@ impl CommunicationStore {
         let mut updated = existing;
         match action.trim().to_ascii_lowercase().as_str() {
             "hold" => {
+                updated.held = true;
                 updated.next_due_at = None;
             }
-            "dispatch" | "handled" | "complete" | "completed" | "schedule" => {
+            "dispatch" | "handled" | "complete" | "completed" => {
+                for (signal_key, signal) in updated.signals.clone() {
+                    updated.consumed_signals.insert(signal_key, signal);
+                }
                 updated.pending = false;
                 updated.next_due_at = None;
                 updated.last_briefing_generation = Some(generation);
                 updated.last_briefing_at = Some(at.clone());
                 updated.reminders_sent = 0;
                 updated.stopped = false;
+                updated.held = false;
                 updated.signals.clear();
+            }
+            "schedule" => {
+                updated.held = false;
+                updated.stopped = false;
+                updated.next_due_at = if updated.pending {
+                    if actor.state == AgentState::Idle {
+                        Some(at.clone())
+                    } else {
+                        Some(add_seconds(&at, DEFAULT_BATCH_WINDOW_SECONDS)?)
+                    }
+                } else {
+                    None
+                };
             }
             other => {
                 return Err(CommError::new(
@@ -1572,8 +1735,15 @@ impl CommunicationStore {
         )?;
         if let Some(wakeup) = self.projection.wakeup.get(&key).cloned() {
             let mut synchronized = wakeup;
-            synchronized.next_due_at = None;
-            synchronized.stopped = true;
+            if action.trim().eq_ignore_ascii_case("schedule") {
+                synchronized.next_due_at = updated.next_due_at.clone();
+                synchronized.stopped = false;
+                synchronized.reminders_sent = 0;
+                synchronized.last_reminder_at = None;
+            } else {
+                synchronized.next_due_at = None;
+                synchronized.stopped = true;
+            }
             self.commit(
                 "wakeup.updated",
                 serde_json::to_value(synchronized).unwrap(),
@@ -1597,15 +1767,147 @@ impl CommunicationStore {
             })
     }
 
+    fn master_wake_signal_recorded(
+        &self,
+        master: &Address,
+        signal_key: &str,
+        signal_id: &str,
+    ) -> bool {
+        self.projection
+            .master_wake
+            .get(&master.key())
+            .is_some_and(|accumulator| {
+                accumulator
+                    .signals
+                    .get(signal_key)
+                    .is_some_and(|signal| signal.signal_id == signal_id)
+                    || accumulator
+                        .consumed_signals
+                        .get(signal_key)
+                        .is_some_and(|signal| signal.signal_id == signal_id)
+            })
+    }
+
+    fn master_wake_signal_consumed(
+        &self,
+        master: &Address,
+        signal_key: &str,
+        signal_id: &str,
+    ) -> bool {
+        self.projection
+            .master_wake
+            .get(&master.key())
+            .and_then(|accumulator| accumulator.consumed_signals.get(signal_key))
+            .is_some_and(|signal| signal.signal_id == signal_id)
+    }
+
+    fn master_wake_signal_delivery_unknown(
+        &self,
+        master: &Address,
+        signal: &MasterWakeSignal,
+    ) -> bool {
+        let (message_id, _) = master_wake_direct_message_identity(master, signal);
+        self.projection.notifications.values().any(|notification| {
+            notification.message_id == message_id && notification.status == "unknown"
+        })
+    }
+
+    fn master_wake_signal_delivery_emitted(
+        &self,
+        master: &Address,
+        signal: &MasterWakeSignal,
+    ) -> bool {
+        let (message_id, _) = master_wake_direct_message_identity(master, signal);
+        self.projection.notifications.values().any(|notification| {
+            notification.message_id == message_id && notification.status == "emitted"
+        })
+    }
+
+    fn reconcile_breakthrough_master_wake(
+        &mut self,
+        accumulator: &MasterWakeAccumulator,
+    ) -> CommResult<MasterWakeAccumulator> {
+        let mut updated = accumulator.clone();
+        let mut changed = false;
+        for (signal_key, signal) in accumulator.signals.iter() {
+            if signal.priority.is_breakthrough()
+                && !signal.direct_dispatched
+                && self.master_wake_signal_delivery_emitted(&accumulator.address, signal)
+            {
+                if let Some(stored) = updated.signals.get_mut(signal_key) {
+                    stored.direct_dispatched = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return Ok(updated);
+        }
+        updated.pending = updated
+            .signals
+            .values()
+            .any(|value| !value.direct_dispatched);
+        updated.next_due_at = if updated.pending && !updated.held {
+            updated.next_due_at.clone()
+        } else {
+            None
+        };
+        self.commit(
+            "master_wake.updated",
+            serde_json::to_value(&updated).unwrap(),
+        )?;
+        Ok(updated)
+    }
+
+    fn validate_master_wake_message_identity(
+        &self,
+        message: &MessageRecord,
+        accumulator: &MasterWakeAccumulator,
+        reminder: u8,
+        target: &Address,
+        conversation_id: &str,
+    ) -> CommResult<()> {
+        let (message_id, _) = master_wake_message_identity(accumulator, reminder);
+        if message.message_id != message_id
+            || message.conversation_id != conversation_id
+            || message.from
+                != (Address {
+                    scope_id: "appsdk".into(),
+                    session_id: "daemon".into(),
+                })
+            || message.to != *target
+            || message.delivery_mode != DeliveryMode::Direct
+            || message.coalesce_key.as_deref() != Some("master-wake")
+            || message.issue_id.is_some()
+            || message.adapter_id != "mailbox"
+        {
+            return Err(CommError::new(
+                "wakeup_message_conflict",
+                format!("wakeup message id identifies a different master wake: {message_id}"),
+            ));
+        }
+        Ok(())
+    }
+
     fn process_master_wake(
         &mut self,
         accumulator: &MasterWakeAccumulator,
         at: &str,
     ) -> CommResult<Option<MasterWakeAccumulator>> {
+        let accumulator = self.reconcile_breakthrough_master_wake(accumulator)?;
         if !accumulator.pending
+            || accumulator.held
             || accumulator.stopped
             || accumulator.reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT
         {
+            return Ok(None);
+        }
+        if !accumulator.signals.values().any(|signal| {
+            !signal.direct_dispatched
+                && !self.master_wake_signal_delivery_unknown(&accumulator.address, signal)
+        }) {
+            // An uncertain direct delivery is never replayed as a briefing. Keep the
+            // signal in the accumulator for explicit recovery or a new signal generation.
             return Ok(None);
         }
         let Some(agent) = self.live_idle_master_at(&accumulator.address, at) else {
@@ -1618,21 +1920,32 @@ impl CommunicationStore {
             return Ok(None);
         }
         let reminder = accumulator.reminders_sent + 1;
-        let (message_id, conversation_id) = master_wake_message_identity(accumulator, reminder);
-        let (title, body, priority) = self.master_wake_briefing(accumulator, reminder);
-        let mut message = self.system_message(
-            &agent.address(),
-            title,
-            &format_priority(&priority),
-            &body,
-            "master-wake",
-            at,
-            "mailbox",
-        )?;
-        message.message_id = message_id;
-        message.conversation_id = conversation_id;
-        message.delivery_mode = DeliveryMode::Direct;
-        let message = self.prepare_wakeup_message(message)?;
+        let (message_id, conversation_id) = master_wake_message_identity(&accumulator, reminder);
+        let message = if let Some(existing) = self.projection.messages.get(&message_id).cloned() {
+            self.validate_master_wake_message_identity(
+                &existing,
+                &accumulator,
+                reminder,
+                &agent.address(),
+                &conversation_id,
+            )?;
+            self.prepare_wakeup_message(existing)?
+        } else {
+            let (title, body, priority) = self.master_wake_briefing(&accumulator, reminder);
+            let mut message = self.system_message(
+                &agent.address(),
+                title,
+                &format_priority(&priority),
+                &body,
+                "master-wake",
+                at,
+                "mailbox",
+            )?;
+            message.message_id = message_id;
+            message.conversation_id = conversation_id;
+            message.delivery_mode = DeliveryMode::Direct;
+            self.prepare_wakeup_message(message)?
+        };
         let notification = self.notification_for(&message, at, Some(at))?;
         let Some(notification) = notification else {
             return Ok(None);
@@ -1651,7 +1964,7 @@ impl CommunicationStore {
         } else {
             Some(add_seconds(at, DEFAULT_BATCH_WINDOW_SECONDS)?)
         };
-        let superseded_keys = self.pending_notification_keys_for_master_wake(accumulator);
+        let superseded_keys = self.pending_notification_keys_for_master_wake(&accumulator);
         if !superseded_keys.is_empty() {
             self.commit(
                 "notification.superseded",
@@ -1724,7 +2037,7 @@ impl CommunicationStore {
         let Some(agent) = self.projection.agents.get(&master.key()) else {
             return Ok(false);
         };
-        if agent.role != "master" || agent.state != AgentState::Working {
+        if agent.role != "master" {
             return Ok(false);
         }
         Ok(self
@@ -1748,7 +2061,10 @@ impl CommunicationStore {
         let mut signals: Vec<&MasterWakeSignal> = accumulator
             .signals
             .values()
-            .filter(|signal| !signal.direct_dispatched)
+            .filter(|signal| {
+                !signal.direct_dispatched
+                    && !self.master_wake_signal_delivery_unknown(&accumulator.address, signal)
+            })
             .collect();
         signals.sort_by(|left, right| {
             left.priority
@@ -1907,6 +2223,13 @@ impl CommunicationStore {
                 let same_cycle = existing.as_ref().is_some_and(|wakeup| {
                     wakeup.idle_since.as_deref() == Some(idle_since.as_str())
                 });
+                if same_cycle
+                    && existing
+                        .as_ref()
+                        .is_some_and(|wakeup| wakeup.stopped && wakeup.next_due_at.is_none())
+                {
+                    return Ok(());
+                }
                 let (reminders_sent, stopped, last_reminder_at) = if same_cycle {
                     let wakeup = existing.as_ref().expect("same cycle wakeup exists");
                     (
@@ -2851,10 +3174,14 @@ impl CommunicationStore {
             json!({ "error": error, "loop": updated_loop }),
         )?;
         let master_wake = if let Some(loop_record) = updated_loop.as_ref() {
-            Some(self.accumulate_master_wake(
-                &loop_record.owner,
-                loop_error_wake_signal(loop_record, &error),
-            )?)
+            self.scope_master_address_unchecked(&loop_record.owner.scope_id)
+                .map(|master| {
+                    self.accumulate_master_wake(
+                        &master,
+                        loop_error_wake_signal(loop_record, &error),
+                    )
+                })
+                .transpose()?
         } else {
             None
         };
@@ -3838,6 +4165,201 @@ impl CommunicationStore {
         Ok(())
     }
 
+    fn apply_master_wake_decided_event(&mut self, data: &Value) -> CommResult<()> {
+        let accumulator =
+            decode_master_wake_accumulator_event(require_event_field(data, "accumulator")?)?;
+        let action = require_event_field(data, "action")?
+            .as_str()
+            .ok_or_else(|| {
+                CommError::new("event_data_invalid", "master wake action is not a string")
+            })?;
+        let at = require_event_field(data, "at")?.as_str().ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "master wake decision at is not a string",
+            )
+        })?;
+        validate_time(at)?;
+        let previous = self
+            .projection
+            .master_wake
+            .get(&accumulator.address.key())
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "event_data_invalid",
+                    format!(
+                        "master wake decision has no prior accumulator: {}",
+                        accumulator.address.key()
+                    ),
+                )
+            })?;
+        if previous.generation != accumulator.generation {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake decision generation does not match prior accumulator",
+            ));
+        }
+        match action.trim().to_ascii_lowercase().as_str() {
+            "hold" => {
+                if !accumulator.held || accumulator.next_due_at.is_some() {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "held master wake decision must remain held without a due time",
+                    ));
+                }
+            }
+            "dispatch" | "handled" | "complete" | "completed" => {
+                if accumulator.pending || !accumulator.signals.is_empty() {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "terminal master wake decision must clear active signals",
+                    ));
+                }
+            }
+            "schedule" => {
+                if accumulator.held {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "scheduled master wake decision cannot remain held",
+                    ));
+                }
+            }
+            other => {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    format!("unsupported master wake decision action: {other}"),
+                ))
+            }
+        }
+        self.projection
+            .master_wake
+            .insert(accumulator.address.key(), accumulator);
+        Ok(())
+    }
+
+    fn apply_master_wake_briefing_event(&mut self, data: &Value) -> CommResult<()> {
+        let accumulator =
+            decode_master_wake_accumulator_event(require_event_field(data, "accumulator")?)?;
+        let message: MessageRecord = decode(require_event_field(data, "message")?, "message")?;
+        let notification: NotificationRecord =
+            decode(require_event_field(data, "notification")?, "notification")?;
+        let generation = require_event_field(data, "generation")?
+            .as_u64()
+            .ok_or_else(|| {
+                CommError::new(
+                    "event_data_invalid",
+                    "master wake generation is not an integer",
+                )
+            })?;
+        let reminder = require_event_field(data, "reminder")?
+            .as_u64()
+            .ok_or_else(|| {
+                CommError::new(
+                    "event_data_invalid",
+                    "master wake reminder is not an integer",
+                )
+            })?;
+        let reminder = u8::try_from(reminder).map_err(|_| {
+            CommError::new("event_data_invalid", "master wake reminder is out of range")
+        })?;
+        if generation != accumulator.generation
+            || reminder == 0
+            || reminder > DEFAULT_MASTER_REMINDER_LIMIT
+            || accumulator.reminders_sent != reminder
+            || accumulator.last_briefing_generation != Some(generation)
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake briefing generation or reminder is inconsistent",
+            ));
+        }
+        let (message_id, conversation_id) = master_wake_message_identity(&accumulator, reminder);
+        self.validate_master_wake_message_identity(
+            &message,
+            &accumulator,
+            reminder,
+            &accumulator.address,
+            &conversation_id,
+        )?;
+        if message.message_id != message_id {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake briefing message identity is inconsistent",
+            ));
+        }
+        let projected_message = self
+            .projection
+            .messages
+            .get(&message.message_id)
+            .ok_or_else(|| {
+                CommError::new(
+                    "event_data_invalid",
+                    format!("master wake briefing message is not durable: {message_id}"),
+                )
+            })?;
+        if serde_json::to_value(projected_message).unwrap()
+            != serde_json::to_value(&message).unwrap()
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake briefing message does not match its durable record",
+            ));
+        }
+        if notification.message_id != message.message_id
+            || notification.recipient != accumulator.address
+            || notification.status != "emitted"
+            || notification.delivery_attempt.is_some()
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake briefing notification is not terminal for its message",
+            ));
+        }
+        let (notification_key, projected_notification) = self
+            .projection
+            .notifications
+            .iter()
+            .find(|(_, value)| value.notification_id == notification.notification_id)
+            .or_else(|| {
+                self.projection
+                    .notifications
+                    .iter()
+                    .find(|(_, value)| value.message_id == notification.message_id)
+            })
+            .ok_or_else(|| {
+                CommError::new(
+                    "event_data_invalid",
+                    format!(
+                        "master wake briefing notification is not durable: {}",
+                        notification.notification_id
+                    ),
+                )
+            })?;
+        if serde_json::to_value(projected_notification).unwrap()
+            != serde_json::to_value(&notification).unwrap()
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake briefing notification does not match its durable record",
+            ));
+        }
+        if !self
+            .projection
+            .completed_attempts
+            .contains_key(notification_key)
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "master wake briefing lacks a completed delivery attempt",
+            ));
+        }
+        self.projection
+            .master_wake
+            .insert(accumulator.address.key(), accumulator);
+        Ok(())
+    }
+
     fn apply_event(&mut self, event: &EventRecord) -> CommResult<()> {
         match event.kind.as_str() {
             "scope.registered" => {
@@ -4180,19 +4702,16 @@ impl CommunicationStore {
                 self.projection.wakeup.insert(wakeup.address.key(), wakeup);
             }
             "master_wake.updated" => {
-                let accumulator: MasterWakeAccumulator = decode(&event.data, "master wake")?;
+                let accumulator = decode_master_wake_accumulator_event(&event.data)?;
                 self.projection
                     .master_wake
                     .insert(accumulator.address.key(), accumulator);
             }
-            "master_wake.decided" | "master_wake.briefing" => {
-                let accumulator: MasterWakeAccumulator = decode(
-                    event.data.get("accumulator").unwrap_or(&Value::Null),
-                    "master wake",
-                )?;
-                self.projection
-                    .master_wake
-                    .insert(accumulator.address.key(), accumulator);
+            "master_wake.decided" => {
+                self.apply_master_wake_decided_event(&event.data)?;
+            }
+            "master_wake.briefing" => {
+                self.apply_master_wake_briefing_event(&event.data)?;
             }
             "wakeup.reminder" => {
                 let wakeup: WakeupRecord =
@@ -4749,6 +5268,11 @@ fn validate_master_wake_signal_request(request: &MasterWakeSignalRequest) -> Com
 }
 
 fn master_wake_signal_matches(left: &MasterWakeSignal, right: &MasterWakeSignal) -> bool {
+    master_wake_signal_identity_matches(left, right)
+        && left.direct_dispatched == right.direct_dispatched
+}
+
+fn master_wake_signal_identity_matches(left: &MasterWakeSignal, right: &MasterWakeSignal) -> bool {
     left.signal_id == right.signal_id
         && left.key == right.key
         && left.kind == right.kind
@@ -4758,7 +5282,6 @@ fn master_wake_signal_matches(left: &MasterWakeSignal, right: &MasterWakeSignal)
         && left.issue_id == right.issue_id
         && left.source == right.source
         && left.observed_at == right.observed_at
-        && left.direct_dispatched == right.direct_dispatched
 }
 
 fn master_wake_accumulator_matches(
@@ -4775,11 +5298,21 @@ fn master_wake_accumulator_matches(
         && left.stopped == right.stopped
         && left.last_briefing_generation == right.last_briefing_generation
         && left.last_briefing_at == right.last_briefing_at
+        && left.held == right.held
         && left.signals.len() == right.signals.len()
-        && left
-            .signals
-            .iter()
-            .all(|(key, signal)| right.signals.get(key) == Some(signal))
+        && left.signals.iter().all(|(key, signal)| {
+            right
+                .signals
+                .get(key)
+                .is_some_and(|candidate| master_wake_signal_matches(signal, candidate))
+        })
+        && left.consumed_signals.len() == right.consumed_signals.len()
+        && left.consumed_signals.iter().all(|(key, signal)| {
+            right
+                .consumed_signals
+                .get(key)
+                .is_some_and(|candidate| master_wake_signal_matches(signal, candidate))
+        })
 }
 
 fn master_wake_message_identity(
@@ -4793,6 +5326,18 @@ fn master_wake_message_identity(
     (
         format!("master-wake-message-{cycle}"),
         format!("master-wake-conversation-{conversation}"),
+    )
+}
+
+fn master_wake_direct_message_identity(
+    master: &Address,
+    signal: &MasterWakeSignal,
+) -> (String, String) {
+    let identity = structured_key(&[&master.key(), &signal.key, &signal.signal_id]);
+    let conversation = structured_key(&[&master.key(), &signal.key]);
+    (
+        format!("master-wake-signal-message-{identity}"),
+        format!("master-wake-signal-conversation-{conversation}"),
     )
 }
 
@@ -5085,6 +5630,36 @@ fn validate_non_empty(value: &str, name: &str) -> CommResult<()> {
 fn decode<T: DeserializeOwned>(value: &Value, name: &str) -> CommResult<T> {
     serde_json::from_value(value.clone())
         .map_err(|error| CommError::new("invalid_request", format!("{name}: {error}")))
+}
+
+fn require_event_field<'a>(data: &'a Value, field: &str) -> CommResult<&'a Value> {
+    data.get(field).ok_or_else(|| {
+        CommError::new(
+            "event_data_invalid",
+            format!("master wake event field is missing: {field}"),
+        )
+    })
+}
+
+fn decode_master_wake_accumulator_event(data: &Value) -> CommResult<MasterWakeAccumulator> {
+    for field in [
+        "address",
+        "generation",
+        "pending",
+        "firstObservedAt",
+        "lastObservedAt",
+        "nextDueAt",
+        "remindersSent",
+        "stopped",
+        "lastBriefingGeneration",
+        "lastBriefingAt",
+        "held",
+        "signals",
+        "consumedSignals",
+    ] {
+        require_event_field(data, field)?;
+    }
+    decode(data, "master wake")
 }
 
 fn validate_time(value: &str) -> CommResult<String> {

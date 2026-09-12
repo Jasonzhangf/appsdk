@@ -124,15 +124,21 @@ notification ID 排序；发送失败保留 `pending` 和 `lastError`，写入
 
 master wake 是唯一的 master 运行态唤醒 owner。worker idle、普通 Bug、Loop error 和
 其他项目更新先按稳定 `signal.key` 写入该 master 的 `MasterWakeAccumulator`；同一 key
-和相同内容重放为幂等，内容变化才递增 `generation`。master 为 `working` 时只积累，
-不会把相同信号单独 flush 给 master；master 转为 `idle` 后，daemon 的 `tick` 在信号
-截止时间到达时生成一条有界 briefing。briefing 包含 generation、P0/P1 优先级、idle
-worker、active Bug 和 active Loop 摘要，并将被覆盖的普通 pending notification 写成
-`notification.superseded`，因此同一更新不会同时以普通通知和 wake briefing 打扰 master。
+和相同内容重放为幂等，内容变化才递增 `generation`。已由 `handled`、`dispatch`、
+`complete` 或 `completed` 消费的 signal 会保留在 `consumedSignals`，同一状态边沿不能
+再次激活；`hold` 会持久化为 `held`，重复观察 master idle 不会解除 hold。master 为
+`working` 时只积累，不会把相同信号单独 flush 给 master；master 转为 `idle` 后，daemon
+的 `tick` 在首个信号进入窗口后的 120 秒生成一条有界 briefing。P0 signal 走同一
+direct delivery/receipt 链，不能只因为 priority 高就标成已送达。briefing 包含 generation、
+P0/P1 优先级、idle worker、active Bug 和 active Loop 摘要，并将被覆盖的普通 pending
+notification 写成 `notification.superseded`，因此同一更新不会同时以普通通知和 wake briefing
+打扰 master。被接管的 notification 在 briefing terminal decision 前始终由 accumulator
+持有，即使 master 已经 idle；delivery 为 `unknown` 时不会自动重发或改渲染成另一条 briefing。
 
-briefing 的 message、notification 和 attempt 使用稳定的 generation/reminder 身份。
-attempt 之后进程崩溃时，重放将 notification 标为 `unknown`，同一 generation 不会重新
-投递或消耗提醒次数；只有看到明确的 terminal receipt 才能继续。master 通过
+briefing 的 message、notification 和 attempt 使用稳定的 generation/reminder 身份。恢复时
+如果该身份的 message 已写入，直接复用 JSONL 中原始 message body，不按当前 active Loop
+或 Bug 列表重新渲染。attempt 之后进程崩溃时，重放将 notification 标为 `unknown`，同一
+generation 不会重新投递或消耗提醒次数；只有看到明确的 terminal receipt 才能继续。master 通过
 `master_wake_decide` 携带精确 generation 写入 `hold`、`dispatch`、`handled`、
 `complete`、`completed` 或 `schedule`。generation 不匹配直接失败；delivery/ACK
 不能自动清除信号，只有显式调度类 decision 才能清空 accumulator。每个 generation

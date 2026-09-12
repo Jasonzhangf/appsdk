@@ -2388,6 +2388,58 @@ fn master_wake_terminal_decision_supersedes_pending_notification_before_briefing
 }
 
 #[test]
+fn master_wake_terminal_decision_replay_stops_legacy_wakeup_without_followup_event() {
+    let root = temp_root("master-wake-decision-replay");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    let before = call(&root, json!({ "op": "status" }));
+    let generation = before["masterWake"][0]["generation"].as_u64().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "master_wake_decide",
+            "master": { "scopeId": "scope", "sessionId": "master" },
+            "generation": generation,
+            "action": "handled",
+            "at": after(at, 1)
+        }),
+    );
+
+    retain_mailbox_through_last(&root, "master_wake.decided");
+    let replayed = call(&root, json!({ "op": "status" }));
+    assert_eq!(replayed["masterWake"][0]["pending"], false);
+    assert_eq!(replayed["wakeup"][0]["stopped"], true);
+    assert!(replayed["wakeup"][0]["nextDueAt"].is_null());
+
+    let tick = call(&root, json!({ "op": "tick", "now": after(at, 120) }));
+    assert!(tick["masterWakeChanged"].as_array().unwrap().is_empty());
+    assert!(tick["changed"].as_array().unwrap().is_empty());
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert!(!raw.contains("\"kind\":\"wakeup.reminder\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn master_wake_flush_and_tick_have_one_notification_owner() {
     let root = temp_root("master-wake-flush-order");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);

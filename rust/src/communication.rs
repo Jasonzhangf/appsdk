@@ -1772,16 +1772,7 @@ impl CommunicationStore {
             json!({ "accumulator": updated, "action": action, "at": at }),
         )?;
         if let Some(wakeup) = self.projection.wakeup.get(&key).cloned() {
-            let mut synchronized = wakeup;
-            if action == "schedule" {
-                synchronized.next_due_at = updated.next_due_at.clone();
-                synchronized.stopped = false;
-                synchronized.reminders_sent = 0;
-                synchronized.last_reminder_at = None;
-            } else {
-                synchronized.next_due_at = None;
-                synchronized.stopped = true;
-            }
+            let synchronized = synchronize_master_wakeup(wakeup, &action, &updated);
             self.commit(
                 "wakeup.updated",
                 serde_json::to_value(synchronized).unwrap(),
@@ -4295,9 +4286,14 @@ impl CommunicationStore {
                 ))
             }
         }
+        let key = accumulator.address.key();
         self.projection
             .master_wake
-            .insert(accumulator.address.key(), accumulator);
+            .insert(key.clone(), accumulator.clone());
+        if let Some(wakeup) = self.projection.wakeup.get(&key).cloned() {
+            let synchronized = synchronize_master_wakeup(wakeup, &action, &accumulator);
+            self.projection.wakeup.insert(key, synchronized);
+        }
         Ok(())
     }
 
@@ -5780,6 +5776,24 @@ fn wakeup_message_identity(
         format!("wakeup-message-{cycle}"),
         format!("wakeup-conversation-{conversation}"),
     ))
+}
+
+fn synchronize_master_wakeup(
+    wakeup: WakeupRecord,
+    action: &str,
+    accumulator: &MasterWakeAccumulator,
+) -> WakeupRecord {
+    let mut synchronized = wakeup;
+    if action == "schedule" {
+        synchronized.next_due_at = accumulator.next_due_at.clone();
+        synchronized.stopped = false;
+        synchronized.reminders_sent = 0;
+        synchronized.last_reminder_at = None;
+    } else {
+        synchronized.next_due_at = None;
+        synchronized.stopped = true;
+    }
+    synchronized
 }
 
 fn wakeup_message_matches(existing: &MessageRecord, expected: &MessageRecord) -> bool {

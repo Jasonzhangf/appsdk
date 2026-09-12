@@ -1244,6 +1244,76 @@ enum LifecycleProducer {
     Chain,
 }
 
+enum RegistryBinding<'a> {
+    Exact,
+    Aggregate(&'a [Value]),
+}
+
+fn assert_registry_binding_contract<'a>(module: &'a Value, module_id: &str) -> RegistryBinding<'a> {
+    let Some(binding) = module.get("registry_binding") else {
+        return RegistryBinding::Exact;
+    };
+    let object = binding.as_object().unwrap_or_else(|| {
+        fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+    });
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "mode" | "modules"))
+    {
+        fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+    }
+    let mode = object
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)));
+    match mode {
+        "exact" => {
+            if object.contains_key("modules") {
+                fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+            }
+            RegistryBinding::Exact
+        }
+        "aggregate" => {
+            let modules = object
+                .get("modules")
+                .and_then(Value::as_array)
+                .filter(|modules| !modules.is_empty())
+                .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)));
+            let mut ids = std::collections::HashSet::new();
+            for selected in modules {
+                let selected = selected
+                    .as_str()
+                    .filter(|selected| !selected.is_empty())
+                    .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)));
+                if !ids.insert(selected) {
+                    fail(format!("INVALID_REGISTRY_BINDING:{}", module_id));
+                }
+            }
+            RegistryBinding::Aggregate(modules)
+        }
+        _ => fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)),
+    }
+}
+
+fn normalized_registry_binding(module: &Value, module_id: &str) -> Value {
+    match assert_registry_binding_contract(module, module_id) {
+        RegistryBinding::Exact => serde_json::json!({"mode": "exact"}),
+        RegistryBinding::Aggregate(modules) => {
+            let mut module_ids = modules
+                .iter()
+                .map(|module| {
+                    module
+                        .as_str()
+                        .unwrap_or_else(|| fail(format!("INVALID_REGISTRY_BINDING:{}", module_id)))
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            module_ids.sort();
+            serde_json::json!({"mode": "aggregate", "modules": module_ids})
+        }
+    }
+}
+
 fn assert_lifecycle_producer_map_binding(
     root: &Path,
     project: &Value,
@@ -1462,6 +1532,7 @@ fn assert_lifecycle_producer_map_binding(
         .and_then(Value::as_array)
         .filter(|paths| !paths.is_empty())
         .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"));
+    let registry_binding = assert_registry_binding_contract(project_module, module_id);
 
     // A project module is a lifecycle scope and may intentionally aggregate
     // several finer-grained source modules. The registry is the source
@@ -1483,19 +1554,50 @@ fn assert_lifecycle_producer_map_binding(
         }
     }
 
-    // An exact registry identity is authoritative for that project module.
-    // Only a project module without a same-id entry may aggregate active
-    // fine-grained registry modules.
-    let coverage_modules: Vec<&Value> = same_id_entries
-        .first()
-        .copied()
-        .map(|registered| vec![registered])
-        .unwrap_or_else(|| {
-            registry_modules
+    let coverage_modules: Vec<&Value> = match registry_binding {
+        RegistryBinding::Exact => same_id_entries
+            .first()
+            .copied()
+            .map(|registered| vec![registered])
+            .unwrap_or_else(|| fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISSING")),
+        RegistryBinding::Aggregate(selected_ids) => {
+            if same_id_entries.first().is_some()
+                && !selected_ids
+                    .iter()
+                    .any(|selected| selected.as_str() == Some(module_id))
+            {
+                fail("LIFECYCLE_PRODUCER_MODULE_BINDING_MISSING");
+            }
+            selected_ids
                 .iter()
-                .filter(|module| module.get("status").and_then(Value::as_str) == Some("active"))
+                .map(|selected| {
+                    let selected_id = selected
+                        .as_str()
+                        .unwrap_or_else(|| fail("INVALID_REGISTRY_BINDING"));
+                    let matches: Vec<&Value> = registry_modules
+                        .iter()
+                        .filter(|module| {
+                            module.get("module_id").and_then(Value::as_str) == Some(selected_id)
+                        })
+                        .collect();
+                    if matches.len() != 1 {
+                        fail(format!(
+                            "LIFECYCLE_PRODUCER_MODULE_REGISTRY_INVALID:{}",
+                            selected_id
+                        ));
+                    }
+                    let registered = matches[0];
+                    if registered.get("status").and_then(Value::as_str) != Some("active") {
+                        fail(format!(
+                            "LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH:{}",
+                            selected_id
+                        ));
+                    }
+                    registered
+                })
                 .collect()
-        });
+        }
+    };
     let active_registry_paths: Vec<Vec<String>> = coverage_modules
         .iter()
         .map(|module| {
@@ -3191,6 +3293,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
             .and_then(Value::as_str)
             .unwrap_or("");
         assert_identifier(id, "INVALID_PROJECT_MODULE");
+        let _ = assert_registry_binding_contract(module, id);
         if !ids.insert(id)
             || !matches!(
                 module.get("stage").and_then(Value::as_str),
@@ -4759,10 +4862,12 @@ fn producer_lock(root: &Path) -> fs::File {
 fn producer_scope_hash(root: &Path, project: &Value, module: &Value, module_id: &str) -> String {
     let source_hash = hash_module_paths(root, project, module, module_id, "owned_paths");
     let contract_hash = hash_module_paths(root, project, module, module_id, "contract_paths");
+    let registry_binding = normalized_registry_binding(module, module_id);
     sha256(&canonical(&serde_json::json!({
         "module_id": module_id,
         "source_hash": source_hash,
-        "contract_hash": contract_hash
+        "contract_hash": contract_hash,
+        "registry_binding": registry_binding
     })))
 }
 

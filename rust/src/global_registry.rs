@@ -79,6 +79,22 @@ fn ensure_no_symlink(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_platform_root_alias(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(relative) = path.strip_prefix("/").ok() else {
+            return false;
+        };
+        let expected = Path::new("/private").join(relative);
+        return fs::canonicalize(path).is_ok_and(|canonical| canonical == expected);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 fn lock_registry(lock_path: &Path) -> Result<File, String> {
     let file = OpenOptions::new()
         .create(true)
@@ -126,10 +142,92 @@ fn validate_registry_root(root: &Path) -> Result<(), String> {
             root.display()
         ));
     }
-    if root.exists() {
-        ensure_no_symlink(root, "registry_root")?;
+    let mut current = PathBuf::new();
+    for component in root.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    if !is_platform_root_alias(&current)
+                        || !fs::metadata(&current).is_ok_and(|target| target.is_dir())
+                    {
+                        return Err(format!(
+                            "GLOBAL_REGISTRY_SYMLINK:registry_root:{}",
+                            current.display()
+                        ));
+                    }
+                } else if !metadata.is_dir() {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_ROOT_INVALID:not a directory:{}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "GLOBAL_REGISTRY_ROOT_STAT_FAILED:{}:{error}",
+                    current.display()
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn ensure_registry_root(root: &Path) -> Result<PathBuf, String> {
+    validate_registry_root(root)?;
+    let mut current = PathBuf::new();
+    for component in root.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    if !is_platform_root_alias(&current)
+                        || !fs::metadata(&current).is_ok_and(|target| target.is_dir())
+                    {
+                        return Err(format!(
+                            "GLOBAL_REGISTRY_SYMLINK:registry_root:{}",
+                            current.display()
+                        ));
+                    }
+                } else if !metadata.is_dir() {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_ROOT_INVALID:not a directory:{}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|error| {
+                    format!(
+                        "GLOBAL_REGISTRY_CREATE_FAILED:{}:{error}",
+                        current.display()
+                    )
+                })?;
+                let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                    format!(
+                        "GLOBAL_REGISTRY_ROOT_STAT_FAILED:{}:{error}",
+                        current.display()
+                    )
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_ROOT_INVALID:not a directory:{}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "GLOBAL_REGISTRY_ROOT_STAT_FAILED:{}:{error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    validate_registry_root(root)?;
+    fs::canonicalize(root).map_err(|error| format!("GLOBAL_REGISTRY_CANONICALIZE_FAILED:{error}"))
 }
 
 fn read_latest(path: &Path, project_root: &str) -> Result<Option<RegistrationEvent>, String> {
@@ -141,6 +239,9 @@ fn read_latest(path: &Path, project_root: &str) -> Result<Option<RegistrationEve
     let mut text = String::new();
     file.read_to_string(&mut text)
         .map_err(|error| format!("GLOBAL_REGISTRY_READ_FAILED:{error}"))?;
+    if !text.is_empty() && !text.as_bytes().ends_with(b"\n") {
+        return Err("GLOBAL_REGISTRY_INVALID_LINE:missing final newline".into());
+    }
     let mut latest = None;
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -195,11 +296,7 @@ pub fn register_project_at(
         return Err("GLOBAL_REGISTRY_SDK_VERSION_INVALID: version must not be empty".into());
     }
 
-    validate_registry_root(registry_root)?;
-    fs::create_dir_all(registry_root)
-        .map_err(|error| format!("GLOBAL_REGISTRY_CREATE_FAILED:{}", error))?;
-    let registry_root = fs::canonicalize(registry_root)
-        .map_err(|error| format!("GLOBAL_REGISTRY_CANONICALIZE_FAILED:{error}"))?;
+    let registry_root = ensure_registry_root(registry_root)?;
     ensure_no_symlink(&registry_root, "registry_root")?;
     let path = registry_root.join(REGISTRY_FILE);
     let lock_path = registry_root.join(REGISTRY_LOCK);
@@ -296,6 +393,63 @@ mod tests {
         fs::write(home.join(REGISTRY_FILE), b"not-json\n").unwrap();
         let error = register_project_at(&project, &home, "0.1.6").unwrap_err();
         assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_LINE:1:"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unterminated_registry_fails_closed_before_idempotent_or_append() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-unterminated-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let registry = root.join("registry");
+        fs::create_dir_all(&project).unwrap();
+        let first = register_project_at(&project, &registry, "0.1.6").unwrap();
+        let path = registry.join(REGISTRY_FILE);
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        let same_version = register_project_at(&project, &registry, "0.1.6").unwrap_err();
+        assert_eq!(
+            same_version,
+            "GLOBAL_REGISTRY_INVALID_LINE:missing final newline"
+        );
+        let next_version = register_project_at(&project, &registry, "0.1.7").unwrap_err();
+        assert_eq!(
+            next_version,
+            "GLOBAL_REGISTRY_INVALID_LINE:missing final newline"
+        );
+        assert_eq!(fs::read(&path).unwrap(), &bytes[..bytes.len() - 1]);
+        assert_eq!(
+            first.project_id,
+            project_id(&project.canonicalize().unwrap())
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_registry_ancestor_fails_closed_before_creation() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-symlink-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let real_parent = root.join("real");
+        let linked_parent = root.join("linked");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let requested = linked_parent.join("new-registry");
+
+        let error = register_project_at(&project, &requested, "0.1.6").unwrap_err();
+        assert!(error.starts_with("GLOBAL_REGISTRY_SYMLINK:registry_root:"));
+        assert!(!real_parent.join("new-registry").exists());
         fs::remove_dir_all(root).ok();
     }
 

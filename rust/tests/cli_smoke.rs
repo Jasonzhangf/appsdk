@@ -3033,6 +3033,55 @@ fn lifecycle_chain_rejects_invalid_attempt_history_before_reusing_canonical_reco
 }
 
 #[test]
+fn lifecycle_chain_rejects_invalid_attempt_history_before_first_canonical_write() {
+    let root = temp_root("lifecycle-chain-attempt-first-write");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let review = root.join(".appsdk/records/review-record-app-core.json");
+    fs::remove_file(&review).unwrap();
+    let attempts = root.join(".appsdk/records/attempts/app-core/review-record.jsonl");
+    fs::create_dir_all(attempts.parent().unwrap()).unwrap();
+    let invalid_ledger = "{\"schema_version\":1,\"result\":\"non_pass\"}\n";
+    fs::write(&attempts, invalid_ledger).unwrap();
+    let input = root.join("architecture-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "architecture": {
+                "reviewer": {"adapter":"test","identity":"test"},
+                "verdict": "pass",
+                "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "architecture",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&rejected.stderr),
+        String::from_utf8_lossy(&rejected.stdout)
+    );
+    assert!(!review.exists());
+    assert_eq!(fs::read_to_string(&attempts).unwrap(), invalid_ledger);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_reenters_non_pass_downstream_stages_and_preserves_attempt_history() {
     let root = temp_root("lifecycle-chain-downstream-reentry");
     let root_text = root.to_str().unwrap();

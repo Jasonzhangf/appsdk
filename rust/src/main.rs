@@ -6350,6 +6350,18 @@ fn lifecycle_chain_output(record: &Value, reused: bool) {
 fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record: &Value) -> bool {
     let target = lifecycle_chain_record_path(root, module_id, kind);
     assert_no_symlink_components(root, &target, "lifecycle_chain_record");
+    if !target.exists() {
+        let record_hash = sha256(&canonical(record));
+        let attempt_id = lifecycle_chain_attempt_identity(module_id, kind, &record_hash);
+        lifecycle_chain_validate_attempt_ledger(
+            root,
+            module_id,
+            kind,
+            &attempt_id,
+            &record_hash,
+            record,
+        );
+    }
     if target.exists() {
         let existing = producer_read_record_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
             .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_RECORD_INVALID"));

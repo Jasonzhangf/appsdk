@@ -473,6 +473,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn registration_is_idempotent_and_append_only() {
@@ -522,16 +523,20 @@ mod tests {
             let start = Arc::clone(&start);
             thread::spawn(move || {
                 start.wait();
-                for _ in 0..100 {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
                     match register_project_at(&project, &registry, "0.1.6") {
                         Ok(receipt) => return receipt,
                         Err(error) if error.starts_with("GLOBAL_REGISTRY_BUSY:") => {
-                            thread::yield_now();
+                            assert!(
+                                Instant::now() < deadline,
+                                "concurrent first registration stayed busy"
+                            );
+                            thread::sleep(Duration::from_millis(1));
                         }
                         Err(error) => panic!("concurrent first registration failed: {error}"),
                     }
                 }
-                panic!("concurrent first registration stayed busy")
             })
         });
         let receipts = handles.map(|handle| handle.join().unwrap());

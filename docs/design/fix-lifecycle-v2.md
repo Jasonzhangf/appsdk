@@ -32,6 +32,32 @@ Playground is the logical experiment lifecycle. The clean Git worktree is the ph
 - Candidate commit missing from the tested integration blocks promotion. In single-worker mode, the merged tree must equal the reviewed/effectiveness-tested candidate tree. In parallel mode, the final main tree may contain other accepted work, but the merged commit/tree must exactly equal IntegrationRecord and remain reachable from both local and recorded remote main refs.
 - Compile and publish never consume Playground or an unmerged candidate branch.
 
+## Phase re-entry and evidence reuse
+
+Every phase is a separately persisted loop. The phase input identity includes
+the candidate/tree, module scope, dependency records, artifact and environment
+bindings, map hashes, evidence references, and the phase-specific mainline or
+cleanup identifiers. AppSDK validates that identity and the upstream graph on
+each call.
+
+When an existing phase projection is PASS and its identity and evidence
+freshness still match, the producer returns `reused: true` and skips the
+external action for that phase. The read-only `verify` command may still walk
+the full record graph to check hashes, references, timestamps, and expiry; that
+walk does not rerun tests, deployment, merge, or publication. A reuse result is
+therefore an exact cache decision, not fresh execution evidence.
+
+Any candidate, dependency, map, artifact, environment, input, or freshness
+drift invalidates that phase and every downstream phase. Immutable PASS records
+remain as historical witnesses; AppSDK rejects the stale identity until a new
+candidate-bound projection is produced. `fail`, `unknown`, malformed, or
+expired projections never count as PASS. Repeating the same non-PASS identity
+returns `LIFECYCLE_CHAIN_STAGE_NOT_PASS`; a changed identity archives the old
+projection in append-only
+`.appsdk/records/attempts/<module>/<phase>.jsonl` and re-enters the phase. A
+partial Worktree/Reproduction/baseline record set, conflicting attempt history,
+or tampered hash fails closed.
+
 ## Record graph
 
 ```text

@@ -347,9 +347,11 @@ clean owner worktree + candidate commit
 
 Each adapter is rerunnable for the same candidate without changing a PASS
 record. A changed candidate, artifact, environment, entrypoint, or input starts
-a new evidence set and invalidates the old one. No adapter may accept a
-hand-entered hash, relabel whitebox output as blackbox output, or use an
-artifact from another worktree/project/version.
+a new evidence set and invalidates the old one. A valid PASS projection skips
+the external action that produced it; the adapter still performs the lightweight
+identity, scope, integrity, and freshness checks required to trust the record.
+No adapter may accept a hand-entered hash, relabel whitebox output as blackbox
+output, or use an artifact from another worktree/project/version.
 
 For the downstream lifecycle records, the typed AppSDK adapter is
 `produce-lifecycle-chain`. It is invoked once per phase (`architecture`,
@@ -361,6 +363,37 @@ evidence, or treat the observation declaration as evidence. A missing or stale
 upstream record fails closed. Freeze and Active publication remain owned by the
 existing lifecycle adapter, which performs their real artifact and VCS gates.
 
+#### Stage execution, re-entry, and reuse
+
+The chain is a sequence of independently persisted phases. A phase has one
+projection and an input identity covering the candidate/tree, module scope,
+dependency records, artifact and environment bindings, map hashes, evidence
+references, and (where applicable) the mainline or cleanup identity.
+
+On every invocation AppSDK first validates the current projection and the
+upstream graph. If the projection is PASS, the identity is unchanged, and all
+referenced evidence is still valid, it returns `"reused": true` and skips the
+external phase action. This is a cache hit for that exact phase identity; it is
+not a claim that tests or deployment were executed again. `verify` remains a
+read-only integrity/freshness check and may read the whole graph without
+rerunning those external actions.
+
+If an input, dependency, map, artifact, environment, or evidence freshness
+changes, the current phase and its downstream phases are no longer reusable.
+The immutable PASS projection is retained and the adapter fails closed until a
+new candidate-bound projection is produced. A non-PASS projection is never a
+PASS cache entry: the same identity returns `LIFECYCLE_CHAIN_STAGE_NOT_PASS`,
+while a changed identity archives the old attempt and permits a new phase
+attempt. Attempts are append-only under
+`.appsdk/records/attempts/<module>/<phase>.jsonl`; malformed or conflicting
+entries fail closed.
+
+The initial `produce-lifecycle-records` phase follows the same rule for its
+Worktree, Reproduction, and baseline EvidenceRecord set. All three records
+must be present and match the complete declaration, identity, command, and
+freshness checks before the baseline command is skipped. A partial set is an
+explicit error; it is never silently completed from a cache.
+
 `produce-lifecycle-records` accepts a declaration containing the confirmed
 `goal_id`, the module and issue scope, bug-triage evidence, and a baseline
 command with a non-zero expected exit status plus an `expected_error_token`.
@@ -371,9 +404,10 @@ match, and its output is hashed, before the three records are written. The
 caller’s result, timestamps, record IDs, input hashes, producer identity, and
 Git fields are never trusted: timestamps, input hashes, path-safe IDs, and the
 fixed `appsdk-lifecycle-record-producer` identity are generated after those
-observations. Existing targets fail with `LIFECYCLE_RECORD_EXISTS`. Records
-are installed with create-new semantics as a group; validation, command, or
-installation failure leaves no newly published record.
+observations. Records are installed with create-new semantics as a group. A
+complete matching set is reused; a partial set, identity drift, expired
+evidence, validation failure, or installation failure remains an explicit error
+and does not publish a new record.
 
 For an upgrade, run `appsdk prepare`/`init` idempotently, inspect and snapshot
 the old project and legacy roots, obtain explicit ownership-transfer approval,

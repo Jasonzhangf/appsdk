@@ -2465,6 +2465,420 @@ fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
 }
 
 #[test]
+fn lifecycle_chain_reenters_non_pass_review_and_preserves_attempt_history() {
+    for initial_verdict in ["fail", "unknown"] {
+        let root = temp_root(&format!("lifecycle-chain-reentry-{initial_verdict}"));
+        let root_text = root.to_str().unwrap();
+        prepare_lifecycle_chain_fixture(&root);
+        let review = root.join(".appsdk/records/review-record-app-core.json");
+        fs::remove_file(&review).unwrap();
+        let input = root.join("architecture-input.json");
+        let write_input = |verdict: &str| {
+            fs::write(
+                &input,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "architecture": {
+                        "reviewer": {"adapter":"test","identity":"test"},
+                        "verdict": verdict,
+                        "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                    }
+                }))
+                .unwrap()
+                    + "\n",
+            )
+            .unwrap();
+        };
+
+        write_input(initial_verdict);
+        let first = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(
+            first.status.success(),
+            "verdict={initial_verdict} stdout={} stderr={}",
+            String::from_utf8_lossy(&first.stdout),
+            String::from_utf8_lossy(&first.stderr)
+        );
+        let repeated = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(!repeated.status.success());
+        assert!(
+            String::from_utf8_lossy(&repeated.stderr).contains("LIFECYCLE_CHAIN_STAGE_NOT_PASS")
+        );
+
+        write_input("pass");
+        let reentered = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(
+            reentered.status.success(),
+            "verdict={initial_verdict} stdout={} stderr={}",
+            String::from_utf8_lossy(&reentered.stdout),
+            String::from_utf8_lossy(&reentered.stderr)
+        );
+        let reentered_json: Value = serde_json::from_slice(&reentered.stdout).unwrap();
+        assert_eq!(reentered_json["verdict"], "pass");
+        assert_eq!(reentered_json["reused"], false);
+        let attempts = root.join(".appsdk/records/attempts/app-core/review-record.jsonl");
+        let attempts_text = fs::read_to_string(&attempts).unwrap();
+        assert_eq!(attempts_text.lines().count(), 1);
+        let attempt: Value = serde_json::from_str(attempts_text.lines().next().unwrap()).unwrap();
+        assert_eq!(attempt["phase"], "review-record");
+        assert_eq!(attempt["record"]["verdict"], initial_verdict);
+
+        let reused = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(reused.status.success());
+        let reused_json: Value = serde_json::from_slice(&reused.stdout).unwrap();
+        assert_eq!(reused_json["reused"], true);
+        assert_eq!(fs::read_to_string(&attempts).unwrap().lines().count(), 1);
+
+        // The append-only ledger is part of the evidence chain.  A forged
+        // envelope must fail closed before a new projection can replace the
+        // current non-pass record.
+        fs::remove_file(&review).unwrap();
+        write_input("fail");
+        let non_pass = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(non_pass.status.success());
+        write_input("pass");
+        let review_before_tamper = fs::read(&review).unwrap();
+        let ledger_before_tamper = fs::read(&attempts).unwrap();
+        let mut non_pass_review: Value = serde_json::from_slice(&review_before_tamper).unwrap();
+        non_pass_review["verdict"] = Value::String("fail".into());
+        fs::write(
+            &review,
+            serde_json::to_string_pretty(&non_pass_review).unwrap() + "\n",
+        )
+        .unwrap();
+        let mut forged_attempt: Value = serde_json::from_str(
+            String::from_utf8_lossy(&ledger_before_tamper)
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        forged_attempt["result"] = Value::String("pass".into());
+        fs::write(
+            &attempts,
+            serde_json::to_string(&forged_attempt).unwrap() + "\n",
+        )
+        .unwrap();
+        let forged = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(!forged.status.success());
+        assert!(
+            String::from_utf8_lossy(&forged.stderr)
+                .contains("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"),
+            "forged stderr={} stdout={}",
+            String::from_utf8_lossy(&forged.stderr),
+            String::from_utf8_lossy(&forged.stdout)
+        );
+        fs::write(&review, review_before_tamper).unwrap();
+        fs::write(&attempts, ledger_before_tamper).unwrap();
+        let recovered = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(recovered.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&recovered.stdout).unwrap()["reused"],
+            false
+        );
+        let recovered_again = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(recovered_again.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&recovered_again.stdout).unwrap()["reused"],
+            true
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn lifecycle_chain_reenters_non_pass_downstream_stages_and_preserves_attempt_history() {
+    let root = temp_root("lifecycle-chain-downstream-reentry");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+
+    let mark_effectiveness_non_pass = || {
+        let path = records.join("effectiveness-record-app-core.json");
+        let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        record["result"] = Value::String("fail".into());
+        fs::write(&path, serde_json::to_string_pretty(&record).unwrap() + "\n").unwrap();
+    };
+    let effectiveness_input = root.join("effectiveness-input.json");
+    fs::write(
+        &effectiveness_input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "effectiveness": {
+                "fixed_replay_evidence_id": "effective-1",
+                "positive_evidence_ids": ["post-positive-1"],
+                "negative_evidence_ids": ["post-negative-1"],
+                "blackbox_evidence_ids": ["effective-1"]
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    mark_effectiveness_non_pass();
+    let effectiveness = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "effectiveness",
+        "--input",
+        effectiveness_input.to_str().unwrap(),
+    ]);
+    assert!(
+        effectiveness.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&effectiveness.stdout),
+        String::from_utf8_lossy(&effectiveness.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&effectiveness.stdout).unwrap()["reused"],
+        false
+    );
+    let effectiveness_attempts = records.join("attempts/app-core/effectiveness-record.jsonl");
+    let effectiveness_attempt = serde_json::from_str::<Value>(
+        fs::read_to_string(&effectiveness_attempts)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(effectiveness_attempt["record"]["result"], "fail");
+
+    let merge_path = records.join("merge-record-app-core.json");
+    let mut merge_record: Value =
+        serde_json::from_str(&fs::read_to_string(&merge_path).unwrap()).unwrap();
+    merge_record["result"] = Value::String("fail".into());
+    fs::write(
+        &merge_path,
+        serde_json::to_string_pretty(&merge_record).unwrap() + "\n",
+    )
+    .unwrap();
+    let merge_input = root.join("merge-input.json");
+    fs::write(&merge_input, r#"{"merge":{"mainline_ref":"HEAD"}}"#).unwrap();
+    let merge = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "merge",
+        "--input",
+        merge_input.to_str().unwrap(),
+    ]);
+    assert!(
+        merge.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&merge.stdout).unwrap()["reused"],
+        false
+    );
+    let merge_attempts = records.join("attempts/app-core/merge-record.jsonl");
+    let merge_attempt = serde_json::from_str::<Value>(
+        fs::read_to_string(&merge_attempts)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(merge_attempt["record"]["result"], "fail");
+
+    let promotion_path = records.join("promotion-record-app-core.json");
+    let mut promotion_record: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion_path).unwrap()).unwrap();
+    promotion_record["required_gate_results"][0]["result"] = Value::String("fail".into());
+    fs::write(
+        &promotion_path,
+        serde_json::to_string_pretty(&promotion_record).unwrap() + "\n",
+    )
+    .unwrap();
+    let promotion_input = root.join("promotion-input.json");
+    fs::write(
+        &promotion_input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "promotion": {
+                "experiment_id": "experiment-1",
+                "new_active_version": "active-v2",
+                "previous_active_version": null,
+                "compatibility_level": "compatible",
+                "evidence_ids": ["candidate-evidence-1"],
+                "required_gate_results": [
+                    {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                    {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                    {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                    {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
+                    {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                    {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
+                ],
+                "change_set_id": "change-2",
+                "root_cause": "root cause",
+                "design_id": "design-1",
+                "change_reason_comment": "reason",
+                "playground_cleanup_record_id": "cleanup-1",
+                "artifact_hash": artifact_hash
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let promotion = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        promotion_input.to_str().unwrap(),
+    ]);
+    assert!(
+        promotion.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&promotion.stdout),
+        String::from_utf8_lossy(&promotion.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&promotion.stdout).unwrap()["reused"],
+        false
+    );
+    let promotion_attempts = records.join("attempts/app-core/promotion-record.jsonl");
+    let promotion_attempt = serde_json::from_str::<Value>(
+        fs::read_to_string(&promotion_attempts)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        promotion_attempt["record"]["required_gate_results"][0]["result"],
+        "fail"
+    );
+
+    for (phase, input) in [
+        ("effectiveness", &effectiveness_input),
+        ("merge", &merge_input),
+        ("promotion", &promotion_input),
+    ] {
+        let reused = run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            phase,
+            "--input",
+            input.to_str().unwrap(),
+        ]);
+        assert!(
+            reused.status.success(),
+            "phase={phase} stdout={} stderr={}",
+            String::from_utf8_lossy(&reused.stdout),
+            String::from_utf8_lossy(&reused.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reused.stdout).unwrap()["reused"],
+            true
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&effectiveness_attempts)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&merge_attempts).unwrap().lines().count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&promotion_attempts)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_accepts_committed_candidate_records() {
     let root = temp_root("lifecycle-chain-record-commit");
     let root_text = root.to_str().unwrap();
@@ -2812,6 +3226,116 @@ fn lifecycle_chain_promotion_writes_bound_record_for_project_module() {
     assert_eq!(promotion["issue_id"], "issue-1");
     assert_eq!(promotion["fix_candidate_id"], "candidate-1");
     assert_eq!(promotion["merge_record_id"], "merge-1");
+    assert_eq!(promotion["bug_closure_verified"], true);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
+    let root = temp_root("lifecycle-chain-promotion-parallel-first-create");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    enable_parallel_development(&root);
+    write_parallel_records(&root, "app-core", &artifact_hash, false);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("promotion-record-app-core.json")).unwrap();
+    let integration_commit = git_test_value(&root, &["rev-parse", "refs/heads/test-mainline"]);
+    let candidate_evidence = records.join("evidence/app-core/candidate-evidence-1.json");
+    let mut candidate_evidence_value: Value =
+        serde_json::from_str(&fs::read_to_string(&candidate_evidence).unwrap()).unwrap();
+    candidate_evidence_value["source_commit"] = Value::String(integration_commit);
+    fs::write(
+        &candidate_evidence,
+        serde_json::to_string_pretty(&candidate_evidence_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let input = root.join("promotion-input.json");
+    let input_value = serde_json::json!({
+        "promotion": {
+            "experiment_id": "experiment-1",
+            "new_active_version": "active-v2",
+            "previous_active_version": null,
+            "compatibility_level": "compatible",
+            "evidence_ids": ["candidate-evidence-1"],
+            "required_gate_results": [
+                {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
+                {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
+            ],
+            "collaboration_record_id": "collaboration-1",
+            "merge_queue_record_id": "queue-1",
+            "integration_record_id": "integration-1",
+            "mainline_receipt_record_id": "receipt-1",
+            "change_set_id": "change-2",
+            "root_cause": "root cause",
+            "design_id": "design-1",
+            "change_reason_comment": "reason",
+            "playground_cleanup_record_id": "cleanup-1",
+            "artifact_hash": artifact_hash
+        }
+    });
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&input_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let first = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["reused"], false);
+    let persisted: Value = serde_json::from_str(
+        &fs::read_to_string(records.join("promotion-record-app-core.json")).unwrap(),
+    )
+    .unwrap();
+    for field in [
+        "collaboration_record_id",
+        "merge_queue_record_id",
+        "integration_record_id",
+        "mainline_receipt_record_id",
+    ] {
+        assert_eq!(persisted[field], input_value["promotion"][field]);
+    }
+    assert_eq!(persisted["bug_closure_verified"], true);
+
+    let second = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        second.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&second.stdout).unwrap()["reused"],
+        true
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -4409,6 +4933,151 @@ fn verify_rejects_tampered_installed_sdk_resource() {
 }
 
 #[test]
+fn verify_allows_missing_known_sdk_resource_only_after_governance_reset() {
+    let root = temp_root("sdk-resource-reset-missing");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(
+        reset.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reset.stdout),
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let resource = root.join(".appsdk/contracts/memory/memory-entry.schema.json");
+    fs::remove_file(&resource).unwrap();
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verified.stderr).contains("resource missing"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_still_rejects_missing_sdk_resource_without_reset() {
+    let root = temp_root("sdk-resource-no-reset-missing");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let resource = root.join(".appsdk/contracts/memory/memory-entry.schema.json");
+    fs::remove_file(&resource).unwrap();
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("SDK_RESOURCE_MISMATCH:.appsdk/contracts/memory/memory-entry.schema.json"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_contracts_that_drop_canonical_semantics() {
+    let root = temp_root("declared-contract-minimums");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let worktree_path = root.join("contracts/records/worktree-record.schema.json");
+    let worktree_before = fs::read(&worktree_path).unwrap();
+    let mut weakened_worktree: Value = serde_json::from_slice(&worktree_before).unwrap();
+    weakened_worktree["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|value| value.as_str() != Some("module_id"));
+    fs::write(
+        &worktree_path,
+        serde_json::to_string_pretty(&weakened_worktree).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_required = run(&["verify", root_text]);
+    assert!(!missing_required.status.success());
+    assert!(String::from_utf8_lossy(&missing_required.stderr)
+        .contains("DECLARED_RECORD_CONTRACT_MISMATCH"));
+    fs::write(&worktree_path, worktree_before).unwrap();
+
+    let zone_path = root.join("contracts/transitions/zone-transition-manifest.json");
+    let zone_before = fs::read(&zone_path).unwrap();
+    let mut weakened_zone: Value = serde_json::from_slice(&zone_before).unwrap();
+    weakened_zone["transitions"].as_array_mut().unwrap()[0] = serde_json::json!({});
+    fs::write(
+        &zone_path,
+        serde_json::to_string_pretty(&weakened_zone).unwrap() + "\n",
+    )
+    .unwrap();
+    let empty_transition = run(&["verify", root_text]);
+    assert!(!empty_transition.status.success());
+    assert!(String::from_utf8_lossy(&empty_transition.stderr)
+        .contains("INVALID_DECLARED_ZONE_CONTRACT"));
+    fs::write(&zone_path, zone_before).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_receipt_validation_is_mode_aware_and_fail_closed() {
+    let root = temp_root("reset-receipt-validation");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    assert!(Command::new("git")
+        .args(["-C", root_text, "branch", "-M", "codex/reset-receipt-test"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(run(&["reset-governance", root_text, "--discard-legacy"])
+        .status
+        .success());
+
+    let receipt_path = root.join(".appsdk/records/reset-governance-record.json");
+    let receipt_before = fs::read(&receipt_path).unwrap();
+    assert!(run(&["verify", root_text]).status.success());
+
+    let mut fresh_without_transaction: Value = serde_json::from_slice(&receipt_before).unwrap();
+    fresh_without_transaction["mode"] = Value::String("fresh_init".into());
+    fresh_without_transaction
+        .as_object_mut()
+        .unwrap()
+        .remove("transaction_id");
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&fresh_without_transaction).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_transaction = run(&["verify", root_text]);
+    assert!(!missing_transaction.status.success());
+    assert!(String::from_utf8_lossy(&missing_transaction.stderr)
+        .contains("INVALID_RESET_GOVERNANCE_RECORD"));
+    fs::write(&receipt_path, &receipt_before).unwrap();
+
+    let mut mismatched_transaction: Value = serde_json::from_slice(&receipt_before).unwrap();
+    mismatched_transaction["mode"] = Value::String("fresh_init".into());
+    mismatched_transaction["transaction_id"] = Value::String("transaction-1".into());
+    mismatched_transaction["reset_id"] = Value::String("reset-1".into());
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&mismatched_transaction).unwrap() + "\n",
+    )
+    .unwrap();
+    let mismatch = run(&["verify", root_text]);
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("INVALID_RESET_GOVERNANCE_RECORD"));
+    fs::write(&receipt_path, &receipt_before).unwrap();
+
+    let mut future_receipt: Value = serde_json::from_slice(&receipt_before).unwrap();
+    future_receipt["created_at"] = Value::String("2999-01-01T00:00:00Z".into());
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&future_receipt).unwrap() + "\n",
+    )
+    .unwrap();
+    let future = run(&["verify", root_text]);
+    assert!(!future.status.success());
+    assert!(String::from_utf8_lossy(&future.stderr).contains("INVALID_RESET_GOVERNANCE_RECORD"));
+    fs::write(&receipt_path, receipt_before).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verify_requires_the_project_pinned_sdk_binary_version() {
     let root = temp_root("sdk-version-pin");
     fs::create_dir_all(&root).unwrap();
@@ -5528,7 +6197,7 @@ fn pin_lock_migrates_stale_project_record_contracts() {
         serde_json::to_vec_pretty(&current_promotion).unwrap(),
     )
     .unwrap();
-    assert!(!run(&["verify", root_text]).status.success());
+    assert!(run(&["verify", root_text]).status.success());
     assert!(run(&[
         "pin-lock",
         root_text,
@@ -7213,12 +7882,39 @@ esac
     );
     assert_eq!(produced_evidence["exit_status"], 1);
     let repeated = produce(&input_path);
-    assert!(!repeated.status.success());
     assert!(
-        String::from_utf8_lossy(&repeated.stderr).contains("LIFECYCLE_RECORD_EXISTS"),
+        repeated.status.success(),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&repeated.stdout),
         String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated_json: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated_json["reused"], true);
+
+    // A cached producer result is valid only when all three records remain
+    // present.  Removing any one member of the set must fail closed instead
+    // of rerunning the baseline command or treating a partial set as a hit.
+    let worktree_path = root.join(".appsdk/records/worktree-record-app-core.json");
+    let reproduction_path = root.join(".appsdk/records/reproduction-record-app-core.json");
+    let evidence_path = evidence_files[0].clone();
+    for path in [&worktree_path, &reproduction_path, &evidence_path] {
+        let saved = fs::read(path).unwrap();
+        fs::remove_file(path).unwrap();
+        let partial = produce(&input_path);
+        assert!(!partial.status.success(), "missing {:?} must fail", path);
+        assert!(
+            String::from_utf8_lossy(&partial.stderr).contains("PRODUCER_RECORD_SET_INCOMPLETE"),
+            "path={:?} stderr={}",
+            path,
+            String::from_utf8_lossy(&partial.stderr)
+        );
+        fs::write(path, saved).unwrap();
+    }
+    let restored = produce(&input_path);
+    assert!(restored.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&restored.stdout).unwrap()["reused"],
+        true
     );
     fs::remove_file(input_path).unwrap();
     fs::remove_dir_all(root).unwrap();

@@ -366,6 +366,35 @@ All user inputs—whether bug reports or new feature requests—are tracked thro
   ```
 - **Legacy Compatibility**: Tasks with empty, `none`, or `legacy-*` `issue_id` are exempt from retroactive bug tracking enforcement.
 
+### 4. Stage gates: re-entry and reuse
+
+Treat each lifecycle phase as its own persisted gate. The phase projection is
+bound to the candidate/tree, module scope, dependencies, artifact and
+environment, map hashes, evidence IDs, and phase-specific mainline or cleanup
+identity. On a new invocation, validate the current projection and upstream
+records before doing work.
+
+- A matching PASS projection with unexpired evidence returns `reused: true`
+  and skips the external action that produced it. Keep the lightweight
+  integrity, identity, and freshness checks; `reused` is not fresh test,
+  deployment, merge, or publication evidence.
+- If any bound input drifts, the current phase and its downstream phases are
+  stale. Keep the immutable PASS record and produce a new candidate-bound
+  projection; do not rewrite or downgrade the old record.
+- `fail`, `unknown`, malformed, and expired records never count as PASS. The
+  same non-PASS identity returns `LIFECYCLE_CHAIN_STAGE_NOT_PASS`; a changed
+  identity archives the prior projection and re-enters the phase. Attempt
+  history is append-only at
+  `.appsdk/records/attempts/<module>/<phase>.jsonl` and is itself validated.
+- `produce-lifecycle-records` reuses the Worktree/Reproduction/baseline set
+  only when all three records and the complete declaration match. A partial
+  set or drift is an explicit failure; never fill a missing record from a
+  guessed cache. `verify` may reread the full graph for integrity without
+  rerunning external commands.
+
+This staged reuse is part of AppSDK quality governance and has no dependency on
+Collab, tmux, Codex TUI, Desktop, or a particular agent runtime.
+
 ## Long-Horizon Goal Subscription & Master Saturation
 
 `collab init` / `whoami` returns `role_brief`; treat it as the active contract.

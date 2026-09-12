@@ -11,7 +11,7 @@
     "fix_candidate_id": {"type": "string"},
     "pre_review_validation_id": {"type": "string"},
     "reviewer": {"type": "object", "required": ["adapter", "identity"], "properties": {"adapter": {"type": "string"}, "identity": {"type": "string"}}},
-    "verdict": {"enum": ["pass", "fail", "new_version_required", "manual_auth_required"]},
+    "verdict": {"enum": ["pass", "fail", "unknown", "new_version_required", "manual_auth_required"]},
     "evidence_ids": {"type": "array", "items": {"type": "string"}},
     "reviewed_commit": {"type": "string"},
     "reviewed_tree_hash": {"type": "string"},

@@ -824,6 +824,172 @@ fn assert_version(value: &str, error: &str) {
     }
 }
 
+fn canonical_record_contract(relative: &str) -> Value {
+    let content = SDK_BUNDLE_RESOURCES
+        .iter()
+        .find(|(path, class, _)| *path == relative && *class == "contracts")
+        .map(|(_, _, content)| *content)
+        .unwrap_or_else(|| fail("NON_CANONICAL_RECORD_CONTRACT_SET"));
+    serde_json::from_str(content).unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"))
+}
+
+fn schema_array_contains(values: &Value, expected: &Value) -> bool {
+    values
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| entry == expected))
+}
+
+fn schema_required_names<'a>(schema: &'a Value, path: &str) -> &'a Vec<Value> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail(format!("INVALID_DECLARED_RECORD_CONTRACT:{}", path)))
+}
+
+fn assert_schema_property_compatible(canonical: &Value, declared: &Value, path: &str) {
+    if !canonical.is_object() || !declared.is_object() {
+        fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+    }
+    for key in [
+        "type",
+        "const",
+        "minimum",
+        "maximum",
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "uniqueItems",
+    ] {
+        let Some(expected) = canonical.get(key) else {
+            continue;
+        };
+        let Some(actual) = declared.get(key) else {
+            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        };
+        let compatible = match key {
+            "minimum" | "minItems" | "minLength" => actual
+                .as_f64()
+                .is_some_and(|value| expected.as_f64().is_some_and(|minimum| value >= minimum)),
+            "maximum" | "maxItems" | "maxLength" => actual
+                .as_f64()
+                .is_some_and(|value| expected.as_f64().is_some_and(|maximum| value <= maximum)),
+            _ => actual == expected,
+        };
+        if !compatible {
+            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        }
+    }
+    if let Some(expected_enum) = canonical.get("enum") {
+        let Some(actual_enum) = declared.get("enum") else {
+            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        };
+        let Some(expected_values) = expected_enum.as_array() else {
+            fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
+        };
+        let Some(actual_values) = actual_enum.as_array() else {
+            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        };
+        if actual_values.is_empty()
+            || actual_values
+                .iter()
+                .any(|value| !expected_values.iter().any(|entry| entry == value))
+        {
+            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+        }
+    }
+    if let Some(expected_items) = canonical.get("items") {
+        let actual_items = declared
+            .get("items")
+            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path)));
+        assert_schema_property_compatible(expected_items, actual_items, &format!("{path}/items"));
+    }
+    if let Some(expected_props) = canonical.get("properties").and_then(Value::as_object) {
+        let actual_props = declared
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path)));
+        let expected_required = canonical
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (name, expected_property) in expected_props {
+            let Some(actual_property) = actual_props.get(name) else {
+                if expected_required
+                    .iter()
+                    .any(|required| required.as_str() == Some(name.as_str()))
+                {
+                    fail(format!(
+                        "DECLARED_RECORD_CONTRACT_MISMATCH:{path}/properties/{name}"
+                    ));
+                }
+                continue;
+            };
+            assert_schema_property_compatible(
+                expected_property,
+                actual_property,
+                &format!("{path}/properties/{name}"),
+            );
+        }
+    }
+    if let Some(expected_required) = canonical.get("required") {
+        let actual_required = declared
+            .get("required")
+            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path)));
+        for required in expected_required
+            .as_array()
+            .unwrap_or_else(|| fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path)))
+        {
+            if !schema_array_contains(actual_required, required) {
+                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
+            }
+        }
+    }
+}
+
+fn assert_record_schema_minimum(relative: &str, declared: &Value) {
+    let canonical = canonical_record_contract(relative);
+    let canonical_required = schema_required_names(&canonical, relative);
+    let declared_required = schema_required_names(declared, relative);
+    let declared_properties = declared
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("INVALID_DECLARED_RECORD_CONTRACT"));
+    let canonical_properties = canonical
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+    for required in canonical_required {
+        let name = required
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+        let compatibility_exception = relative == "contracts/records/promotion-record.schema.json"
+            && name == "bug_closure_verified";
+        let required_present =
+            schema_array_contains(&Value::Array(declared_required.clone()), required);
+        let declared_property = declared_properties.get(name);
+        if (!required_present || declared_property.is_none()) && compatibility_exception {
+            continue;
+        }
+        if !required_present || declared_property.is_none() {
+            fail(format!(
+                "DECLARED_RECORD_CONTRACT_MISMATCH:{relative}:{name}"
+            ));
+        }
+        let canonical_property = canonical_properties
+            .get(name)
+            .unwrap_or_else(|| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
+        assert_schema_property_compatible(
+            canonical_property,
+            declared_property.unwrap(),
+            &format!("{relative}/properties/{name}"),
+        );
+    }
+}
+
 fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     let zone = contract_root(root, project, "/governance/zone_transition_contract");
     let canonical_zone = project
@@ -892,21 +1058,84 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     };
     let zone_value: Value =
         serde_json::from_str(&zone_text).unwrap_or_else(|_| fail("INVALID_DECLARED_ZONE_CONTRACT"));
-    if zone_value.pointer("/zones")
-        != Some(&serde_json::json!([
-            "playground",
-            "active",
-            "protected",
-            "generated"
-        ]))
-        || zone_value
-            .pointer("/transitions")
-            .and_then(Value::as_array)
-            .map(|v| v.len())
-            .unwrap_or(0)
-            < 16
+    let canonical_zone: Value = serde_json::from_str(CANONICAL_ZONE_TRANSITION_CONTRACT)
+        .unwrap_or_else(|_| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+    if zone_value.get("zones") != canonical_zone.get("zones") {
+        fail("INVALID_DECLARED_ZONE_CONTRACT");
+    }
+    let declared_transitions = zone_value
+        .get("transitions")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+    let canonical_transitions = canonical_zone
+        .get("transitions")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+    if declared_transitions.len() < canonical_transitions.len()
+        || canonical_transitions
+            .iter()
+            .any(|expected| !declared_transitions.iter().any(|actual| actual == expected))
     {
         fail("INVALID_DECLARED_ZONE_CONTRACT");
+    }
+    for transition in declared_transitions {
+        let object = transition
+            .as_object()
+            .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+        for field in ["from", "to", "owner"] {
+            if object
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                fail("INVALID_DECLARED_ZONE_CONTRACT");
+            }
+        }
+        if object.get("allowed").and_then(Value::as_bool).is_none()
+            || object
+                .get("runtime_allowed")
+                .and_then(Value::as_bool)
+                .is_none()
+            || object
+                .get("artifact_required")
+                .and_then(Value::as_bool)
+                .is_none()
+            || object
+                .get("requirements")
+                .and_then(Value::as_array)
+                .is_none()
+            || object
+                .get("record_required")
+                .and_then(Value::as_array)
+                .is_none()
+        {
+            fail("INVALID_DECLARED_ZONE_CONTRACT");
+        }
+        for field in ["requirements", "record_required"] {
+            if object[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str().is_none())
+            {
+                fail("INVALID_DECLARED_ZONE_CONTRACT");
+            }
+        }
+    }
+    if let Some(expected_forbidden) = canonical_zone.get("forbidden_runtime_edges") {
+        let actual_forbidden = zone_value
+            .get("forbidden_runtime_edges")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+        if !expected_forbidden
+            .as_array()
+            .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"))
+            .iter()
+            .all(|expected| actual_forbidden.iter().any(|actual| actual == expected))
+        {
+            fail("INVALID_DECLARED_ZONE_CONTRACT");
+        }
     }
     let canonical_path = zone.with_file_name("zone-transition.manifest.json");
     let canonical_path = if canonical_path == zone {
@@ -914,11 +1143,6 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     } else {
         canonical_path
     };
-    let canonical_value: Value = serde_json::from_str(CANONICAL_ZONE_TRANSITION_CONTRACT)
-        .unwrap_or_else(|_| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
-    if canonical_project && zone_value != canonical_value {
-        fail("DECLARED_ZONE_CONTRACT_MISMATCH");
-    }
     if strict && !canonical_path.exists() {
         fail("CANONICAL_ZONE_CONTRACT_MISSING");
     }
@@ -938,76 +1162,31 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         };
         let value: Value = serde_json::from_str(&text)
             .unwrap_or_else(|_| fail("INVALID_DECLARED_RECORD_CONTRACT"));
-        let canonical_text = match relative {
-            "contracts/records/worktree-record.schema.json" => {
-                include_str!("../../contracts/records/worktree-record.schema.json")
-            }
-            "contracts/records/reproduction-record.schema.json" => {
-                include_str!("../../contracts/records/reproduction-record.schema.json")
-            }
-            "contracts/records/evidence-record.schema.json" => {
-                include_str!("../../contracts/records/evidence-record.schema.json")
-            }
-            "contracts/records/goal-clarification-record.schema.json" => {
-                include_str!("../../contracts/records/goal-clarification-record.schema.json")
-            }
-            "contracts/records/fix-candidate-record.schema.json" => {
-                include_str!("../../contracts/records/fix-candidate-record.schema.json")
-            }
-            "contracts/records/review-record.schema.json" => {
-                include_str!("../../contracts/records/review-record.schema.json")
-            }
-            "contracts/records/effectiveness-record.schema.json" => {
-                include_str!("../../contracts/records/effectiveness-record.schema.json")
-            }
-            "contracts/records/pre-review-validation-record.schema.json" => {
-                include_str!("../../contracts/records/pre-review-validation-record.schema.json")
-            }
-            "contracts/records/collaboration-record.schema.json" => {
-                include_str!("../../contracts/records/collaboration-record.schema.json")
-            }
-            "contracts/records/collaboration-index.schema.json" => {
-                include_str!("../../contracts/records/collaboration-index.schema.json")
-            }
-            "contracts/records/merge-queue-record.schema.json" => {
-                include_str!("../../contracts/records/merge-queue-record.schema.json")
-            }
-            "contracts/records/merge-queue-state.schema.json" => {
-                include_str!("../../contracts/records/merge-queue-state.schema.json")
-            }
-            "contracts/records/integration-record.schema.json" => {
-                include_str!("../../contracts/records/integration-record.schema.json")
-            }
-            "contracts/records/mainline-receipt-record.schema.json" => {
-                include_str!("../../contracts/records/mainline-receipt-record.schema.json")
-            }
-            "contracts/records/merge-record.schema.json" => {
-                include_str!("../../contracts/records/merge-record.schema.json")
-            }
-            "contracts/records/promotion-record.schema.json" => {
-                include_str!("../../contracts/records/promotion-record.schema.json")
-            }
-            "contracts/records/regression-report.schema.json" => {
-                include_str!("../../contracts/records/regression-report.schema.json")
-            }
-            "contracts/records/freeze-record.schema.json" => {
-                include_str!("../../contracts/records/freeze-record.schema.json")
-            }
-            "contracts/records/record-graph.contract.json" => {
-                include_str!("../../contracts/records/record-graph.contract.json")
-            }
-            _ => fail("NON_CANONICAL_RECORD_CONTRACT_SET"),
-        };
-        let canonical_value: Value = serde_json::from_str(canonical_text)
-            .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
-        if value != canonical_value {
-            fail("DECLARED_RECORD_CONTRACT_MISMATCH");
-        }
-        if value.get("$schema").and_then(Value::as_str).is_none()
-            || value.get("type").and_then(Value::as_str).is_none()
+        let schema = value
+            .get("$schema")
+            .and_then(Value::as_str)
+            .filter(|schema| !schema.is_empty());
+        let schema_id = value
+            .get("$id")
+            .and_then(Value::as_str)
+            .filter(|schema_id| !schema_id.is_empty());
+        let schema_type = value.get("type").and_then(Value::as_str);
+        let properties = value.get("properties").and_then(Value::as_object);
+        let required = value.get("required").and_then(Value::as_array);
+        if schema.is_none()
+            || schema_id.is_none()
+            || schema_type != Some("object")
+            || properties.is_none()
+            || required.is_none_or(|values| {
+                values.is_empty()
+                    || values
+                        .iter()
+                        .any(|entry| entry.as_str().filter(|name| !name.is_empty()).is_none())
+            })
         {
             fail("INVALID_DECLARED_RECORD_CONTRACT");
         }
+        assert_record_schema_minimum(relative, &value);
     }
 }
 
@@ -5124,6 +5303,197 @@ fn assert_recovered_record_bindings(
     }
 }
 
+fn producer_read_record_if_present(target: &Path, error: &str) -> Option<Value> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error_value) if error_value.kind() == ErrorKind::NotFound => return None,
+        Err(_) => fail(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        fail(error);
+    }
+    Some(
+        serde_json::from_str(&fs::read_to_string(target).unwrap_or_else(|_| fail(error)))
+            .unwrap_or_else(|_| fail(error)),
+    )
+}
+
+fn producer_without_fields(value: &Value, fields: &[&str]) -> Value {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        for field in fields {
+            object.remove(*field);
+        }
+    }
+    value
+}
+
+fn producer_assert_reuse_match(
+    existing: &Value,
+    expected: &Value,
+    ignored_fields: &[&str],
+    error: &str,
+) {
+    if producer_without_fields(existing, ignored_fields)
+        != producer_without_fields(expected, ignored_fields)
+    {
+        fail(error);
+    }
+}
+
+fn producer_try_reuse_records(
+    root: &Path,
+    module_id: &str,
+    input: &Value,
+    base_ref: &str,
+    base_commit: &str,
+    head_commit: &str,
+    branch: &str,
+    scope_hash: &str,
+    worktree_id: &str,
+    reproduction_id: &str,
+    baseline_id: &str,
+    input_hashes: &[String],
+    command: &Value,
+    expected_status: i32,
+    expected_error_token: &str,
+) -> Option<Vec<(PathBuf, Value)>> {
+    if producer_transaction_dir(root, module_id).exists() {
+        return None;
+    }
+    let records_root = root.join(".appsdk").join("records");
+    let targets = [
+        records_root.join(module_record_name("worktree-record", module_id)),
+        records_root.join(module_record_name("reproduction-record", module_id)),
+        records_root
+            .join("evidence")
+            .join(module_id)
+            .join(format!("{}.json", baseline_id)),
+    ];
+    let mut existing = Vec::with_capacity(targets.len());
+    let mut saw_missing = false;
+    for target in &targets {
+        assert_no_symlink_components(root, target, "record_control");
+        if let Some(record) =
+            producer_read_record_if_present(target, "PRODUCER_RECORD_REUSE_TARGET_INVALID")
+        {
+            existing.push(record);
+        } else {
+            saw_missing = true;
+        }
+    }
+    if saw_missing {
+        if existing.is_empty() {
+            return None;
+        }
+        fail("PRODUCER_RECORD_SET_INCOMPLETE");
+    }
+
+    let worktree = input
+        .get("worktree")
+        .unwrap_or_else(|| fail("PRODUCER_WORKTREE_MISSING"));
+    let reproduction = input
+        .get("reproduction")
+        .unwrap_or_else(|| fail("PRODUCER_REPRODUCTION_MISSING"));
+    let baseline = input
+        .get("baseline_evidence")
+        .unwrap_or_else(|| fail("PRODUCER_BASELINE_EVIDENCE_MISSING"));
+    let issue_id = producer_issue(worktree, "/issue_id", "INVALID_WORKTREE_RECORD");
+    let bug_triage = worktree.get("bug_triage");
+    let mut expected_worktree = worktree.clone();
+    expected_worktree["worktree_id"] = Value::String(worktree_id.to_string());
+    expected_worktree["module_id"] = Value::String(module_id.to_string());
+    expected_worktree["base_ref"] = Value::String(base_ref.to_string());
+    expected_worktree["base_commit"] = Value::String(base_commit.to_string());
+    expected_worktree["branch"] = Value::String(branch.to_string());
+    expected_worktree["head_commit"] = Value::String(head_commit.to_string());
+    expected_worktree["initial_clean"] = Value::Bool(true);
+    expected_worktree["final_clean"] = Value::Bool(true);
+    expected_worktree["isolation_mode"] = Value::String("isolated_worktree".into());
+    expected_worktree["scope_hash"] = Value::String(scope_hash.to_string());
+    if let Some(triage) = bug_triage {
+        expected_worktree["bug_triage_query_binding"] =
+            Value::String(sha256(&canonical(&serde_json::json!({
+                "issue_id": issue_id,
+                "query": triage["query"],
+                "mode": triage["mode"],
+                "reopened_from_issue_id": triage["reopened_from_issue_id"]
+            }))));
+    }
+    producer_assert_reuse_match(
+        &existing[0],
+        &expected_worktree,
+        &["created_at"],
+        "PRODUCER_REUSE_WORKTREE_MISMATCH",
+    );
+    assert_bug_tracker_triage_evidence(&existing[0], &issue_id, None, true);
+
+    let mut expected_reproduction = reproduction.clone();
+    expected_reproduction["reproduction_id"] = Value::String(reproduction_id.to_string());
+    expected_reproduction["issue_id"] = Value::String(issue_id.clone());
+    expected_reproduction["module_id"] = Value::String(module_id.to_string());
+    expected_reproduction["worktree_id"] = Value::String(worktree_id.to_string());
+    expected_reproduction["base_commit"] = Value::String(base_commit.to_string());
+    expected_reproduction["input_hashes"] = serde_json::json!(input_hashes);
+    expected_reproduction["baseline_evidence_id"] = Value::String(baseline_id.to_string());
+    expected_reproduction["first_divergence"] =
+        Value::String(format!("baseline_error_token:{}", expected_error_token));
+    expected_reproduction["result"] = Value::String("reproduced".into());
+    producer_assert_reuse_match(
+        &existing[1],
+        &expected_reproduction,
+        &["created_at"],
+        "PRODUCER_REUSE_REPRODUCTION_MISMATCH",
+    );
+
+    let mut expected_baseline = baseline.clone();
+    expected_baseline["issue_id"] = Value::String(issue_id);
+    expected_baseline["source_commit"] = Value::String(base_commit.to_string());
+    expected_baseline["evidence_id"] = Value::String(baseline_id.to_string());
+    expected_baseline["input_hashes"] = serde_json::json!(input_hashes);
+    expected_baseline["producer"] = serde_json::json!({
+        "adapter": "appsdk",
+        "identity": "appsdk-lifecycle-record-producer"
+    });
+    expected_baseline["result"] = Value::String("pass".into());
+    expected_baseline["command"] = command.clone();
+    expected_baseline["exit_status"] = Value::Number(expected_status.into());
+    expected_baseline["phase"] = Value::String("baseline_reproduction".into());
+    expected_baseline["scope_hash"] = Value::String(scope_hash.to_string());
+    producer_assert_reuse_match(
+        &existing[2],
+        &expected_baseline,
+        &["created_at", "expires_at", "output_hash"],
+        "PRODUCER_REUSE_BASELINE_MISMATCH",
+    );
+    if existing[2]
+        .get("output_hash")
+        .and_then(Value::as_str)
+        .is_none_or(|hash| {
+            hash.len() != 71
+                || !hash.starts_with("sha256:")
+                || !hash[7..]
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        })
+    {
+        fail("PRODUCER_REUSE_BASELINE_OUTPUT_INVALID");
+    }
+    assert_evidence_record(&existing[2], baseline_id, Utc::now());
+    let now = Utc::now();
+    for (record, name) in [
+        (&existing[0], "worktree-record"),
+        (&existing[1], "reproduction-record"),
+        (&existing[2], baseline_id),
+    ] {
+        if record_time(record, name) > now {
+            fail("PRODUCER_REUSE_RECORD_FUTURE");
+        }
+    }
+
+    Some(targets.into_iter().zip(existing).collect())
+}
+
 fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_project_root_safe(root);
     assert_mutation_worktree(root);
@@ -5170,20 +5540,6 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     // still delayed until all current-candidate gates have passed below.
     producer_record_transaction_validate_marker(root, module_id, &input_hash);
     let records_root = root.join(".appsdk").join("records");
-    if !producer_transaction_dir(root, module_id).exists() {
-        for target in [
-            records_root.join(module_record_name("worktree-record", module_id)),
-            records_root.join(module_record_name("reproduction-record", module_id)),
-        ] {
-            assert_no_symlink_components(root, &target, "record_control");
-            if target.exists() {
-                fail(format!(
-                    "LIFECYCLE_RECORD_EXISTS:{}",
-                    target.strip_prefix(root).unwrap_or(&target).display()
-                ));
-            }
-        }
-    }
     let worktree = input
         .get("worktree")
         .unwrap_or_else(|| fail("PRODUCER_WORKTREE_MISSING"));
@@ -5269,38 +5625,6 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
             .is_some_and(|path| path == current_root)
     }) {
         fail("PRODUCER_WORKTREE_NOT_REGISTERED");
-    }
-    let status = git_value(
-        root,
-        &["status", "--porcelain", "--untracked-files=all"],
-        "PRODUCER_VCS_UNAVAILABLE",
-    );
-    if !status.is_empty() {
-        let transaction = producer_transaction_dir(root, module_id);
-        let marker_path = transaction.join("marker.json");
-        let transaction_targets = fs::read_to_string(marker_path)
-            .ok()
-            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
-            .and_then(|marker| marker.get("records").cloned())
-            .and_then(|records| records.as_array().cloned())
-            .map(|records| {
-                records
-                    .iter()
-                    .filter_map(|entry| entry.get("target").and_then(Value::as_str))
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            });
-        let transaction_only = status.lines().all(|line| {
-            line.get(3..).map(str::trim).is_some_and(|path| {
-                transaction_targets
-                    .as_ref()
-                    .is_some_and(|targets| targets.iter().any(|target| target == path))
-                    || path.starts_with(&format!(".appsdk/transactions/producer-{}/", module_id))
-            })
-        });
-        if !transaction_only {
-            fail("PRODUCER_WORKTREE_DIRTY");
-        }
     }
     let base_commit = producer_string(worktree, "/base_commit", "INVALID_WORKTREE_RECORD");
     let head_commit = producer_string(worktree, "/head_commit", "INVALID_WORKTREE_RECORD");
@@ -5423,6 +5747,77 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         }),
     );
     let targets = producer_record_targets(root, module_id, &input, &baseline_id);
+    let status = git_value(
+        root,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "PRODUCER_VCS_UNAVAILABLE",
+    );
+    if !status.is_empty() {
+        let allowed_targets = targets
+            .iter()
+            .filter_map(|(target, _)| target.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        let transaction = producer_transaction_dir(root, module_id);
+        let marker_path = transaction.join("marker.json");
+        let transaction_targets = fs::read_to_string(marker_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .and_then(|marker| marker.get("records").cloned())
+            .and_then(|records| records.as_array().cloned())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter_map(|entry| entry.get("target").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            });
+        let status_only = status.lines().all(|line| {
+            line.get(3..).map(str::trim).is_some_and(|path| {
+                allowed_targets.iter().any(|target| target == path)
+                    || transaction_targets
+                        .as_ref()
+                        .is_some_and(|targets| targets.iter().any(|target| target == path))
+                    || path.starts_with(&format!(".appsdk/transactions/producer-{}/", module_id))
+            })
+        });
+        if !status_only {
+            fail("PRODUCER_WORKTREE_DIRTY");
+        }
+    }
+    if let Some(reused) = producer_try_reuse_records(
+        root,
+        module_id,
+        &input,
+        &base_ref,
+        &base_commit,
+        &head_commit,
+        &current_branch,
+        &expected_scope_hash,
+        &worktree_id,
+        &reproduction_id,
+        &baseline_id,
+        &input_hashes,
+        &command_declaration,
+        expected_status,
+        &expected_error_token,
+    ) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "module_id": module_id,
+                "goal_id": input["goal_id"],
+                "reused": true,
+                "records": reused.iter().map(|(target, record)| serde_json::json!({
+                    "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
+                    "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
+                })).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        );
+        return;
+    }
     // Validate the declaration before creating a temporary worktree. The
     // baseline checkout must be disposable even when its directory is
     // malformed or absent at the declared source commit.
@@ -5691,22 +6086,248 @@ fn lifecycle_chain_candidate(root: &Path, module_id: &str) -> (Value, Value, Val
     (worktree, reproduction, candidate, validation)
 }
 
-fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record: &Value) {
-    let target = root
-        .join(".appsdk")
+fn lifecycle_chain_record_path(root: &Path, module_id: &str, kind: &str) -> PathBuf {
+    root.join(".appsdk")
         .join("records")
-        .join(module_record_name(kind, module_id));
+        .join(module_record_name(kind, module_id))
+}
+
+fn lifecycle_chain_read_record_if_present(
+    root: &Path,
+    module_id: &str,
+    kind: &str,
+) -> Option<Value> {
+    let target = lifecycle_chain_record_path(root, module_id, kind);
+    assert_no_symlink_components(root, &target, "lifecycle_chain_record");
+    producer_read_record_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
+}
+
+fn lifecycle_chain_record_is_pass(kind: &str, record: &Value) -> bool {
+    let result = record.get("result").and_then(Value::as_str);
+    let verdict = record.get("verdict").and_then(Value::as_str);
+    // A contradictory status must never become a cache hit.  Promotion records
+    // historically derive PASS from their gate set, while newer projections may
+    // also carry an explicit result; every present status must agree.
+    if record.get("result").is_some_and(|value| !value.is_string())
+        || record
+            .get("verdict")
+            .is_some_and(|value| !value.is_string())
+    {
+        return false;
+    }
+    if result.is_some_and(|value| value != "pass") || verdict.is_some_and(|value| value != "pass") {
+        return false;
+    }
+    match kind {
+        "review-record" => verdict == Some("pass"),
+        "promotion-record" => {
+            let gates_pass = record
+                .get("required_gate_results")
+                .and_then(Value::as_array)
+                .is_some_and(|gates| {
+                    !gates.is_empty()
+                        && gates
+                            .iter()
+                            .all(|gate| gate.get("result").and_then(Value::as_str) == Some("pass"))
+                });
+            result == Some("pass") || verdict == Some("pass") || gates_pass
+        }
+        _ => result == Some("pass"),
+    }
+}
+
+fn lifecycle_chain_attempt_path(root: &Path, module_id: &str, kind: &str) -> PathBuf {
+    root.join(".appsdk")
+        .join("records")
+        .join("attempts")
+        .join(module_id)
+        .join(format!("{}.jsonl", kind))
+}
+
+fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, record: &Value) {
+    let target = lifecycle_chain_attempt_path(root, module_id, kind);
+    assert_no_symlink_components(root, &target, "lifecycle_chain_attempt");
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
+    }
+
+    let record_hash = sha256(&canonical(record));
+    let attempt_id = producer_stable_id(
+        "lifecycle-attempt",
+        &serde_json::json!({
+            "module_id": module_id,
+            "phase": kind,
+            "record_hash": record_hash
+        }),
+    );
+    if target.is_file() {
+        let contents = fs::read_to_string(&target)
+            .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+        let mut matching_attempt = false;
+        let mut seen_attempt_ids = BTreeSet::new();
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+            }
+            let existing: Value = serde_json::from_str(line)
+                .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+            if existing.get("schema_version").and_then(Value::as_u64) != Some(1)
+                || existing.get("module_id").and_then(Value::as_str) != Some(module_id)
+                || existing.get("phase").and_then(Value::as_str) != Some(kind)
+                || existing.get("result").and_then(Value::as_str) != Some("non_pass")
+                || existing.get("attempt_id").and_then(Value::as_str).is_none()
+                || existing.get("record").is_none()
+                || existing
+                    .get("record_hash")
+                    .and_then(Value::as_str)
+                    .is_none()
+                || existing
+                    .get("archived_at")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+            {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+            }
+            let archived_at = existing.get("archived_at").and_then(Value::as_str).unwrap();
+            let archived_at = DateTime::parse_from_rfc3339(archived_at)
+                .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"))
+                .with_timezone(&Utc);
+            if archived_at > Utc::now() {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+            }
+            let existing_attempt_id = existing.get("attempt_id").and_then(Value::as_str).unwrap();
+            if !seen_attempt_ids.insert(existing_attempt_id.to_string()) {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+            }
+            let existing_record = existing
+                .get("record")
+                .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+            let existing_record_hash = sha256(&canonical(existing_record));
+            let stored_record_hash = existing.get("record_hash").and_then(Value::as_str).unwrap();
+            if stored_record_hash != existing_record_hash {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+            }
+            let expected_existing_attempt_id = producer_stable_id(
+                "lifecycle-attempt",
+                &serde_json::json!({
+                    "module_id": module_id,
+                    "phase": kind,
+                    "record_hash": existing_record_hash
+                }),
+            );
+            if existing.get("attempt_id").and_then(Value::as_str)
+                != Some(expected_existing_attempt_id.as_str())
+            {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+            }
+            if expected_existing_attempt_id == attempt_id {
+                if existing_record_hash != record_hash || existing_record != record {
+                    fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_CONFLICT");
+                }
+                matching_attempt = true;
+            }
+        }
+        if matching_attempt {
+            return;
+        }
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_WRITE_FAILED"));
+    }
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "module_id": module_id,
+        "phase": kind,
+        "result": "non_pass",
+        "record_hash": record_hash,
+        "record": record,
+        "archived_at": Utc::now().to_rfc3339()
+    });
+    let mut line = serde_json::to_vec(&envelope)
+        .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_WRITE_FAILED"));
+    line.push(b'\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+        .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_WRITE_FAILED"));
+    file.write_all(&line)
+        .and_then(|_| file.sync_all())
+        .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_WRITE_FAILED"));
+    if let Some(parent) = target.parent() {
+        if let Ok(file) = OpenOptions::new().read(true).open(parent) {
+            let _ = file.sync_all();
+        }
+    }
+}
+
+fn lifecycle_chain_assert_reusable_record(
+    existing: &Value,
+    expected: &Value,
+    name: &str,
+    mismatch_error: &str,
+    pass: bool,
+) {
+    if !pass {
+        fail("LIFECYCLE_CHAIN_STAGE_NOT_PASS");
+    }
+    producer_assert_reuse_match(existing, expected, &["created_at"], mismatch_error);
+    let created_at = record_time(existing, name);
+    if created_at > Utc::now() {
+        fail("LIFECYCLE_CHAIN_RECORD_FUTURE");
+    }
+}
+
+fn lifecycle_chain_output(record: &Value, reused: bool) {
+    let mut output = record.clone();
+    output["reused"] = Value::Bool(reused);
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record: &Value) -> bool {
+    let target = lifecycle_chain_record_path(root, module_id, kind);
     assert_no_symlink_components(root, &target, "lifecycle_chain_record");
     if target.exists() {
-        fail(format!(
-            "LIFECYCLE_RECORD_EXISTS:{}",
-            target.strip_prefix(root).unwrap_or(&target).display()
-        ));
+        let existing = producer_read_record_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
+            .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_RECORD_INVALID"));
+        let existing_pass = lifecycle_chain_record_is_pass(kind, &existing);
+        let expected_pass = lifecycle_chain_record_is_pass(kind, record);
+        if existing_pass {
+            if !expected_pass {
+                fail("LIFECYCLE_CHAIN_PASS_IMMUTABLE");
+            }
+            lifecycle_chain_assert_reusable_record(
+                &existing,
+                record,
+                &target.display().to_string(),
+                "LIFECYCLE_CHAIN_RECORD_IDENTITY_MISMATCH",
+                true,
+            );
+            return true;
+        }
+        record_time(&existing, &target.display().to_string());
+        if producer_without_fields(&existing, &["created_at"])
+            == producer_without_fields(record, &["created_at"])
+        {
+            fail("LIFECYCLE_CHAIN_STAGE_NOT_PASS");
+        }
+        lifecycle_chain_append_attempt(root, module_id, kind, &existing);
+        producer_durable_json(
+            target.as_path(),
+            record,
+            "LIFECYCLE_CHAIN_RECORD_WRITE_FAILED",
+        );
+        return false;
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_RECORD_WRITE_FAILED"));
     }
     producer_durable_json(&target, record, "LIFECYCLE_CHAIN_RECORD_WRITE_FAILED");
+    false
 }
 
 fn lifecycle_chain_validate_evidence(
@@ -5751,28 +6372,22 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     assert_goal_confirmed(root);
     assert_lifecycle_producer_map_binding(root, &project, module_id);
     let observation = lifecycle_chain_input(root, input_path, "architecture");
-    let (worktree, _reproduction, candidate, _validation) =
+    let (worktree, _reproduction, candidate, validation) =
         lifecycle_chain_candidate(root, module_id);
-    let artifact = read_module_artifact(root, &project, module_id);
-    module_artifact_matches_project(
-        project
-            .get("modules")
-            .and_then(Value::as_array)
-            .and_then(|modules| {
-                modules.iter().find(|module| {
-                    module.get("module_id").and_then(Value::as_str) == Some(module_id)
-                })
-            })
-            .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id))),
-        &artifact,
-    );
-    assert_pre_review_validation_gate(root, module_id, &artifact);
     let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
     let candidate_id =
         producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
     let candidate_commit = producer_string(&candidate, "/head_commit", "fix-candidate-record.json");
     let candidate_tree = producer_string(&candidate, "/tree_hash", "fix-candidate-record.json");
     let scope_hash = producer_string(&candidate, "/scope_hash", "fix-candidate-record.json");
+    if git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "FIX_CANDIDATE_COMMIT_MISSING",
+    ) != candidate_tree
+    {
+        fail("FIX_CANDIDATE_TREE_MISMATCH");
+    }
     assert_lifecycle_chain_candidate_at_head(
         root,
         &project,
@@ -5780,6 +6395,17 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
         &candidate_commit,
         &candidate_tree,
     );
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    let artifact = read_module_artifact(root, &project, module_id);
+    module_artifact_matches_project(module, &artifact);
     let evidence_ids = lifecycle_chain_required_array(
         &observation,
         "/evidence_ids",
@@ -5826,7 +6452,7 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     );
     if !matches!(
         verdict.as_str(),
-        "pass" | "fail" | "new_version_required" | "manual_auth_required"
+        "pass" | "fail" | "unknown" | "new_version_required" | "manual_auth_required"
     ) {
         fail("ARCHITECTURE_REVIEW_VERDICT_INVALID");
     }
@@ -5849,7 +6475,7 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
         "issue_id": issue_id,
         "promotion_id": promotion_id,
         "fix_candidate_id": candidate_id,
-        "pre_review_validation_id": producer_string(&_validation, "/validation_id", "pre-review-validation-record.json"),
+        "pre_review_validation_id": producer_string(&validation, "/validation_id", "pre-review-validation-record.json"),
         "reviewer": reviewer,
         "verdict": verdict,
         "evidence_ids": evidence_ids,
@@ -5885,8 +6511,37 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     ] {
         producer_string(&review, path, "ARCHITECTURE_REVIEW_RECORD_INVALID");
     }
-    lifecycle_chain_write_record(root, module_id, "review-record", &review);
-    println!("{}", serde_json::to_string_pretty(&review).unwrap());
+    // A cached architecture PASS is valid only while the pre-review validation
+    // it references still passes for the current candidate and artifact.
+    assert_pre_review_validation_gate(root, module_id, &artifact);
+    let review_name = module_record_name("review-record", module_id);
+    if let Some(existing) = lifecycle_chain_read_record_if_present(root, module_id, "review-record")
+    {
+        assert_lifecycle_chain_review_identity(&existing);
+        if lifecycle_chain_record_is_pass("review-record", &existing) {
+            if verdict != "pass" {
+                fail("LIFECYCLE_CHAIN_PASS_IMMUTABLE");
+            }
+            lifecycle_chain_assert_reusable_record(
+                &existing,
+                &review,
+                &review_name,
+                "ARCHITECTURE_REVIEW_IDENTITY_MISMATCH",
+                true,
+            );
+            let existing_time = record_time(&existing, &review_name);
+            for id in &evidence_ids {
+                let evidence = evidence_by_id(root, module_id, id);
+                if record_time(&evidence, id) > existing_time {
+                    fail("ARCHITECTURE_REVIEW_EVIDENCE_DRIFT");
+                }
+            }
+            lifecycle_chain_output(&existing, true);
+            return;
+        }
+    }
+    let reused = lifecycle_chain_write_record(root, module_id, "review-record", &review);
+    lifecycle_chain_output(&review, reused);
 }
 
 fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str) {
@@ -5901,8 +6556,21 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
         lifecycle_chain_candidate(root, module_id);
     let review_name = module_record_name("review-record", module_id);
     let review = read_record(root, &review_name);
+    assert_lifecycle_chain_review_identity(&review);
+    if review.get("verdict").and_then(Value::as_str) != Some("pass") {
+        fail("ARCHITECTURE_REVIEW_NOT_PASS");
+    }
     let artifact = read_module_artifact(root, &project, module_id);
-    assert_fix_architecture_gate(root, module_id, &artifact);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    module_artifact_matches_project(module, &artifact);
     let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
     let candidate_id =
         producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
@@ -6003,8 +6671,31 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
     ] {
         producer_string(&effectiveness, path, "EFFECTIVENESS_RECORD_INVALID");
     }
-    lifecycle_chain_write_record(root, module_id, "effectiveness-record", &effectiveness);
-    println!("{}", serde_json::to_string_pretty(&effectiveness).unwrap());
+    // Reuse still validates the complete upstream architecture gate.  This is
+    // read-only and avoids rerunning any external review/effectiveness action.
+    assert_fix_architecture_gate(root, module_id, &artifact);
+    if let Some(existing) =
+        lifecycle_chain_read_record_if_present(root, module_id, "effectiveness-record")
+    {
+        if lifecycle_chain_record_is_pass("effectiveness-record", &existing) {
+            // A cache hit must satisfy the same complete effectiveness gate
+            // as a downstream consumer.  This catches evidence timestamp or
+            // reference drift before returning reused=true.
+            assert_fix_effectiveness_gate(root, module_id);
+            lifecycle_chain_assert_reusable_record(
+                &existing,
+                &effectiveness,
+                &module_record_name("effectiveness-record", module_id),
+                "EFFECTIVENESS_RECORD_IDENTITY_MISMATCH",
+                true,
+            );
+            lifecycle_chain_output(&existing, true);
+            return;
+        }
+    }
+    let reused =
+        lifecycle_chain_write_record(root, module_id, "effectiveness-record", &effectiveness);
+    lifecycle_chain_output(&effectiveness, reused);
 }
 
 fn assert_lifecycle_chain_promotion_gates(gates: &[Value]) {
@@ -6057,7 +6748,6 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
     let (worktree, _reproduction, candidate, _validation) =
         lifecycle_chain_candidate(root, module_id);
     let effectiveness = read_record(root, &module_record_name("effectiveness-record", module_id));
-    assert_fix_effectiveness_gate(root, module_id);
     let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
     let candidate_id =
         producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
@@ -6110,6 +6800,28 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
         }
         "tested_integration_exact"
     };
+    assert_lifecycle_chain_candidate_at_head(
+        root,
+        &project,
+        module_id,
+        &candidate_commit,
+        &candidate_tree,
+    );
+    if effectiveness.get("result").and_then(Value::as_str) != Some("pass")
+        || effectiveness.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || effectiveness.get("issue_id").and_then(Value::as_str) != Some(&issue_id)
+        || effectiveness
+            .get("fix_candidate_id")
+            .and_then(Value::as_str)
+            != Some(&candidate_id)
+        || effectiveness.get("reviewed_commit").and_then(Value::as_str) != Some(&candidate_commit)
+        || effectiveness
+            .get("reviewed_tree_hash")
+            .and_then(Value::as_str)
+            != Some(&candidate_tree)
+    {
+        fail("POST_ARCHITECTURE_EFFECTIVENESS_MISMATCH");
+    }
     let merge_time = Utc::now();
     let merge_id = producer_stable_id(
         "merge",
@@ -6130,8 +6842,26 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
         "result": "pass",
         "created_at": merge_time.to_rfc3339()
     });
-    lifecycle_chain_write_record(root, module_id, "merge-record", &merge);
-    println!("{}", serde_json::to_string_pretty(&merge).unwrap());
+    let merge_name = module_record_name("merge-record", module_id);
+    // A merge cache hit must continue to prove the effectiveness graph; the
+    // check only reads existing records and Git identity.
+    assert_fix_effectiveness_gate(root, module_id);
+    if let Some(existing) = lifecycle_chain_read_record_if_present(root, module_id, "merge-record")
+    {
+        if lifecycle_chain_record_is_pass("merge-record", &existing) {
+            lifecycle_chain_assert_reusable_record(
+                &existing,
+                &merge,
+                &merge_name,
+                "MERGE_RECORD_IDENTITY_MISMATCH",
+                true,
+            );
+            lifecycle_chain_output(&existing, true);
+            return;
+        }
+    }
+    let reused = lifecycle_chain_write_record(root, module_id, "merge-record", &merge);
+    lifecycle_chain_output(&merge, reused);
 }
 
 fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
@@ -6149,6 +6879,17 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
     let effectiveness = read_record(root, &module_record_name("effectiveness-record", module_id));
     let merge = read_record(root, &module_record_name("merge-record", module_id));
     let artifact = read_module_artifact(root, &project, module_id);
+    let module = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        })
+        .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
+    let parallel_development = assert_development_scenarios(root, &project);
+    module_artifact_matches_project(module, &artifact);
     let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
     let candidate_id =
         producer_string(&candidate, "/fix_candidate_id", "fix-candidate-record.json");
@@ -6158,6 +6899,19 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
     let public_api_hash = producer_string(&artifact, "/public_api_hash", "module-artifact");
     if git_value(root, &["rev-parse", "HEAD"], "PROMOTION_HEAD_UNAVAILABLE") != merge_commit {
         fail("PROMOTION_MERGE_HEAD_MISMATCH");
+    }
+    if merge.get("result").and_then(Value::as_str) != Some("pass")
+        || merge.get("issue_id").and_then(Value::as_str) != Some(&issue_id)
+        || merge.get("module_id").and_then(Value::as_str) != Some(module_id)
+        || merge.get("fix_candidate_id").and_then(Value::as_str) != Some(&candidate_id)
+        || merge.get("effectiveness_id") != effectiveness.get("effectiveness_id")
+        || git_value(
+            root,
+            &["rev-parse", &format!("{}^{{tree}}", merge_commit)],
+            "PROMOTION_MERGE_TREE_UNAVAILABLE",
+        ) != producer_string(&merge, "/merged_tree_hash", "merge-record.json")
+    {
+        fail("MAINLINE_MERGE_RECORD_MISMATCH");
     }
     let experiment_id = producer_string(
         &observation,
@@ -6234,14 +6988,13 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         "/playground_cleanup_record_id",
         "PROMOTION_CLEANUP_MISSING",
     );
-    assert_fix_merge_gate(root, module_id);
     let cleanup = read_record(root, &format!("playground-cleanup-{}.json", cleanup_id));
     if producer_string(&cleanup, "/cleanup_id", "playground-cleanup-record") != cleanup_id {
         fail("PROMOTION_CLEANUP_MISMATCH");
     }
     let promotion_id = lifecycle_chain_promotion_id(&issue_id, module_id, &candidate_id);
     let promotion_time = Utc::now();
-    let promotion = serde_json::json!({
+    let mut promotion = serde_json::json!({
         "promotion_id": promotion_id,
         "issue_id": issue_id,
         "experiment_id": experiment_id,
@@ -6270,10 +7023,64 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         "design_id": producer_string(&observation, "/design_id", "PROMOTION_DESIGN_MISSING"),
         "change_reason_comment": producer_string(&observation, "/change_reason_comment", "PROMOTION_REASON_MISSING"),
         "playground_cleanup_record_id": cleanup_id,
+        // The producer owns the closure claim.  It is written only after the
+        // authoritative git-bug closure check below succeeds; callers cannot
+        // turn this into a cache hit by supplying a boolean in the input.
+        "bug_closure_verified": true,
         "created_at": promotion_time.to_rfc3339()
     });
-    lifecycle_chain_write_record(root, module_id, "promotion-record", &promotion);
-    println!("{}", serde_json::to_string_pretty(&promotion).unwrap());
+    if parallel_development {
+        for (field, error) in [
+            (
+                "collaboration_record_id",
+                "PROMOTION_COLLABORATION_RECORD_MISSING",
+            ),
+            (
+                "merge_queue_record_id",
+                "PROMOTION_MERGE_QUEUE_RECORD_MISSING",
+            ),
+            (
+                "integration_record_id",
+                "PROMOTION_INTEGRATION_RECORD_MISSING",
+            ),
+            (
+                "mainline_receipt_record_id",
+                "PROMOTION_MAINLINE_RECEIPT_RECORD_MISSING",
+            ),
+        ] {
+            promotion[field] =
+                Value::String(producer_string(&observation, &format!("/{}", field), error));
+        }
+    }
+    // Validate the merge graph before looking for a cached promotion.  In
+    // parallel mode the first promotion has no persisted promotion record yet,
+    // so validate against the candidate projection just constructed.
+    if parallel_development {
+        assert_parallel_merge_gate_for_promotion(root, module_id, &promotion);
+    } else {
+        assert_single_merge_gate(root, module_id);
+    }
+    // A promotion is the closure boundary for a tracked defect.  Validate the
+    // current bug state on every invocation, including cache probes, so a
+    // reopened or otherwise unverifiable issue can never reuse an old PASS.
+    assert_bug_tracker_solution_evidence(root, &issue_id, &promotion);
+    if let Some(existing) =
+        lifecycle_chain_read_record_if_present(root, module_id, "promotion-record")
+    {
+        if lifecycle_chain_record_is_pass("promotion-record", &existing) {
+            lifecycle_chain_assert_reusable_record(
+                &existing,
+                &promotion,
+                &module_record_name("promotion-record", module_id),
+                "PROMOTION_RECORD_IDENTITY_MISMATCH",
+                true,
+            );
+            lifecycle_chain_output(&existing, true);
+            return;
+        }
+    }
+    let reused = lifecycle_chain_write_record(root, module_id, "promotion-record", &promotion);
+    lifecycle_chain_output(&promotion, reused);
 }
 
 fn produce_lifecycle_chain(root: &Path, module_id: &str, phase: &str, input_path: &str) {
@@ -7518,6 +8325,12 @@ fn assert_fix_effectiveness_gate(root: &Path, module_id: &str) {
 }
 
 fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
+    let promotion_name = module_record_name("promotion-record", module_id);
+    let promotion = read_record(root, &promotion_name);
+    assert_parallel_merge_gate_for_promotion(root, module_id, &promotion);
+}
+
+fn assert_parallel_merge_gate_for_promotion(root: &Path, module_id: &str, promotion: &Value) {
     let worktree_name = module_record_name("worktree-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);
@@ -7526,7 +8339,6 @@ fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     let worktree = read_record(root, &worktree_name);
     let candidate = read_record(root, &candidate_name);
     let effectiveness = read_record(root, &effectiveness_name);
-    let promotion = read_record(root, &promotion_name);
     let collaboration_name = format!(
         "collaboration-record-{}.json",
         record_str(&promotion, "/collaboration_record_id", &promotion_name)
@@ -9285,6 +10097,18 @@ fn assert_sdk_resources(root: &Path, required: bool) {
         .get("resources")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_SDK_RESOURCES"));
+    if entries.is_empty() {
+        fail("INVALID_SDK_RESOURCES");
+    }
+    let reset_mode = reset_governance_record_mode(root);
+    let bundle_entries = sdk_bundle_resource_entries();
+    let mut known = BTreeSet::new();
+    for (source, class, _) in &bundle_entries {
+        if !known.insert(format!("{}\0{}", class, source)) {
+            fail("SDK_RESOURCE_BUNDLE_DUPLICATE");
+        }
+    }
+    let mut seen = BTreeSet::new();
     for entry in entries {
         let source = entry
             .get("source")
@@ -9295,6 +10119,18 @@ fn assert_sdk_resources(root: &Path, required: bool) {
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or_else(|| fail("INVALID_SDK_RESOURCES"));
+        let class = entry
+            .get("class")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fail(format!("INVALID_SDK_RESOURCE_CLASS:{}", source)));
+        let key = format!("{}\0{}", class, source);
+        if !known.contains(&key) {
+            fail(format!("SDK_RESOURCE_UNKNOWN:{}", source));
+        }
+        if !seen.insert(key) {
+            fail(format!("SDK_RESOURCE_DUPLICATE:{}", source));
+        }
         let relative_path = Path::new(relative);
         if relative_path.is_absolute()
             || relative_path.components().any(|component| {
@@ -9307,6 +10143,10 @@ fn assert_sdk_resources(root: &Path, required: bool) {
         {
             fail(format!("SDK_RESOURCE_PATH_ESCAPE:{}", relative));
         }
+        let expected_relative = sdk_resource_install_relative(source, class);
+        if relative != expected_relative {
+            fail(format!("SDK_RESOURCE_PATH_MISMATCH:{}", relative));
+        }
         let expected = entry
             .get("digest")
             .and_then(Value::as_str)
@@ -9316,22 +10156,142 @@ fn assert_sdk_resources(root: &Path, required: bool) {
                     && digest[7..].chars().all(|c| c.is_ascii_hexdigit())
             })
             .unwrap_or_else(|| fail(format!("INVALID_SDK_RESOURCE_DIGEST:{}", source)));
-        if entry.get("class").and_then(Value::as_str).is_none() {
-            fail(format!("INVALID_SDK_RESOURCE_CLASS:{}", source));
-        }
         let target = root.join(relative);
         assert_no_symlink_components(root, &target, "sdk_resource_record");
+        if !target.exists() {
+            if reset_mode.is_some() {
+                eprintln!(
+                    "warning: SDK resource missing after authorized governance reset ({})",
+                    relative
+                );
+                continue;
+            }
+            fail(format!("SDK_RESOURCE_MISMATCH:{}", relative));
+        }
         if !target.is_file() || file_sha256(&target, "sdk_resource") != expected {
             fail(format!("SDK_RESOURCE_MISMATCH:{}", relative));
         }
     }
+    for (source, class, _) in bundle_entries {
+        let key = format!("{}\0{}", class, source);
+        if !seen.contains(&key) {
+            if reset_mode.is_some() {
+                eprintln!(
+                    "warning: SDK resource record entry missing after authorized governance reset ({})",
+                    source
+                );
+                continue;
+            }
+            fail(format!("SDK_RESOURCE_RECORD_ENTRY_MISSING:{}", source));
+        }
+    }
+}
+
+fn reset_governance_record_mode(root: &Path) -> Option<String> {
+    let path = root
+        .join(".appsdk")
+        .join("records")
+        .join("reset-governance-record.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(_) => fail("INVALID_RESET_GOVERNANCE_RECORD"),
+    };
+    if metadata.file_type().is_symlink() {
+        fail("GOVERNANCE_PATH_SYMLINK:reset_governance_record");
+    }
+    if !metadata.is_file() {
+        fail("INVALID_RESET_GOVERNANCE_RECORD");
+    }
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(&path).unwrap_or_else(|_| fail("INVALID_RESET_GOVERNANCE_RECORD")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+    if record.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        fail("INVALID_RESET_GOVERNANCE_RECORD");
+    }
+    let mode = record
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "fresh_init" | "discard_legacy_control_plane"))
+        .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+    for key in ["reset_id", "branch"] {
+        if record
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            fail("INVALID_RESET_GOVERNANCE_RECORD");
+        }
+    }
+    if mode == "fresh_init"
+        && record
+            .get("transaction_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        fail("INVALID_RESET_GOVERNANCE_RECORD");
+    }
+    if let Some(transaction_id) = record.get("transaction_id") {
+        if transaction_id
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            fail("INVALID_RESET_GOVERNANCE_RECORD");
+        }
+    }
+    if mode == "fresh_init" && record.get("reset_id") != record.get("transaction_id") {
+        fail("INVALID_RESET_GOVERNANCE_RECORD");
+    }
+    let created_at = record
+        .get("created_at")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+    let created_at = DateTime::parse_from_rfc3339(created_at)
+        .unwrap_or_else(|_| fail("INVALID_RESET_GOVERNANCE_RECORD"))
+        .with_timezone(&Utc);
+    if created_at > Utc::now() {
+        fail("INVALID_RESET_GOVERNANCE_RECORD");
+    }
+    for key in ["preserved", "removed"] {
+        let values = record
+            .get(key)
+            .and_then(Value::as_array)
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+        if values
+            .iter()
+            .any(|entry| entry.as_str().filter(|entry| !entry.is_empty()).is_none())
+        {
+            fail("INVALID_RESET_GOVERNANCE_RECORD");
+        }
+    }
+    Some(mode.to_string())
+}
+
+fn verify_sdk_migration_record(root: &Path) {
+    if reset_governance_record_mode(root).is_some() {
+        let migration_root = sdk_map_migration_root(root);
+        if fs::symlink_metadata(&migration_root).is_ok() {
+            eprintln!(
+                "warning: SDK migration history ignored after authorized governance reset ({})",
+                migration_root.display()
+            );
+        }
+        return;
+    }
+    let _ = assert_sdk_migration_record(root);
 }
 
 fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     assert_project_root_safe(root);
     let project = read_project(root);
     assert_governance_maps(root);
-    let _ = assert_sdk_migration_record(root);
+    verify_sdk_migration_record(root);
     assert_declared_contracts(root, &project, true);
     assert_project_contract(root, &project);
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {

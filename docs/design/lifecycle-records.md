@@ -48,6 +48,39 @@ Required checks:
 
 These checks belong to a record-reference gate. Individual schema validity is insufficient.
 
+## Stage execution, re-entry, and reuse
+
+The lifecycle chain is evaluated one persisted phase at a time. The phase
+projection is bound to the candidate and tree, module scope, dependency
+records, artifact and environment, map hashes, evidence IDs, and any
+mainline/cleanup identity required by that phase.
+
+Each invocation performs a read-only integrity, identity, and evidence-
+freshness check for the current phase and its upstream records. A PASS
+projection with the same complete identity and unexpired evidence is returned
+with `reused: true`; the external action that created that evidence is skipped.
+This is phase-local reuse. It does not claim that tests, deployment, merge, or
+publication ran again. `verify` may therefore reread the complete graph to
+detect tampering or drift without rerunning external commands.
+
+When a candidate, dependency, map, artifact, environment, input, or evidence
+expires, that phase and its downstream phases lose reuse eligibility. The old
+PASS record remains immutable and is not rewritten or downgraded; the next
+attempt must produce a new candidate-bound projection. A non-PASS projection
+(`fail`, `unknown`, or any invalid status) is never a cache hit. Repeating the
+same non-PASS identity returns `LIFECYCLE_CHAIN_STAGE_NOT_PASS`; a changed
+identity archives the previous projection and may re-enter the phase. The
+archive is append-only JSONL at
+`.appsdk/records/attempts/<module>/<phase>.jsonl`, with a record hash and the
+full prior projection. Invalid, conflicting, or edited attempt entries fail
+closed.
+
+The WorktreeRecord, ReproductionRecord, and baseline EvidenceRecord producer
+uses the same phase-local rule. It skips the baseline command only when the
+complete three-record set, declaration, command, identity, output hash, and
+evidence freshness all match. Missing members, partial sets, or drift are
+explicit errors and are never filled from a guessed cache.
+
 ## Evidence freshness
 
 Evidence includes `expires_at`, `input_hashes`, `source_commit`, `artifact_hash`, and `scope_hash`.

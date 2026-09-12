@@ -610,6 +610,63 @@ struct WakeupRecord {
     last_reminder_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MasterWakeSignal {
+    #[serde(rename = "signalId")]
+    signal_id: String,
+    key: String,
+    kind: String,
+    title: String,
+    priority: Priority,
+    summary: String,
+    #[serde(rename = "issueId")]
+    issue_id: Option<String>,
+    source: Option<Address>,
+    #[serde(rename = "observedAt")]
+    observed_at: String,
+    #[serde(rename = "directDispatched")]
+    direct_dispatched: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MasterWakeAccumulator {
+    address: Address,
+    generation: u64,
+    pending: bool,
+    #[serde(rename = "firstObservedAt")]
+    first_observed_at: Option<String>,
+    #[serde(rename = "lastObservedAt")]
+    last_observed_at: Option<String>,
+    #[serde(rename = "nextDueAt")]
+    next_due_at: Option<String>,
+    #[serde(rename = "remindersSent")]
+    reminders_sent: u8,
+    stopped: bool,
+    #[serde(rename = "lastBriefingGeneration")]
+    last_briefing_generation: Option<u64>,
+    #[serde(rename = "lastBriefingAt")]
+    last_briefing_at: Option<String>,
+    #[serde(default)]
+    signals: BTreeMap<String, MasterWakeSignal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MasterWakeSignalRequest {
+    #[serde(rename = "signalId", alias = "signal_id")]
+    signal_id: Option<String>,
+    key: String,
+    kind: String,
+    title: String,
+    priority: String,
+    summary: String,
+    #[serde(default, rename = "issueId", alias = "issue_id")]
+    issue_id: Option<String>,
+    #[serde(default)]
+    source: Option<Address>,
+    #[serde(default, rename = "observedAt", alias = "observed_at")]
+    observed_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BugRecord {
     #[serde(rename = "bugId")]
@@ -671,6 +728,8 @@ struct Projection {
     notifications: BTreeMap<String, NotificationRecord>,
     adapters: BTreeMap<String, AdapterRecord>,
     wakeup: BTreeMap<String, WakeupRecord>,
+    #[serde(default)]
+    master_wake: BTreeMap<String, MasterWakeAccumulator>,
     bugs: BTreeMap<String, BugRecord>,
     loops: BTreeMap<String, LoopRecord>,
     #[serde(default)]
@@ -834,6 +893,7 @@ impl CommunicationStore {
             "bugs": self.projection.bugs.values().collect::<Vec<_>>(),
             "loops": loops,
             "wakeup": self.projection.wakeup.values().collect::<Vec<_>>(),
+            "masterWake": self.projection.master_wake.values().collect::<Vec<_>>(),
             "notificationProjection": {
                 "pending": pending,
                 "emitted": emitted,
@@ -1100,8 +1160,10 @@ impl CommunicationStore {
         if current.state == next {
             if current.role == "master" {
                 self.repair_master_wakeup(&current, &next)?;
+                self.sync_master_wake_schedule(&current.address(), &next, &at)?;
             } else if current.role != "master" && next == AgentState::Idle {
                 let master_address = self.scope_master_address(&current.scope_id)?;
+                self.accumulate_worker_idle(&current, &master_address, &current.last_state_at)?;
                 let notification_key = structured_key(&[
                     &current.address().key(),
                     &master_address.key(),
@@ -1161,6 +1223,7 @@ impl CommunicationStore {
                 }
             };
             self.commit("wakeup.updated", serde_json::to_value(&wakeup).unwrap())?;
+            self.sync_master_wake_schedule(&current.address(), &next, &at)?;
             return Ok(json!({
                 "agent": self.require_agent(&address)?,
                 "idempotent": false,
@@ -1170,6 +1233,7 @@ impl CommunicationStore {
 
         if next == AgentState::Idle {
             let master_address = self.scope_master_address(&current.scope_id)?;
+            self.accumulate_worker_idle(&current, &master_address, &at)?;
             let message = worker_idle_message(&current, master_address, &at);
             let notification = match self.send(message) {
                 Ok(value) => value,
@@ -1182,11 +1246,632 @@ impl CommunicationStore {
             }));
         }
 
+        if next == AgentState::Working {
+            self.clear_worker_idle(&current.address(), &at)?;
+        }
+
         Ok(json!({
             "agent": self.require_agent(&address)?,
             "idempotent": false,
             "notification": Value::Null
         }))
+    }
+
+    fn accumulate_worker_idle(
+        &mut self,
+        worker: &AgentRecord,
+        master: &Address,
+        at: &str,
+    ) -> CommResult<MasterWakeAccumulator> {
+        let source = worker.address();
+        let key = worker_idle_signal_key(&source);
+        let signal = MasterWakeSignal {
+            signal_id: worker_idle_message_id(worker, at),
+            key,
+            kind: "worker_idle".into(),
+            title: format!("worker idle: {}", worker.agent_id),
+            priority: Priority::P2,
+            summary: format!(
+                "{} entered idle; inspect the JSONL facts for its latest result",
+                worker.agent_id
+            ),
+            issue_id: None,
+            source: Some(source),
+            observed_at: validate_time(at)?,
+            direct_dispatched: false,
+        };
+        self.accumulate_master_wake(master, signal)
+    }
+
+    fn clear_worker_idle(&mut self, worker: &Address, at: &str) -> CommResult<()> {
+        let Some(master) = self.scope_master_address_unchecked(&worker.scope_id) else {
+            return Ok(());
+        };
+        self.clear_master_wake_signal(&master, &worker_idle_signal_key(worker), at)
+    }
+
+    fn accumulate_master_wake(
+        &mut self,
+        master: &Address,
+        signal: MasterWakeSignal,
+    ) -> CommResult<MasterWakeAccumulator> {
+        validate_address(master)?;
+        validate_non_empty(&signal.signal_id, "signalId")?;
+        validate_non_empty(&signal.key, "key")?;
+        validate_non_empty(&signal.kind, "kind")?;
+        validate_non_empty(&signal.title, "title")?;
+        validate_non_empty(&signal.summary, "summary")?;
+        if signal.title.chars().count() > 200 {
+            return Err(CommError::new(
+                "master_wake_title_too_long",
+                "master wake signal title must be at most 200 characters",
+            ));
+        }
+        let master_agent = self.require_agent(master)?.clone();
+        if master_agent.role != "master"
+            || self
+                .projection
+                .scopes
+                .get(&master.scope_id)
+                .and_then(|scope| scope.master_session_id.as_deref())
+                != Some(master.session_id.as_str())
+        {
+            return Err(CommError::new(
+                "master_wake_target_required",
+                "master wake accumulator requires the registered scope master",
+            ));
+        }
+
+        let observed_at = validate_time(&signal.observed_at)?;
+        let key = master.key();
+        let existing = self.projection.master_wake.get(&key).cloned();
+        if let Some(existing_signal) = existing
+            .as_ref()
+            .and_then(|accumulator| accumulator.signals.get(&signal.key))
+        {
+            if master_wake_signal_matches(existing_signal, &signal) {
+                return Ok(existing.expect("master wake accumulator exists"));
+            }
+        }
+
+        let mut accumulator = existing.unwrap_or_else(|| MasterWakeAccumulator {
+            address: master.clone(),
+            generation: 0,
+            pending: false,
+            first_observed_at: None,
+            last_observed_at: None,
+            next_due_at: None,
+            reminders_sent: 0,
+            stopped: false,
+            last_briefing_generation: None,
+            last_briefing_at: None,
+            signals: BTreeMap::new(),
+        });
+        accumulator.generation = accumulator.generation.checked_add(1).ok_or_else(|| {
+            CommError::new(
+                "master_wake_generation_exhausted",
+                format!("master wake generation exhausted: {}", master.key()),
+            )
+        })?;
+        accumulator.first_observed_at = accumulator
+            .first_observed_at
+            .clone()
+            .or_else(|| Some(observed_at.clone()));
+        accumulator.last_observed_at = Some(observed_at.clone());
+        accumulator
+            .signals
+            .insert(signal.key.clone(), signal.clone());
+        accumulator.pending = accumulator
+            .signals
+            .values()
+            .any(|value| !value.direct_dispatched);
+        accumulator.reminders_sent = 0;
+        accumulator.stopped = false;
+        accumulator.last_briefing_generation = None;
+        accumulator.last_briefing_at = None;
+        accumulator.next_due_at = if accumulator.pending {
+            if signal.priority.is_breakthrough() || master_agent.state == AgentState::Idle {
+                Some(observed_at)
+            } else {
+                Some(add_seconds(
+                    &signal.observed_at,
+                    DEFAULT_BATCH_WINDOW_SECONDS,
+                )?)
+            }
+        } else {
+            None
+        };
+        self.commit(
+            "master_wake.updated",
+            serde_json::to_value(&accumulator).unwrap(),
+        )?;
+        Ok(accumulator)
+    }
+
+    fn sync_master_wake_schedule(
+        &mut self,
+        master: &Address,
+        state: &AgentState,
+        at: &str,
+    ) -> CommResult<()> {
+        let key = master.key();
+        let Some(existing) = self.projection.master_wake.get(&key).cloned() else {
+            return Ok(());
+        };
+        let mut updated = existing.clone();
+        match state {
+            AgentState::Working => {
+                if updated.pending {
+                    updated.next_due_at = None;
+                }
+            }
+            AgentState::Idle => {
+                if updated.pending && !updated.stopped && updated.next_due_at.is_none() {
+                    updated.next_due_at = Some(validate_time(at)?);
+                }
+            }
+        }
+        if master_wake_accumulator_matches(&existing, &updated) {
+            return Ok(());
+        }
+        self.commit(
+            "master_wake.updated",
+            serde_json::to_value(&updated).unwrap(),
+        )?;
+        Ok(())
+    }
+
+    fn clear_master_wake_signal(
+        &mut self,
+        master: &Address,
+        signal_key: &str,
+        at: &str,
+    ) -> CommResult<()> {
+        let key = master.key();
+        let Some(existing) = self.projection.master_wake.get(&key).cloned() else {
+            return Ok(());
+        };
+        if !existing.signals.contains_key(signal_key) {
+            return Ok(());
+        }
+        let mut updated = existing.clone();
+        updated.signals.remove(signal_key);
+        updated.generation = updated.generation.checked_add(1).ok_or_else(|| {
+            CommError::new(
+                "master_wake_generation_exhausted",
+                format!("master wake generation exhausted: {key}"),
+            )
+        })?;
+        updated.last_observed_at = Some(validate_time(at)?);
+        updated.pending = updated
+            .signals
+            .values()
+            .any(|value| !value.direct_dispatched);
+        updated.next_due_at = if updated.pending {
+            updated.next_due_at.clone()
+        } else {
+            None
+        };
+        self.commit(
+            "master_wake.updated",
+            serde_json::to_value(&updated).unwrap(),
+        )?;
+        Ok(())
+    }
+
+    fn record_master_wake(
+        &mut self,
+        master: Address,
+        request: MasterWakeSignalRequest,
+    ) -> CommResult<Value> {
+        validate_master_wake_signal_request(&request)?;
+        let observed_at = request
+            .observed_at
+            .as_deref()
+            .map(validate_time)
+            .transpose()?
+            .unwrap_or_else(now);
+        let priority = Priority::parse(&request.priority)?;
+        let key = request.key.clone();
+        let signal = MasterWakeSignal {
+            signal_id: request
+                .signal_id
+                .unwrap_or_else(|| structured_key(&[&request.kind, &request.key, &observed_at])),
+            key,
+            kind: request.kind,
+            title: request.title,
+            priority,
+            summary: request.summary,
+            issue_id: request.issue_id,
+            source: request.source,
+            observed_at,
+            direct_dispatched: false,
+        };
+        let idempotent = self
+            .projection
+            .master_wake
+            .get(&master.key())
+            .and_then(|accumulator| accumulator.signals.get(&signal.key))
+            .is_some_and(|existing| master_wake_signal_matches(existing, &signal));
+        let accumulator = self.accumulate_master_wake(&master, signal)?;
+        Ok(json!({
+            "masterWake": accumulator,
+            "idempotent": idempotent
+        }))
+    }
+
+    fn decide_master_wake(
+        &mut self,
+        master: Address,
+        generation: u64,
+        action: &str,
+        at: Option<&str>,
+    ) -> CommResult<Value> {
+        validate_address(&master)?;
+        validate_non_empty(action, "action")?;
+        let actor = self.require_live_agent(&master)?.clone();
+        if actor.role != "master"
+            || self
+                .projection
+                .scopes
+                .get(&master.scope_id)
+                .and_then(|scope| scope.master_session_id.as_deref())
+                != Some(master.session_id.as_str())
+        {
+            return Err(CommError::new(
+                "master_wake_actor_required",
+                "only the registered scope master may decide its wake",
+            ));
+        }
+        let key = master.key();
+        let existing = self
+            .projection
+            .master_wake
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "master_wake_not_found",
+                    format!("master wake not found: {key}"),
+                )
+            })?;
+        if existing.generation != generation {
+            return Err(CommError::new(
+                "master_wake_generation_conflict",
+                format!(
+                    "master wake generation is {}, not {}",
+                    existing.generation, generation
+                ),
+            ));
+        }
+        let at = at.map(validate_time).transpose()?.unwrap_or_else(now);
+        let mut updated = existing;
+        match action.trim().to_ascii_lowercase().as_str() {
+            "hold" => {
+                updated.next_due_at = None;
+            }
+            "dispatch" | "handled" | "complete" | "completed" | "schedule" => {
+                updated.pending = false;
+                updated.next_due_at = None;
+                updated.last_briefing_generation = Some(generation);
+                updated.last_briefing_at = Some(at.clone());
+                updated.reminders_sent = 0;
+                updated.stopped = false;
+                updated.signals.clear();
+            }
+            other => {
+                return Err(CommError::new(
+                    "master_wake_action_invalid",
+                    format!("unsupported master wake action: {other}"),
+                ))
+            }
+        }
+        self.commit(
+            "master_wake.decided",
+            json!({ "accumulator": updated, "action": action, "at": at }),
+        )?;
+        if let Some(wakeup) = self.projection.wakeup.get(&key).cloned() {
+            let mut synchronized = wakeup;
+            synchronized.next_due_at = None;
+            synchronized.stopped = true;
+            self.commit(
+                "wakeup.updated",
+                serde_json::to_value(synchronized).unwrap(),
+            )?;
+        }
+        Ok(json!({
+            "masterWake": self.projection.master_wake.get(&key),
+            "action": action,
+            "generation": generation
+        }))
+    }
+
+    fn scope_master_address_unchecked(&self, scope_id: &str) -> Option<Address> {
+        self.projection
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.master_session_id.as_ref())
+            .map(|session_id| Address {
+                scope_id: scope_id.into(),
+                session_id: session_id.clone(),
+            })
+    }
+
+    fn process_master_wake(
+        &mut self,
+        accumulator: &MasterWakeAccumulator,
+        at: &str,
+    ) -> CommResult<Option<MasterWakeAccumulator>> {
+        if !accumulator.pending
+            || accumulator.stopped
+            || accumulator.reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT
+        {
+            return Ok(None);
+        }
+        let Some(agent) = self.live_idle_master_at(&accumulator.address, at) else {
+            return Ok(None);
+        };
+        let Some(next_due_at) = accumulator.next_due_at.as_deref() else {
+            return Ok(None);
+        };
+        if parse_time(at)? < parse_time(next_due_at)? {
+            return Ok(None);
+        }
+        let reminder = accumulator.reminders_sent + 1;
+        let (message_id, conversation_id) = master_wake_message_identity(accumulator, reminder);
+        let (title, body, priority) = self.master_wake_briefing(accumulator, reminder);
+        let mut message = self.system_message(
+            &agent.address(),
+            title,
+            &format_priority(&priority),
+            &body,
+            "master-wake",
+            at,
+            "mailbox",
+        )?;
+        message.message_id = message_id;
+        message.conversation_id = conversation_id;
+        message.delivery_mode = DeliveryMode::Direct;
+        let message = self.prepare_wakeup_message(message)?;
+        let notification = self.notification_for(&message, at, Some(at))?;
+        let Some(notification) = notification else {
+            return Ok(None);
+        };
+        if notification.status != "emitted" {
+            return Ok(None);
+        }
+
+        let mut next = accumulator.clone();
+        next.reminders_sent = reminder;
+        next.last_briefing_generation = Some(accumulator.generation);
+        next.last_briefing_at = Some(at.into());
+        next.stopped = reminder >= DEFAULT_MASTER_REMINDER_LIMIT;
+        next.next_due_at = if next.stopped {
+            None
+        } else {
+            Some(add_seconds(at, DEFAULT_BATCH_WINDOW_SECONDS)?)
+        };
+        let superseded_keys = self.pending_notification_keys_for_master_wake(accumulator);
+        if !superseded_keys.is_empty() {
+            self.commit(
+                "notification.superseded",
+                json!({
+                    "keys": superseded_keys,
+                    "generation": accumulator.generation,
+                    "reason": "master_wake_briefing"
+                }),
+            )?;
+        }
+        self.commit(
+            "master_wake.briefing",
+            json!({
+                "accumulator": next,
+                "message": message,
+                "notification": notification,
+                "generation": accumulator.generation,
+                "reminder": reminder
+            }),
+        )?;
+        if let Some(wakeup) = self
+            .projection
+            .wakeup
+            .get(&accumulator.address.key())
+            .cloned()
+        {
+            let mut synchronized = wakeup;
+            synchronized.reminders_sent = reminder;
+            synchronized.last_reminder_at = Some(at.into());
+            synchronized.next_due_at = next.next_due_at.clone();
+            synchronized.stopped = next.stopped;
+            self.commit(
+                "wakeup.updated",
+                serde_json::to_value(synchronized).unwrap(),
+            )?;
+        }
+        Ok(Some(next))
+    }
+
+    fn pending_notification_keys_for_master_wake(
+        &self,
+        accumulator: &MasterWakeAccumulator,
+    ) -> Vec<String> {
+        self.projection
+            .notifications
+            .iter()
+            .filter(|(_, notification)| {
+                notification.status == "pending"
+                    && notification.recipient == accumulator.address
+                    && accumulator
+                        .signals
+                        .values()
+                        .any(|signal| master_wake_covers_notification(signal, notification))
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    fn notification_held_for_master_wake(
+        &self,
+        notification: &NotificationRecord,
+    ) -> CommResult<bool> {
+        let Some(master) = self.scope_master_address_unchecked(&notification.recipient.scope_id)
+        else {
+            return Ok(false);
+        };
+        if master != notification.recipient {
+            return Ok(false);
+        }
+        let Some(agent) = self.projection.agents.get(&master.key()) else {
+            return Ok(false);
+        };
+        if agent.role != "master" || agent.state != AgentState::Working {
+            return Ok(false);
+        }
+        Ok(self
+            .projection
+            .master_wake
+            .get(&master.key())
+            .is_some_and(|accumulator| {
+                accumulator.pending
+                    && accumulator
+                        .signals
+                        .values()
+                        .any(|signal| master_wake_covers_notification(signal, notification))
+            }))
+    }
+
+    fn master_wake_briefing(
+        &self,
+        accumulator: &MasterWakeAccumulator,
+        reminder: u8,
+    ) -> (String, String, Priority) {
+        let mut signals: Vec<&MasterWakeSignal> = accumulator
+            .signals
+            .values()
+            .filter(|signal| !signal.direct_dispatched)
+            .collect();
+        signals.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.observed_at.cmp(&right.observed_at))
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        let priority = signals
+            .first()
+            .map(|signal| signal.priority.clone())
+            .unwrap_or(Priority::P1);
+        let title = format!(
+            "master wake: {} update{} (reminder {}/{})",
+            signals.len(),
+            if signals.len() == 1 { "" } else { "s" },
+            reminder,
+            DEFAULT_MASTER_REMINDER_LIMIT
+        );
+        let mut lines = vec![format!(
+            "Generation {} observed {}; inspect mailbox JSONL before dispatching the next loop.",
+            accumulator.generation,
+            accumulator.last_observed_at.as_deref().unwrap_or("unknown")
+        )];
+        if signals.is_empty() {
+            lines.push(
+                "No undelivered signal remains; the direct signal is retained as history.".into(),
+            );
+        } else {
+            lines.push("Signals:".into());
+            for signal in signals.iter().take(12) {
+                lines.push(format!(
+                    "- [{}] {}: {} ({})",
+                    format_priority(&signal.priority),
+                    signal.title,
+                    signal.summary,
+                    signal.kind
+                ));
+            }
+            if signals.len() > 12 {
+                lines.push(format!(
+                    "- ... {} more signals in JSONL",
+                    signals.len() - 12
+                ));
+            }
+        }
+
+        let mut idle_workers: Vec<&AgentRecord> = self
+            .projection
+            .agents
+            .values()
+            .filter(|agent| {
+                agent.scope_id == accumulator.address.scope_id
+                    && agent.role != "master"
+                    && agent.state == AgentState::Idle
+            })
+            .collect();
+        idle_workers.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        lines.push(format!("Idle workers: {}", idle_workers.len()));
+        for worker in idle_workers.iter().take(12) {
+            lines.push(format!(
+                "- {} ({})",
+                worker.agent_id,
+                worker.address().key()
+            ));
+        }
+        if idle_workers.len() > 12 {
+            lines.push(format!(
+                "- ... {} more idle workers in status",
+                idle_workers.len() - 12
+            ));
+        }
+
+        let mut active_bugs: Vec<&BugRecord> = self
+            .projection
+            .bugs
+            .values()
+            .filter(|bug| bug.scope_id == accumulator.address.scope_id && bug.status == "active")
+            .collect();
+        active_bugs.sort_by(|left, right| priority_then_time_bug(left, right));
+        lines.push(format!("Active bugs: {}", active_bugs.len()));
+        for bug in active_bugs.iter().take(12) {
+            lines.push(format!(
+                "- [{}] {}: {} ({})",
+                format_priority(&bug.priority),
+                bug.bug_id,
+                bug.title,
+                bug.loop_id
+            ));
+        }
+        if active_bugs.len() > 12 {
+            lines.push(format!(
+                "- ... {} more active bugs in status",
+                active_bugs.len() - 12
+            ));
+        }
+
+        let mut active_loops: Vec<&LoopRecord> = self
+            .projection
+            .loops
+            .values()
+            .filter(|loop_record| {
+                loop_record.owner.scope_id == accumulator.address.scope_id
+                    && loop_record.status == "active"
+            })
+            .collect();
+        active_loops.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
+        lines.push(format!("Active loops: {}", active_loops.len()));
+        for loop_record in active_loops.iter().take(12) {
+            lines.push(format!(
+                "- {} phase={} iteration={}",
+                loop_record.loop_id, loop_record.phase, loop_record.iteration
+            ));
+        }
+        if active_loops.len() > 12 {
+            lines.push(format!(
+                "- ... {} more loops in status",
+                active_loops.len() - 12
+            ));
+        }
+        lines.push(
+            "Action: consume this generation, prioritize P0/P1, and dispatch only within ownership; use master_wake_decide after a scheduling decision.".into(),
+        );
+        (title, truncate_chars(&lines.join("\n"), 3_600), priority)
     }
 
     fn repair_master_wakeup(
@@ -1277,9 +1962,27 @@ impl CommunicationStore {
 
     pub fn tick(&mut self, at: Option<&str>) -> CommResult<Value> {
         let at = at.map(validate_time).transpose()?.unwrap_or_else(now);
-        let wakeups: Vec<WakeupRecord> = self.projection.wakeup.values().cloned().collect();
+        let mut addresses = BTreeMap::new();
+        for wakeup in self.projection.wakeup.values() {
+            addresses.insert(wakeup.address.key(), wakeup.address.clone());
+        }
+        for accumulator in self.projection.master_wake.values() {
+            addresses.insert(accumulator.address.key(), accumulator.address.clone());
+        }
         let mut changed = Vec::new();
-        for wakeup in wakeups {
+        let mut master_wake_changed = Vec::new();
+        for (_, address) in addresses {
+            if let Some(accumulator) = self.projection.master_wake.get(&address.key()).cloned() {
+                if accumulator.pending {
+                    if let Some(updated) = self.process_master_wake(&accumulator, &at)? {
+                        master_wake_changed.push(updated);
+                    }
+                    continue;
+                }
+            }
+            let Some(wakeup) = self.projection.wakeup.get(&address.key()).cloned() else {
+                continue;
+            };
             if wakeup.stopped || wakeup.reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT {
                 continue;
             }
@@ -1528,7 +2231,19 @@ impl CommunicationStore {
             changed.push(updated);
         }
         let wakeup = self.projection.wakeup.values().cloned().collect::<Vec<_>>();
-        Ok(json!({ "at": at, "wakeup": wakeup, "changed": changed }))
+        let master_wake = self
+            .projection
+            .master_wake
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "at": at,
+            "wakeup": wakeup,
+            "masterWake": master_wake,
+            "changed": changed,
+            "masterWakeChanged": master_wake_changed
+        }))
     }
 
     pub fn flush_notifications(&mut self, at: Option<&str>) -> CommResult<Value> {
@@ -1538,6 +2253,9 @@ impl CommunicationStore {
             BTreeMap::new();
         for (key, notification) in &self.projection.notifications {
             if notification.status != "pending" {
+                continue;
+            }
+            if self.notification_held_for_master_wake(notification)? {
                 continue;
             }
             if parse_time(&notification.available_at)? > now_time {
@@ -1744,17 +2462,29 @@ impl CommunicationStore {
             None,
             "mailbox",
         )?;
-        Ok(json!({ "bug": bug, "notification": notification, "idempotent": false }))
+        let signal = bug_wake_signal(&bug, priority.is_breakthrough());
+        let master_wake = self.accumulate_master_wake(&owner, signal)?;
+        Ok(json!({
+            "bug": bug,
+            "notification": notification,
+            "masterWake": master_wake,
+            "idempotent": false
+        }))
     }
 
     fn recover_idempotent_bug(&mut self, bug: BugRecord) -> CommResult<Value> {
         let owner = self.scope_master_address(&bug.scope_id)?;
         let loop_record = self.recover_bug_loop(&bug, &owner)?;
         let notification = self.recover_bug_notification(&bug, &owner)?;
+        let master_wake = self.accumulate_master_wake(
+            &owner,
+            bug_wake_signal(&bug, bug.priority.is_breakthrough()),
+        )?;
         Ok(json!({
             "bug": bug,
             "loop": loop_record,
             "notification": notification,
+            "masterWake": master_wake,
             "idempotent": true
         }))
     }
@@ -1945,10 +2675,40 @@ impl CommunicationStore {
                 None,
                 "mailbox",
             )?)
+        } else if status == "active" && updated.priority.is_breakthrough() {
+            Some(self.system_notification(
+                &owner,
+                format!("bug active: {}", updated.title),
+                &updated.priority,
+                &updated.description,
+                Some(&updated.bug_id),
+                "bug",
+                &updated.updated_at,
+                Some(&updated.updated_at),
+                "mailbox",
+            )?)
         } else {
             None
         };
-        Ok(json!({ "bug": updated, "loop": updated_loop, "notification": notification }))
+        let master_wake = if updated.status == "active" {
+            Some(self.accumulate_master_wake(
+                &owner,
+                bug_wake_signal(&updated, updated.priority.is_breakthrough()),
+            )?)
+        } else {
+            self.clear_master_wake_signal(
+                &owner,
+                &bug_wake_signal_key(&updated.bug_id),
+                &updated.updated_at,
+            )?;
+            self.projection.master_wake.get(&owner.key()).cloned()
+        };
+        Ok(json!({
+            "bug": updated,
+            "loop": updated_loop,
+            "notification": notification,
+            "masterWake": master_wake
+        }))
     }
 
     fn create_loop(&mut self, request: LoopRequest) -> CommResult<Value> {
@@ -2090,7 +2850,20 @@ impl CommunicationStore {
             "error.recorded",
             json!({ "error": error, "loop": updated_loop }),
         )?;
-        Ok(json!({ "error": error, "loop": updated_loop, "eventId": event_id }))
+        let master_wake = if let Some(loop_record) = updated_loop.as_ref() {
+            Some(self.accumulate_master_wake(
+                &loop_record.owner,
+                loop_error_wake_signal(loop_record, &error),
+            )?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "error": error,
+            "loop": updated_loop,
+            "masterWake": master_wake,
+            "eventId": event_id
+        }))
     }
 
     fn enqueue_message(
@@ -2284,23 +3057,43 @@ impl CommunicationStore {
         };
         let mut notification =
             self.build_notification(message, created_at, available_at_override)?;
-        let key = self.notification_key(message, &notification, !immediate);
+        let existing_immediate = if immediate {
+            self.projection
+                .notifications
+                .iter()
+                .find(|(_, existing)| existing.message_id == message.message_id)
+                .map(|(key, existing)| (key.clone(), existing.clone()))
+        } else {
+            None
+        };
+        let key = existing_immediate
+            .as_ref()
+            .map(|(key, _)| key.clone())
+            .unwrap_or_else(|| self.notification_key(message, &notification, !immediate));
+        let mut reused_pending = false;
         if let Some(existing) = self.projection.notifications.get(&key) {
-            if existing.status == "unknown" {
+            if matches!(existing.status.as_str(), "emitted" | "unknown") {
                 return Ok(Some(existing.clone()));
             }
             if existing.status == "pending" {
-                notification.available_at = existing.available_at.clone();
+                if immediate {
+                    notification = existing.clone();
+                    reused_pending = true;
+                } else {
+                    notification.available_at = existing.available_at.clone();
+                }
             }
         }
         let attempt = immediate
             .then(|| new_delivery_attempt(&message.adapter_id, "notification.emitted", None));
         let attempt_id = attempt.as_ref().map(|attempt| attempt.attempt_id.clone());
         let notification_id = notification.notification_id.clone();
-        self.commit(
-            "notification.queued",
-            json!({ "key": key, "notification": notification }),
-        )?;
+        if !reused_pending {
+            self.commit(
+                "notification.queued",
+                json!({ "key": key, "notification": notification }),
+            )?;
+        }
         if let Some(attempt) = attempt.as_ref() {
             self.commit(
                 "notification.delivery_attempt",
@@ -3148,6 +3941,34 @@ impl CommunicationStore {
                     .notifications
                     .insert(key.into(), notification);
             }
+            "notification.superseded" => {
+                let keys = event
+                    .data
+                    .get("keys")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        CommError::new("event_data_invalid", "notification superseded keys missing")
+                    })?;
+                for value in keys {
+                    let key = value.as_str().ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "notification superseded key is not a string",
+                        )
+                    })?;
+                    let notification =
+                        self.projection.notifications.get_mut(key).ok_or_else(|| {
+                            CommError::new(
+                                "event_data_invalid",
+                                format!("notification key not found: {key}"),
+                            )
+                        })?;
+                    if notification.status == "pending" {
+                        notification.status = "superseded".into();
+                        notification.delivery_attempt = None;
+                    }
+                }
+            }
             "notification.delivery_attempt" => {
                 let keys = event
                     .data
@@ -3357,6 +4178,21 @@ impl CommunicationStore {
             "wakeup.updated" => {
                 let wakeup: WakeupRecord = decode(&event.data, "wakeup")?;
                 self.projection.wakeup.insert(wakeup.address.key(), wakeup);
+            }
+            "master_wake.updated" => {
+                let accumulator: MasterWakeAccumulator = decode(&event.data, "master wake")?;
+                self.projection
+                    .master_wake
+                    .insert(accumulator.address.key(), accumulator);
+            }
+            "master_wake.decided" | "master_wake.briefing" => {
+                let accumulator: MasterWakeAccumulator = decode(
+                    event.data.get("accumulator").unwrap_or(&Value::Null),
+                    "master wake",
+                )?;
+                self.projection
+                    .master_wake
+                    .insert(accumulator.address.key(), accumulator);
             }
             "wakeup.reminder" => {
                 let wakeup: WakeupRecord =
@@ -3583,6 +4419,45 @@ impl CommunicationStore {
                 self.set_agent_state(address, state, request.get("at").and_then(Value::as_str))
             }
             "tick" => self.tick(request.get("now").and_then(Value::as_str)),
+            "accumulate_wake" | "accumulate-wake" | "record_wake" | "record-wake" => {
+                let master: Address = decode(
+                    request
+                        .get("master")
+                        .or_else(|| request.get("address"))
+                        .unwrap_or(&Value::Null),
+                    "master",
+                )?;
+                let signal: MasterWakeSignalRequest =
+                    decode(request.get("signal").unwrap_or(request), "signal")?;
+                self.record_master_wake(master, signal)
+            }
+            "master_wake_decide" | "master-wake-decide" => {
+                let master: Address = decode(
+                    request
+                        .get("master")
+                        .or_else(|| request.get("address"))
+                        .unwrap_or(&Value::Null),
+                    "master",
+                )?;
+                let generation = request
+                    .get("generation")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        CommError::new("master_wake_generation_required", "generation is required")
+                    })?;
+                let action = request
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CommError::new("master_wake_action_required", "action is required")
+                    })?;
+                self.decide_master_wake(
+                    master,
+                    generation,
+                    action,
+                    request.get("at").and_then(Value::as_str),
+                )
+            }
             "flush_notifications" | "flush-notifications" => {
                 self.flush_notifications(request.get("now").and_then(Value::as_str))
             }
@@ -3686,9 +4561,10 @@ pub fn run_cli(args: Vec<String>) -> CommResult<()> {
 pub fn capabilities() -> Value {
     json!({
         "protocol": PROTOCOL,
-        "execution": [
-            "register_adapter", "register_scope", "register_agent", "refresh_agent",
-            "send", "set_agent_state", "tick", "flush_notifications", "report_bug",
+            "execution": [
+                "register_adapter", "register_scope", "register_agent", "refresh_agent",
+            "send", "set_agent_state", "tick", "accumulate_wake", "record_wake",
+            "master_wake_decide", "flush_notifications", "report_bug",
             "update_bug", "create_loop", "advance_loop", "record_error"
         ],
         "query": ["status", "capabilities"],
@@ -3705,7 +4581,8 @@ pub fn capabilities() -> Value {
         "notification": {
             "batchWindowSeconds": DEFAULT_BATCH_WINDOW_SECONDS,
             "masterReminderLimit": DEFAULT_MASTER_REMINDER_LIMIT,
-            "p0Breakthrough": true
+            "p0Breakthrough": true,
+            "masterWake": "accumulate-while-working-and-brief-when-idle"
         },
         "facts": {
             "format": "jsonl",
@@ -3789,6 +4666,138 @@ fn worker_idle_message_id(current: &AgentRecord, transition_at: &str) -> String 
         "worker-idle:{}",
         structured_key(&[&address_key, transition_at])
     )
+}
+
+fn worker_idle_signal_key(address: &Address) -> String {
+    format!("worker-idle:{}", address.key())
+}
+
+fn worker_idle_coalesce_key(address: &Address) -> String {
+    format!("idle:{}", address.key())
+}
+
+fn master_wake_covers_notification(
+    signal: &MasterWakeSignal,
+    notification: &NotificationRecord,
+) -> bool {
+    let worker_idle = signal.kind == "worker_idle"
+        && signal.source.as_ref().is_some_and(|source| {
+            notification.coalesce_key.as_deref() == Some(worker_idle_coalesce_key(source).as_str())
+        });
+    let bug = signal.issue_id.as_deref().is_some_and(|issue_id| {
+        notification.issue_id.as_deref() == Some(issue_id)
+            && notification.coalesce_key.as_deref() == Some("bug")
+    });
+    worker_idle || bug
+}
+
+fn bug_wake_signal_key(bug_id: &str) -> String {
+    format!("bug:{}", bug_id)
+}
+
+fn bug_wake_signal(bug: &BugRecord, direct_dispatched: bool) -> MasterWakeSignal {
+    MasterWakeSignal {
+        signal_id: format!("bug:{}:{}:{}", bug.bug_id, bug.status, bug.updated_at),
+        key: bug_wake_signal_key(&bug.bug_id),
+        kind: "bug".into(),
+        title: format!("bug {}: {}", bug.status, bug.title),
+        priority: bug.priority.clone(),
+        summary: bug.description.clone(),
+        issue_id: Some(bug.bug_id.clone()),
+        source: Some(bug.reporter.clone()),
+        observed_at: bug.updated_at.clone(),
+        direct_dispatched,
+    }
+}
+
+fn loop_error_wake_signal(loop_record: &LoopRecord, error: &ErrorRecord) -> MasterWakeSignal {
+    MasterWakeSignal {
+        signal_id: format!("loop-error:{}:{}", loop_record.loop_id, error.at),
+        key: format!("loop-error:{}", loop_record.loop_id),
+        kind: "loop_error".into(),
+        title: format!("loop blocked: {}", loop_record.loop_id),
+        priority: Priority::P1,
+        summary: format!("{}: {}", error.code, error.message),
+        issue_id: None,
+        source: None,
+        observed_at: error.at.clone(),
+        direct_dispatched: false,
+    }
+}
+
+fn validate_master_wake_signal_request(request: &MasterWakeSignalRequest) -> CommResult<()> {
+    validate_non_empty(&request.key, "key")?;
+    validate_non_empty(&request.kind, "kind")?;
+    validate_non_empty(&request.title, "title")?;
+    validate_non_empty(&request.summary, "summary")?;
+    if request.title.chars().count() > 200 {
+        return Err(CommError::new(
+            "master_wake_title_too_long",
+            "master wake signal title must be at most 200 characters",
+        ));
+    }
+    if let Some(signal_id) = request.signal_id.as_deref() {
+        validate_non_empty(signal_id, "signalId")?;
+    }
+    if let Some(source) = request.source.as_ref() {
+        validate_address(source)?;
+    }
+    if let Some(observed_at) = request.observed_at.as_deref() {
+        validate_time(observed_at)?;
+    }
+    Ok(())
+}
+
+fn master_wake_signal_matches(left: &MasterWakeSignal, right: &MasterWakeSignal) -> bool {
+    left.signal_id == right.signal_id
+        && left.key == right.key
+        && left.kind == right.kind
+        && left.title == right.title
+        && left.priority == right.priority
+        && left.summary == right.summary
+        && left.issue_id == right.issue_id
+        && left.source == right.source
+        && left.observed_at == right.observed_at
+        && left.direct_dispatched == right.direct_dispatched
+}
+
+fn master_wake_accumulator_matches(
+    left: &MasterWakeAccumulator,
+    right: &MasterWakeAccumulator,
+) -> bool {
+    left.address == right.address
+        && left.generation == right.generation
+        && left.pending == right.pending
+        && left.first_observed_at == right.first_observed_at
+        && left.last_observed_at == right.last_observed_at
+        && left.next_due_at == right.next_due_at
+        && left.reminders_sent == right.reminders_sent
+        && left.stopped == right.stopped
+        && left.last_briefing_generation == right.last_briefing_generation
+        && left.last_briefing_at == right.last_briefing_at
+        && left.signals.len() == right.signals.len()
+        && left
+            .signals
+            .iter()
+            .all(|(key, signal)| right.signals.get(key) == Some(signal))
+}
+
+fn master_wake_message_identity(
+    accumulator: &MasterWakeAccumulator,
+    reminder: u8,
+) -> (String, String) {
+    let generation = accumulator.generation.to_string();
+    let reminder = reminder.to_string();
+    let cycle = structured_key(&[&accumulator.address.key(), &generation, &reminder]);
+    let conversation = structured_key(&[&accumulator.address.key(), &generation]);
+    (
+        format!("master-wake-message-{cycle}"),
+        format!("master-wake-conversation-{conversation}"),
+    )
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
 }
 
 fn message_matches_request(

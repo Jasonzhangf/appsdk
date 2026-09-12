@@ -31,7 +31,13 @@
         "advance_loop",
         "advance-loop",
         "record_error",
-        "record-error"
+        "record-error",
+        "accumulate_wake",
+        "accumulate-wake",
+        "record_wake",
+        "record-wake",
+        "master_wake_decide",
+        "master-wake-decide"
       ]
     },
     "address": {"$ref": "#/$defs/address"},
@@ -40,6 +46,11 @@
     "agent": {"$ref": "#/$defs/agent"},
     "adapter": {"$ref": "#/$defs/adapter"},
     "actor": {"$ref": "#/$defs/address"},
+    "master": {"$ref": "#/$defs/address"},
+    "signal": {"$ref": "#/$defs/masterWakeSignalRequest"},
+    "generation": {"type": "integer", "minimum": 0},
+    "action": {"enum": ["hold", "dispatch", "handled", "complete", "completed", "schedule"]},
+    "at": {"type": "string", "format": "date-time"},
     "loopId": {"type": "string", "minLength": 1},
     "evidence": {"type": "object", "minProperties": 1},
     "priority": {"$ref": "#/$defs/priority"},
@@ -74,6 +85,28 @@
         "properties": {
           "evidence": {"$ref": "#/$defs/bugResolutionEvidence"}
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["accumulate_wake", "accumulate-wake", "record_wake", "record-wake"]}
+        }
+      },
+      "then": {
+        "required": ["signal"],
+        "anyOf": [{"required": ["master"]}, {"required": ["address"]}]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["master_wake_decide", "master-wake-decide"]}
+        }
+      },
+      "then": {
+        "required": ["generation", "action"],
+        "anyOf": [{"required": ["master"]}, {"required": ["address"]}]
       }
     }
   ],
@@ -244,6 +277,24 @@
         "enabled": {"type": ["boolean", "null"]},
         "execute": {"type": ["boolean", "null"]},
         "recipient": {"$ref": "#/$defs/address"}
+      },
+      "additionalProperties": false
+    },
+    "masterWakeSignalRequest": {
+      "type": "object",
+      "required": ["key", "kind", "title", "priority", "summary"],
+      "properties": {
+        "signalId": {"type": "string", "minLength": 1},
+        "key": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"$ref": "#/$defs/priority"},
+        "summary": {"type": "string", "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "source": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]
+        },
+        "observedAt": {"type": ["string", "null"], "format": "date-time"}
       },
       "additionalProperties": false
     }

@@ -26,11 +26,12 @@
     "deliveryStates": {"type": "array", "items": {"type": "string"}},
     "notification": {
       "type": "object",
-      "required": ["batchWindowSeconds", "masterReminderLimit", "p0Breakthrough"],
+      "required": ["batchWindowSeconds", "masterReminderLimit", "p0Breakthrough", "masterWake"],
       "properties": {
         "batchWindowSeconds": {"const": 120},
         "masterReminderLimit": {"const": 3},
-        "p0Breakthrough": {"const": true}
+        "p0Breakthrough": {"const": true},
+        "masterWake": {"const": "accumulate-while-working-and-brief-when-idle"}
       },
       "additionalProperties": false
     },

@@ -18,12 +18,16 @@
         "message.created",
         "message.state",
         "notification.queued",
+        "notification.superseded",
         "notification.delivery_attempt",
         "notification.emitted",
         "notification.batch_emitted",
         "notification.delivery_failed",
         "wakeup.updated",
         "wakeup.reminder",
+        "master_wake.updated",
+        "master_wake.briefing",
+        "master_wake.decided",
         "bug.reported",
         "bug.updated",
         "loop.created",
@@ -68,6 +72,16 @@
     },
     {
       "if": {
+        "properties": {"kind": {"const": "notification.superseded"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/notificationSupersededEvent"}
+        }
+      }
+    },
+    {
+      "if": {
         "properties": {"kind": {"const": "notification.delivery_attempt"}}
       },
       "then": {
@@ -103,6 +117,36 @@
       "then": {
         "properties": {
           "data": {"$ref": "#/$defs/notificationFailureEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "master_wake.updated"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/masterWakeAccumulator"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "master_wake.briefing"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/masterWakeBriefingEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "master_wake.decided"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/masterWakeDecidedEvent"}
         }
       }
     },
@@ -437,7 +481,7 @@
         "body": {"type": "string", "minLength": 1},
         "createdAt": {"type": "string", "format": "date-time"},
         "availableAt": {"type": "string", "format": "date-time"},
-        "status": {"enum": ["pending", "emitted", "unknown"]},
+        "status": {"enum": ["pending", "emitted", "superseded", "unknown"]},
         "emittedAt": {"type": ["string", "null"], "format": "date-time"},
         "adapterId": {"type": "string", "minLength": 1},
         "transportReceipt": {
@@ -467,6 +511,164 @@
       "properties": {
         "key": {"type": "string", "minLength": 1},
         "notification": {"$ref": "#/$defs/notificationRecord"}
+      },
+      "additionalProperties": false
+    },
+    "notificationSupersededEvent": {
+      "type": "object",
+      "required": ["keys", "generation", "reason"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "generation": {"type": "integer", "minimum": 0},
+        "reason": {"const": "master_wake_briefing"}
+      },
+      "additionalProperties": false
+    },
+    "masterWakeSignal": {
+      "type": "object",
+      "required": [
+        "signalId",
+        "key",
+        "kind",
+        "title",
+        "priority",
+        "summary",
+        "issueId",
+        "source",
+        "observedAt",
+        "directDispatched"
+      ],
+      "properties": {
+        "signalId": {"type": "string", "minLength": 1},
+        "key": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+        "summary": {"type": "string", "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "source": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]
+        },
+        "observedAt": {"type": "string", "format": "date-time"},
+        "directDispatched": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "masterWakeAccumulator": {
+      "type": "object",
+      "required": [
+        "address",
+        "generation",
+        "pending",
+        "firstObservedAt",
+        "lastObservedAt",
+        "nextDueAt",
+        "remindersSent",
+        "stopped",
+        "lastBriefingGeneration",
+        "lastBriefingAt",
+        "signals"
+      ],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "generation": {"type": "integer", "minimum": 0},
+        "pending": {"type": "boolean"},
+        "firstObservedAt": {"type": ["string", "null"], "format": "date-time"},
+        "lastObservedAt": {"type": ["string", "null"], "format": "date-time"},
+        "nextDueAt": {"type": ["string", "null"], "format": "date-time"},
+        "remindersSent": {"type": "integer", "minimum": 0, "maximum": 3},
+        "stopped": {"type": "boolean"},
+        "lastBriefingGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "lastBriefingAt": {"type": ["string", "null"], "format": "date-time"},
+        "signals": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/masterWakeSignal"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "routeRecord": {
+      "type": "object",
+      "required": ["mode", "sameAppserver", "sameProject", "sourceRole", "targetRole"],
+      "properties": {
+        "mode": {"type": "string", "minLength": 1},
+        "sameAppserver": {"type": "boolean"},
+        "sameProject": {"type": "boolean"},
+        "sourceRole": {"type": "string", "minLength": 1},
+        "targetRole": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "messageRecord": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "messageId",
+        "conversationId",
+        "from",
+        "to",
+        "title",
+        "priority",
+        "body",
+        "deliveryMode",
+        "coalesceKey",
+        "issueId",
+        "adapterId",
+        "createdAt",
+        "state",
+        "evidence",
+        "route",
+        "lastError"
+      ],
+      "properties": {
+        "protocol": {"const": "appsdk-comm/v1"},
+        "messageId": {"type": "string", "minLength": 1},
+        "conversationId": {"type": "string", "minLength": 1},
+        "from": {"$ref": "#/$defs/address"},
+        "to": {"$ref": "#/$defs/address"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+        "body": {"type": "string", "minLength": 1},
+        "deliveryMode": {"enum": ["direct", "idle"]},
+        "coalesceKey": {"type": ["string", "null"], "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "adapterId": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "state": {"type": "string", "minLength": 1},
+        "evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/deliveryEvidence"}
+        },
+        "route": {"$ref": "#/$defs/routeRecord"},
+        "lastError": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/errorRecord"}]
+        }
+      },
+      "additionalProperties": false
+    },
+    "masterWakeBriefingEvent": {
+      "type": "object",
+      "required": ["accumulator", "message", "notification", "generation", "reminder"],
+      "properties": {
+        "accumulator": {"$ref": "#/$defs/masterWakeAccumulator"},
+        "message": {"$ref": "#/$defs/messageRecord"},
+        "notification": {"$ref": "#/$defs/notificationRecord"},
+        "generation": {"type": "integer", "minimum": 0},
+        "reminder": {"type": "integer", "minimum": 1, "maximum": 3}
+      },
+      "additionalProperties": false
+    },
+    "masterWakeDecidedEvent": {
+      "type": "object",
+      "required": ["accumulator", "action", "at"],
+      "properties": {
+        "accumulator": {"$ref": "#/$defs/masterWakeAccumulator"},
+        "action": {"type": "string", "minLength": 1},
+        "at": {"type": "string", "format": "date-time"}
       },
       "additionalProperties": false
     },

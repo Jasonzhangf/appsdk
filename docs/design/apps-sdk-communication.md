@@ -36,9 +36,11 @@ JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`�
 协议不匹配或未知事件不跳过，统一以 `journal_corrupt` 或
 `journal_unknown_event` 失败。
 
-`message.created`、`message.state`、`notification.queued`、`notification.delivery_attempt`、
-`notification.emitted`、`notification.batch_emitted`、`notification.delivery_failed`、`wakeup.reminder`、
-`bug.*`、`loop.*` 和 `error.recorded` 是可重放事件。错误处理也必须追加事实；如果
+`message.created`、`message.state`、`notification.queued`、`notification.superseded`、
+`notification.delivery_attempt`、`notification.emitted`、`notification.batch_emitted`、
+`notification.delivery_failed`、`wakeup.reminder`、`master_wake.updated`、
+`master_wake.briefing`、`master_wake.decided`、`bug.*`、`loop.*` 和 `error.recorded` 是可重放事件。
+错误处理也必须追加事实；如果
 错误事实本身写入失败，返回包含主错误和次级写入错误的错误链。
 
 ## 地址、scope、角色和 lease
@@ -120,6 +122,23 @@ notification ID 排序；发送失败保留 `pending` 和 `lastError`，写入
 `notification.delivery_failed`，以后可以在同一事实基础上重试。不存在固定 10 秒
 探针。
 
+master wake 是唯一的 master 运行态唤醒 owner。worker idle、普通 Bug、Loop error 和
+其他项目更新先按稳定 `signal.key` 写入该 master 的 `MasterWakeAccumulator`；同一 key
+和相同内容重放为幂等，内容变化才递增 `generation`。master 为 `working` 时只积累，
+不会把相同信号单独 flush 给 master；master 转为 `idle` 后，daemon 的 `tick` 在信号
+截止时间到达时生成一条有界 briefing。briefing 包含 generation、P0/P1 优先级、idle
+worker、active Bug 和 active Loop 摘要，并将被覆盖的普通 pending notification 写成
+`notification.superseded`，因此同一更新不会同时以普通通知和 wake briefing 打扰 master。
+
+briefing 的 message、notification 和 attempt 使用稳定的 generation/reminder 身份。
+attempt 之后进程崩溃时，重放将 notification 标为 `unknown`，同一 generation 不会重新
+投递或消耗提醒次数；只有看到明确的 terminal receipt 才能继续。master 通过
+`master_wake_decide` 携带精确 generation 写入 `hold`、`dispatch`、`handled`、
+`complete`、`completed` 或 `schedule`。generation 不匹配直接失败；delivery/ACK
+不能自动清除信号，只有显式调度类 decision 才能清空 accumulator。每个 generation
+最多提醒三次，第三次标记 `stopped`，避免 idle 堆积；新 signal 或 master 的显式
+decision 才开始下一轮。
+
 worker 只有在 `working -> idle` 的状态边沿向 scope master 产生一次幂等 idle 通知；
 重复观察 idle 不重复建消息，worker 不参与 master wakeup。没有 live master 时，worker
 状态仍然先落盘并返回 `master_not_registered`，master 注册后可用同一状态边沿的
@@ -185,7 +204,8 @@ appsdk comm ...
 
 请求操作包括 `register_adapter`、`register_scope`、`register_agent`、`refresh_agent`、
 `send`、`set_agent_state`、`tick`、`flush_notifications`、`report_bug`、`update_bug`、
-`create_loop`、`advance_loop`、`status` 和 `record_error`。查询只读取 replay
+`create_loop`、`advance_loop`、`accumulate_wake`/`record_wake`、`master_wake_decide`、
+`status` 和 `record_error`。查询只读取 replay
 projection；变更返回投影和本次写入的事实 ID。
 
 非法 JSON、未知 operation/event、非法角色或 priority、重复 master、未注册或过期
@@ -207,7 +227,10 @@ projection；变更返回投影和本次写入的事实 ID。
 - route matrix 覆盖同 scope peer、parent/subagent、master、跨 scope master，以及
   过期 lease 的拒绝；只有 live master tick，worker idle 只产生一次通知。
 - direct、idle 120 秒、P0 breakthrough、按 adapter 分组的 batch、失败后 pending
-  保留和 master 三次唤醒上限都有正反测试。
+  保留和 master 三次唤醒上限都有正反测试；master working 时的普通 signal 会被
+  hold，idle 后只产生一条 briefing。
+- master wake signal 的稳定 key/generation、P0 direct 不重复聚合、superseded
+  notification、generation 冲突和 hold/dispatch decision 都有正反测试。
 - 每次真实 adapter 调用只追加一个 `notification.delivery_attempt`；idle flush 重复执行
   不重复写 `notification.queued`，attempt 与 terminal event 的 `attemptId` 必须一致；
   attempt 后崩溃会得到 `unknown`，不能自动重发或冒充成功。

@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const REGISTRY_DIR: &str = ".appsdk";
 const REGISTRY_FILE: &str = "projects.jsonl";
@@ -64,6 +64,22 @@ fn project_id(project_root: &Path) -> String {
     let mut digest = Sha256::new();
     digest.update(project_root.to_string_lossy().as_bytes());
     format!("project-{:x}", digest.finalize())
+}
+
+fn is_lexically_canonical_absolute(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir | Component::ParentDir => return false,
+        }
+    }
+    normalized == path
 }
 
 fn ensure_no_symlink(path: &Path, label: &str) -> Result<(), String> {
@@ -291,6 +307,12 @@ fn has_registered_version(
                 canonical_stored_root_text.to_string()
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
+                if !is_lexically_canonical_absolute(stored_root) {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not canonical",
+                        index + 1
+                    ));
+                }
                 if event.project_id != project_id(stored_root) {
                     return Err(format!(
                         "GLOBAL_REGISTRY_INVALID_EVENT:{}:project id does not match stored root",
@@ -531,6 +553,34 @@ mod tests {
         let receipt = register_project_at(&project_b, &registry, "0.1.6").unwrap();
         assert!(!receipt.idempotent);
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 2);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_ancestor_with_noncanonical_root_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-missing-ancestor-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let registry = root.join("registry");
+        fs::create_dir_all(&project).unwrap();
+        register_project_at(&project, &registry, "0.1.6").unwrap();
+
+        let path = registry.join(REGISTRY_FILE);
+        let mut event: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let noncanonical_root = root.join("missing").join("..").join("removed-project");
+        event["project_root"] = Value::String(noncanonical_root.to_str().unwrap().to_string());
+        event["project_id"] = Value::String(project_id(&noncanonical_root));
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+
+        let error = register_project_at(&project, &registry, "0.1.6").unwrap_err();
+        assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_EVENT:1:"));
         fs::remove_dir_all(root).ok();
     }
 

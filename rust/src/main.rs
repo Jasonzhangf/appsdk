@@ -11081,21 +11081,7 @@ fn reset_transaction_lock_path(root: &Path) -> PathBuf {
     PathBuf::from(format!("{}.lock", transaction_dir.display()))
 }
 
-struct ResetTransactionLock {
-    _file: fs::File,
-    path: PathBuf,
-}
-
-impl Drop for ResetTransactionLock {
-    fn drop(&mut self) {
-        // Keep the advisory lock held while removing its pathname. A new
-        // transaction can only create and lock a replacement inode after the
-        // path is gone, so cleanup cannot remove that replacement.
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn reset_transaction_acquire_lock(root: &Path) -> Result<ResetTransactionLock, String> {
+fn reset_transaction_acquire_lock(root: &Path) -> Result<fs::File, String> {
     let lock_path = reset_transaction_lock_path(root);
     if fs::symlink_metadata(&lock_path)
         .map(|metadata| metadata.file_type().is_symlink())
@@ -11127,10 +11113,11 @@ fn reset_transaction_acquire_lock(root: &Path) -> Result<ResetTransactionLock, S
             return Err(format!("GOVERNANCE_RESET_BUSY:{}", lock_path.display()));
         }
     }
-    Ok(ResetTransactionLock {
-        _file: file,
-        path: lock_path,
-    })
+    // Keep the pathname stable for the lifetime of the project. `flock`
+    // releases the kernel lock when this descriptor closes, including after a
+    // crash; unlinking here would let a contender that opened the old inode
+    // race a new contender on a replacement inode.
+    Ok(file)
 }
 
 fn reset_transaction_expected_target_kind(
@@ -13335,15 +13322,12 @@ fn reset_governance_internal(
             Err(error) => return Err(error),
         }
     }
-    let status = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or(""),
-            "status",
-            "--porcelain",
-            "--",
-            ".",
-        ])
+    let mut status_command = Command::new("git");
+    status_command.args(["-C", root.to_str().unwrap_or(""), "status", "--porcelain"]);
+    if fresh_init {
+        status_command.args(["--", "."]);
+    }
+    let status = status_command
         .output()
         .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
     if !status.status.success() {

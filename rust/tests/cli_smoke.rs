@@ -27,6 +27,21 @@ fn hold_advisory_lock(file: &fs::File) {
     assert_eq!(unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) }, 0);
 }
 
+#[cfg(unix)]
+fn assert_reset_lock_released(path: &Path) {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("lock path {}: {error}", path.display()));
+    hold_advisory_lock(&file);
+}
+
+#[cfg(not(unix))]
+fn assert_reset_lock_released(path: &Path) {
+    assert!(path.is_file(), "lock path {} is missing", path.display());
+}
+
 fn reset_transaction_lock_path(root: &Path) -> PathBuf {
     let transaction_dir = root.parent().unwrap().join(format!(
         ".appsdk-reset-transaction-{}",
@@ -407,6 +422,41 @@ fn reset_governance_discards_only_control_plane_and_is_idempotent() {
 }
 
 #[test]
+fn reset_governance_nested_project_preserves_parent_dirty_gate() {
+    let workspace = temp_root("reset-governance-nested-project-dirty-parent");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = workspace.join("v4");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&workspace);
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    fs::write(workspace.join("unrelated.txt"), "outside project\n").unwrap();
+
+    let rejected = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("RESET_REQUIRES_CLEAN_WORKTREE"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    assert_eq!(
+        fs::read_to_string(workspace.join("unrelated.txt")).unwrap(),
+        "outside project\n"
+    );
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
     let root = temp_root("init-fresh-governance-epoch");
     let root_text = root.to_str().unwrap();
@@ -521,7 +571,7 @@ fn init_fresh_nested_project_ignores_its_transaction_lock_when_checking_clean_wo
         fs::read_to_string(root.join("business.txt")).unwrap(),
         "keep\n"
     );
-    assert!(!reset_transaction_lock_path(&root).exists());
+    assert_reset_lock_released(&reset_transaction_lock_path(&root));
 
     fs::remove_dir_all(&workspace).unwrap();
     let _ = fs::remove_file(reset_transaction_lock_path(&root));
@@ -566,7 +616,7 @@ fn init_fresh_nested_project_rejects_project_dirty_state_without_mutation() {
     assert!(!root
         .join(".appsdk/records/reset-governance-record.json")
         .exists());
-    assert!(!lock_path.exists());
+    assert_reset_lock_released(&lock_path);
 
     fs::remove_dir_all(&workspace).unwrap();
     let _ = fs::remove_file(lock_path);
@@ -704,7 +754,7 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
         String::from_utf8_lossy(&recovered.stderr)
     );
     assert!(!transaction.exists());
-    assert!(!lock_path.exists());
+    assert_reset_lock_released(&lock_path);
     assert_eq!(
         fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
         project_before
@@ -722,8 +772,9 @@ fn init_fresh_recovers_prepared_transaction_before_retrying() {
         String::from_utf8_lossy(&initialized.stderr)
     );
     assert!(run(&["verify", root_text]).status.success());
-    assert!(!lock_path.exists());
+    assert_reset_lock_released(&lock_path);
     fs::remove_dir_all(root).unwrap();
+    let _ = fs::remove_file(lock_path);
 }
 
 #[test]
@@ -1365,6 +1416,7 @@ fn init_fresh_returns_busy_while_same_root_transaction_lock_is_held() {
         "keep\n"
     );
     assert!(transaction.exists());
+    assert!(lock_path.is_file());
     drop(lock);
     fs::remove_dir_all(&root).unwrap();
     fs::remove_dir_all(transaction).unwrap();
@@ -1504,6 +1556,7 @@ fn init_fresh_refuses_main_worktree_without_mutating_governance() {
         .exists());
     assert!(!lock_path.exists());
     fs::remove_dir_all(root).unwrap();
+    let _ = fs::remove_file(lock_path);
 }
 
 #[test]
@@ -1530,8 +1583,9 @@ fn init_fresh_refuses_dirty_worktree_without_mutating_governance() {
     assert!(!root
         .join(".appsdk/records/reset-governance-record.json")
         .exists());
-    assert!(!lock_path.exists());
+    assert_reset_lock_released(&lock_path);
     fs::remove_dir_all(root).unwrap();
+    let _ = fs::remove_file(lock_path);
 }
 
 #[test]

@@ -9868,9 +9868,215 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         .unwrap()
         .success());
 
+    // Keep both immutable archive layouts for the selector regression. The
+    // versioned archive is authoritative when it exists; the compatibility
+    // history archive remains a fallback for older publications.
+    let version_archive = root.join("protected/history-versions/app-core/active-v1");
+    fs::create_dir_all(version_archive.join("library")).unwrap();
+    for name in [
+        "freeze-artifact.json",
+        "module-artifact.json",
+        "module-contract.json",
+        "source-snapshot.json",
+    ] {
+        fs::copy(
+            root.join("protected/history/app-core").join(name),
+            version_archive.join(name),
+        )
+        .unwrap();
+    }
+    for entry in module_artifact["artifacts"].as_array().unwrap() {
+        let relative = entry["path"].as_str().unwrap();
+        let source = root
+            .join("protected/history/app-core/library")
+            .join(relative);
+        let target = version_archive.join("library").join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(source, target).unwrap();
+    }
+
+    // A present generated module projection is checked before any historical
+    // fallback. Corruption must fail closed even though the protected archive
+    // remains available.
+    let generated_module_artifact = root.join("generated/modules/app-core/module.compiled.json");
+    let generated_module_artifact_text = fs::read_to_string(&generated_module_artifact).unwrap();
+    fs::write(&generated_module_artifact, "{}\n").unwrap();
+    let tampered_generated = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!tampered_generated.status.success());
+    assert!(String::from_utf8_lossy(&tampered_generated.stderr)
+        .contains("MODULE_ARTIFACT_MISMATCH:app-core"));
+    fs::write(&generated_module_artifact, generated_module_artifact_text).unwrap();
+
+    // The generated fast path still has to prove the immutable publication
+    // graph. A damaged protected archive cannot be hidden by a valid
+    // generated projection.
+    let archive_with_generated = version_archive.clone();
+    let archive_with_generated_text =
+        fs::read_to_string(archive_with_generated.join("module-artifact.json")).unwrap();
+    fs::write(archive_with_generated.join("module-artifact.json"), "{}\n").unwrap();
+    let tampered_archive_with_generated = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!tampered_archive_with_generated.status.success());
+    assert!(
+        String::from_utf8_lossy(&tampered_archive_with_generated.stderr)
+            .contains("MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:app-core")
+    );
+    fs::write(
+        archive_with_generated.join("module-artifact.json"),
+        archive_with_generated_text,
+    )
+    .unwrap();
+
     fs::remove_dir_all(root.join("generated")).unwrap();
     fs::remove_dir_all(root.join("active")).unwrap();
+
+    // Review admission for an immutable module must resolve the published
+    // artifact from protected history after the rebuildable checkout
+    // projection has been removed. Historical evidence may also be expired
+    // now; it remains admissible only through the historical graph path.
+    let evidence_file = root.join(".appsdk/records/evidence-record-app-core.json");
+    let mut expired_historical_evidence: Value =
+        serde_json::from_str(&fs::read_to_string(&evidence_file).unwrap()).unwrap();
+    expired_historical_evidence["expires_at"] = Value::String("2026-01-02T00:00:00Z".into());
+    fs::write(
+        &evidence_file,
+        serde_json::to_string_pretty(&expired_historical_evidence).unwrap() + "\n",
+    )
+    .unwrap();
+    let historical_admission = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        historical_admission.status.success(),
+        "{}",
+        String::from_utf8_lossy(&historical_admission.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&historical_admission.stdout).contains("\"mode\":\"historical\"")
+    );
+
+    // Historical freshness is evaluated as of publication, not as of the
+    // current clock. An expiry after the freeze but before now is valid (the
+    // successful admission above); an expiry before the publication terminal
+    // timestamp is invalid and must not be resurrected by Historical mode.
+    let mut expired_before_publication = expired_historical_evidence.clone();
+    expired_before_publication["expires_at"] = Value::String("2026-01-01T00:03:01Z".into());
+    fs::write(
+        &evidence_file,
+        serde_json::to_string_pretty(&expired_before_publication).unwrap() + "\n",
+    )
+    .unwrap();
+    let historical_expired_before_publication = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!historical_expired_before_publication.status.success());
+    assert!(
+        String::from_utf8_lossy(&historical_expired_before_publication.stderr)
+            .contains("EXPIRED_EVIDENCE_RECORD:evidence-record.json")
+    );
+    fs::write(
+        &evidence_file,
+        serde_json::to_string_pretty(&expired_historical_evidence).unwrap() + "\n",
+    )
+    .unwrap();
+
+    // A valid versioned archive and a valid compatibility archive are the
+    // same publication, not an ambiguity. Corrupting the lower-priority
+    // compatibility copy must not shadow the versioned source.
+    let current_archive = root.join("protected/history/app-core");
+    let current_archive_text =
+        fs::read_to_string(current_archive.join("module-artifact.json")).unwrap();
+    fs::write(current_archive.join("module-artifact.json"), "{}\n").unwrap();
+    let version_priority = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        version_priority.status.success(),
+        "{}",
+        String::from_utf8_lossy(&version_priority.stderr)
+    );
+    fs::write(
+        current_archive.join("module-artifact.json"),
+        current_archive_text,
+    )
+    .unwrap();
+
+    // Once the versioned archive exists, its corruption is terminal even if
+    // the compatibility archive is intact; there is no silent fallback.
+    let version_archive_artifact = version_archive.join("module-artifact.json");
+    let version_archive_text = fs::read_to_string(&version_archive_artifact).unwrap();
+    fs::write(&version_archive_artifact, "{}\n").unwrap();
+    let damaged_version = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!damaged_version.status.success());
+    assert!(String::from_utf8_lossy(&damaged_version.stderr)
+        .contains("MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:app-core"));
+    fs::write(&version_archive_artifact, version_archive_text).unwrap();
+
+    // Removing the complete version archive re-enables the compatibility
+    // fallback, which remains covered by the same entrypoint.
+    fs::remove_dir_all(&version_archive).unwrap();
+    let compatibility_fallback = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        compatibility_fallback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compatibility_fallback.stderr)
+    );
+
+    // A damaged or missing immutable archive must fail closed. The verifier
+    // must not fall back to source or recreate a generated artifact during
+    // review admission.
+    let historical_archive = root.join("protected/history/app-core/module-artifact.json");
+    let historical_archive_text = fs::read_to_string(&historical_archive).unwrap();
+    fs::write(&historical_archive, "{}\n").unwrap();
+    let tampered_history = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!tampered_history.status.success());
+    assert!(String::from_utf8_lossy(&tampered_history.stderr)
+        .contains("MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:app-core"));
+    fs::write(&historical_archive, historical_archive_text).unwrap();
+
     fs::remove_dir_all(root.join("protected/history")).unwrap();
+
     let blocked = run(&[
         "begin-version",
         root_text,

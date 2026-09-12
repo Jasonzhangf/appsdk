@@ -271,27 +271,42 @@ fn has_registered_version(
             ));
         }
 
-        let canonical_stored_root = fs::canonicalize(stored_root).map_err(|error| {
-            format!(
-                "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root canonicalization failed:{error}",
-                index + 1
-            )
-        })?;
-        let canonical_stored_root_text = canonical_stored_root.to_str().ok_or_else(|| {
-            format!(
-                "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not UTF-8",
-                index + 1
-            )
-        })?;
-        if canonical_stored_root_text != event.project_root
-            || event.project_id != project_id(&canonical_stored_root)
-        {
-            return Err(format!(
-                "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not canonical",
-                index + 1
-            ));
-        }
-        if canonical_stored_root_text == project_root {
+        let stored_root_for_match = match fs::canonicalize(stored_root) {
+            Ok(canonical_stored_root) => {
+                let canonical_stored_root_text =
+                    canonical_stored_root.to_str().ok_or_else(|| {
+                        format!(
+                            "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not UTF-8",
+                            index + 1
+                        )
+                    })?;
+                if canonical_stored_root_text != event.project_root
+                    || event.project_id != project_id(&canonical_stored_root)
+                {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root is not canonical",
+                        index + 1
+                    ));
+                }
+                canonical_stored_root_text.to_string()
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if event.project_id != project_id(stored_root) {
+                    return Err(format!(
+                        "GLOBAL_REGISTRY_INVALID_EVENT:{}:project id does not match stored root",
+                        index + 1
+                    ));
+                }
+                event.project_root.clone()
+            }
+            Err(error) => {
+                return Err(format!(
+                    "GLOBAL_REGISTRY_INVALID_EVENT:{}:project root canonicalization failed:{error}",
+                    index + 1
+                ));
+            }
+        };
+        if stored_root_for_match == project_root {
             if event.sdk_version == sdk_version {
                 matching_version = true;
             }
@@ -485,6 +500,37 @@ mod tests {
 
         let error = register_project_at(&project, &registry, "0.1.6").unwrap_err();
         assert!(error.starts_with("GLOBAL_REGISTRY_INVALID_EVENT:1:"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_historical_project_does_not_block_registration() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-global-registry-missing-project-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project_a = root.join("project-a");
+        let project_b = root.join("project-b");
+        let removed_project = root.join("removed-project");
+        let registry = root.join("registry");
+        fs::create_dir_all(&project_a).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+        register_project_at(&project_a, &registry, "0.1.6").unwrap();
+
+        let path = registry.join(REGISTRY_FILE);
+        let mut event: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        event["project_root"] = Value::String(removed_project.to_str().unwrap().to_string());
+        event["project_id"] = Value::String(project_id(&removed_project));
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+
+        let receipt = register_project_at(&project_b, &registry, "0.1.6").unwrap();
+        assert!(!receipt.idempotent);
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 2);
         fs::remove_dir_all(root).ok();
     }
 

@@ -9868,6 +9868,76 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         .unwrap()
         .success());
 
+    // Keep both immutable archive layouts for the selector regression. The
+    // versioned archive is authoritative when it exists; the compatibility
+    // history archive remains a fallback for older publications.
+    let version_archive = root.join("protected/history-versions/app-core/active-v1");
+    fs::create_dir_all(version_archive.join("library")).unwrap();
+    for name in [
+        "freeze-artifact.json",
+        "module-artifact.json",
+        "module-contract.json",
+        "source-snapshot.json",
+    ] {
+        fs::copy(
+            root.join("protected/history/app-core").join(name),
+            version_archive.join(name),
+        )
+        .unwrap();
+    }
+    for entry in module_artifact["artifacts"].as_array().unwrap() {
+        let relative = entry["path"].as_str().unwrap();
+        let source = root
+            .join("protected/history/app-core/library")
+            .join(relative);
+        let target = version_archive.join("library").join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(source, target).unwrap();
+    }
+
+    // A present generated module projection is checked before any historical
+    // fallback. Corruption must fail closed even though the protected archive
+    // remains available.
+    let generated_module_artifact = root.join("generated/modules/app-core/module.compiled.json");
+    let generated_module_artifact_text = fs::read_to_string(&generated_module_artifact).unwrap();
+    fs::write(&generated_module_artifact, "{}\n").unwrap();
+    let tampered_generated = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!tampered_generated.status.success());
+    assert!(String::from_utf8_lossy(&tampered_generated.stderr)
+        .contains("MODULE_ARTIFACT_MISMATCH:app-core"));
+    fs::write(&generated_module_artifact, generated_module_artifact_text).unwrap();
+
+    // The generated fast path still has to prove the immutable publication
+    // graph. A damaged protected archive cannot be hidden by a valid
+    // generated projection.
+    let archive_with_generated = version_archive.clone();
+    let archive_with_generated_text =
+        fs::read_to_string(archive_with_generated.join("module-artifact.json")).unwrap();
+    fs::write(archive_with_generated.join("module-artifact.json"), "{}\n").unwrap();
+    let tampered_archive_with_generated = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!tampered_archive_with_generated.status.success());
+    assert!(
+        String::from_utf8_lossy(&tampered_archive_with_generated.stderr)
+            .contains("MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:app-core")
+    );
+    fs::write(
+        archive_with_generated.join("module-artifact.json"),
+        archive_with_generated_text,
+    )
+    .unwrap();
+
     fs::remove_dir_all(root.join("generated")).unwrap();
     fs::remove_dir_all(root.join("active")).unwrap();
 
@@ -9900,6 +9970,64 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
         String::from_utf8_lossy(&historical_admission.stdout).contains("\"mode\":\"historical\"")
     );
 
+    // A valid versioned archive and a valid compatibility archive are the
+    // same publication, not an ambiguity. Corrupting the lower-priority
+    // compatibility copy must not shadow the versioned source.
+    let current_archive = root.join("protected/history/app-core");
+    let current_archive_text =
+        fs::read_to_string(current_archive.join("module-artifact.json")).unwrap();
+    fs::write(current_archive.join("module-artifact.json"), "{}\n").unwrap();
+    let version_priority = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        version_priority.status.success(),
+        "{}",
+        String::from_utf8_lossy(&version_priority.stderr)
+    );
+    fs::write(
+        current_archive.join("module-artifact.json"),
+        current_archive_text,
+    )
+    .unwrap();
+
+    // Once the versioned archive exists, its corruption is terminal even if
+    // the compatibility archive is intact; there is no silent fallback.
+    let version_archive_artifact = version_archive.join("module-artifact.json");
+    let version_archive_text = fs::read_to_string(&version_archive_artifact).unwrap();
+    fs::write(&version_archive_artifact, "{}\n").unwrap();
+    let damaged_version = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!damaged_version.status.success());
+    assert!(String::from_utf8_lossy(&damaged_version.stderr)
+        .contains("MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:app-core"));
+    fs::write(&version_archive_artifact, version_archive_text).unwrap();
+
+    // Removing the complete version archive re-enables the compatibility
+    // fallback, which remains covered by the same entrypoint.
+    fs::remove_dir_all(&version_archive).unwrap();
+    let compatibility_fallback = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(
+        compatibility_fallback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compatibility_fallback.stderr)
+    );
+
     // A damaged or missing immutable archive must fail closed. The verifier
     // must not fall back to source or recreate a generated artifact during
     // review admission.
@@ -9915,7 +10043,7 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     ]);
     assert!(!tampered_history.status.success());
     assert!(String::from_utf8_lossy(&tampered_history.stderr)
-        .contains("MODULE_ARTIFACT_HISTORY_MISSING:app-core"));
+        .contains("MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:app-core"));
     fs::write(&historical_archive, historical_archive_text).unwrap();
 
     fs::remove_dir_all(root.join("protected/history")).unwrap();

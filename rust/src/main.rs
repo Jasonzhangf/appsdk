@@ -2531,6 +2531,23 @@ fn read_historical_module_artifact(
     module: &Value,
     module_id: &str,
 ) -> Value {
+    // A frozen checkout may still have its generated projection. Treat that
+    // projection as authoritative for this admission attempt when it exists:
+    // parse and validate it strictly, and never hide corruption by falling
+    // through to an archive. Archive lookup is reserved for an actual missing
+    // generated file.
+    let current_file = module_artifact_file(root, project, module_id);
+    assert_no_symlink_components(root, &current_file, "module_artifact");
+    let current_artifact = match fs::symlink_metadata(&current_file) {
+        Ok(_) => {
+            let artifact = read_module_artifact(root, project, module_id);
+            module_artifact_matches_project(module, &artifact);
+            Some(artifact)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => fail("MISSING_RECORD:module-artifact"),
+    };
+
     let freeze_name = freeze_record_name(module_id);
     let freeze = read_record(root, &freeze_name);
     let active_version = record_str(&freeze, "/active_version", &freeze_name);
@@ -2542,37 +2559,65 @@ fn read_historical_module_artifact(
         .join("history-versions")
         .join(module_id)
         .join(active_version);
-    let mut selected: Option<(PathBuf, Value)> = None;
-    let candidates = [
-        (current_archive, "protected_archive"),
-        (version_archive, "protected_version_history"),
-    ];
-    for (archive, label) in candidates {
-        assert_no_symlink_components(root, &archive, label);
-        let artifact_file = archive.join("module-artifact.json");
-        assert_no_symlink_components(root, &artifact_file, "module_artifact_history");
-        if !artifact_file.is_file() {
-            continue;
+    // A versioned archive is the immutable source for the active publication.
+    // It takes precedence over the compatibility `history/<module>` location.
+    // Once the version directory exists, a damaged or mismatched artifact is
+    // a hard failure; only an absent version directory permits the legacy
+    // history fallback. This also makes two valid copies deterministic rather
+    // than treating them as ambiguous.
+    assert_no_symlink_components(root, &version_archive, "protected_version_history");
+    let archive = match fs::symlink_metadata(&version_archive) {
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id));
+            }
+            version_archive
         }
-        let artifact: Value = serde_json::from_str(
-            &fs::read_to_string(&artifact_file)
-                .unwrap_or_else(|_| fail("MODULE_ARTIFACT_HISTORY_MISSING")),
-        )
-        .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
-        if artifact.get("artifact_hash").and_then(Value::as_str) != Some(&expected_hash) {
-            continue;
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            assert_no_symlink_components(root, &current_archive, "protected_archive");
+            match fs::symlink_metadata(&current_archive) {
+                Ok(metadata) => {
+                    if !metadata.is_dir() {
+                        fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id));
+                    }
+                    current_archive
+                }
+                Err(_) => fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id)),
+            }
         }
-        if selected.is_some() {
-            fail(format!("MODULE_ARTIFACT_HISTORY_AMBIGUOUS:{}", module_id));
-        }
-        assert_protected_not_ignored(root, &archive);
-        module_artifact_matches_project(module, &artifact);
-        assert_protected_archive_matches(root, module, &artifact, &archive);
-        selected = Some((archive, artifact));
+        Err(_) => fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id)),
+    };
+    assert_no_symlink_components(root, &archive, "protected_archive");
+    let artifact_file = archive.join("module-artifact.json");
+    assert_no_symlink_components(root, &artifact_file, "module_artifact_history");
+    if !artifact_file.is_file() {
+        fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id));
     }
-    selected
-        .map(|(_, artifact)| artifact)
-        .unwrap_or_else(|| fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id)))
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(&artifact_file)
+            .unwrap_or_else(|_| fail(format!("MODULE_ARTIFACT_HISTORY_MISSING:{}", module_id))),
+    )
+    .unwrap_or_else(|_| fail("INVALID_MODULE_ARTIFACT"));
+    if artifact.get("artifact_hash").and_then(Value::as_str) != Some(&expected_hash) {
+        fail(format!(
+            "MODULE_ARTIFACT_HISTORY_HASH_MISMATCH:{}",
+            module_id
+        ));
+    }
+    assert_protected_not_ignored(root, &archive);
+    module_artifact_matches_project(module, &artifact);
+    assert_protected_archive_matches(root, module, &artifact, &archive);
+    if let Some(current_artifact) = current_artifact {
+        if current_artifact != artifact {
+            fail(format!(
+                "FROZEN_REVIEW_GENERATED_ARTIFACT_MISMATCH:{}",
+                module_id
+            ));
+        }
+        current_artifact
+    } else {
+        artifact
+    }
 }
 
 fn write_module_artifact_value(root: &Path, project: &Value, module_id: &str, artifact: &Value) {

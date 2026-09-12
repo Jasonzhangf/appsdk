@@ -1483,9 +1483,21 @@ fn assert_lifecycle_producer_map_binding(
         }
     }
 
-    let active_registry_paths: Vec<Vec<String>> = registry_modules
+    // An exact registry identity is authoritative for that project module.
+    // Only a project module without a same-id entry may aggregate active
+    // fine-grained registry modules.
+    let coverage_modules: Vec<&Value> = same_id_entries
+        .first()
+        .copied()
+        .map(|registered| vec![registered])
+        .unwrap_or_else(|| {
+            registry_modules
+                .iter()
+                .filter(|module| module.get("status").and_then(Value::as_str) == Some("active"))
+                .collect()
+        });
+    let active_registry_paths: Vec<Vec<String>> = coverage_modules
         .iter()
-        .filter(|module| module.get("status").and_then(Value::as_str) == Some("active"))
         .map(|module| {
             let registry_module_id = module
                 .get("module_id")

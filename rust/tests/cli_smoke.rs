@@ -2805,6 +2805,72 @@ fn lifecycle_producer_accepts_project_module_aggregating_registry_modules() {
 }
 
 #[test]
+fn lifecycle_producer_rejects_same_id_project_module_borrowing_other_registry_paths() {
+    let root = temp_root("lifecycle-producer-same-id-path-borrow");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["modules"][0]["owned_paths"] =
+        serde_json::json!(["playground/experiments/**", "tests/core/**"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    let mut registry: Value =
+        serde_json::from_str(&fs::read_to_string(&registry_path).unwrap()).unwrap();
+    let app_core = registry["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|module| module["module_id"] == "app-core")
+        .unwrap();
+    app_core["owned_paths"] = serde_json::json!(["playground/experiments/**"]);
+    registry["modules"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "module_id": "other-owner",
+            "status": "active",
+            "owner": "other-owner",
+            "owned_paths": ["tests/core/**"],
+            "forbidden_paths": ["active/lib/**", "generated/**"]
+        }));
+    fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&registry).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let input = root.join("producer-input.json");
+    fs::write(&input, "{}\n").unwrap();
+    let rejected = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(!rejected.status.success());
+    assert!(
+        stderr.contains("LIFECYCLE_PRODUCER_MODULE_BINDING_MISMATCH"),
+        "{stderr}"
+    );
+    assert!(!root
+        .join(".appsdk/records/worktree-record-app-core.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_producer_rejects_unknown_phase_without_mutating_records() {
     let root = temp_root("lifecycle-chain-invalid-phase");
     let root_text = root.to_str().unwrap();

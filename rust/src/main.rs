@@ -5470,6 +5470,57 @@ fn producer_issue(record: &Value, path: &str, error: &str) -> String {
         .unwrap_or_else(|| fail(error))
 }
 
+fn producer_goal_issue_binding(goal_issue_id: &str, issue_id: &str) -> String {
+    sha256(&canonical(&serde_json::json!({
+        "goal_issue_id": goal_issue_id,
+        "issue_id": issue_id
+    })))
+}
+
+fn producer_goal_issue_binding_for_input(
+    goal: &Value,
+    worktree: &Value,
+    worktree_issue: &str,
+) -> Option<(String, String)> {
+    let goal_issue_id = goal.get("issue_id").and_then(Value::as_str);
+    let declared_goal_issue_id = worktree
+        .get("goal_issue_id")
+        .map(|_| producer_string(worktree, "/goal_issue_id", "PRODUCER_GOAL_ISSUE_MISMATCH"));
+    match (goal_issue_id, declared_goal_issue_id) {
+        (Some(goal_issue_id), Some(declared_goal_issue_id))
+            if declared_goal_issue_id == goal_issue_id =>
+        {
+            Some((
+                declared_goal_issue_id,
+                producer_goal_issue_binding(goal_issue_id, worktree_issue),
+            ))
+        }
+        (Some(goal_issue_id), None) if goal_issue_id == worktree_issue => None,
+        (None, None) => None,
+        _ => fail("PRODUCER_GOAL_ISSUE_MISMATCH"),
+    }
+}
+
+fn assert_producer_goal_issue_binding(worktree: &Value, issue_id: &str) {
+    match worktree.get("goal_issue_id") {
+        Some(goal_issue_id) => {
+            let goal_issue_id = goal_issue_id
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| fail("PRODUCER_GOAL_ISSUE_BINDING_MISMATCH"));
+            let expected = producer_goal_issue_binding(goal_issue_id, issue_id);
+            if worktree.get("goal_issue_binding").and_then(Value::as_str) != Some(expected.as_str())
+            {
+                fail("PRODUCER_GOAL_ISSUE_BINDING_MISMATCH");
+            }
+        }
+        None if worktree.get("goal_issue_binding").is_some() => {
+            fail("PRODUCER_GOAL_ISSUE_BINDING_MISMATCH")
+        }
+        None => {}
+    }
+}
+
 fn producer_bool(record: &Value, path: &str, error: &str) {
     if record.pointer(path) != Some(&Value::Bool(true)) {
         fail(error);
@@ -6564,6 +6615,7 @@ fn assert_produced_record_shapes(targets: &[(PathBuf, Value)], module_id: &str) 
     }
     let issue_id = producer_issue(worktree, "/issue_id", "PRODUCER_RECORD_SCHEMA_INVALID");
     assert_bug_tracker_triage_evidence(worktree, &issue_id, None, true);
+    assert_producer_goal_issue_binding(worktree, &issue_id);
 
     let reproduction = &targets[1].1;
     for path in [
@@ -6660,6 +6712,7 @@ fn assert_recovered_record_bindings(
     worktree_id: &str,
     reproduction_id: &str,
     baseline_id: &str,
+    goal_issue_binding: Option<(&str, &str)>,
     input_hashes: &[String],
     command: &Value,
     expected_status: i32,
@@ -6703,6 +6756,13 @@ fn assert_recovered_record_bindings(
         ) != worktree_id
         || worktree.get("initial_clean") != Some(&Value::Bool(true))
         || worktree.get("final_clean") != Some(&Value::Bool(true))
+        || goal_issue_binding.is_some_and(|(goal_issue_id, binding)| {
+            worktree.get("goal_issue_id").and_then(Value::as_str) != Some(goal_issue_id)
+                || worktree.get("goal_issue_binding").and_then(Value::as_str) != Some(binding)
+        })
+        || (goal_issue_binding.is_none()
+            && (worktree.get("goal_issue_id").is_some()
+                || worktree.get("goal_issue_binding").is_some()))
         || bug_triage.is_some_and(|expected| worktree.get("bug_triage") != Some(expected))
         || bug_triage.is_none() && worktree.get("bug_triage").is_some()
     {
@@ -6887,6 +6947,7 @@ fn producer_try_reuse_records(
     worktree_id: &str,
     reproduction_id: &str,
     baseline_id: &str,
+    goal_issue_binding: Option<(&str, &str)>,
     input_hashes: &[String],
     command: &Value,
     expected_status: i32,
@@ -6954,6 +7015,14 @@ fn producer_try_reuse_records(
     expected_worktree["final_clean"] = Value::Bool(true);
     expected_worktree["isolation_mode"] = Value::String("isolated_worktree".into());
     expected_worktree["scope_hash"] = Value::String(scope_hash.to_string());
+    expected_worktree
+        .as_object_mut()
+        .unwrap()
+        .remove("goal_issue_binding");
+    if let Some((goal_issue_id, binding)) = goal_issue_binding {
+        expected_worktree["goal_issue_id"] = Value::String(goal_issue_id.to_string());
+        expected_worktree["goal_issue_binding"] = Value::String(binding.to_string());
+    }
     if let Some(triage) = bug_triage {
         expected_worktree["bug_triage_query_binding"] =
             Value::String(sha256(&canonical(&serde_json::json!({
@@ -6970,6 +7039,7 @@ fn producer_try_reuse_records(
         "PRODUCER_REUSE_WORKTREE_MISMATCH",
     );
     assert_bug_tracker_triage_evidence(&existing[0], &issue_id, None, true);
+    assert_producer_goal_issue_binding(&existing[0], &issue_id);
 
     let mut expected_reproduction = reproduction.clone();
     expected_reproduction["reproduction_id"] = Value::String(reproduction_id.to_string());
@@ -7136,6 +7206,8 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         ));
     }
     let worktree_issue = producer_issue(worktree, "/issue_id", "INVALID_WORKTREE_RECORD");
+    let goal_issue_binding =
+        producer_goal_issue_binding_for_input(&goal, worktree, &worktree_issue);
     if !worktree_issue.is_empty()
         && worktree_issue != "none"
         && !worktree_issue.starts_with("legacy-")
@@ -7144,13 +7216,6 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         fail("BUG_TRIAGE_MISSING");
     }
     assert_bug_tracker_triage_evidence(worktree, &worktree_issue, Some(root), true);
-    if goal
-        .get("issue_id")
-        .and_then(Value::as_str)
-        .is_some_and(|issue| issue != worktree_issue)
-    {
-        fail("PRODUCER_GOAL_ISSUE_MISMATCH");
-    }
     if producer_string(worktree, "/base_commit", "INVALID_WORKTREE_RECORD")
         == producer_string(worktree, "/head_commit", "INVALID_WORKTREE_RECORD")
     {
@@ -7361,6 +7426,9 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         &worktree_id,
         &reproduction_id,
         &baseline_id,
+        goal_issue_binding
+            .as_ref()
+            .map(|(goal_issue_id, binding)| (goal_issue_id.as_str(), binding.as_str())),
         &input_hashes,
         &command_declaration,
         expected_status,
@@ -7403,6 +7471,9 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
                     &worktree_id,
                     &reproduction_id,
                     &baseline_id,
+                    goal_issue_binding
+                        .as_ref()
+                        .map(|(goal_issue_id, binding)| (goal_issue_id.as_str(), binding.as_str())),
                     &input_hashes,
                     &command_declaration,
                     expected_status,
@@ -7533,6 +7604,14 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     observed_worktree["initial_clean"] = Value::Bool(true);
     observed_worktree["final_clean"] = Value::Bool(true);
     observed_worktree["created_at"] = Value::String(baseline_started_at.to_rfc3339());
+    observed_worktree
+        .as_object_mut()
+        .unwrap()
+        .remove("goal_issue_binding");
+    if let Some((goal_issue_id, goal_issue_binding)) = &goal_issue_binding {
+        observed_worktree["goal_issue_id"] = Value::String(goal_issue_id.clone());
+        observed_worktree["goal_issue_binding"] = Value::String(goal_issue_binding.clone());
+    }
     if let Some(observed_bug_triage) = worktree.get("bug_triage") {
         if !observed_bug_triage.is_object() {
             fail("INVALID_BUG_TRIAGE");

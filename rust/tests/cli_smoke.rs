@@ -5471,7 +5471,7 @@ fn lifecycle_record_producer_recovers_partial_group_commit() {
     assert!(run(&["new", root_text]).status.success());
     fs::write(
         root.join(".appsdk/goal.json"),
-        r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+        r#"{"goal_id":"goal-1","issue_id":"none","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#,
     )
     .unwrap();
@@ -9794,7 +9794,7 @@ fn lifecycle_record_producer_binds_clean_worktree_and_baseline() {
     assert!(run(&["new", root_text]).status.success());
     fs::write(
         root.join(".appsdk/goal.json"),
-        r#"{"goal_id":"goal-1","issue_id":null,"raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+        r#"{"goal_id":"goal-1","issue_id":"goal-issue-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
 "#,
     )
     .unwrap();
@@ -9913,7 +9913,7 @@ esac
         serde_json::to_string_pretty(&serde_json::json!({
             "goal_id":"goal-1",
             "worktree": {
-                "worktree_id":"caller-worktree-id","issue_id":"issue-producer-1","module_id":"app-core",
+                "worktree_id":"caller-worktree-id","issue_id":"issue-producer-1","goal_issue_id":"goal-issue-1","module_id":"app-core",
                 "base_ref":"HEAD","base_commit":commit,"branch":"codex/test","head_commit":commit,
                 "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
                 "scope_hash":scope_hash,"created_at":"2026-01-01T00:00:00Z",
@@ -9941,6 +9941,33 @@ esac
     .unwrap();
     let valid_input: Value =
         serde_json::from_str(&fs::read_to_string(&input_path).unwrap()).unwrap();
+    let mut missing_goal_issue = valid_input.clone();
+    missing_goal_issue["worktree"]
+        .as_object_mut()
+        .unwrap()
+        .remove("goal_issue_id");
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&missing_goal_issue).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_goal_issue_result = produce(&input_path);
+    assert!(!missing_goal_issue_result.status.success());
+    assert!(String::from_utf8_lossy(&missing_goal_issue_result.stderr)
+        .contains("PRODUCER_GOAL_ISSUE_MISMATCH"));
+
+    let mut forged_goal_issue = valid_input.clone();
+    forged_goal_issue["worktree"]["goal_issue_id"] = Value::String("forged-goal-issue".into());
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&forged_goal_issue).unwrap() + "\n",
+    )
+    .unwrap();
+    let forged_goal_issue_result = produce(&input_path);
+    assert!(!forged_goal_issue_result.status.success());
+    assert!(String::from_utf8_lossy(&forged_goal_issue_result.stderr)
+        .contains("PRODUCER_GOAL_ISSUE_MISMATCH"));
+
     let mut invalid_triage = valid_input.clone();
     invalid_triage["worktree"]["bug_triage"]["mode"] = Value::String("bogus".into());
     fs::write(
@@ -10090,6 +10117,14 @@ esac
         produced_worktree["bug_triage_query_binding"],
         expected_triage_binding
     );
+    assert_eq!(produced_worktree["goal_issue_id"], "goal-issue-1");
+    assert_eq!(
+        produced_worktree["goal_issue_binding"],
+        digest(&canonical(&serde_json::json!({
+            "goal_issue_id": "goal-issue-1",
+            "issue_id": "issue-producer-1"
+        })))
+    );
     assert_eq!(produced_evidence["exit_status"], 1);
     let repeated = produce(&input_path);
     assert!(
@@ -10126,6 +10161,20 @@ esac
         serde_json::from_slice::<Value>(&restored.stdout).unwrap()["reused"],
         true
     );
+
+    let worktree_bytes = fs::read(&worktree_path).unwrap();
+    let mut forged_goal_binding: Value = serde_json::from_slice(&worktree_bytes).unwrap();
+    forged_goal_binding["goal_issue_binding"] = Value::String("sha256:forged".into());
+    fs::write(
+        &worktree_path,
+        serde_json::to_string_pretty(&forged_goal_binding).unwrap() + "\n",
+    )
+    .unwrap();
+    let forged_goal_binding_result = produce(&input_path);
+    assert!(!forged_goal_binding_result.status.success());
+    assert!(String::from_utf8_lossy(&forged_goal_binding_result.stderr)
+        .contains("PRODUCER_REUSE_WORKTREE_MISMATCH"));
+    fs::write(&worktree_path, worktree_bytes).unwrap();
 
     // A new candidate identity must re-run the baseline, preserve the prior
     // three-record set in producer history, and replace only the current

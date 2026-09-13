@@ -8,6 +8,17 @@ tokens, rejects mismatched or duplicate identities, and records
 `bug_triage_query_binding` as the SHA-256 binding of issue ID, query, mode, and
 reopen source. Empty, `none`, and `legacy-*` issue IDs remain exempt.
 
+The confirmed goal issue is the parent scope for a change. The
+`WorktreeRecord.issue_id` is the module execution scope and may be a narrower
+module issue. When those IDs differ, the producer requires
+`WorktreeRecord.goal_issue_id` to equal the confirmed goal's issue ID exactly,
+then computes `goal_issue_binding` itself from the goal and module issue IDs.
+The binding is the SHA-256 of the canonical object
+`{"goal_issue_id": <goal issue>, "issue_id": <module issue>}`, is persisted in
+the WorktreeRecord, and is revalidated on reuse. A missing or forged
+`goal_issue_id` fails closed. Reproduction and baseline evidence remain bound
+to the module issue and its triage evidence.
+
 ## Module registry binding
 
 Each `project.json#/modules[]` entry has an exact registry binding by default.

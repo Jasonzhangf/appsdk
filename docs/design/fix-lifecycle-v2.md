@@ -58,6 +58,13 @@ projection in append-only
 partial Worktree/Reproduction/baseline record set, conflicting attempt history,
 or tampered hash fails closed.
 
+The producer applies this transition to every downstream phase, including
+merge and promotion: only an exact identity is a cache hit. A stale PASS is
+preserved with its original record hash and timestamp, while the replacement
+must be produced from the current candidate and pass the phase's upstream
+graph. This makes re-entry bounded to the first invalidated phase instead of
+forcing a full lifecycle rerun or accepting an old PASS as current truth.
+
 ## Record graph
 
 ```text

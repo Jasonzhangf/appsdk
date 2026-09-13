@@ -115,6 +115,42 @@ complete three-record set, declaration, command, identity, output hash, and
 evidence freshness all match. Missing members, partial sets, or drift are
 explicit errors and are never filled from a guessed cache.
 
+The current projection is separate from its historical witness. When a new
+candidate or baseline identity is observed, the producer executes the declared
+baseline command, appends the previous Worktree/Reproduction/baseline set to
+`.appsdk/records/attempts/<module>/producer-records.jsonl` with its original
+bytes and hashes, then atomically replaces only the current projection. The
+same input identity is reused on later calls. A partial current set, malformed
+archive, conflicting hash, or interrupted transaction remains fail-closed; the
+producer never deletes, edits, or relabels the old witness.
+
+Every producer archive is revalidated before reuse or append. The validator
+recomputes the record-set hash and stable archive ID, checks the timestamp and
+JSONL framing, and binds the three historical paths to the module's
+Worktree/Reproduction/baseline records. A durable producer transaction is
+recovered from its marker before a new baseline is executed or the current set
+is archived; this prevents a partially published replacement from being
+misread as a new incomplete current set.
+
+For a project nested inside a registered Git worktree, the baseline checkout
+preserves the project's path relative to that Git worktree. The declared
+working directory is then resolved from the nested project root, so `.` and
+other relative command paths observe the same project scope in the baseline
+that they observe in the candidate.
+
+Downstream `review`, `effectiveness`, `merge`, and `promotion` projections use
+the same rule. An exact PASS identity is reusable. A changed identity archives
+the old PASS as `result: "stale"` in the phase attempt ledger and writes a new
+candidate-bound projection after all upstream gates pass. PASS history remains
+immutable evidence and is never treated as current evidence for the new
+candidate.
+
+Frozen dependency artifacts are restored only through the explicit
+`appsdk rehydrate-frozen --module <id>` operation. `verify` and `compile` do not
+copy protected/history files, manufacture an Active index, or implicitly publish
+a frozen source. After rehydration, the affected compile/verify phase and its
+downstream dependants are rerun against the restored artifact identity.
+
 ## Evidence freshness
 
 Evidence includes `expires_at`, `input_hashes`, `source_commit`, `artifact_hash`, and `scope_hash`.

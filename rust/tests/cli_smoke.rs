@@ -3328,6 +3328,296 @@ fn lifecycle_chain_reenters_non_pass_review_and_preserves_attempt_history() {
 }
 
 #[test]
+fn lifecycle_chain_replaces_stale_pass_and_preserves_stale_attempt() {
+    let root = temp_root("lifecycle-chain-stale-pass");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let review = root.join(".appsdk/records/review-record-app-core.json");
+    fs::remove_file(&review).unwrap();
+    let input = root.join("architecture-input.json");
+    let write_input = |identity: &str| {
+        fs::write(
+            &input,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "architecture": {
+                    "reviewer": {"adapter":"test","identity":identity},
+                    "verdict": "pass",
+                    "evidence_ids": ["candidate-evidence-1","positive-1","negative-1"]
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    };
+    let produce = || {
+        run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "architecture",
+            "--input",
+            input.to_str().unwrap(),
+        ])
+    };
+
+    write_input("reviewer-a");
+    assert!(produce().status.success());
+    let first = fs::read(&review).unwrap();
+    write_input("reviewer-b");
+    let reentered = produce();
+    assert!(
+        reentered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reentered.stdout),
+        String::from_utf8_lossy(&reentered.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reentered.stdout).unwrap()["reused"],
+        false
+    );
+    let second = fs::read(&review).unwrap();
+    assert_ne!(first, second);
+    let attempts = root.join(".appsdk/records/attempts/app-core/review-record.jsonl");
+    let stale: Value = serde_json::from_str(fs::read_to_string(&attempts).unwrap().trim()).unwrap();
+    assert_eq!(stale["result"], "stale");
+    assert_eq!(
+        stale["record"],
+        serde_json::from_slice::<Value>(&first).unwrap()
+    );
+
+    let reused = produce();
+    assert!(reused.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reused.stdout).unwrap()["reused"],
+        true
+    );
+    assert_eq!(fs::read_to_string(&attempts).unwrap().lines().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_replaces_stale_effectiveness_pass() {
+    let root = temp_root("lifecycle-chain-stale-effectiveness");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let input = root.join("effectiveness-input.json");
+    let write_input = || {
+        fs::write(
+            &input,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "effectiveness": {
+                    "fixed_replay_evidence_id": "effective-1",
+                    "positive_evidence_ids": ["positive-1"],
+                    "negative_evidence_ids": ["post-negative-1"],
+                    "blackbox_evidence_ids": ["effective-1"]
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    };
+    let produce = || {
+        run(&[
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "effectiveness",
+            "--input",
+            input.to_str().unwrap(),
+        ])
+    };
+    write_input();
+    let reentered = produce();
+    assert!(
+        reentered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reentered.stdout),
+        String::from_utf8_lossy(&reentered.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reentered.stdout).unwrap()["reused"],
+        false
+    );
+    let attempts = root.join(".appsdk/records/attempts/app-core/effectiveness-record.jsonl");
+    let stale: Value = serde_json::from_str(fs::read_to_string(&attempts).unwrap().trim()).unwrap();
+    assert_eq!(stale["result"], "stale");
+    let reused = produce();
+    assert!(reused.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reused.stdout).unwrap()["reused"],
+        true
+    );
+    assert_eq!(fs::read_to_string(&attempts).unwrap().lines().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_replaces_stale_merge_pass() {
+    let root = temp_root("lifecycle-chain-stale-merge");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let merge_record = root.join(".appsdk/records/merge-record-app-core.json");
+    let mut stale: Value =
+        serde_json::from_str(&fs::read_to_string(&merge_record).unwrap()).unwrap();
+    stale["change_identity"] = Value::String("tested_integration_exact".into());
+    fs::write(
+        &merge_record,
+        serde_json::to_string_pretty(&stale).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("merge-input.json");
+    fs::write(&input, r#"{"merge":{"mainline_ref":"HEAD"}}"#).unwrap();
+
+    let produced = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "merge",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        produced.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&produced.stdout),
+        String::from_utf8_lossy(&produced.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&produced.stdout).unwrap()["reused"],
+        false
+    );
+    let current: Value = serde_json::from_str(&fs::read_to_string(&merge_record).unwrap()).unwrap();
+    assert_eq!(current["change_identity"], "exact");
+    let attempts = root.join(".appsdk/records/attempts/app-core/merge-record.jsonl");
+    let archived: Value =
+        serde_json::from_str(fs::read_to_string(&attempts).unwrap().trim()).unwrap();
+    assert_eq!(archived["result"], "stale");
+    assert_eq!(
+        archived["record"]["change_identity"],
+        "tested_integration_exact"
+    );
+
+    let reused = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "merge",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(reused.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reused.stdout).unwrap()["reused"],
+        true
+    );
+    assert_eq!(fs::read_to_string(&attempts).unwrap().lines().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_replaces_stale_promotion_pass() {
+    let root = temp_root("lifecycle-chain-stale-promotion");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    let promotion_record = root.join(".appsdk/records/promotion-record-app-core.json");
+    let mut stale: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion_record).unwrap()).unwrap();
+    stale["change_set_id"] = Value::String("change-1".into());
+    fs::write(
+        &promotion_record,
+        serde_json::to_string_pretty(&stale).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = root.join("promotion-input.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "promotion": {
+                "experiment_id": "experiment-1",
+                "new_active_version": "active-v2",
+                "previous_active_version": null,
+                "compatibility_level": "compatible",
+                "evidence_ids": ["candidate-evidence-1"],
+                "required_gate_results": [
+                    {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                    {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                    {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                    {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
+                    {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                    {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
+                ],
+                "change_set_id": "change-2",
+                "root_cause": "root cause",
+                "design_id": "design-1",
+                "change_reason_comment": "reason",
+                "playground_cleanup_record_id": "cleanup-1",
+                "artifact_hash": artifact_hash
+            }
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let produced = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(
+        produced.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&produced.stdout),
+        String::from_utf8_lossy(&produced.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&produced.stdout).unwrap()["reused"],
+        false
+    );
+    let current: Value =
+        serde_json::from_str(&fs::read_to_string(&promotion_record).unwrap()).unwrap();
+    assert_eq!(current["change_set_id"], "change-2");
+    let attempts = root.join(".appsdk/records/attempts/app-core/promotion-record.jsonl");
+    let archived: Value =
+        serde_json::from_str(fs::read_to_string(&attempts).unwrap().trim()).unwrap();
+    assert_eq!(archived["result"], "stale");
+    assert_eq!(archived["record"]["change_set_id"], "change-1");
+
+    let reused = run(&[
+        "produce-lifecycle-chain",
+        root_text,
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert!(reused.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reused.stdout).unwrap()["reused"],
+        true
+    );
+    assert_eq!(fs::read_to_string(&attempts).unwrap().lines().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_rejects_invalid_attempt_history_before_reusing_canonical_record() {
     let root = temp_root("lifecycle-chain-attempt-integrity");
     let root_text = root.to_str().unwrap();
@@ -5324,8 +5614,99 @@ fn lifecycle_record_producer_recovers_partial_group_commit() {
         String::from_utf8_lossy(&recovered.stderr)
     );
     assert!(!transaction.exists());
-    for (target, _) in records {
-        assert!(root.join(&target).is_file(), "missing {target}");
+    // A replacement transaction can be interrupted after the fixed
+    // worktree/reproduction projections are visible but before the new
+    // baseline is linked. Recovery must use the durable marker first; trying
+    // to archive the mixed current projection would report a false partial
+    // set and leave the transaction stuck.
+    let replacement_records = records
+        .iter()
+        .map(|(target, _)| {
+            (
+                target.clone(),
+                serde_json::from_str::<Value>(&fs::read_to_string(root.join(target)).unwrap())
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let replacement_baseline = root.join(&replacement_records[2].0);
+    fs::remove_file(&replacement_baseline).unwrap();
+    let replacement_transaction = root.join(".appsdk/transactions/producer-app-core");
+    fs::create_dir_all(&replacement_transaction).unwrap();
+    let mut staged_replacement_records = replacement_records.clone();
+    staged_replacement_records[2].1["exit_status"] = Value::Number(2.into());
+    let mut replacement_entries = Vec::new();
+    for (index, (target, record)) in staged_replacement_records.iter().enumerate() {
+        let staging = replacement_transaction.join(format!("record-{}.json", index));
+        let bytes = serde_json::to_string_pretty(record).unwrap() + "\n";
+        fs::write(&staging, &bytes).unwrap();
+        replacement_entries.push(serde_json::json!({
+            "target": target,
+            "staging": format!("record-{}.json", index),
+            "digest": digest(&bytes)
+        }));
+    }
+    let mut replacement_marker = serde_json::json!({
+        "schema_version":1,
+        "module_id":"app-core",
+        "input_hash":input_hash,
+        "phase":"commit",
+        "replace_current":true,
+        "records":replacement_entries
+    });
+    fs::write(
+        replacement_transaction.join("marker.json"),
+        serde_json::to_string_pretty(&replacement_marker).unwrap() + "\n",
+    )
+    .unwrap();
+    let status_rejected = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(!status_rejected.status.success());
+    assert!(String::from_utf8_lossy(&status_rejected.stderr)
+        .contains("PRODUCER_RECOVERY_BASELINE_STATUS_MISMATCH:expected=1:actual=2"));
+    assert!(replacement_transaction.is_dir());
+    assert!(!replacement_baseline.exists());
+    let correct_baseline_bytes =
+        serde_json::to_string_pretty(&replacement_records[2].1).unwrap() + "\n";
+    fs::write(
+        replacement_transaction.join("record-2.json"),
+        &correct_baseline_bytes,
+    )
+    .unwrap();
+    replacement_marker["records"][2]["digest"] = Value::String(digest(&correct_baseline_bytes));
+    fs::write(
+        replacement_transaction.join("marker.json"),
+        serde_json::to_string_pretty(&replacement_marker).unwrap() + "\n",
+    )
+    .unwrap();
+    let replacement_recovered = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(
+        replacement_recovered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&replacement_recovered.stdout),
+        String::from_utf8_lossy(&replacement_recovered.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&replacement_recovered.stdout).unwrap()["recovered"],
+        true
+    );
+    assert!(!replacement_transaction.exists());
+    assert!(replacement_baseline.is_file());
+    for (target, _) in &records {
+        assert!(root.join(target).is_file(), "missing {target}");
     }
 
     let worktree_record = root.join(".appsdk/records/worktree-record-app-core.json");
@@ -9248,8 +9629,259 @@ esac
         serde_json::from_slice::<Value>(&restored.stdout).unwrap()["reused"],
         true
     );
+
+    // A new candidate identity must re-run the baseline, preserve the prior
+    // three-record set in producer history, and replace only the current
+    // projections. The next invocation of that same identity is a cache hit.
+    fs::write(root.join("candidate-source.txt"), "candidate\n").unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "candidate-source.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "candidate identity"])
+        .status()
+        .unwrap()
+        .success());
+    let next_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    let mut next_input = valid_input.clone();
+    next_input["worktree"]["base_ref"] = Value::String("HEAD".into());
+    next_input["worktree"]["base_commit"] = Value::String(next_commit.clone());
+    next_input["worktree"]["head_commit"] = Value::String(next_commit.clone());
+    next_input["reproduction"]["base_commit"] = Value::String(next_commit);
+    next_input["baseline_evidence"]["source_commit"] =
+        next_input["worktree"]["base_commit"].clone();
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&next_input).unwrap() + "\n",
+    )
+    .unwrap();
+    let reentered = produce(&input_path);
+    assert!(
+        reentered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reentered.stdout),
+        String::from_utf8_lossy(&reentered.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reentered.stdout).unwrap()["reused"],
+        Value::Null
+    );
+    let producer_attempts = root.join(".appsdk/records/attempts/app-core/producer-records.jsonl");
+    let producer_attempt: Value =
+        serde_json::from_str(fs::read_to_string(&producer_attempts).unwrap().trim()).unwrap();
+    assert_eq!(producer_attempt["result"], "stale");
+    assert_eq!(producer_attempt["records"].as_array().unwrap().len(), 3);
+    let reentered_again = produce(&input_path);
+    assert!(reentered_again.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reentered_again.stdout).unwrap()["reused"],
+        true
+    );
+    assert_eq!(
+        fs::read_to_string(&producer_attempts)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let valid_attempts = fs::read_to_string(&producer_attempts).unwrap();
+    let valid_attempt: Value = serde_json::from_str(valid_attempts.trim()).unwrap();
+    for (field, replacement) in [
+        (
+            "record_hash",
+            Value::String(format!("sha256:{}", "a".repeat(64))),
+        ),
+        (
+            "archive_id",
+            Value::String("producer-attempt-forged".into()),
+        ),
+    ] {
+        let mut tampered = valid_attempt.clone();
+        tampered[field] = replacement;
+        fs::write(
+            &producer_attempts,
+            serde_json::to_string(&tampered).unwrap() + "\n",
+        )
+        .unwrap();
+        let rejected = produce(&input_path);
+        assert!(!rejected.status.success(), "tampered {field} must fail");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("PRODUCER_RECORD_ARCHIVE_INVALID"),
+            "field={field} stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        fs::write(&producer_attempts, &valid_attempts).unwrap();
+    }
+    let ledger_recovered = produce(&input_path);
+    assert!(ledger_recovered.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&ledger_recovered.stdout).unwrap()["reused"],
+        true
+    );
     fs::remove_file(input_path).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_record_producer_runs_nested_project_baseline_in_project_directory() {
+    let git_root = temp_root("lifecycle-record-producer-nested-git-root");
+    let project_root = git_root.join("packages/app");
+    fs::create_dir_all(&project_root).unwrap();
+    let project_text = project_root.to_str().unwrap();
+    assert!(run(&["new", project_text]).status.success());
+    fs::write(project_root.join("nested-baseline-marker"), "nested\n").unwrap();
+    fs::write(
+        project_root.join(".appsdk/goal.json"),
+        r#"{"goal_id":"goal-1","issue_id":null,"raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
+"#,
+    )
+    .unwrap();
+    init_git(&git_root);
+    assert!(
+        run(&["promote", project_text, "--to", "source_implemented"])
+            .status
+            .success()
+    );
+    assert!(run(&["promote", project_text, "--to", "contract_bound"])
+        .status
+        .success());
+    assert!(
+        run(&["compile-module", project_text, "--module", "app-core"])
+            .status
+            .success()
+    );
+    assert!(run(&[
+        "promote-module",
+        project_text,
+        "--module",
+        "app-core",
+        "--to",
+        "contract_bound",
+    ])
+    .status
+    .success());
+    assert!(Command::new("git")
+        .args(["-C", git_root.to_str().unwrap(), "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            git_root.to_str().unwrap(),
+            "commit",
+            "-m",
+            "nested candidate"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let commit = git_test_value(&project_root, &["rev-parse", "HEAD"]);
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("generated/modules/app-core/module.compiled.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let scope_hash = digest(&canonical(&serde_json::json!({
+        "module_id":"app-core",
+        "source_hash":artifact["source_hash"],
+        "contract_hash":artifact["contract_hash"],
+        "registry_binding":{"mode":"exact"}
+    })));
+    let command = serde_json::json!({
+        "program":"sh",
+        "args":["-c","test -f nested-baseline-marker && printf nested-baseline >&2; exit 1"],
+        "working_directory":".",
+        "expected_exit_status":1,
+        "expected_error_token":"nested-baseline"
+    });
+    let input_hashes = vec![digest(&canonical(&command))];
+    let current_root = project_root.canonicalize().unwrap();
+    let worktree_id = format!(
+        "worktree-{}",
+        digest(&canonical(&serde_json::json!({
+            "root": current_root,
+            "module_id":"app-core",
+            "issue_id":"none",
+            "base_commit":commit,
+            "head_commit":commit,
+            "branch":"codex/test",
+            "scope_hash":scope_hash
+        })))
+        .strip_prefix("sha256:")
+        .unwrap()
+    );
+    let reproduction_id = format!(
+        "reproduction-{}",
+        digest(&canonical(&serde_json::json!({
+            "worktree_id":worktree_id,
+            "input_hashes":input_hashes,
+            "error_token":"nested-baseline"
+        })))
+        .strip_prefix("sha256:")
+        .unwrap()
+    );
+    let baseline_id = format!(
+        "baseline-{}",
+        digest(&canonical(&serde_json::json!({
+            "reproduction_id":reproduction_id,
+            "source_commit":commit,
+            "input_hashes":input_hashes,
+            "command":command
+        })))
+        .strip_prefix("sha256:")
+        .unwrap()
+    );
+    let input = serde_json::json!({
+        "goal_id":"goal-1",
+        "worktree": {
+            "worktree_id":worktree_id,"issue_id":"none","module_id":"app-core",
+            "base_ref":"HEAD","base_commit":commit,"branch":"codex/test","head_commit":commit,
+            "initial_clean":true,"final_clean":true,"isolation_mode":"isolated_worktree",
+            "scope_hash":scope_hash,"created_at":"2026-01-01T00:00:00Z"
+        },
+        "reproduction": {
+            "reproduction_id":reproduction_id,"issue_id":"none","module_id":"app-core",
+            "worktree_id":worktree_id,"base_commit":commit,"input_hashes":input_hashes,
+            "baseline_evidence_id":baseline_id,"first_divergence":"baseline","result":"reproduced",
+            "created_at":"2026-01-01T00:00:00Z"
+        },
+        "baseline_evidence": {
+            "evidence_id":baseline_id,"issue_id":"none","experiment_id":"experiment",
+            "phase":"baseline_reproduction","kind":"red_test","source_commit":commit,
+            "scope":{"module_id":"app-core"},"producer":{"adapter":"appsdk","identity":"appsdk-lifecycle-record-producer"},
+            "result":"pass","created_at":"2026-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z",
+            "input_hashes":input_hashes,"scope_hash":scope_hash,"command":command,"exit_status":1,
+            "output_hash":digest("stdout=\nstderr=nested-baseline")
+        }
+    });
+    let input_path = git_root.with_extension("nested-producer-input.json");
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&input).unwrap() + "\n",
+    )
+    .unwrap();
+    let produced = run(&[
+        "produce-lifecycle-records",
+        project_text,
+        "--module",
+        "app-core",
+        "--input",
+        input_path.to_str().unwrap(),
+    ]);
+    assert!(
+        produced.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&produced.stdout),
+        String::from_utf8_lossy(&produced.stderr)
+    );
+    assert!(project_root
+        .join(".appsdk/records/evidence/app-core")
+        .is_dir());
+    fs::remove_file(input_path).unwrap();
+    fs::remove_dir_all(git_root).unwrap();
 }
 
 #[test]

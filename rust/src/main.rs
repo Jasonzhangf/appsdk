@@ -5109,6 +5109,278 @@ fn producer_record_targets(
     ]
 }
 
+fn producer_attempt_path(root: &Path, module_id: &str) -> PathBuf {
+    root.join(".appsdk")
+        .join("records")
+        .join("attempts")
+        .join(module_id)
+        .join("producer-records.jsonl")
+}
+
+fn producer_baseline_path(root: &Path, module_id: &str, baseline_id: &str) -> PathBuf {
+    if !baseline_id.starts_with("baseline-")
+        || baseline_id.len() != "baseline-".len() + 64
+        || !baseline_id["baseline-".len()..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        fail("PRODUCER_BASELINE_ID_INVALID");
+    }
+    root.join(".appsdk")
+        .join("records")
+        .join("evidence")
+        .join(module_id)
+        .join(format!("{}.json", baseline_id))
+}
+
+fn producer_validate_attempt_ledger(root: &Path, module_id: &str) {
+    let target = producer_attempt_path(root, module_id);
+    assert_no_symlink_components(root, &target, "producer_record_archive");
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(_) => fail("PRODUCER_RECORD_ARCHIVE_INVALID"),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+    }
+    let contents =
+        fs::read_to_string(&target).unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+    if contents.is_empty() || !contents.ends_with('\n') {
+        fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+    }
+    let records_root = root.join(".appsdk").join("records");
+    let expected_worktree_path = records_root
+        .join(module_record_name("worktree-record", module_id))
+        .strip_prefix(root)
+        .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let expected_reproduction_path = records_root
+        .join(module_record_name("reproduction-record", module_id))
+        .strip_prefix(root)
+        .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut seen_archive_ids = BTreeSet::new();
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+        let existing: Value =
+            serde_json::from_str(line).unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        if existing.get("schema_version").and_then(Value::as_u64) != Some(1)
+            || existing.get("module_id").and_then(Value::as_str) != Some(module_id)
+            || existing.get("result").and_then(Value::as_str) != Some("stale")
+        {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+        let archive_id =
+            producer_string(&existing, "/archive_id", "PRODUCER_RECORD_ARCHIVE_INVALID");
+        if !seen_archive_ids.insert(archive_id.clone()) {
+            fail("PRODUCER_RECORD_ARCHIVE_CONFLICT");
+        }
+        let records = existing
+            .get("records")
+            .and_then(Value::as_array)
+            .filter(|records| records.len() == 3)
+            .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        let record_hash =
+            producer_string(&existing, "/record_hash", "PRODUCER_RECORD_ARCHIVE_INVALID");
+        if record_hash != sha256(&canonical(&Value::Array(records.clone()))) {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+        let expected_archive_id = producer_stable_id(
+            "producer-attempt",
+            &serde_json::json!({"module_id": module_id, "record_hash": record_hash}),
+        );
+        if archive_id != expected_archive_id {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+        let archived_at = DateTime::parse_from_rfc3339(&producer_string(
+            &existing,
+            "/archived_at",
+            "PRODUCER_RECORD_ARCHIVE_INVALID",
+        ))
+        .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"))
+        .with_timezone(&Utc);
+        if archived_at > Utc::now() {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+
+        let path_at = |index: usize| {
+            records[index]
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"))
+        };
+        if path_at(0) != expected_worktree_path || path_at(1) != expected_reproduction_path {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+        let worktree = records[0]
+            .get("record")
+            .filter(|record| record.is_object())
+            .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        let reproduction = records[1]
+            .get("record")
+            .filter(|record| record.is_object())
+            .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        let evidence = records[2]
+            .get("record")
+            .filter(|record| record.is_object())
+            .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        let evidence_id =
+            producer_string(evidence, "/evidence_id", "PRODUCER_RECORD_ARCHIVE_INVALID");
+        let expected_evidence_path = producer_baseline_path(root, module_id, &evidence_id)
+            .strip_prefix(root)
+            .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"))
+            .to_string_lossy()
+            .replace('\\', "/");
+        if path_at(2) != expected_evidence_path
+            || producer_string(worktree, "/module_id", "PRODUCER_RECORD_ARCHIVE_INVALID")
+                != module_id
+            || producer_string(
+                reproduction,
+                "/module_id",
+                "PRODUCER_RECORD_ARCHIVE_INVALID",
+            ) != module_id
+            || producer_string(
+                evidence,
+                "/scope/module_id",
+                "PRODUCER_RECORD_ARCHIVE_INVALID",
+            ) != module_id
+            || producer_string(
+                reproduction,
+                "/baseline_evidence_id",
+                "PRODUCER_RECORD_ARCHIVE_INVALID",
+            ) != evidence_id
+            || producer_string(
+                reproduction,
+                "/worktree_id",
+                "PRODUCER_RECORD_ARCHIVE_INVALID",
+            ) != producer_string(worktree, "/worktree_id", "PRODUCER_RECORD_ARCHIVE_INVALID")
+            || producer_issue(worktree, "/issue_id", "PRODUCER_RECORD_ARCHIVE_INVALID")
+                != producer_issue(reproduction, "/issue_id", "PRODUCER_RECORD_ARCHIVE_INVALID")
+            || producer_issue(worktree, "/issue_id", "PRODUCER_RECORD_ARCHIVE_INVALID")
+                != producer_issue(evidence, "/issue_id", "PRODUCER_RECORD_ARCHIVE_INVALID")
+            || producer_string(evidence, "/result", "PRODUCER_RECORD_ARCHIVE_INVALID") != "pass"
+        {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+    }
+}
+
+fn producer_archive_current_set(root: &Path, module_id: &str) -> bool {
+    producer_validate_attempt_ledger(root, module_id);
+    let records_root = root.join(".appsdk").join("records");
+    let fixed_targets = [
+        records_root.join(module_record_name("worktree-record", module_id)),
+        records_root.join(module_record_name("reproduction-record", module_id)),
+    ];
+    let mut fixed = Vec::with_capacity(fixed_targets.len());
+    let mut present = 0usize;
+    for target in &fixed_targets {
+        assert_no_symlink_components(root, target, "producer_record_archive");
+        if let Some(record) =
+            producer_read_record_if_present(target, "PRODUCER_RECORD_ARCHIVE_INVALID")
+        {
+            present += 1;
+            fixed.push((target.clone(), record));
+        }
+    }
+    if present == 0 {
+        return false;
+    }
+    if present != fixed_targets.len() {
+        fail("PRODUCER_RECORD_SET_INCOMPLETE");
+    }
+
+    let baseline_id = producer_string(
+        &fixed[1].1,
+        "/baseline_evidence_id",
+        "PRODUCER_RECORD_ARCHIVE_INVALID",
+    );
+    let baseline_target = producer_baseline_path(root, module_id, &baseline_id);
+    assert_no_symlink_components(root, &baseline_target, "producer_record_archive");
+    let baseline =
+        producer_read_record_if_present(&baseline_target, "PRODUCER_RECORD_SET_INCOMPLETE")
+            .unwrap_or_else(|| fail("PRODUCER_RECORD_SET_INCOMPLETE"));
+
+    let records = vec![
+        serde_json::json!({
+            "path": fixed[0].0.strip_prefix(root).unwrap_or(&fixed[0].0).to_string_lossy(),
+            "record": fixed[0].1
+        }),
+        serde_json::json!({
+            "path": fixed[1].0.strip_prefix(root).unwrap_or(&fixed[1].0).to_string_lossy(),
+            "record": fixed[1].1
+        }),
+        serde_json::json!({
+            "path": baseline_target.strip_prefix(root).unwrap_or(&baseline_target).to_string_lossy(),
+            "record": baseline
+        }),
+    ];
+    let record_hash = sha256(&canonical(&Value::Array(records.clone())));
+    let archive_id = producer_stable_id(
+        "producer-attempt",
+        &serde_json::json!({"module_id": module_id, "record_hash": record_hash}),
+    );
+    let target = producer_attempt_path(root, module_id);
+    assert_no_symlink_components(root, &target, "producer_record_archive");
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+        }
+    }
+    if target.is_file() {
+        let contents =
+            fs::read_to_string(&target).unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        for line in contents.lines() {
+            let existing: Value = serde_json::from_str(line)
+                .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+            if existing.get("archive_id").and_then(Value::as_str) == Some(&archive_id) {
+                if existing.get("record_hash").and_then(Value::as_str) != Some(&record_hash)
+                    || existing.get("records") != Some(&Value::Array(records.clone()))
+                {
+                    fail("PRODUCER_RECORD_ARCHIVE_CONFLICT");
+                }
+                return true;
+            }
+        }
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_WRITE_FAILED"));
+    }
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "archive_id": archive_id,
+        "module_id": module_id,
+        "result": "stale",
+        "record_hash": record_hash,
+        "records": records,
+        "archived_at": Utc::now().to_rfc3339()
+    });
+    let mut line = serde_json::to_vec(&envelope)
+        .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_WRITE_FAILED"));
+    line.push(b'\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+        .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_WRITE_FAILED"));
+    file.write_all(&line)
+        .and_then(|_| file.sync_all())
+        .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_WRITE_FAILED"));
+    if let Some(parent) = target.parent() {
+        if let Ok(file) = OpenOptions::new().read(true).open(parent) {
+            let _ = file.sync_all();
+        }
+    }
+    producer_validate_attempt_ledger(root, module_id);
+    true
+}
+
 fn producer_stable_id(prefix: &str, value: &Value) -> String {
     let digest = sha256(&canonical(value));
     format!(
@@ -5252,11 +5524,15 @@ fn producer_transaction_dir(root: &Path, module_id: &str) -> PathBuf {
         .join(format!("producer-{}", module_id))
 }
 
-fn producer_record_transaction_validate_marker(root: &Path, module_id: &str, input_hash: &str) {
+fn producer_record_transaction_validate_marker(
+    root: &Path,
+    module_id: &str,
+    input_hash: &str,
+) -> Option<bool> {
     let transaction = producer_transaction_dir(root, module_id);
     let marker_path = transaction.join("marker.json");
     if !transaction.exists() || !marker_path.is_file() {
-        return;
+        return None;
     }
     assert_no_symlink_components(root, &transaction, "lifecycle_producer_transaction");
     let marker: Value = serde_json::from_str(
@@ -5268,6 +5544,9 @@ fn producer_record_transaction_validate_marker(root: &Path, module_id: &str, inp
         || marker.get("module_id").and_then(Value::as_str) != Some(module_id)
         || marker.get("input_hash").and_then(Value::as_str) != Some(input_hash)
         || marker.get("phase").and_then(Value::as_str) != Some("commit")
+        || marker
+            .get("replace_current")
+            .is_some_and(|value| !value.is_boolean())
     {
         fail("PRODUCER_TRANSACTION_MARKER_MISMATCH");
     }
@@ -5332,12 +5611,19 @@ fn producer_record_transaction_validate_marker(root: &Path, module_id: &str, inp
             fail("PRODUCER_TRANSACTION_MARKER_INVALID");
         }
     }
+    Some(
+        marker
+            .get("replace_current")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
 }
 
 fn producer_record_transaction_recover<F>(
     root: &Path,
     module_id: &str,
     input_hash: &str,
+    replace_current: bool,
     validate: F,
 ) -> Option<Vec<(PathBuf, Value)>>
 where
@@ -5367,6 +5653,14 @@ where
         || marker.get("phase").and_then(Value::as_str) != Some("commit")
     {
         fail("PRODUCER_TRANSACTION_MARKER_MISMATCH");
+    }
+    if marker
+        .get("replace_current")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        != replace_current
+    {
+        fail("PRODUCER_TRANSACTION_REPLACE_MODE_MISMATCH");
     }
     let entries = marker
         .get("records")
@@ -5441,18 +5735,23 @@ where
             .unwrap_or_else(|| fail("PRODUCER_TRANSACTION_MARKER_INVALID"));
         let staging = transaction.join(staging_name);
         assert_no_symlink_components(root, &staging, "lifecycle_producer_staging");
+        let staging_valid = staging.is_file()
+            && file_sha256(&staging, "lifecycle_producer_staging") == expected_hash;
         let bytes = if target.exists() {
-            if file_sha256(&target, "lifecycle_producer_record") != expected_hash {
-                fail("PRODUCER_TRANSACTION_TARGET_CONFLICT");
+            if file_sha256(&target, "lifecycle_producer_record") == expected_hash {
+                fs::read(&target).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"))
+            } else {
+                if !replace_current || !staging_valid {
+                    fail("PRODUCER_TRANSACTION_TARGET_CONFLICT");
+                }
+                pending_links.push((staging.clone(), target.clone(), true));
+                fs::read(&staging).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"))
             }
-            fs::read(&target).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"))
         } else {
-            if !staging.is_file()
-                || file_sha256(&staging, "lifecycle_producer_staging") != expected_hash
-            {
+            if !staging_valid {
                 fail("PRODUCER_TRANSACTION_STAGING_MISSING");
             }
-            pending_links.push((staging.clone(), target.clone()));
+            pending_links.push((staging.clone(), target.clone(), false));
             fs::read(&staging).unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"))
         };
         let record: Value = serde_json::from_slice(&bytes)
@@ -5476,13 +5775,22 @@ where
     // publishing any missing records. A mismatch must leave the transaction
     // available for diagnosis and must not publish a partial graph.
     validate(&recovered);
-    for (staging, target) in pending_links {
+    for (staging, target, replace) in pending_links {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
         }
-        fs::hard_link(&staging, &target)
-            .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+        if replace {
+            producer_replace_target_from_staging(
+                root,
+                &staging,
+                &target,
+                "PRODUCER_TRANSACTION_RECOVERY_FAILED",
+            );
+        } else {
+            fs::hard_link(&staging, &target)
+                .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_RECOVERY_FAILED"));
+        }
     }
     fs::remove_dir_all(&transaction)
         .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
@@ -5516,10 +5824,43 @@ fn producer_durable_json(target: &Path, value: &Value, error: &str) {
     }
 }
 
+fn producer_replace_target_from_staging(root: &Path, staging: &Path, target: &Path, error: &str) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
+        .as_nanos();
+    let backup = target.with_extension(format!("replaced.{}.{}", std::process::id(), nonce));
+    assert_no_symlink_components(root, &backup, "lifecycle_producer_backup");
+    assert_no_symlink_components(root, staging, "lifecycle_producer_staging");
+    assert_no_symlink_components(root, target, "lifecycle_producer_record");
+    if backup.exists() {
+        fail(error);
+    }
+    let had_target = target.exists();
+    if had_target {
+        fs::rename(target, &backup).unwrap_or_else(|_| fail(error));
+    }
+    if let Err(_) = fs::rename(staging, target) {
+        if had_target {
+            let _ = fs::rename(&backup, target);
+        }
+        fail(error);
+    }
+    if backup.exists() {
+        fs::remove_file(&backup).unwrap_or_else(|_| fail(error));
+    }
+    if let Some(parent) = target.parent() {
+        if let Ok(file) = OpenOptions::new().read(true).open(parent) {
+            let _ = file.sync_all();
+        }
+    }
+}
+
 fn producer_commit_records(
     root: &Path,
     module_id: &str,
     input_hash: &str,
+    replace_current: bool,
     targets: &[(PathBuf, Value)],
 ) {
     let transaction = producer_transaction_dir(root, module_id);
@@ -5557,6 +5898,7 @@ fn producer_commit_records(
             "module_id": module_id,
             "input_hash": input_hash,
             "phase": "commit",
+            "replace_current": replace_current,
             "records": entries
         }),
         "PRODUCER_TRANSACTION_WRITE_FAILED",
@@ -5564,18 +5906,25 @@ fn producer_commit_records(
     for (index, (target, record)) in targets.iter().enumerate() {
         let staging = transaction.join(format!("record-{}.json", index));
         if target.exists() {
-            if file_sha256(target, "lifecycle_producer_record")
-                != digest_bytes(
-                    &(serde_json::to_string_pretty(record).unwrap() + "\n").into_bytes(),
-                )
-            {
+            let expected_hash =
+                digest_bytes(&(serde_json::to_string_pretty(record).unwrap() + "\n").into_bytes());
+            if file_sha256(target, "lifecycle_producer_record") == expected_hash {
+                let _ = fs::remove_file(staging);
+            } else if replace_current {
+                producer_replace_target_from_staging(
+                    root,
+                    &staging,
+                    target,
+                    "PRODUCER_TRANSACTION_WRITE_FAILED",
+                );
+            } else {
                 fail("PRODUCER_TRANSACTION_TARGET_CONFLICT");
             }
         } else {
             fs::hard_link(&staging, target)
                 .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_WRITE_FAILED"));
+            let _ = fs::remove_file(staging);
         }
-        let _ = fs::remove_file(staging);
     }
     fs::remove_dir_all(&transaction)
         .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
@@ -5713,8 +6062,7 @@ fn assert_recovered_record_bindings(
     baseline_id: &str,
     input_hashes: &[String],
     command: &Value,
-    actual_status: i32,
-    output_hash: &str,
+    expected_status: i32,
     bug_triage: Option<&Value>,
 ) {
     let worktree = &targets[0].1;
@@ -5799,6 +6147,35 @@ fn assert_recovered_record_bindings(
     }
 
     let evidence = &targets[2].1;
+    assert_evidence_record(
+        evidence,
+        baseline_id,
+        EvidenceValidationMode::Current(Utc::now()),
+    );
+    let output_hash = producer_string(
+        evidence,
+        "/output_hash",
+        "PRODUCER_RECOVERY_BASELINE_OUTPUT_INVALID",
+    );
+    if output_hash.len() != 71
+        || !output_hash.starts_with("sha256:")
+        || !output_hash[7..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        fail("PRODUCER_RECOVERY_BASELINE_OUTPUT_INVALID");
+    }
+    let recorded_status = evidence
+        .get("exit_status")
+        .and_then(Value::as_i64)
+        .filter(|status| (-255..=255).contains(status) && *status != 0)
+        .unwrap_or_else(|| fail("PRODUCER_RECOVERY_BASELINE_STATUS_INVALID"));
+    if recorded_status != i64::from(expected_status) {
+        fail(format!(
+            "PRODUCER_RECOVERY_BASELINE_STATUS_MISMATCH:expected={}:actual={}",
+            expected_status, recorded_status
+        ));
+    }
     if producer_string(
         evidence,
         "/issue_id",
@@ -5826,12 +6203,6 @@ fn assert_recovered_record_bindings(
         ) != baseline_id
         || evidence.get("input_hashes") != Some(&serde_json::json!(input_hashes))
         || evidence.get("command") != Some(command)
-        || evidence.get("exit_status").and_then(Value::as_i64) != Some(i64::from(actual_status))
-        || producer_string(
-            evidence,
-            "/output_hash",
-            "PRODUCER_RECOVERY_BASELINE_BINDING_MISMATCH",
-        ) != output_hash
         || evidence.get("producer")
             != Some(&serde_json::json!({
                 "adapter": "appsdk",
@@ -5897,6 +6268,7 @@ fn producer_try_reuse_records(
     expected_status: i32,
     expected_error_token: &str,
 ) -> Option<Vec<(PathBuf, Value)>> {
+    producer_validate_attempt_ledger(root, module_id);
     if producer_transaction_dir(root, module_id).exists() {
         return None;
     }
@@ -5923,6 +6295,14 @@ fn producer_try_reuse_records(
     }
     if saw_missing {
         if existing.is_empty() {
+            return None;
+        }
+        if targets[0].is_file() && targets[1].is_file() && !targets[2].is_file() {
+            // The fixed worktree/reproduction projections belong to the last
+            // current attempt while this input has a new baseline identity.
+            // Let the producer run the real baseline command and replace the
+            // current set after archiving it; a partial fixed set remains a
+            // hard error below.
             return None;
         }
         fail("PRODUCER_RECORD_SET_INCOMPLETE");
@@ -6018,12 +6398,22 @@ fn producer_try_reuse_records(
     {
         fail("PRODUCER_REUSE_BASELINE_OUTPUT_INVALID");
     }
+    let now = Utc::now();
+    let expires_at = DateTime::parse_from_rfc3339(&producer_string(
+        &existing[2],
+        "/expires_at",
+        "PRODUCER_REUSE_BASELINE_INVALID",
+    ))
+    .unwrap_or_else(|_| fail("PRODUCER_REUSE_BASELINE_INVALID"))
+    .with_timezone(&Utc);
+    if expires_at <= now {
+        return None;
+    }
     assert_evidence_record(
         &existing[2],
         baseline_id,
-        EvidenceValidationMode::Current(Utc::now()),
+        EvidenceValidationMode::Current(now),
     );
-    let now = Utc::now();
     for (record, name) in [
         (&existing[0], "worktree-record"),
         (&existing[1], "reproduction-record"),
@@ -6081,7 +6471,8 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     // A durable marker is structurally checked during preflight so malformed
     // transactions fail with their own diagnostic; record recovery itself is
     // still delayed until all current-candidate gates have passed below.
-    producer_record_transaction_validate_marker(root, module_id, &input_hash);
+    let transaction_replace_current =
+        producer_record_transaction_validate_marker(root, module_id, &input_hash);
     let records_root = root.join(".appsdk").join("records");
     let worktree = input
         .get("worktree")
@@ -6162,13 +6553,17 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     let current_root = root
         .canonicalize()
         .unwrap_or_else(|_| fail("PRODUCER_WORKTREE_UNAVAILABLE"));
-    if !worktree_list.lines().any(|line| {
-        line.strip_prefix("worktree ")
-            .and_then(|path| Path::new(path).canonicalize().ok())
-            .is_some_and(|path| path == current_root)
-    }) {
-        fail("PRODUCER_WORKTREE_NOT_REGISTERED");
-    }
+    let git_worktree_root = worktree_list
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .filter_map(|path| Path::new(path).canonicalize().ok())
+        .filter(|path| current_root == *path || current_root.starts_with(path))
+        .max_by_key(|path| path.components().count())
+        .unwrap_or_else(|| fail("PRODUCER_WORKTREE_NOT_REGISTERED"));
+    let project_relative_path = current_root
+        .strip_prefix(&git_worktree_root)
+        .unwrap_or_else(|_| fail("PRODUCER_WORKTREE_NOT_REGISTERED"))
+        .to_path_buf();
     let base_commit = producer_string(worktree, "/base_commit", "INVALID_WORKTREE_RECORD");
     let head_commit = producer_string(worktree, "/head_commit", "INVALID_WORKTREE_RECORD");
     if git_value(
@@ -6318,10 +6713,12 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         let status_only = status.lines().all(|line| {
             line.get(3..).map(str::trim).is_some_and(|path| {
                 allowed_targets.iter().any(|target| target == path)
+                    || path.starts_with(&format!(".appsdk/records/evidence/{}/", module_id))
                     || transaction_targets
                         .as_ref()
                         .is_some_and(|targets| targets.iter().any(|target| target == path))
                     || path.starts_with(&format!(".appsdk/transactions/producer-{}/", module_id))
+                    || path.starts_with(&format!(".appsdk/records/attempts/{}/", module_id))
             })
         });
         if !status_only {
@@ -6361,6 +6758,51 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         );
         return;
     }
+    let bug_triage = worktree.get("bug_triage");
+    if producer_transaction_dir(root, module_id).exists() {
+        let replace_current = transaction_replace_current.unwrap_or(false);
+        if let Some(recovered) = producer_record_transaction_recover(
+            root,
+            module_id,
+            &input_hash,
+            replace_current,
+            |recovered| {
+                assert_recovered_record_bindings(
+                    recovered,
+                    module_id,
+                    &worktree_issue,
+                    &base_ref,
+                    &base_commit,
+                    &head_commit,
+                    &current_branch,
+                    &expected_scope_hash,
+                    &worktree_id,
+                    &reproduction_id,
+                    &baseline_id,
+                    &input_hashes,
+                    &command_declaration,
+                    expected_status,
+                    bug_triage,
+                );
+            },
+        ) {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "module_id": module_id,
+                    "goal_id": input["goal_id"],
+                    "recovered": true,
+                    "records": recovered.iter().map(|(target, record)| serde_json::json!({
+                        "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
+                        "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
+                    })).collect::<Vec<_>>()
+                }))
+                .unwrap()
+            );
+            return;
+        }
+    }
     // Validate the declaration before creating a temporary worktree. The
     // baseline checkout must be disposable even when its directory is
     // malformed or absent at the declared source commit.
@@ -6379,7 +6821,8 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
             fail(error);
         }
     }
-    let command_directory = match producer_command_dir(&baseline_root, &working_directory) {
+    let baseline_project_root = baseline_root.join(&project_relative_path);
+    let command_directory = match producer_command_dir(&baseline_project_root, &working_directory) {
         Ok(path) => path,
         Err(error) => {
             remove_producer_baseline_worktree(root, &baseline_root);
@@ -6445,51 +6888,13 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ));
-    let bug_triage = worktree.get("bug_triage");
-    if let Some(recovered) =
-        producer_record_transaction_recover(root, module_id, &input_hash, |recovered| {
-            assert_recovered_record_bindings(
-                recovered,
-                module_id,
-                &worktree_issue,
-                &base_ref,
-                &base_commit,
-                &head_commit,
-                &current_branch,
-                &expected_scope_hash,
-                &worktree_id,
-                &reproduction_id,
-                &baseline_id,
-                &input_hashes,
-                &command_declaration,
-                actual_status,
-                &output_hash,
-                bug_triage,
-            );
-        })
-    {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": true,
-                "module_id": module_id,
-                "goal_id": input["goal_id"],
-                "recovered": true,
-                "records": recovered.iter().map(|(target, record)| serde_json::json!({
-                    "path": target.strip_prefix(root).unwrap_or(target).display().to_string(),
-                    "id": record.get("worktree_id").or_else(|| record.get("reproduction_id")).or_else(|| record.get("evidence_id"))
-                })).collect::<Vec<_>>()
-            }))
-            .unwrap()
-        );
-        return;
-    }
+    let replace_current = producer_archive_current_set(root, module_id);
     for target in [
         records_root.join(module_record_name("worktree-record", module_id)),
         records_root.join(module_record_name("reproduction-record", module_id)),
     ] {
         assert_no_symlink_components(root, &target, "record_control");
-        if target.exists() {
+        if target.exists() && !replace_current {
             fail(format!(
                 "LIFECYCLE_RECORD_EXISTS:{}",
                 target.strip_prefix(root).unwrap_or(&target).display()
@@ -6552,7 +6957,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
         (targets[2].0.clone(), observed_baseline),
     ];
     assert_produced_record_shapes(&targets, module_id);
-    producer_commit_records(root, module_id, &input_hash, &targets);
+    producer_commit_records(root, module_id, &input_hash, replace_current, &targets);
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -6698,7 +7103,16 @@ fn lifecycle_chain_attempt_path(root: &Path, module_id: &str, kind: &str) -> Pat
         .join(format!("{}.jsonl", kind))
 }
 
-fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, record: &Value) {
+fn lifecycle_chain_append_attempt_with_result(
+    root: &Path,
+    module_id: &str,
+    kind: &str,
+    record: &Value,
+    result: &str,
+) {
+    if !matches!(result, "non_pass" | "stale") {
+        fail("LIFECYCLE_CHAIN_ATTEMPT_RESULT_INVALID");
+    }
     let target = lifecycle_chain_attempt_path(root, module_id, kind);
     let record_hash = sha256(&canonical(record));
     let attempt_id = lifecycle_chain_attempt_identity(module_id, kind, &record_hash);
@@ -6720,7 +7134,7 @@ fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, reco
         "attempt_id": attempt_id,
         "module_id": module_id,
         "phase": kind,
-        "result": "non_pass",
+        "result": result,
         "record_hash": record_hash,
         "record": record,
         "archived_at": Utc::now().to_rfc3339()
@@ -6741,6 +7155,10 @@ fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, reco
             let _ = file.sync_all();
         }
     }
+}
+
+fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, record: &Value) {
+    lifecycle_chain_append_attempt_with_result(root, module_id, kind, record, "non_pass");
 }
 
 fn lifecycle_chain_validate_attempt_ledger(
@@ -6774,7 +7192,10 @@ fn lifecycle_chain_validate_attempt_ledger(
         if existing.get("schema_version").and_then(Value::as_u64) != Some(1)
             || existing.get("module_id").and_then(Value::as_str) != Some(module_id)
             || existing.get("phase").and_then(Value::as_str) != Some(kind)
-            || existing.get("result").and_then(Value::as_str) != Some("non_pass")
+            || !matches!(
+                existing.get("result").and_then(Value::as_str),
+                Some("non_pass" | "stale")
+            )
             || existing.get("attempt_id").and_then(Value::as_str).is_none()
             || existing.get("record").is_none()
             || existing
@@ -6860,6 +7281,7 @@ fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record
     if target.exists() {
         let existing = producer_read_record_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
             .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_RECORD_INVALID"));
+        record_time(&existing, &target.display().to_string());
         let existing_record_hash = sha256(&canonical(&existing));
         let existing_attempt_id =
             lifecycle_chain_attempt_identity(module_id, kind, &existing_record_hash);
@@ -6877,22 +7299,32 @@ fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record
             if !expected_pass {
                 fail("LIFECYCLE_CHAIN_PASS_IMMUTABLE");
             }
-            lifecycle_chain_assert_reusable_record(
-                &existing,
-                record,
-                &target.display().to_string(),
-                "LIFECYCLE_CHAIN_RECORD_IDENTITY_MISMATCH",
-                true,
-            );
-            return true;
+            if producer_without_fields(&existing, &["created_at"])
+                == producer_without_fields(record, &["created_at"])
+            {
+                lifecycle_chain_assert_reusable_record(
+                    &existing,
+                    record,
+                    &target.display().to_string(),
+                    "LIFECYCLE_CHAIN_RECORD_IDENTITY_MISMATCH",
+                    true,
+                );
+                return true;
+            }
+            // A PASS projection is immutable as an audit witness, but the
+            // current projection may advance to a new candidate identity. Keep
+            // the complete old bytes in the append-only ledger before replacing
+            // the current file.
+            lifecycle_chain_append_attempt_with_result(root, module_id, kind, &existing, "stale");
         }
-        record_time(&existing, &target.display().to_string());
-        if producer_without_fields(&existing, &["created_at"])
-            == producer_without_fields(record, &["created_at"])
-        {
-            fail("LIFECYCLE_CHAIN_STAGE_NOT_PASS");
+        if !existing_pass {
+            if producer_without_fields(&existing, &["created_at"])
+                == producer_without_fields(record, &["created_at"])
+            {
+                fail("LIFECYCLE_CHAIN_STAGE_NOT_PASS");
+            }
+            lifecycle_chain_append_attempt(root, module_id, kind, &existing);
         }
-        lifecycle_chain_append_attempt(root, module_id, kind, &existing);
         producer_durable_json(
             target.as_path(),
             record,
@@ -7114,22 +7546,26 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
             if verdict != "pass" {
                 fail("LIFECYCLE_CHAIN_PASS_IMMUTABLE");
             }
-            lifecycle_chain_assert_reusable_record(
-                &existing,
-                &review,
-                &review_name,
-                "ARCHITECTURE_REVIEW_IDENTITY_MISMATCH",
-                true,
-            );
-            let existing_time = record_time(&existing, &review_name);
-            for id in &evidence_ids {
-                let evidence = evidence_by_id(root, module_id, id);
-                if record_time(&evidence, id) > existing_time {
-                    fail("ARCHITECTURE_REVIEW_EVIDENCE_DRIFT");
+            if producer_without_fields(&existing, &["created_at"])
+                == producer_without_fields(&review, &["created_at"])
+            {
+                lifecycle_chain_assert_reusable_record(
+                    &existing,
+                    &review,
+                    &review_name,
+                    "ARCHITECTURE_REVIEW_IDENTITY_MISMATCH",
+                    true,
+                );
+                let existing_time = record_time(&existing, &review_name);
+                for id in &evidence_ids {
+                    let evidence = evidence_by_id(root, module_id, id);
+                    if record_time(&evidence, id) > existing_time {
+                        fail("ARCHITECTURE_REVIEW_EVIDENCE_DRIFT");
+                    }
                 }
+                lifecycle_chain_output(&existing, true);
+                return;
             }
-            lifecycle_chain_output(&existing, true);
-            return;
         }
     }
     let reused = lifecycle_chain_write_record(root, module_id, "review-record", &review);
@@ -7284,19 +7720,23 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
                 &existing_record_hash,
                 &existing,
             );
-            // A cache hit must satisfy the same complete effectiveness gate
-            // as a downstream consumer.  This catches evidence timestamp or
-            // reference drift before returning reused=true.
-            assert_fix_effectiveness_gate(root, module_id);
-            lifecycle_chain_assert_reusable_record(
-                &existing,
-                &effectiveness,
-                &module_record_name("effectiveness-record", module_id),
-                "EFFECTIVENESS_RECORD_IDENTITY_MISMATCH",
-                true,
-            );
-            lifecycle_chain_output(&existing, true);
-            return;
+            if producer_without_fields(&existing, &["created_at"])
+                == producer_without_fields(&effectiveness, &["created_at"])
+            {
+                // A cache hit must satisfy the same complete effectiveness
+                // gate as a downstream consumer. This catches evidence
+                // timestamp or reference drift before returning reused=true.
+                assert_fix_effectiveness_gate(root, module_id);
+                lifecycle_chain_assert_reusable_record(
+                    &existing,
+                    &effectiveness,
+                    &module_record_name("effectiveness-record", module_id),
+                    "EFFECTIVENESS_RECORD_IDENTITY_MISMATCH",
+                    true,
+                );
+                lifecycle_chain_output(&existing, true);
+                return;
+            }
         }
     }
     let reused =
@@ -7466,15 +7906,19 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
                 &existing_record_hash,
                 &existing,
             );
-            lifecycle_chain_assert_reusable_record(
-                &existing,
-                &merge,
-                &merge_name,
-                "MERGE_RECORD_IDENTITY_MISMATCH",
-                true,
-            );
-            lifecycle_chain_output(&existing, true);
-            return;
+            if producer_without_fields(&existing, &["created_at"])
+                == producer_without_fields(&merge, &["created_at"])
+            {
+                lifecycle_chain_assert_reusable_record(
+                    &existing,
+                    &merge,
+                    &merge_name,
+                    "MERGE_RECORD_IDENTITY_MISMATCH",
+                    true,
+                );
+                lifecycle_chain_output(&existing, true);
+                return;
+            }
         }
     }
     let reused = lifecycle_chain_write_record(root, module_id, "merge-record", &merge);
@@ -7699,15 +8143,19 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
                 &existing_record_hash,
                 &existing,
             );
-            lifecycle_chain_assert_reusable_record(
-                &existing,
-                &promotion,
-                &module_record_name("promotion-record", module_id),
-                "PROMOTION_RECORD_IDENTITY_MISMATCH",
-                true,
-            );
-            lifecycle_chain_output(&existing, true);
-            return;
+            if producer_without_fields(&existing, &["created_at"])
+                == producer_without_fields(&promotion, &["created_at"])
+            {
+                lifecycle_chain_assert_reusable_record(
+                    &existing,
+                    &promotion,
+                    &module_record_name("promotion-record", module_id),
+                    "PROMOTION_RECORD_IDENTITY_MISMATCH",
+                    true,
+                );
+                lifecycle_chain_output(&existing, true);
+                return;
+            }
         }
     }
     let reused = lifecycle_chain_write_record(root, module_id, "promotion-record", &promotion);

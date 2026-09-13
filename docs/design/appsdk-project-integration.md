@@ -19,6 +19,15 @@ to be frozen before it reads or creates publication records. Frozen dependencies
 retain the existing immutable artifact verification; development compilation
 does not manufacture a FreezeRecord or alter Active/Protected.
 
+If a clean checkout is missing a retained frozen projection, restore it with
+the explicit `appsdk rehydrate-frozen --module <id>` command. The command
+validates the retained freeze/promotion graph and rebuilds the generated
+projection under the current project root. `verify`, `compile`, and Active
+index generation remain read-only with respect to protected/history state and
+must not silently copy artifacts or publish a replacement. Only after the
+rehydration receipt is present may the invalidated compile and downstream
+verification stages be rerun.
+
 ```text
 external AppSDK installation
   -> versioned Bundle: CLI / compiler / contracts / docs / rules / skills

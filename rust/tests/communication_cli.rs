@@ -4079,3 +4079,332 @@ fn bug_loop_collisions_fail_closed_without_mutating_unrelated_loops() {
     assert_eq!(corrupted_loop["kind"], "task");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn agent_rebind_preserves_identity_updates_master_and_replays() {
+    let root = temp_root("agent-rebind-success");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+
+    let rebound = call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    assert_eq!(rebound["idempotent"], false);
+    assert_eq!(rebound["agent"]["agentId"], "master");
+    assert_eq!(rebound["agent"]["sessionId"], "master-new");
+    assert_eq!(rebound["tombstone"]["address"]["sessionId"], "master-old");
+    assert_eq!(rebound["tombstone"]["reboundTo"]["sessionId"], "master-new");
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(status["agents"][0]["sessionId"], "master-new");
+    assert_eq!(
+        status["agents"][0]["masterGrant"],
+        "user approved master for this scope"
+    );
+    assert_eq!(status["scopes"][0]["masterSessionId"], "master-new");
+    assert_eq!(status["agentTombstones"].as_array().unwrap().len(), 1);
+    assert_eq!(status["agentTombstones"][0]["agentId"], "master");
+    assert_eq!(status["agentTombstones"][0]["runtimeId"], "runtime-scope");
+
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"agent.rebound\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_rejects_runtime_mismatch_without_mutation() {
+    let root = temp_root("agent-rebind-runtime-mismatch");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    let error = call_error(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-forged"
+            }
+        }),
+    );
+    assert!(error.contains("agent_rebind_runtime_mismatch"), "{error}");
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(status["agents"][0]["sessionId"], "master-old");
+    assert_eq!(status["scopes"][0]["masterSessionId"], "master-old");
+    assert!(status["agentTombstones"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_rejects_occupied_target_without_mutation() {
+    let root = temp_root("agent-rebind-occupied");
+    register_scope(&root, "scope", "app", "/project", &["master-old", "target"]);
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    register_agent(&root, "scope", "target", "target", "peer", None);
+    let error = call_error(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "target" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    assert!(error.contains("agent_address_occupied"), "{error}");
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(status["scopes"][0]["masterSessionId"], "master-old");
+    assert!(status["agentTombstones"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_makes_old_address_read_only_and_new_address_sendable() {
+    let root = temp_root("agent-rebind-send");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new", "peer"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    register_agent(&root, "scope", "peer", "peer", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    let old_send = call_error(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "peer" },
+                "title": "old address",
+                "priority": "p1",
+                "body": "must be rejected"
+            }
+        }),
+    );
+    assert!(old_send.contains("agent_address_rebound"), "{old_send}");
+
+    let new_send = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-new" },
+                "to": { "scopeId": "scope", "sessionId": "peer" },
+                "title": "new address",
+                "priority": "p1",
+                "body": "must be accepted"
+            }
+        }),
+    );
+    assert_eq!(new_send["message"]["from"]["sessionId"], "master-new");
+    let old_refresh = call_error(
+        &root,
+        json!({
+            "op": "refresh_agent",
+            "address": { "scopeId": "scope", "sessionId": "master-old" }
+        }),
+    );
+    assert!(
+        old_refresh.contains("agent_address_rebound"),
+        "{old_refresh}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_preserves_existing_subagent_parent_ancestry() {
+    let root = temp_root("agent-rebind-parent");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master", "parent-old", "parent-new", "child"],
+    );
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "parent-old", "parent", "peer", None);
+    register_agent(
+        &root,
+        "scope",
+        "child",
+        "child",
+        "subagent",
+        Some(json!({ "scopeId": "scope", "sessionId": "parent-old" })),
+    );
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "parent-old" },
+                "to": { "scopeId": "scope", "sessionId": "parent-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    let child_to_parent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "child" },
+                "to": { "scopeId": "scope", "sessionId": "parent-new" },
+                "title": "child reply",
+                "priority": "p1",
+                "body": "preserve parent after rebind"
+            }
+        }),
+    );
+    assert_eq!(child_to_parent["message"]["state"], "accepted");
+    let parent_to_child = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "parent-new" },
+                "to": { "scopeId": "scope", "sessionId": "child" },
+                "title": "parent dispatch",
+                "priority": "p1",
+                "body": "preserve child binding after rebind"
+            }
+        }),
+    );
+    assert_eq!(parent_to_child["message"]["state"], "accepted");
+    let old_parent = call_error(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "parent-old" },
+                "to": { "scopeId": "scope", "sessionId": "child" },
+                "title": "old parent",
+                "priority": "p1",
+                "body": "must be rejected"
+            }
+        }),
+    );
+    assert!(old_parent.contains("agent_address_rebound"), "{old_parent}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tampered_agent_rebind_event_fails_closed_on_replay() {
+    let root = temp_root("agent-rebind-tamper");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut lines: Vec<Value> = contents
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rebound = lines
+        .iter_mut()
+        .find(|event| event["kind"] == "agent.rebound")
+        .unwrap();
+    rebound["data"]["to"]["agentId"] = json!("forged");
+    let rewritten = lines
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&mailbox, format!("{rewritten}\n")).unwrap();
+    let error = call_error(&root, json!({ "op": "status" }));
+    assert!(error.contains("journal_corrupt"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tampered_agent_rebind_address_fails_closed_on_replay() {
+    let root = temp_root("agent-rebind-address-tamper");
+    register_scope(&root, "scope", "app", "/project", &[]);
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut lines: Vec<Value> = contents
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rebound = lines
+        .iter_mut()
+        .find(|event| event["kind"] == "agent.rebound")
+        .unwrap();
+    rebound["data"]["to"]["sessionId"] = json!("");
+    rebound["data"]["tombstone"]["reboundTo"]["sessionId"] = json!("");
+    let rewritten = lines
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&mailbox, format!("{rewritten}\n")).unwrap();
+    let error = call_error(&root, json!({ "op": "status" }));
+    assert!(error.contains("journal_corrupt"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}

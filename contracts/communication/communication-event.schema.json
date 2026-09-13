@@ -14,6 +14,7 @@
         "adapter.registered",
         "agent.registered",
         "agent.refreshed",
+        "agent.rebound",
         "agent.state",
         "message.created",
         "message.state",
@@ -57,6 +58,16 @@
       "then": {
         "properties": {
           "data": {"$ref": "#/$defs/messageStateEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "agent.rebound"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/agentReboundEvent"}
         }
       }
     },
@@ -168,6 +179,64 @@
       "properties": {
         "scopeId": {"type": "string", "minLength": 1},
         "sessionId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "agentRecord": {
+      "type": "object",
+      "required": [
+        "scopeId",
+        "sessionId",
+        "agentId",
+        "role",
+        "masterGrant",
+        "parent",
+        "leaseMs",
+        "registeredAt",
+        "lastObservedAt",
+        "expiresAt",
+        "state",
+        "lastStateAt",
+        "runtimeId"
+      ],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1},
+        "agentId": {"type": "string", "minLength": 1},
+        "role": {"enum": ["master", "peer", "subagent"]},
+        "masterGrant": {"type": ["string", "null"]},
+        "parent": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]
+        },
+        "leaseMs": {"type": "integer", "minimum": 1000},
+        "registeredAt": {"type": "string", "format": "date-time"},
+        "lastObservedAt": {"type": "string", "format": "date-time"},
+        "expiresAt": {"type": "string", "format": "date-time"},
+        "state": {"enum": ["working", "idle"]},
+        "lastStateAt": {"type": "string", "format": "date-time"},
+        "runtimeId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "agentTombstone": {
+      "type": "object",
+      "required": ["address", "agentId", "runtimeId", "reboundTo", "reboundAt"],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "agentId": {"type": "string", "minLength": 1},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "reboundTo": {"$ref": "#/$defs/address"},
+        "reboundAt": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "agentReboundEvent": {
+      "type": "object",
+      "required": ["from", "to", "tombstone"],
+      "properties": {
+        "from": {"$ref": "#/$defs/agentRecord"},
+        "to": {"$ref": "#/$defs/agentRecord"},
+        "tombstone": {"$ref": "#/$defs/agentTombstone"}
       },
       "additionalProperties": false
     },

@@ -67,7 +67,7 @@
       "contracts/records/freeze-record.schema.json",
       "contracts/records/record-graph.contract.json"
     ],
-    "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json",
+    "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json",
     "zone_transition_manifest": "contracts/transitions/zone-transition-manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true

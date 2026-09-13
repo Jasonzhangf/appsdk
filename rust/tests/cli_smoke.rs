@@ -2484,6 +2484,86 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
 }
 
 #[test]
+fn init_sdk_source_workspace_uses_canonical_zone_transition_contract() {
+    let root = temp_root("init-sdk-source-workspace");
+    fs::create_dir_all(root.join("contracts/transitions")).unwrap();
+    fs::write(
+        root.join("contracts/transitions/zone-transition-manifest.json"),
+        include_str!("../../contracts/transitions/zone-transition-manifest.json"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("contracts/transitions/zone-transition.manifest.json"),
+        include_str!("../../contracts/transitions/zone-transition.manifest.json"),
+    )
+    .unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let project: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/project.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        project["governance"]["zone_transition_contract"],
+        "contracts/transitions/zone-transition.manifest.json"
+    );
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_preserves_legacy_zone_transition_contract_alias() {
+    let root = temp_root("init-legacy-zone-transition-alias");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["governance"]["zone_transition_contract"] =
+        Value::String("contracts/transitions/zone-transition-manifest.json".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let after_init: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    assert_eq!(
+        after_init["governance"]["zone_transition_contract"],
+        "contracts/transitions/zone-transition-manifest.json"
+    );
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_record_producer_is_bound_in_canonical_and_embedded_maps() {
     let root = temp_root("lifecycle-producer-map-binding");
     let root_text = root.to_str().unwrap();
@@ -6658,7 +6738,7 @@ fn verify_rejects_contracts_that_drop_canonical_semantics() {
         .contains("DECLARED_RECORD_CONTRACT_MISMATCH"));
     fs::write(&worktree_path, worktree_before).unwrap();
 
-    let zone_path = root.join("contracts/transitions/zone-transition-manifest.json");
+    let zone_path = root.join("contracts/transitions/zone-transition.manifest.json");
     let zone_before = fs::read(&zone_path).unwrap();
     let mut weakened_zone: Value = serde_json::from_slice(&zone_before).unwrap();
     weakened_zone["transitions"].as_array_mut().unwrap()[0] = serde_json::json!({});

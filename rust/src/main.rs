@@ -850,6 +850,10 @@ fn retire_record_snapshot(
 }
 
 fn retire_validate_worktree(root: &Path) {
+    retire_validate_reentry_worktree(root, &[]);
+}
+
+fn retire_validate_reentry_worktree(root: &Path, allowed: &[PathBuf]) {
     let branch = git_value(
         root,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -858,17 +862,6 @@ fn retire_validate_worktree(root: &Path) {
     if !branch.starts_with("codex/") {
         fail("RETIRE_WORKTREE_OWNER_REQUIRED");
     }
-    let status = git_value(
-        root,
-        &["status", "--porcelain", "--untracked-files=all", "--", "."],
-        "RETIRE_VCS_UNAVAILABLE",
-    );
-    if !status.is_empty() {
-        fail("RETIRE_WORKTREE_DIRTY");
-    }
-}
-
-fn retire_validate_reentry_worktree(root: &Path, allowed: &[PathBuf]) {
     let status = git_value(
         root,
         &["status", "--porcelain", "--untracked-files=all", "--", "."],
@@ -1189,6 +1182,7 @@ fn retire_lifecycle_records(root: &Path, module_id: &str, current_issue_id: &str
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     assert_identifier(current_issue_id, "INVALID_ISSUE_ID");
+    let _producer_lock = producer_lock(root);
     let project = read_project(root);
     let module_exists = project
         .get("modules")
@@ -1309,7 +1303,7 @@ fn retire_lifecycle_records(root: &Path, module_id: &str, current_issue_id: &str
             );
             return;
         }
-        retire_validate_worktree(root);
+        retire_validate_reentry_worktree(root, &[candidate_path.clone(), validation_path.clone()]);
         if fs::symlink_metadata(&staging).is_ok() {
             fail("RETIRE_ARCHIVE_PARTIAL");
         }

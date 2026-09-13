@@ -8441,6 +8441,56 @@ fn retire_lifecycle_records_archives_pair_and_is_idempotent() {
 }
 
 #[test]
+fn retire_lifecycle_records_accepts_producer_dirty_candidate_and_validation() {
+    let root = prepare_retire_fixture(
+        "retire-producer-dirty-records",
+        "stale-issue",
+        "stale-issue",
+    );
+    let root_text = root.to_str().unwrap();
+    let records = root.join(".appsdk/records");
+    let candidate_path = records.join("fix-candidate-record-app-core.json");
+    let validation_path = records.join("pre-review-validation-record-app-core.json");
+
+    let mut candidate_bytes = fs::read(&candidate_path).unwrap();
+    candidate_bytes.extend_from_slice(b"\n");
+    fs::write(&candidate_path, &candidate_bytes).unwrap();
+    let mut validation_bytes = fs::read(&validation_path).unwrap();
+    validation_bytes.extend_from_slice(b"\n");
+    fs::write(&validation_path, &validation_bytes).unwrap();
+
+    let result = run(&[
+        "retire-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let archive = records
+        .join("rejected/app-core")
+        .join(value["stable_id"].as_str().unwrap());
+    assert_eq!(
+        fs::read(archive.join("fix-candidate-record.json")).unwrap(),
+        candidate_bytes
+    );
+    assert_eq!(
+        fs::read(archive.join("pre-review-validation-record.json")).unwrap(),
+        validation_bytes
+    );
+    assert!(!candidate_path.exists());
+    assert!(!validation_path.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn retire_lifecycle_records_rejects_binding_mismatch_and_current_issue() {
     let mismatch = prepare_retire_fixture("retire-mismatch", "stale-issue", "other-issue");
     let mismatch_result = run(&[
@@ -8524,6 +8574,14 @@ fn retire_lifecycle_records_rejects_partial_archive_and_dirty_worktree() {
     fs::remove_dir_all(partial).unwrap();
 
     let dirty = prepare_retire_fixture("retire-dirty", "stale-issue", "stale-issue");
+    for path in [
+        dirty.join(".appsdk/records/fix-candidate-record-app-core.json"),
+        dirty.join(".appsdk/records/pre-review-validation-record-app-core.json"),
+    ] {
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"\n");
+        fs::write(&path, bytes).unwrap();
+    }
     fs::write(dirty.join("unrelated-dirty.txt"), "must block\n").unwrap();
     let dirty_result = run(&[
         "retire-lifecycle-records",
@@ -8539,6 +8597,41 @@ fn retire_lifecycle_records_rejects_partial_archive_and_dirty_worktree() {
         .join(".appsdk/records/pre-review-validation-record-app-core.json")
         .is_file());
     fs::remove_dir_all(dirty).unwrap();
+}
+
+#[test]
+fn retire_lifecycle_records_honors_producer_lock() {
+    let root = prepare_retire_fixture("retire-producer-lock", "stale-issue", "stale-issue");
+    let control_dir = root.join(".appsdk-control");
+    fs::create_dir_all(&control_dir).unwrap();
+    let lock_path = control_dir.join("lifecycle-record-producer.lock");
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .unwrap();
+    hold_advisory_lock(&lock_file);
+
+    let result = run(&[
+        "retire-lifecycle-records",
+        root.to_str().unwrap(),
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("PRODUCER_BUSY"));
+    assert!(root
+        .join(".appsdk/records/fix-candidate-record-app-core.json")
+        .is_file());
+    assert!(root
+        .join(".appsdk/records/pre-review-validation-record-app-core.json")
+        .is_file());
+
+    drop(lock_file);
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn write_parallel_records(

@@ -8443,6 +8443,257 @@ fn enable_parallel_development(root: &Path) {
     .unwrap();
 }
 
+fn prepare_retire_fixture(name: &str, candidate_issue: &str, validation_issue: &str) -> PathBuf {
+    let root = temp_root(name);
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let candidate_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    let candidate_tree = git_test_value(&root, &["rev-parse", "HEAD^{tree}"]);
+    let records = root.join(".appsdk/records");
+    fs::write(
+        records.join("fix-candidate-record-app-core.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "fix_candidate_id":"candidate-1",
+            "issue_id":candidate_issue,
+            "module_id":"app-core",
+            "worktree_id":"worktree-1",
+            "base_commit":candidate_commit,
+            "head_commit":candidate_commit,
+            "tree_hash":candidate_tree,
+            "diff_hash":"sha256:diff",
+            "design_id":"design-1",
+            "owner":"test",
+            "scope_hash":"sha256:scope",
+            "changed_paths":[],
+            "verification_evidence_ids":["evidence-1","evidence-2","evidence-3"],
+            "created_at":"2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        records.join("pre-review-validation-record-app-core.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "validation_id":"validation-1",
+            "issue_id":validation_issue,
+            "module_id":"app-core",
+            "fix_candidate_id":"candidate-1",
+            "candidate_commit":candidate_commit,
+            "candidate_tree_hash":candidate_tree,
+            "artifact_hash":"sha256:artifact",
+            "whitebox_producer":{"adapter":"test","identity":"whitebox"},
+            "whitebox_evidence_ids":["whitebox-1"],
+            "blackbox_evidence_ids":["blackbox-1"],
+            "deployment":{},
+            "source_unchanged":true,
+            "result":"pass",
+            "created_at":"2026-01-01T00:01:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "add",
+            ".appsdk/records/fix-candidate-record-app-core.json",
+            ".appsdk/records/pre-review-validation-record-app-core.json",
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "candidate records"])
+        .status()
+        .unwrap()
+        .success());
+    root
+}
+
+fn retire_fixture_stable_id(root: &Path, issue_id: &str) -> String {
+    let candidate: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/fix-candidate-record-app-core.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let commit = candidate["head_commit"].as_str().unwrap();
+    let tree = candidate["tree_hash"].as_str().unwrap();
+    let identity = serde_json::json!({
+        "module_id":"app-core",
+        "issue_id":issue_id,
+        "fix_candidate_id":candidate["fix_candidate_id"],
+        "candidate_commit":commit,
+        "candidate_tree":tree
+    });
+    format!(
+        "candidate-{}",
+        digest(&canonical(&identity))
+            .strip_prefix("sha256:")
+            .unwrap()
+    )
+}
+
+#[test]
+fn retire_lifecycle_records_archives_pair_and_is_idempotent() {
+    let root = prepare_retire_fixture("retire-success", "stale-issue", "stale-issue");
+    let root_text = root.to_str().unwrap();
+    let records = root.join(".appsdk/records");
+    let candidate_bytes = fs::read(records.join("fix-candidate-record-app-core.json")).unwrap();
+    let first = run(&[
+        "retire-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["retired"], true);
+    assert_eq!(first_json["reused"], false);
+    let archive = records
+        .join("rejected/app-core")
+        .join(first_json["stable_id"].as_str().unwrap());
+    assert_eq!(
+        fs::read(archive.join("fix-candidate-record.json")).unwrap(),
+        candidate_bytes
+    );
+    assert!(!records.join("fix-candidate-record-app-core.json").exists());
+    assert!(!records
+        .join("pre-review-validation-record-app-core.json")
+        .exists());
+
+    let second = run(&[
+        "retire-lifecycle-records",
+        root_text,
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(
+        second.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_json: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_json["stable_id"], first_json["stable_id"]);
+    assert_eq!(second_json["retired"], false);
+    assert_eq!(second_json["reused"], true);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retire_lifecycle_records_rejects_binding_mismatch_and_current_issue() {
+    let mismatch = prepare_retire_fixture("retire-mismatch", "stale-issue", "other-issue");
+    let mismatch_result = run(&[
+        "retire-lifecycle-records",
+        mismatch.to_str().unwrap(),
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(!mismatch_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&mismatch_result.stderr).contains("RETIRE_RECORD_BINDING_MISMATCH")
+    );
+    assert!(mismatch
+        .join(".appsdk/records/fix-candidate-record-app-core.json")
+        .is_file());
+    fs::remove_dir_all(mismatch).unwrap();
+
+    let current = prepare_retire_fixture("retire-current-issue", "current-issue", "current-issue");
+    let current_result = run(&[
+        "retire-lifecycle-records",
+        current.to_str().unwrap(),
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(!current_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&current_result.stderr).contains("RETIRE_CURRENT_ISSUE_PROTECTED")
+    );
+    assert!(current
+        .join(".appsdk/records/pre-review-validation-record-app-core.json")
+        .is_file());
+    fs::remove_dir_all(current).unwrap();
+}
+
+#[test]
+fn retire_lifecycle_records_rejects_partial_archive_and_dirty_worktree() {
+    let partial = prepare_retire_fixture("retire-partial", "stale-issue", "stale-issue");
+    let stable_id = retire_fixture_stable_id(&partial, "stale-issue");
+    let archive = partial
+        .join(".appsdk/records/rejected/app-core")
+        .join(stable_id);
+    fs::create_dir_all(&archive).unwrap();
+    let candidate: Value = serde_json::from_str(
+        &fs::read_to_string(partial.join(".appsdk/records/fix-candidate-record-app-core.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        archive.join("manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version":1,
+            "stable_id":archive.file_name().unwrap().to_string_lossy(),
+            "module_id":"app-core",
+            "issue_id":"stale-issue",
+            "fix_candidate_id":candidate["fix_candidate_id"],
+            "candidate_commit":candidate["head_commit"],
+            "candidate_tree":candidate["tree_hash"],
+            "records":[]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let partial_result = run(&[
+        "retire-lifecycle-records",
+        partial.to_str().unwrap(),
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(!partial_result.status.success());
+    assert!(String::from_utf8_lossy(&partial_result.stderr).contains("RETIRE_ARCHIVE_PARTIAL"));
+    assert!(partial
+        .join(".appsdk/records/fix-candidate-record-app-core.json")
+        .is_file());
+    fs::remove_dir_all(partial).unwrap();
+
+    let dirty = prepare_retire_fixture("retire-dirty", "stale-issue", "stale-issue");
+    fs::write(dirty.join("unrelated-dirty.txt"), "must block\n").unwrap();
+    let dirty_result = run(&[
+        "retire-lifecycle-records",
+        dirty.to_str().unwrap(),
+        "--module",
+        "app-core",
+        "--issue",
+        "current-issue",
+    ]);
+    assert!(!dirty_result.status.success());
+    assert!(String::from_utf8_lossy(&dirty_result.stderr).contains("RETIRE_WORKTREE_DIRTY"));
+    assert!(dirty
+        .join(".appsdk/records/pre-review-validation-record-app-core.json")
+        .is_file());
+    fs::remove_dir_all(dirty).unwrap();
+}
+
 fn write_parallel_records(
     root: &PathBuf,
     module_id: &str,

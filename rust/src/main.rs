@@ -812,6 +812,592 @@ fn module_record_name(kind: &str, module_id: &str) -> String {
     format!("{}-{}.json", kind, module_id)
 }
 
+struct RetireRecordSnapshot {
+    kind: &'static str,
+    file_name: &'static str,
+    source: PathBuf,
+    bytes: Vec<u8>,
+    value: Value,
+}
+
+fn retire_record_snapshot(
+    root: &Path,
+    records_root: &Path,
+    module_id: &str,
+    kind: &'static str,
+    file_name: &'static str,
+) -> RetireRecordSnapshot {
+    let source = records_root.join(module_record_name(kind, module_id));
+    assert_no_symlink_components(root, &source, "retire_record");
+    let metadata = fs::symlink_metadata(&source).unwrap_or_else(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            fail("RETIRE_RECORD_SET_INCOMPLETE");
+        }
+        fail("RETIRE_RECORD_READ_FAILED");
+    });
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        fail("RETIRE_RECORD_READ_FAILED");
+    }
+    let bytes = fs::read(&source).unwrap_or_else(|_| fail("RETIRE_RECORD_READ_FAILED"));
+    let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| fail("RETIRE_RECORD_INVALID"));
+    RetireRecordSnapshot {
+        kind,
+        file_name,
+        source,
+        bytes,
+        value,
+    }
+}
+
+fn retire_validate_worktree(root: &Path) {
+    let branch = git_value(
+        root,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        "RETIRE_WORKTREE_BRANCH_REQUIRED",
+    );
+    if !branch.starts_with("codex/") {
+        fail("RETIRE_WORKTREE_OWNER_REQUIRED");
+    }
+    let status = git_value(
+        root,
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
+        "RETIRE_VCS_UNAVAILABLE",
+    );
+    if !status.is_empty() {
+        fail("RETIRE_WORKTREE_DIRTY");
+    }
+}
+
+fn retire_validate_reentry_worktree(root: &Path, allowed: &[PathBuf]) {
+    let status = git_value(
+        root,
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
+        "RETIRE_VCS_UNAVAILABLE",
+    );
+    if status.is_empty() {
+        return;
+    }
+    let allowed = allowed
+        .iter()
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or_else(|_| fail("RETIRE_WORKTREE_DIRTY"))
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<BTreeSet<_>>();
+    for line in status.lines() {
+        let path_text = line.get(2..).unwrap_or("").trim();
+        for path in path_text.split(" -> ") {
+            if !allowed.contains(path) {
+                fail(format!("RETIRE_WORKTREE_DIRTY:{}", path));
+            }
+        }
+    }
+}
+
+fn retire_verify_candidate_identity(root: &Path, candidate_commit: &str, candidate_tree: &str) {
+    let resolved_commit = git_value(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{}^{{commit}}", candidate_commit),
+        ],
+        "RETIRE_CANDIDATE_COMMIT_INVALID",
+    );
+    if resolved_commit != candidate_commit {
+        fail("RETIRE_CANDIDATE_COMMIT_MISMATCH");
+    }
+    let resolved_tree = git_value(
+        root,
+        &["rev-parse", &format!("{}^{{tree}}", candidate_commit)],
+        "RETIRE_CANDIDATE_TREE_INVALID",
+    );
+    if resolved_tree != candidate_tree {
+        fail("RETIRE_CANDIDATE_TREE_MISMATCH");
+    }
+}
+
+fn retire_stable_id(
+    module_id: &str,
+    issue_id: &str,
+    fix_candidate_id: &str,
+    candidate_commit: &str,
+    candidate_tree: &str,
+) -> String {
+    let identity = serde_json::json!({
+        "module_id": module_id,
+        "issue_id": issue_id,
+        "fix_candidate_id": fix_candidate_id,
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree
+    });
+    format!(
+        "candidate-{}",
+        sha256(&canonical(&identity))
+            .strip_prefix("sha256:")
+            .unwrap_or_else(|| fail("RETIRE_STABLE_ID_INVALID"))
+    )
+}
+
+fn retire_write_bytes(root: &Path, target: &Path, bytes: &[u8]) {
+    assert_no_symlink_components(root, target, "retire_archive_file");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .unwrap_or_else(|_| fail("RETIRE_ARCHIVE_WRITE_FAILED"));
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .unwrap_or_else(|_| fail("RETIRE_ARCHIVE_WRITE_FAILED"));
+}
+
+fn retire_read_archive_file(root: &Path, target: &Path) -> Vec<u8> {
+    assert_no_symlink_components(root, target, "retire_archive_file");
+    let metadata = fs::symlink_metadata(target).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        fail("RETIRE_ARCHIVE_PARTIAL");
+    }
+    fs::read(target).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"))
+}
+
+fn retire_manifest(
+    module_id: &str,
+    issue_id: &str,
+    fix_candidate_id: &str,
+    candidate_commit: &str,
+    candidate_tree: &str,
+    stable_id: &str,
+    snapshots: &[RetireRecordSnapshot],
+) -> Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "stable_id": stable_id,
+        "module_id": module_id,
+        "issue_id": issue_id,
+        "fix_candidate_id": fix_candidate_id,
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree,
+        "records": snapshots.iter().map(|snapshot| serde_json::json!({
+            "kind": snapshot.kind,
+            "file": snapshot.file_name,
+            "source": snapshot.source.file_name().and_then(|name| name.to_str()).unwrap_or_else(|| fail("RETIRE_ARCHIVE_MANIFEST_INVALID")),
+            "sha256": digest_bytes(&snapshot.bytes),
+            "byte_length": snapshot.bytes.len()
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn retire_validate_archive(
+    root: &Path,
+    archive: &Path,
+    module_id: &str,
+    current_issue_id: &str,
+) -> (String, String, String, String, String, Vec<Vec<u8>>) {
+    assert_no_symlink_components(root, archive, "retire_archive");
+    let metadata = fs::symlink_metadata(archive).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        fail("RETIRE_ARCHIVE_PARTIAL");
+    }
+    let manifest_path = archive.join("manifest.json");
+    let manifest_bytes = retire_read_archive_file(root, &manifest_path);
+    let manifest: Value =
+        serde_json::from_slice(&manifest_bytes).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || manifest.get("module_id").and_then(Value::as_str) != Some(module_id)
+    {
+        fail("RETIRE_ARCHIVE_CONFLICT");
+    }
+    let stable_id = producer_string(&manifest, "/stable_id", "RETIRE_ARCHIVE_PARTIAL");
+    if archive.file_name().and_then(|name| name.to_str()) != Some(stable_id.as_str()) {
+        fail("RETIRE_ARCHIVE_CONFLICT");
+    }
+    let issue_id = producer_string(&manifest, "/issue_id", "RETIRE_ARCHIVE_PARTIAL");
+    if issue_id == current_issue_id {
+        fail("RETIRE_CURRENT_ISSUE_PROTECTED");
+    }
+    let fix_candidate_id =
+        producer_string(&manifest, "/fix_candidate_id", "RETIRE_ARCHIVE_PARTIAL");
+    let candidate_commit =
+        producer_string(&manifest, "/candidate_commit", "RETIRE_ARCHIVE_PARTIAL");
+    let candidate_tree = producer_string(&manifest, "/candidate_tree", "RETIRE_ARCHIVE_PARTIAL");
+    retire_verify_candidate_identity(root, &candidate_commit, &candidate_tree);
+    if retire_stable_id(
+        module_id,
+        &issue_id,
+        &fix_candidate_id,
+        &candidate_commit,
+        &candidate_tree,
+    ) != stable_id
+    {
+        fail("RETIRE_ARCHIVE_CONFLICT");
+    }
+    let entries = manifest
+        .get("records")
+        .and_then(Value::as_array)
+        .filter(|entries| entries.len() == 2)
+        .unwrap_or_else(|| fail("RETIRE_ARCHIVE_PARTIAL"));
+    let expected = [
+        ("fix-candidate-record", "fix-candidate-record.json"),
+        (
+            "pre-review-validation-record",
+            "pre-review-validation-record.json",
+        ),
+    ];
+    let mut archived_bytes = Vec::with_capacity(2);
+    for (kind, file_name) in expected {
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.get("kind").and_then(Value::as_str) == Some(kind)
+                    && entry.get("file").and_then(Value::as_str) == Some(file_name)
+            })
+            .unwrap_or_else(|| fail("RETIRE_ARCHIVE_PARTIAL"));
+        let bytes = retire_read_archive_file(root, &archive.join(file_name));
+        if entry.get("sha256").and_then(Value::as_str) != Some(digest_bytes(&bytes).as_str())
+            || entry.get("byte_length").and_then(Value::as_u64) != Some(bytes.len() as u64)
+        {
+            fail("RETIRE_ARCHIVE_CONFLICT");
+        }
+        let record: Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_CONFLICT"));
+        if producer_string(&record, "/module_id", "RETIRE_ARCHIVE_CONFLICT") != module_id
+            || producer_issue(&record, "/issue_id", "RETIRE_ARCHIVE_CONFLICT") != issue_id
+        {
+            fail("RETIRE_ARCHIVE_CONFLICT");
+        }
+        if kind == "fix-candidate-record"
+            && (producer_string(&record, "/fix_candidate_id", "RETIRE_ARCHIVE_CONFLICT")
+                != fix_candidate_id
+                || producer_string(&record, "/head_commit", "RETIRE_ARCHIVE_CONFLICT")
+                    != candidate_commit
+                || producer_string(&record, "/tree_hash", "RETIRE_ARCHIVE_CONFLICT")
+                    != candidate_tree)
+        {
+            fail("RETIRE_ARCHIVE_CONFLICT");
+        }
+        if kind == "pre-review-validation-record"
+            && (producer_string(&record, "/fix_candidate_id", "RETIRE_ARCHIVE_CONFLICT")
+                != fix_candidate_id
+                || producer_string(&record, "/candidate_commit", "RETIRE_ARCHIVE_CONFLICT")
+                    != candidate_commit
+                || producer_string(&record, "/candidate_tree_hash", "RETIRE_ARCHIVE_CONFLICT")
+                    != candidate_tree)
+        {
+            fail("RETIRE_ARCHIVE_CONFLICT");
+        }
+        archived_bytes.push(bytes);
+    }
+    let mut names = BTreeSet::new();
+    for entry in fs::read_dir(archive).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL")) {
+        let entry = entry.unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata =
+            fs::symlink_metadata(entry.path()).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+        if metadata.file_type().is_symlink() || !metadata.is_file() || !names.insert(name) {
+            fail("RETIRE_ARCHIVE_PARTIAL");
+        }
+    }
+    if names
+        != BTreeSet::from([
+            "fix-candidate-record.json".to_string(),
+            "manifest.json".to_string(),
+            "pre-review-validation-record.json".to_string(),
+        ])
+    {
+        fail("RETIRE_ARCHIVE_PARTIAL");
+    }
+    (
+        stable_id,
+        issue_id,
+        fix_candidate_id,
+        candidate_commit,
+        candidate_tree,
+        archived_bytes,
+    )
+}
+
+fn retire_find_existing_archive(
+    root: &Path,
+    records_root: &Path,
+    module_id: &str,
+    current_issue_id: &str,
+) -> Option<PathBuf> {
+    let module_root = records_root.join("rejected").join(module_id);
+    assert_no_symlink_components(root, &module_root, "retire_archive");
+    let metadata = match fs::symlink_metadata(&module_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(_) => fail("RETIRE_ARCHIVE_PARTIAL"),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        fail("RETIRE_ARCHIVE_PARTIAL");
+    }
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(&module_root).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL")) {
+        let entry = entry.unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_PARTIAL"));
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            fail("RETIRE_ARCHIVE_PARTIAL");
+        }
+        let (_, issue_id, _, _, _, _) =
+            retire_validate_archive(root, &path, module_id, current_issue_id);
+        if issue_id != current_issue_id {
+            matches.push(path);
+        }
+    }
+    if matches.len() > 1 {
+        fail("RETIRE_ARCHIVE_SELECTION_AMBIGUOUS");
+    }
+    matches.into_iter().next()
+}
+
+fn retire_remove_matching_sources(snapshots: &[RetireRecordSnapshot], archived_bytes: &[Vec<u8>]) {
+    for (snapshot, archived) in snapshots.iter().zip(archived_bytes.iter()) {
+        match fs::symlink_metadata(&snapshot.source) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    fail("RETIRE_SOURCE_CONFLICT");
+                }
+                let current =
+                    fs::read(&snapshot.source).unwrap_or_else(|_| fail("RETIRE_SOURCE_CONFLICT"));
+                if current != *archived {
+                    fail("RETIRE_SOURCE_CONFLICT");
+                }
+                fs::remove_file(&snapshot.source)
+                    .unwrap_or_else(|_| fail("RETIRE_SOURCE_REMOVE_FAILED"));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => fail("RETIRE_SOURCE_CONFLICT"),
+        }
+    }
+    if let Some(parent) = snapshots
+        .first()
+        .and_then(|snapshot| snapshot.source.parent())
+    {
+        if let Ok(file) = OpenOptions::new().read(true).open(parent) {
+            let _ = file.sync_all();
+        }
+    }
+}
+
+fn retire_lifecycle_records(root: &Path, module_id: &str, current_issue_id: &str) {
+    assert_project_root_safe(root);
+    assert_identifier(module_id, "INVALID_MODULE_ID");
+    assert_identifier(current_issue_id, "INVALID_ISSUE_ID");
+    let project = read_project(root);
+    let module_exists = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .is_some_and(|modules| {
+            modules
+                .iter()
+                .any(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
+        });
+    if !module_exists {
+        fail(format!("UNKNOWN_MODULE:{}", module_id));
+    }
+    let records_root = root.join(".appsdk").join("records");
+    let candidate_path = records_root.join(module_record_name("fix-candidate-record", module_id));
+    let validation_path = records_root.join(module_record_name(
+        "pre-review-validation-record",
+        module_id,
+    ));
+    let candidate_present = fs::symlink_metadata(&candidate_path).is_ok();
+    let validation_present = fs::symlink_metadata(&validation_path).is_ok();
+    if candidate_present && validation_present {
+        let snapshots = vec![
+            retire_record_snapshot(
+                root,
+                &records_root,
+                module_id,
+                "fix-candidate-record",
+                "fix-candidate-record.json",
+            ),
+            retire_record_snapshot(
+                root,
+                &records_root,
+                module_id,
+                "pre-review-validation-record",
+                "pre-review-validation-record.json",
+            ),
+        ];
+        let candidate = &snapshots[0].value;
+        let validation = &snapshots[1].value;
+        let candidate_issue =
+            producer_issue(candidate, "/issue_id", "RETIRE_RECORD_BINDING_MISMATCH");
+        let validation_issue =
+            producer_issue(validation, "/issue_id", "RETIRE_RECORD_BINDING_MISMATCH");
+        let candidate_module =
+            producer_string(candidate, "/module_id", "RETIRE_RECORD_BINDING_MISMATCH");
+        let validation_module =
+            producer_string(validation, "/module_id", "RETIRE_RECORD_BINDING_MISMATCH");
+        let fix_candidate_id = producer_string(
+            candidate,
+            "/fix_candidate_id",
+            "RETIRE_RECORD_BINDING_MISMATCH",
+        );
+        let validation_candidate_id = producer_string(
+            validation,
+            "/fix_candidate_id",
+            "RETIRE_RECORD_BINDING_MISMATCH",
+        );
+        let candidate_commit =
+            producer_string(candidate, "/head_commit", "RETIRE_RECORD_BINDING_MISMATCH");
+        let validation_commit = producer_string(
+            validation,
+            "/candidate_commit",
+            "RETIRE_RECORD_BINDING_MISMATCH",
+        );
+        let candidate_tree =
+            producer_string(candidate, "/tree_hash", "RETIRE_RECORD_BINDING_MISMATCH");
+        let validation_tree = producer_string(
+            validation,
+            "/candidate_tree_hash",
+            "RETIRE_RECORD_BINDING_MISMATCH",
+        );
+        if candidate_module != module_id
+            || validation_module != module_id
+            || candidate_issue != validation_issue
+            || candidate_issue == current_issue_id
+            || candidate_issue.is_empty()
+            || fix_candidate_id != validation_candidate_id
+            || candidate_commit != validation_commit
+            || candidate_tree != validation_tree
+        {
+            if candidate_issue == current_issue_id || validation_issue == current_issue_id {
+                fail("RETIRE_CURRENT_ISSUE_PROTECTED");
+            }
+            fail("RETIRE_RECORD_BINDING_MISMATCH");
+        }
+        retire_verify_candidate_identity(root, &candidate_commit, &candidate_tree);
+        let stable_id = retire_stable_id(
+            module_id,
+            &candidate_issue,
+            &fix_candidate_id,
+            &candidate_commit,
+            &candidate_tree,
+        );
+        let rejected_root = records_root.join("rejected").join(module_id);
+        let archive = rejected_root.join(&stable_id);
+        let staging = rejected_root.join(format!(".{}.staging", stable_id));
+        assert_no_symlink_components(root, &rejected_root, "retire_archive");
+        fs::create_dir_all(&rejected_root).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_CREATE_FAILED"));
+        assert_no_symlink_components(root, &archive, "retire_archive");
+        assert_no_symlink_components(root, &staging, "retire_archive");
+        if fs::symlink_metadata(&archive).is_ok() {
+            retire_validate_reentry_worktree(
+                root,
+                &[
+                    candidate_path.clone(),
+                    validation_path.clone(),
+                    archive.join("manifest.json"),
+                    archive.join("fix-candidate-record.json"),
+                    archive.join("pre-review-validation-record.json"),
+                ],
+            );
+            let (_, _, _, _, _, archived_bytes) =
+                retire_validate_archive(root, &archive, module_id, current_issue_id);
+            retire_remove_matching_sources(&snapshots, &archived_bytes);
+            println!(
+                "{}",
+                serde_json::json!({"ok":true,"module_id":module_id,"issue_id":current_issue_id,"stable_id":stable_id,"retired":false,"reused":true})
+            );
+            return;
+        }
+        retire_validate_worktree(root);
+        if fs::symlink_metadata(&staging).is_ok() {
+            fail("RETIRE_ARCHIVE_PARTIAL");
+        }
+        fs::create_dir(&staging).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_CREATE_FAILED"));
+        let manifest = retire_manifest(
+            module_id,
+            &candidate_issue,
+            &fix_candidate_id,
+            &candidate_commit,
+            &candidate_tree,
+            &stable_id,
+            &snapshots,
+        );
+        retire_write_bytes(
+            root,
+            &staging.join(snapshots[0].file_name),
+            &snapshots[0].bytes,
+        );
+        retire_write_bytes(
+            root,
+            &staging.join(snapshots[1].file_name),
+            &snapshots[1].bytes,
+        );
+        let manifest_bytes = (serde_json::to_string_pretty(&manifest).unwrap() + "\n").into_bytes();
+        retire_write_bytes(root, &staging.join("manifest.json"), &manifest_bytes);
+        if let Ok(file) = OpenOptions::new().read(true).open(&staging) {
+            let _ = file.sync_all();
+        }
+        if fs::symlink_metadata(&archive).is_ok() {
+            fail("RETIRE_ARCHIVE_CONFLICT");
+        }
+        fs::rename(&staging, &archive).unwrap_or_else(|_| fail("RETIRE_ARCHIVE_COMMIT_FAILED"));
+        if let Some(parent) = archive.parent() {
+            if let Ok(file) = OpenOptions::new().read(true).open(parent) {
+                let _ = file.sync_all();
+            }
+        }
+        retire_remove_matching_sources(
+            &snapshots,
+            &[snapshots[0].bytes.clone(), snapshots[1].bytes.clone()],
+        );
+        println!(
+            "{}",
+            serde_json::json!({"ok":true,"module_id":module_id,"issue_id":current_issue_id,"stable_id":stable_id,"retired":true,"reused":false})
+        );
+        return;
+    }
+    if candidate_present || validation_present {
+        retire_validate_worktree(root);
+        fail("RETIRE_RECORD_SET_INCOMPLETE");
+    }
+    let archive = retire_find_existing_archive(root, &records_root, module_id, current_issue_id)
+        .unwrap_or_else(|| fail("RETIRE_RECORD_SET_INCOMPLETE"));
+    retire_validate_reentry_worktree(
+        root,
+        &[
+            candidate_path.clone(),
+            validation_path.clone(),
+            archive.join("manifest.json"),
+            archive.join("fix-candidate-record.json"),
+            archive.join("pre-review-validation-record.json"),
+        ],
+    );
+    let (stable_id, _, _, _, _, archived_bytes) =
+        retire_validate_archive(root, &archive, module_id, current_issue_id);
+    let snapshots = vec![
+        RetireRecordSnapshot {
+            kind: "fix_candidate",
+            file_name: "fix-candidate-record.json",
+            source: candidate_path,
+            bytes: Vec::new(),
+            value: Value::Null,
+        },
+        RetireRecordSnapshot {
+            kind: "pre_review_validation",
+            file_name: "pre-review-validation-record.json",
+            source: validation_path,
+            bytes: Vec::new(),
+            value: Value::Null,
+        },
+    ];
+    retire_remove_matching_sources(&snapshots, &archived_bytes);
+    println!(
+        "{}",
+        serde_json::json!({"ok":true,"module_id":module_id,"issue_id":current_issue_id,"stable_id":stable_id,"retired":false,"reused":true})
+    );
+}
+
 fn assert_version(value: &str, error: &str) {
     if value.is_empty()
         || !value
@@ -18742,6 +19328,9 @@ fn print_cli_help(command: Option<&str>) {
         Some("produce-lifecycle-records") => {
             "Usage: appsdk produce-lifecycle-records [project] --module <id> --input <json>"
         }
+        Some("retire-lifecycle-records") => {
+            "Usage: appsdk retire-lifecycle-records [project] --module <id> --issue <id>"
+        }
         Some("produce-lifecycle-chain") => {
             "Usage: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>"
         }
@@ -19067,6 +19656,25 @@ fn main() {
                 fail("USAGE: appsdk produce-lifecycle-records [project] --module <id> --input <json>");
             }
             produce_lifecycle_records(&root, &module_id, &input);
+        }
+        Some("retire-lifecycle-records") => {
+            let root = project_root_or_cwd(&mut args);
+            if args.next().as_deref() != Some("--module") {
+                fail("USAGE: appsdk retire-lifecycle-records [project] --module <id> --issue <id>");
+            }
+            let module_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk retire-lifecycle-records [project] --module <id> --issue <id>")
+            });
+            if args.next().as_deref() != Some("--issue") {
+                fail("USAGE: appsdk retire-lifecycle-records [project] --module <id> --issue <id>");
+            }
+            let issue_id = args.next().unwrap_or_else(|| {
+                fail("USAGE: appsdk retire-lifecycle-records [project] --module <id> --issue <id>")
+            });
+            if args.next().is_some() {
+                fail("USAGE: appsdk retire-lifecycle-records [project] --module <id> --issue <id>");
+            }
+            retire_lifecycle_records(&root, &module_id, &issue_id);
         }
         Some("produce-lifecycle-chain") => {
             let root = project_root_or_cwd(&mut args);

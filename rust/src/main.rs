@@ -990,7 +990,7 @@ fn assert_record_schema_minimum(relative: &str, declared: &Value) {
     }
 }
 
-fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
+fn assert_declared_contracts(root: &Path, project: &Value) {
     let zone = contract_root(root, project, "/governance/zone_transition_contract");
     let canonical_zone = project
         .pointer("/governance/zone_transition_contract")
@@ -1013,7 +1013,6 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         })
         .unwrap_or(false);
     let canonical_project = canonical_zone && canonical_records;
-    let strict = strict || canonical_project;
     if !canonical_project {
         fail("NON_CANONICAL_GOVERNANCE_CONTRACT");
     }
@@ -1051,11 +1050,8 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
     {
         fail("NON_CANONICAL_RECORD_CONTRACT_SET");
     }
-    let zone_text = match fs::read_to_string(&zone) {
-        Ok(text) => text,
-        Err(_) if !strict => return,
-        Err(_) => fail("DECLARED_ZONE_CONTRACT_MISSING"),
-    };
+    let zone_text =
+        fs::read_to_string(&zone).unwrap_or_else(|_| fail("DECLARED_ZONE_CONTRACT_MISSING"));
     let zone_value: Value =
         serde_json::from_str(&zone_text).unwrap_or_else(|_| fail("INVALID_DECLARED_ZONE_CONTRACT"));
     let canonical_zone: Value = serde_json::from_str(CANONICAL_ZONE_TRANSITION_CONTRACT)
@@ -1138,12 +1134,7 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
         }
     }
     let canonical_path = zone.with_file_name("zone-transition.manifest.json");
-    let canonical_path = if canonical_path == zone {
-        zone.with_file_name("zone-transition.manifest.json")
-    } else {
-        canonical_path
-    };
-    if strict && !canonical_path.exists() {
+    if !canonical_path.exists() {
         fail("CANONICAL_ZONE_CONTRACT_MISSING");
     }
     for declared in project
@@ -1155,11 +1146,8 @@ fn assert_declared_contracts(root: &Path, project: &Value, strict: bool) {
             .as_str()
             .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"));
         let path = safe_owned_path(root, relative, "record_contract");
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(_) if !strict => return,
-            Err(_) => fail("DECLARED_RECORD_CONTRACT_MISSING"),
-        };
+        let text =
+            fs::read_to_string(path).unwrap_or_else(|_| fail("DECLARED_RECORD_CONTRACT_MISSING"));
         let value: Value = serde_json::from_str(&text)
             .unwrap_or_else(|_| fail("INVALID_DECLARED_RECORD_CONTRACT"));
         let schema = value
@@ -2986,7 +2974,7 @@ fn compile_module(root: &Path, module_id: &str) -> Value {
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     assert_project_contract(root, &project);
     let modules = project
@@ -3609,7 +3597,7 @@ fn compile(root: &Path) {
     assert_mutation_worktree(root);
     let project = read_project(root);
     assert_compile_preconditions(root, &project, None);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     let modules = project
         .get("modules")
         .and_then(Value::as_array)
@@ -3650,7 +3638,7 @@ fn begin_version(root: &Path, module_id: &str, from: &str, to: &str) {
         fail("MODULE_VERSION_MUST_ADVANCE");
     }
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     assert_project_contract(root, &project);
     let modules = project
@@ -4360,7 +4348,7 @@ fn rehydrate_frozen(root: &Path, module_id: &str) {
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
     assert_project_contract(root, &project);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     assert_sdk_lock(root, &project);
     let module = project
@@ -5943,7 +5931,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Records);
     assert_goal_confirmed(root);
     let goal = read_goal(root);
@@ -5958,7 +5946,7 @@ fn produce_lifecycle_records(root: &Path, module_id: &str, input_path: &str) {
     // Validate again after taking the lock so a concurrent map edit cannot be
     // accepted between the read-only preflight and the record transaction.
     let _producer_lock = producer_lock(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Records);
     if producer_string(&input, "/goal_id", "PRODUCER_GOAL_MISSING")
         != producer_string(&goal, "/goal_id", "INVALID_GOAL_CLARIFICATION_RECORD")
@@ -6850,7 +6838,7 @@ fn lifecycle_chain_architecture(root: &Path, module_id: &str, input_path: &str) 
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Chain);
     let observation = lifecycle_chain_input(root, input_path, "architecture");
@@ -7042,7 +7030,7 @@ fn lifecycle_chain_effectiveness(root: &Path, module_id: &str, input_path: &str)
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     let observation = lifecycle_chain_input(root, input_path, "effectiveness");
     let (worktree, reproduction, candidate, _validation) =
@@ -7249,7 +7237,7 @@ fn lifecycle_chain_merge(root: &Path, module_id: &str, input_path: &str) {
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     let observation = lifecycle_chain_input(root, input_path, "merge");
     let (worktree, _reproduction, candidate, _validation) =
@@ -7387,7 +7375,7 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
     assert_mutation_worktree(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
     let project = read_project(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     assert_lifecycle_producer_map_binding(root, &project, module_id, LifecycleProducer::Chain);
     let observation = lifecycle_chain_input(root, input_path, "promotion");
@@ -10140,7 +10128,7 @@ fn promote(root: &Path, target: &str) {
     let project = read_project(root);
     assert_project_contract(root, &project);
     assert_goal_confirmed(root);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     let from = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
     let valid = matches!(
         (from, target),
@@ -10182,7 +10170,7 @@ fn promote_module(root: &Path, module_id: &str, target: &str) {
         println!("{}", serde_json::to_string_pretty(&project).unwrap());
         return;
     }
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     if target == "frozen" {
         freeze_module(root, module_id);
         return;
@@ -10269,7 +10257,7 @@ fn freeze_module(root: &Path, module_id: &str) {
         println!("{}", serde_json::to_string_pretty(&project).unwrap());
         return;
     }
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_goal_confirmed(root);
     let modules = project
         .get("modules")
@@ -10475,7 +10463,7 @@ fn publish_active_internal(
     assert_version(version, "INVALID_ACTIVE_VERSION");
     let project = read_project(root);
     assert_project_contract(root, &project);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_sdk_lock(root, &project);
     let modules = project
         .get("modules")
@@ -10938,7 +10926,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     let project = read_project(root);
     assert_governance_maps(root);
     verify_sdk_migration_record(root, admission);
-    assert_declared_contracts(root, &project, true);
+    assert_declared_contracts(root, &project);
     assert_project_contract(root, &project);
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
         fail("UNSUPPORTED_PROJECT_SCHEMA");

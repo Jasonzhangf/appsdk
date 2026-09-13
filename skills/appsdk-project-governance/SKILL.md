@@ -39,13 +39,21 @@ This Skill is used in two different contexts and must not blur them:
 - **AppSDK source repository:** a checkout containing the SDK implementation,
   release scripts, contracts, docs, and Skills (for example, `rust/` and
   `scripts/install-global-appsdk.sh`). Its root is an SDK development and
-  release surface. A missing `.appsdk/project.json` at that root is expected;
-  do not run `appsdk init` or `appsdk reset-governance` there merely to make the
-  SDK repository look like a consumer project. A `playground/<slug>` worktree
-  used to develop the SDK remains an SDK source worktree. Its source, Git
-  history, and release gates are governed as SDK work; any local
-  `.appsdk-control/` state is inspected as local runtime state and is not a
-  reason to delete the source repository's files.
+  release surface by default. A missing `.appsdk/project.json` means that the
+  checkout is not implicitly a managed consumer project; it does not make
+  initialization impossible. If the user explicitly chooses to govern this
+  SDK workspace with AppSDK, run `appsdk prepare` and confirm the preparation,
+  then run `appsdk init` from a clean non-`main` owner worktree. The normal
+  initialization path creates a project contract that the owner must review
+  and bind to the SDK source modules; it does not infer or overwrite those
+  modules. A `playground/<slug>` worktree used to develop the SDK remains an
+  SDK source worktree unless that explicit project registration is made. Its
+  source, Git history, and release gates remain SDK-owned. Never run
+  `appsdk init` or `appsdk reset-governance` merely to manufacture a contract,
+  and never use fresh reset without the existing contract and explicit
+  `--fresh --discard-legacy` authorization. Any local `.appsdk-control/` state
+  is inspected as local runtime state and is not a reason to delete source
+  repository files.
 - **AppSDK-managed business project:** a consumer root with an explicit
   `.appsdk/project.json` and its project-owned goal, maps, records, module
   contracts, and `sdk.lock`. `appsdk prepare`, `init`, `verify`, `compile`,
@@ -57,10 +65,12 @@ This Skill is used in two different contexts and must not blur them:
 
 The SDK source repository can still use an explicitly enabled Collab route for
 its own TUI development, but that route proves agent communication only; it
-does not create an AppSDK consumer contract or authorize a governance reset.
-Conversely, initializing a managed business project does not grant authority
-over the SDK source repository. Keep source/release evidence, project
-governance truth, and Collab runtime state in their respective owners.
+does not by itself create a project contract or authorize a governance reset.
+An explicit, confirmed `appsdk init` is the separate opt-in that registers the
+SDK workspace as a project. Conversely, initializing a managed business project
+does not grant authority over the SDK source repository. Keep source/release
+evidence, project governance truth, and Collab runtime state in their
+respective owners.
 
 ## One global AppSDK binary
 

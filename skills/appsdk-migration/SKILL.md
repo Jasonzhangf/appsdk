@@ -80,9 +80,14 @@ Before inspecting mutable state, write a migration record with a unique
 
 For the AppSDK source repository itself, first determine whether the root is a
 managed AppSDK project. The presence of SDK source or `.appsdk-control/` alone
-does not make it a normal governed application. If there is no project
-contract, do not run `appsdk init` or reset commands just to manufacture one;
-perform only the declared SDK/runtime migration and record that scope.
+does not implicitly register it as a governed application. When the user
+explicitly chooses to govern the SDK workspace itself, `appsdk prepare` may be
+confirmed and followed by `appsdk init` in a clean non-`main` owner worktree;
+the owner must then review the generated contract and bind it to the SDK
+source modules. If the user has not made that choice, do not run `appsdk init`
+or reset commands merely to manufacture a contract; perform only the declared
+SDK/runtime migration and record that scope. A fresh reset still requires an
+existing contract plus explicit `--fresh --discard-legacy` authorization.
 
 All code, Skill, or contract changes are made in a clean non-`main` worktree
 created from the latest `origin/main`. Merge and verify the candidate on the

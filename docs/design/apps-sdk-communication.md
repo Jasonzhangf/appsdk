@@ -180,10 +180,15 @@ attempt 无效或 attempt 的 adapter 与通知记录不一致时 fail-closed。
 idle notification 按“发送地址、接收地址、adapter、coalesce key”合并。一个 bucket
 的 projection 只保留最新标题、时间、priority 和 issue；完整正文及每一次更新仍
 可从 JSONL 读取。bucket 的 `availableAt` 取第一次进入窗口的截止时间，后续进度
-不会无限推迟它。flush 按收件地址和 adapter 分组，再按 priority、createdAt 和
-notification ID 排序；发送失败保留 `pending` 和 `lastError`，写入
-`notification.delivery_failed`，以后可以在同一事实基础上重试。不存在固定 10 秒
-探针。
+不会无限推迟它。窗口结束后，已 `emitted`、`unknown` 或 `superseded` 的 bucket
+不会吞掉下一次更新：下一条不同 `messageId` 的更新开启新的 `generation`，而同一
+generation 内仍只保留最新 projection；旧窗口的完整轨迹只留在 JSONL。flush 按
+收件地址和 adapter 分组，再按 priority、createdAt 和 notification ID 排序。
+`direct` 消息以及 priority 为 `p0` 的通知永远不进入 idle batch；它们只能通过
+独立的 direct delivery/retry 路径处理。flush 发现 pending notification 没有对应
+的 message fact 时直接 fail-closed。任何适配器发送失败都保留 `pending` 和
+`lastError`，写入 `notification.delivery_failed`，以后可以在同一事实基础上重试。
+不存在固定 10 秒探针。
 
 master wake 是唯一的 master 运行态唤醒 owner。worker idle、普通 Bug、Loop error 和
 其他项目更新先按稳定 `signal.key` 写入该 master 的 `MasterWakeAccumulator`；同一 key
@@ -211,8 +216,11 @@ generation 不会重新投递或消耗提醒次数；只有看到明确的 termi
 
 worker 只有在 `working -> idle` 的状态边沿向 scope master 产生一次幂等 idle 通知；
 重复观察 idle 不重复建消息，worker 不参与 master wakeup。没有 live master 时，worker
-状态仍然先落盘并返回 `master_not_registered`，master 注册后可用同一状态边沿的
-语义恢复通知。
+状态仍然先落盘并返回 `master_not_registered`。master 注册时会扫描同 scope 仍在
+lease 内的 idle worker，并用该 worker 的 `lastStateAt` 重建同一条 deterministic
+idle signal/message；已有 signal、message 和 notification 会幂等复用，缺失的
+prefix 只补写缺失事实。master 重复注册不会重新发送；过期 worker 不会被伪造为
+可投递地址，仍保留其状态事实等待重新注册。
 
 daemon 只对 live、仍为 `idle` 的 master 执行状态驱动 `tick`。master idle 后每 120 秒
 最多提醒三次，第三次后将 wake cycle 标记为 `stopped`；master 回到 `working` 时
@@ -287,6 +295,8 @@ projection；变更返回投影和本次写入的事实 ID。
 - 从 JSONL 重开后，scope、agent lease、route、message、notification、wakeup、Bug、
   Loop、receipt 和错误 projection 与事实一致；坏 JSONL、未知 event 和占用锁均
   fail-closed。
+- communication JSONL 必须以换行结束；重复 `eventId`、EventRecord 顶层未知字段和
+  截断的最后一行都 fail-closed，不能部分重放。
 - 相同 `messageId` 的 crash-prefix 重试覆盖“只有 created”和“created + accepted”，
   并确认 direct/P0 独立通知、idle 原 bucket、pending/emitted projection 和
   `message_id_conflict`。
@@ -297,8 +307,9 @@ projection；变更返回投影和本次写入的事实 ID。
 - route matrix 覆盖同 scope peer、parent/subagent、master、跨 scope master，以及
   过期 lease 的拒绝；只有 live master tick，worker idle 只产生一次通知。
 - direct、idle 120 秒、P0 breakthrough、按 adapter 分组的 batch、失败后 pending
-  保留和 master 三次唤醒上限都有正反测试；master working 时的普通 signal 会被
-  hold，idle 后只产生一条 briefing。
+  保留、terminal bucket 后的新 generation 和 master 三次唤醒上限都有正反测试；
+  master working 时的普通 signal 会被 hold，idle 后只产生一条 briefing。master
+  延迟注册时已落盘的 worker idle edge 也必须只补偿一次。
 - master wake signal 的稳定 key/generation、P0 direct 不重复聚合、superseded
   notification、generation 冲突和 hold/dispatch decision 都有正反测试。
 - 每次真实 adapter 调用只追加一个 `notification.delivery_attempt`；idle flush 重复执行

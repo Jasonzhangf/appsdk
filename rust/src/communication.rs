@@ -637,6 +637,11 @@ struct NotificationRecord {
     notification_id: String,
     #[serde(rename = "messageId")]
     message_id: String,
+    /// Monotonically increases whenever an idle coalescing bucket reopens
+    /// after a terminal outcome.  Legacy records omit this field and belong
+    /// to generation zero.
+    #[serde(default)]
+    generation: u64,
     recipient: Address,
     title: String,
     priority: Priority,
@@ -672,6 +677,8 @@ struct NotificationSummary {
     notification_id: String,
     #[serde(rename = "messageId")]
     message_id: String,
+    #[serde(default)]
+    generation: u64,
     title: String,
     priority: Priority,
     #[serde(rename = "issueId")]
@@ -687,6 +694,7 @@ impl NotificationRecord {
         NotificationSummary {
             notification_id: self.notification_id.clone(),
             message_id: self.message_id.clone(),
+            generation: self.generation,
             title: self.title.clone(),
             priority: self.priority.clone(),
             issue_id: self.issue_id.clone(),
@@ -859,6 +867,7 @@ struct Projection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EventRecord {
     protocol: String,
     #[serde(rename = "eventId")]
@@ -1425,7 +1434,74 @@ impl CommunicationStore {
             runtime_id: request.runtime_id,
         };
         self.commit("agent.registered", serde_json::to_value(&record).unwrap())?;
-        Ok(json!({ "agent": record, "idempotent": false }))
+        let reconciled_idle = if record.role == "master" {
+            self.reconcile_idle_workers_for_master(&record)?
+        } else {
+            Vec::new()
+        };
+        Ok(json!({
+            "agent": record,
+            "idempotent": false,
+            "reconciledIdle": reconciled_idle
+        }))
+    }
+
+    fn reconcile_idle_workers_for_master(
+        &mut self,
+        master: &AgentRecord,
+    ) -> CommResult<Vec<Value>> {
+        let observed_at = now();
+        let workers: Vec<AgentRecord> = self
+            .projection
+            .agents
+            .values()
+            .filter(|agent| {
+                agent.scope_id == master.scope_id
+                    && agent.role != "master"
+                    && agent.state == AgentState::Idle
+                    && agent.live_at(&observed_at)
+            })
+            .cloned()
+            .collect();
+        let master_address = master.address();
+        let mut reconciled = Vec::new();
+        for worker in workers {
+            let signal_key = worker_idle_signal_key(&worker.address());
+            let message =
+                worker_idle_message(&worker, master_address.clone(), &worker.last_state_at);
+            let message_id = message
+                .message_id
+                .as_deref()
+                .expect("worker idle message must have a deterministic message id");
+            let notification_key = structured_key(&[
+                &worker.address().key(),
+                &master_address.key(),
+                "mailbox",
+                &format!("idle:{}", worker.address().key()),
+            ]);
+            let signal_recorded =
+                self.master_wake_signal_recorded(&master_address, &signal_key, message_id);
+            let signal_consumed =
+                self.master_wake_signal_consumed(&master_address, &signal_key, message_id);
+            let notification_matches_message = self
+                .projection
+                .notifications
+                .get(&notification_key)
+                .is_some_and(|notification| notification.message_id == message_id);
+            if !signal_recorded {
+                self.accumulate_worker_idle(&worker, &master_address, &worker.last_state_at)?;
+            }
+            if !signal_consumed
+                && (!self.projection.messages.contains_key(message_id)
+                    || !notification_matches_message)
+            {
+                // send() persists the deterministic message and its
+                // notification.  It is safe to call after a partial prefix:
+                // messageId and the idle edge are the idempotency boundary.
+                reconciled.push(self.send(message)?);
+            }
+        }
+        Ok(reconciled)
     }
 
     pub fn refresh_agent(&mut self, address: Address, at: Option<&str>) -> CommResult<Value> {
@@ -2974,12 +3050,17 @@ impl CommunicationStore {
                 continue;
             }
             let reminders_sent = wakeup.reminders_sent + 1;
+            let stopped = reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT;
             let next_wakeup = WakeupRecord {
                 address: wakeup.address.clone(),
                 idle_since: wakeup.idle_since.clone(),
                 reminders_sent,
-                next_due_at: Some(add_seconds(&at, DEFAULT_BATCH_WINDOW_SECONDS)?),
-                stopped: reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT,
+                next_due_at: if stopped {
+                    None
+                } else {
+                    Some(add_seconds(&at, DEFAULT_BATCH_WINDOW_SECONDS)?)
+                },
+                stopped,
                 last_reminder_at: Some(at.clone()),
             };
             let (message_id, conversation_id) = wakeup_message_identity(&wakeup, reminders_sent)?;
@@ -3226,6 +3307,29 @@ impl CommunicationStore {
             BTreeMap::new();
         for (key, notification) in &self.projection.notifications {
             if notification.status != "pending" {
+                continue;
+            }
+            let message = self
+                .projection
+                .messages
+                .get(&notification.message_id)
+                .ok_or_else(|| {
+                    CommError::new(
+                        "notification_message_missing",
+                        format!(
+                            "pending notification {} references missing message {}",
+                            key, notification.message_id
+                        ),
+                    )
+                })?;
+            if matches!(message.delivery_mode, DeliveryMode::Direct)
+                || message.priority.is_breakthrough()
+                || notification.priority.is_breakthrough()
+            {
+                // Direct and P0 notifications have their own delivery retry
+                // path.  Keeping them out of this idle batch is essential:
+                // an adapter failure must never be silently demoted to a
+                // lower urgency transport.
                 continue;
             }
             if self.notification_held_for_master_wake(notification)? {
@@ -4058,8 +4162,19 @@ impl CommunicationStore {
             .unwrap_or_else(|| self.notification_key(message, &notification, !immediate));
         let mut reused_pending = false;
         if let Some(existing) = self.projection.notifications.get(&key) {
-            if matches!(existing.status.as_str(), "emitted" | "unknown") {
-                return Ok(Some(existing.clone()));
+            if matches!(
+                existing.status.as_str(),
+                "emitted" | "unknown" | "superseded"
+            ) {
+                if existing.message_id == message.message_id || immediate {
+                    return Ok(Some(existing.clone()));
+                }
+                notification.generation = existing.generation.checked_add(1).ok_or_else(|| {
+                    CommError::new(
+                        "notification_generation_exhausted",
+                        format!("notification generation exhausted: {key}"),
+                    )
+                })?;
             }
             if existing.status == "pending" {
                 if immediate {
@@ -4067,6 +4182,7 @@ impl CommunicationStore {
                     reused_pending = true;
                 } else {
                     notification.available_at = existing.available_at.clone();
+                    notification.generation = existing.generation;
                 }
             }
         }
@@ -4240,6 +4356,7 @@ impl CommunicationStore {
         Ok(NotificationRecord {
             notification_id: new_id("notification"),
             message_id: message.message_id.clone(),
+            generation: 0,
             recipient: message.to.clone(),
             title: message.title.clone(),
             priority: message.priority.clone(),
@@ -4885,6 +5002,13 @@ impl CommunicationStore {
                 ))
             }
         };
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err(CommError::new(
+                "journal_corrupt",
+                "communication JSONL must end with a newline",
+            ));
+        }
+        let mut event_ids = BTreeMap::new();
         for (index, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 return Err(CommError::new(
@@ -4904,6 +5028,17 @@ impl CommunicationStore {
                     format!("invalid envelope at line {}: {error}", index + 1),
                 )
             })?;
+            if let Some(previous_line) = event_ids.insert(event.event_id.clone(), index + 1) {
+                return Err(CommError::new(
+                    "journal_corrupt",
+                    format!(
+                        "duplicate eventId {} at line {} (already present at line {})",
+                        event.event_id,
+                        index + 1,
+                        previous_line
+                    ),
+                ));
+            }
             if event.protocol != PROTOCOL {
                 return Err(CommError::new(
                     "journal_protocol_mismatch",

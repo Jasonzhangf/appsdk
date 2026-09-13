@@ -3510,6 +3510,9 @@ impl CommunicationStore {
                 .messages
                 .get(&notification.message_id)
                 .cloned();
+            if let Some(message) = message.as_ref() {
+                self.ensure_message_delivery_attempt(message)?;
+            }
             return Ok(json!({
                 "message": message,
                 "notification": notification.summary()
@@ -3983,6 +3986,7 @@ impl CommunicationStore {
         &mut self,
         message: &MessageRecord,
     ) -> CommResult<Option<NotificationRecord>> {
+        self.ensure_message_delivery_attempt(message)?;
         let immediate = matches!(message.delivery_mode, DeliveryMode::Direct)
             || message.priority.is_breakthrough();
         let existing = if immediate {

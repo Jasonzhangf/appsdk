@@ -3328,6 +3328,159 @@ fn lifecycle_chain_reenters_non_pass_review_and_preserves_attempt_history() {
 }
 
 #[test]
+fn lifecycle_chain_new_candidate_preserves_pass_bytes_and_reuses_current() {
+    let root = temp_root("lifecycle-chain-new-candidate");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    let records = root.join(".appsdk/records");
+    let kinds = [
+        "review-record",
+        "effectiveness-record",
+        "merge-record",
+        "promotion-record",
+    ];
+    let previous_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    // Whitespace is intentional: preserving the parsed value alone loses the witness bytes.
+    let previous: Vec<_> = kinds
+        .iter()
+        .map(|kind| {
+            let file = records.join(format!("{kind}-app-core.json"));
+            let bytes = format!(" \n{}\n", fs::read_to_string(&file).unwrap());
+            fs::write(&file, &bytes).unwrap();
+            bytes
+        })
+        .collect();
+    fs::write(root.join("candidate-source-change.txt"), "new candidate\n").unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "candidate-source-change.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "new source candidate"])
+        .status()
+        .unwrap()
+        .success());
+    let current_commit = git_test_value(&root, &["rev-parse", "HEAD"]);
+    assert_ne!(previous_commit, current_commit);
+    // Upstream evidence is a fixture for the new source. All four old PASS files remain
+    // present while the real CLI performs each downstream transition.
+    write_records(&root, "app-core", &artifact_hash, false, "issue-1");
+    for (kind, bytes) in kinds.iter().zip(&previous) {
+        fs::write(records.join(format!("{kind}-app-core.json")), bytes).unwrap();
+    }
+    for (kind, id_field, id) in [
+        ("fix-candidate-record", "fix_candidate_id", "candidate-2"),
+        (
+            "pre-review-validation-record",
+            "validation_id",
+            "validation-2",
+        ),
+    ] {
+        let file = records.join(format!("{kind}-app-core.json"));
+        let mut value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        value[id_field] = serde_json::json!(id);
+        value["fix_candidate_id"] = serde_json::json!("candidate-2");
+        fs::write(file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+    let observations = [
+        (
+            "architecture",
+            serde_json::json!({"reviewer":{"adapter":"test","identity":"test"},"verdict":"pass","evidence_ids":["candidate-evidence-1","positive-1","negative-1"]}),
+        ),
+        (
+            "effectiveness",
+            serde_json::json!({"fixed_replay_evidence_id":"blackbox-1","positive_evidence_ids":["positive-1"],"negative_evidence_ids":["negative-1"],"blackbox_evidence_ids":["blackbox-1"]}),
+        ),
+        ("merge", serde_json::json!({"mainline_ref":"HEAD"})),
+        (
+            "promotion",
+            serde_json::json!({
+                "experiment_id":"experiment-2","new_active_version":"active-v2","previous_active_version":null,
+                "compatibility_level":"compatible","evidence_ids":["candidate-evidence-1"],
+                "required_gate_results":[
+                    {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                    {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                    {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                    {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
+                    {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                    {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
+                ],"change_set_id":"change-2","root_cause":"root cause","design_id":"design-1",
+                "change_reason_comment":"reason","playground_cleanup_record_id":"cleanup-1","artifact_hash":artifact_hash
+            }),
+        ),
+    ];
+    for ((phase, observation), (kind, old_bytes)) in
+        observations.iter().zip(kinds.iter().zip(&previous))
+    {
+        let input = root.join(format!("{phase}-input.json"));
+        fs::write(
+            &input,
+            serde_json::to_vec(&serde_json::json!({*phase:observation})).unwrap(),
+        )
+        .unwrap();
+        let produce = || {
+            run(&[
+                "produce-lifecycle-chain",
+                root_text,
+                "--module",
+                "app-core",
+                "--phase",
+                phase,
+                "--input",
+                input.to_str().unwrap(),
+            ])
+        };
+        let output = produce();
+        assert!(
+            output.status.success(),
+            "{phase}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["reused"], false,
+            "{phase} must not reuse the previous candidate"
+        );
+        assert_eq!(value["fix_candidate_id"], "candidate-2");
+        let file = records.join(format!("{kind}-app-core.json"));
+        let current = fs::read(&file).unwrap();
+        let ledger = records.join(format!("attempts/app-core/{kind}.jsonl"));
+        let history = fs::read(&ledger).unwrap();
+        let entries: Vec<Value> = String::from_utf8(history.clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["result"], "stale");
+        assert_eq!(
+            entries[0]["record"],
+            serde_json::from_str::<Value>(old_bytes).unwrap()
+        );
+        assert_eq!(
+            entries[0]["record_json"].as_str(),
+            Some(old_bytes.as_str()),
+            "{phase}: original JSON bytes must survive"
+        );
+        let reused = produce();
+        assert!(
+            reused.status.success(),
+            "{phase}: {}",
+            String::from_utf8_lossy(&reused.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reused.stdout).unwrap()["reused"],
+            true
+        );
+        assert_eq!(fs::read(file).unwrap(), current);
+        assert_eq!(fs::read(ledger).unwrap(), history);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_replaces_stale_pass_and_preserves_stale_attempt() {
     let root = temp_root("lifecycle-chain-stale-pass");
     let root_text = root.to_str().unwrap();
@@ -9673,6 +9826,13 @@ esac
         serde_json::from_str(fs::read_to_string(&producer_attempts).unwrap().trim()).unwrap();
     assert_eq!(producer_attempt["result"], "stale");
     assert_eq!(producer_attempt["records"].as_array().unwrap().len(), 3);
+    for entry in producer_attempt["records"].as_array().unwrap() {
+        let record_json = entry["record_json"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(record_json).unwrap(),
+            entry["record"]
+        );
+    }
     let reentered_again = produce(&input_path);
     assert!(reentered_again.status.success());
     assert_eq!(

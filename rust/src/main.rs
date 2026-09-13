@@ -5482,7 +5482,11 @@ fn producer_goal_issue_binding_for_input(
     worktree: &Value,
     worktree_issue: &str,
 ) -> Option<(String, String)> {
-    let goal_issue_id = goal.get("issue_id").and_then(Value::as_str);
+    let goal_issue_id = match goal.get("issue_id") {
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(Value::Null) | None => None,
+        Some(_) => fail("PRODUCER_GOAL_ISSUE_MISMATCH"),
+    };
     let declared_goal_issue_id = worktree
         .get("goal_issue_id")
         .map(|_| producer_string(worktree, "/goal_issue_id", "PRODUCER_GOAL_ISSUE_MISMATCH"));
@@ -5496,7 +5500,13 @@ fn producer_goal_issue_binding_for_input(
             ))
         }
         (Some(goal_issue_id), None) if goal_issue_id == worktree_issue => None,
-        (None, None) => None,
+        (None, None)
+            if worktree_issue.is_empty()
+                || worktree_issue == "none"
+                || worktree_issue.starts_with("legacy-") =>
+        {
+            None
+        }
         _ => fail("PRODUCER_GOAL_ISSUE_MISMATCH"),
     }
 }

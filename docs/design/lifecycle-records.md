@@ -15,8 +15,13 @@ module issue. When those IDs differ, the producer requires
 then computes `goal_issue_binding` itself from the goal and module issue IDs.
 The binding is the SHA-256 of the canonical object
 `{"goal_issue_id": <goal issue>, "issue_id": <module issue>}`, is persisted in
-the WorktreeRecord, and is revalidated on reuse. A missing or forged
-`goal_issue_id` fails closed. Reproduction and baseline evidence remain bound
+the WorktreeRecord, and is revalidated on reuse. When the confirmed goal has no
+`issue_id` (missing or `null`), no binding is allowed only for an empty,
+`none`, or `legacy-*` module issue. A non-string goal issue, or an absent
+binding for any non-exempt module issue, fails closed. When the goal and module
+issues are the same valid string, the older input without a binding remains
+valid; when they differ, the producer must supply the exact goal issue and
+computes the binding itself. Reproduction and baseline evidence remain bound
 to the module issue and its triage evidence.
 
 ## Module registry binding

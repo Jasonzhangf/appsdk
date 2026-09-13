@@ -9939,8 +9939,93 @@ esac
             + "\n",
     )
     .unwrap();
-    let valid_input: Value =
+    let mut valid_input: Value =
         serde_json::from_str(&fs::read_to_string(&input_path).unwrap()).unwrap();
+
+    let set_goal_issue = |issue_id: Option<Value>| -> String {
+        let goal_path = root.join(".appsdk/goal.json");
+        let mut goal: Value =
+            serde_json::from_str(&fs::read_to_string(&goal_path).unwrap()).unwrap();
+        match issue_id {
+            Some(issue_id) => goal["issue_id"] = issue_id,
+            None => {
+                goal.as_object_mut().unwrap().remove("issue_id");
+            }
+        }
+        fs::write(
+            &goal_path,
+            serde_json::to_string_pretty(&goal).unwrap() + "\n",
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["-C", root_text, "add", ".appsdk/goal.json"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["-C", root_text, "commit", "-m", "goal issue variant"])
+            .status()
+            .unwrap()
+            .success());
+        git_test_value(&root, &["rev-parse", "HEAD"])
+    };
+    let set_input_commit = |input: &mut Value, commit: &str| {
+        input["worktree"]["base_commit"] = Value::String(commit.to_string());
+        input["worktree"]["head_commit"] = Value::String(commit.to_string());
+        input["reproduction"]["base_commit"] = Value::String(commit.to_string());
+        input["baseline_evidence"]["source_commit"] = Value::String(commit.to_string());
+    };
+
+    for issue_id in [Some(Value::Null), None, Some(Value::from(7))] {
+        let goal_commit = set_goal_issue(issue_id);
+        let mut invalid_goal_input = valid_input.clone();
+        invalid_goal_input["worktree"]
+            .as_object_mut()
+            .unwrap()
+            .remove("goal_issue_id");
+        set_input_commit(&mut invalid_goal_input, &goal_commit);
+        fs::write(
+            &input_path,
+            serde_json::to_string_pretty(&invalid_goal_input).unwrap() + "\n",
+        )
+        .unwrap();
+        let invalid_goal_result = produce(&input_path);
+        assert!(!invalid_goal_result.status.success());
+        assert!(String::from_utf8_lossy(&invalid_goal_result.stderr)
+            .contains("PRODUCER_GOAL_ISSUE_MISMATCH"));
+    }
+
+    let same_issue_commit = set_goal_issue(Some(Value::String("issue-producer-1".into())));
+    let mut same_issue_input = valid_input.clone();
+    same_issue_input["worktree"]
+        .as_object_mut()
+        .unwrap()
+        .remove("goal_issue_id");
+    set_input_commit(&mut same_issue_input, &same_issue_commit);
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&same_issue_input).unwrap() + "\n",
+    )
+    .unwrap();
+    let same_issue_result = produce(&input_path);
+    assert!(
+        same_issue_result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&same_issue_result.stdout),
+        String::from_utf8_lossy(&same_issue_result.stderr)
+    );
+    let same_issue_worktree: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/worktree-record-app-core.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(same_issue_worktree.get("goal_issue_id").is_none());
+    assert!(same_issue_worktree.get("goal_issue_binding").is_none());
+    fs::remove_file(root.join(".appsdk/records/worktree-record-app-core.json")).unwrap();
+    fs::remove_file(root.join(".appsdk/records/reproduction-record-app-core.json")).unwrap();
+    fs::remove_dir_all(root.join(".appsdk/records/evidence/app-core")).unwrap();
+
+    let restored_goal_commit = set_goal_issue(Some(Value::String("goal-issue-1".into())));
+    set_input_commit(&mut valid_input, &restored_goal_commit);
     let mut missing_goal_issue = valid_input.clone();
     missing_goal_issue["worktree"]
         .as_object_mut()

@@ -13305,8 +13305,33 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
     {
         fail("GOVERNANCE_RESET_STAGING_AUTH_FAILED");
     }
+    let project_path = root.join(".appsdk/project.json");
+    if fs::symlink_metadata(&project_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:project");
+    }
+    let project_bytes = fs::read(&project_path)
+        .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_MISSING"));
+    let project: Value = serde_json::from_slice(&project_bytes)
+        .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_INVALID"));
     let staging_root = transaction_dir.join("staging");
     new_project(&staging_root, false);
+    // Fresh init resets the control-plane records and rebuildable projections,
+    // but the existing project contract remains project-owned truth.  The
+    // scaffold only supplies the new SDK-owned layout; restore the validated
+    // project contract byte-for-byte before publishing the transaction.
+    reset_transaction_write_bytes(
+        transaction_dir,
+        &staging_root.join(".appsdk/project.json"),
+        &project_bytes,
+    )
+    .unwrap_or_else(|error| fail(error));
+    // Validate against the freshly built SDK resources so stale legacy
+    // projections do not prevent a valid contract from being checked.  The
+    // transaction has not quarantined or published any project paths yet.
+    assert_project_contract(&staging_root, &project);
 }
 
 fn sdk_map_migration_root(root: &Path) -> PathBuf {
@@ -15527,10 +15552,10 @@ fn reset_transaction_build_staging(
             detail
         ));
     }
-    // `appsdk new` bootstraps the stable project scaffold.  Fresh reset also
-    // replaces every root contract declared by the current bundle, including
-    // record contracts added after the scaffold template was published.  Write
-    // those canonical bytes into staging before any project path is moved.
+    // Start from the stable scaffold, then replace every root contract declared
+    // by the current bundle, including record contracts added after the
+    // scaffold template was published.  The staging helper preserves the
+    // existing project contract before this replacement is published.
     for &(relative, _, content) in SDK_BUNDLE_RESOURCES.iter().filter(|(path, _, _)| {
         path.starts_with("contracts/records/") || path.starts_with("contracts/transitions/")
     }) {

@@ -282,8 +282,10 @@ appsdk init ./existing-project --fresh --discard-legacy
 这不是普通 `init` 的隐式行为。它只接受已有 `.appsdk/project.json` 的项目，并且必须在
 clean、非 `main`/`master` worktree 执行；缺少 `--discard-legacy`、项目不存在、主分支或
 dirty worktree 都 fail-closed，拒绝写入。命令只通过 AppSDK 的 canonical reset owner
-移除 `.appsdk/`、`.appsdk-control/` 和声明的 generated root，保留业务源码、runtime、
-`active/`、`protected/` 与人类文档，随后重建当前 `.appsdk` contract 和
+移除旧的 `.appsdk/` 控制面、`.appsdk-control/` 和声明的 generated root；它会先验证并
+把现有 `.appsdk/project.json` 作为项目合同原样带入新的 `.appsdk`，不会用
+`change-me/app-core` scaffold 覆盖项目身份、模块 owner、build 或生命周期边界。业务源码、
+runtime、`active/`、`protected/` 与人类文档继续保留，随后重建当前 `.appsdk` contract 和
 `contracts/records/**`、`contracts/transitions/**` projection，并写入
 `.appsdk/records/reset-governance-record.json`（`mode: "fresh_init"`）。
 

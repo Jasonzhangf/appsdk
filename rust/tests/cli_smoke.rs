@@ -489,6 +489,16 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
     let root = temp_root("init-fresh-governance-epoch");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("preserved-project".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let project_before = fs::read(&project_path).unwrap();
     fs::write(root.join("business.txt"), "keep\n").unwrap();
     fs::write(root.join("protected/history/legacy.txt"), "retain\n").unwrap();
     fs::write(root.join("active/legacy.txt"), "retain-active\n").unwrap();
@@ -538,6 +548,7 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
         fs::read_to_string(root.join("active/legacy.txt")).unwrap(),
         "retain-active\n"
     );
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
     assert!(!root.join("generated/legacy-output").exists());
     assert!(!root
         .join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")
@@ -561,7 +572,13 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
     )
     .unwrap();
     assert_eq!(reset["mode"], "fresh_init");
-    assert!(run(&["verify", root_text]).status.success());
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -892,6 +909,96 @@ fn init_fresh_rejects_malformed_project_contract_before_resetting_state() {
         );
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[test]
+fn init_fresh_rejects_semantically_invalid_project_contract_before_resetting_state() {
+    let root = temp_root("init-fresh-invalid-project-semantic");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    fs::create_dir_all(root.join("generated/legacy-output")).unwrap();
+    fs::write(root.join("generated/legacy-output/result"), "retain\n").unwrap();
+    fs::write(
+        root.join(".appsdk/legacy-record.json"),
+        "{\"legacy\":true}\n",
+    )
+    .unwrap();
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("invalid_project".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let project_before = fs::read(&project_path).unwrap();
+    let legacy_before = fs::read_to_string(root.join(".appsdk/legacy-record.json")).unwrap();
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("INVALID_PROJECT_ID"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/legacy-record.json")).unwrap(),
+        legacy_before
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("generated/legacy-output/result")).unwrap(),
+        "retain\n"
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_preserves_compiled_project_contract_for_rebuild() {
+    let root = temp_root("init-fresh-compiled-project-contract");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("compiled-project".into());
+    project["lifecycle"]["stage"] = Value::String("compiled".into());
+    project["modules"][0]["stage"] = Value::String("compiled".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let project_before = fs::read(&project_path).unwrap();
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
+    assert!(root
+        .join(".appsdk/records/reset-governance-record.json")
+        .is_file());
+    let verify = run(&["verify", root_text]);
+    assert!(!verify.status.success());
+    assert!(
+        String::from_utf8_lossy(&verify.stderr).contains("COMPILED_STAGE_REQUIRES_ARTIFACT"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

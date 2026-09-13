@@ -163,9 +163,10 @@ Use ownership and rebuildability, not age, to decide what is removable:
 | `active/`, `protected/`, runtime data, business source | Retain | They may be the only published or operational truth. |
 | `dist/`, `.deploy/`, `build/`, `tmp/`, custom reports/artifacts | Keep until exact disposable ownership is confirmed | AppSDK cannot infer that an external output is safe to delete. |
 
-The reset command reads the old project contract before removal and includes
-its declared generated root in the disposable set. It does not use a fixed
-project path or silently delete Active/Protected. For external outputs, the
+The reset command reads and validates the old project contract before removal,
+carries that contract into the new `.appsdk` root, and includes its declared
+generated root in the disposable set. It does not use a fixed project path or
+silently delete Active/Protected. For external outputs, the
 owner must name the exact path, establish that it is rebuildable, authorize
 cleanup, and record the result separately. Never preserve an old report by
 renaming it as a new record, and never make a new record by editing an old

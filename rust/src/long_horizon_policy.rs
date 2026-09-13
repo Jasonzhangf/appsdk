@@ -14,7 +14,7 @@ THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待
 
 {}
 
-## 2. Worker / Subagent 处理规则
+## 2. Worker / Subworker 处理规则
 
 {}
 
@@ -101,12 +101,12 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
    不可逆操作、发布、成本与新的未批准范围仍需人类批准，这类外部门禁允许
    `collab master wake hold --reason "<门禁与解除条件>" --ttl-seconds <n>`。"#;
 
-const FLEET_RULES: &str = r#"Worker / subagent 处理规则（每次唤醒都适用）：
+const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
-1. Master 可以关闭 worker，包括它的 tmux session：`collab worker close <id> --reason "<why>" --kill-session`。关闭 managed subagent：`collab subagent close <id>`。
-2. Worker 或 subagent 不在线，允许关闭。需要产能时自己开 subagent，同时最多 5 个。默认按 `~/.appsdk/config.toml` `[subagent].runtime`：cursor 开 cursor，codex/gcm 开 Codex。一个 runtime 起不来就切另一个一次，不要循环。
-3. 任务结束必须回收资源：清理 worktree，关闭为该任务开的 subagent。默认不清理、不关闭 worker。
-4. 不工作、不响应时，关闭前先 `collab subagent snapshot <id> --lines 40` 确认异常。处理不了可以关闭：默认关 subagent、保留 worker。只有 pane 确认已死、离线或 identity 丢失才关 worker。"#;
+1. Master 可以关闭 worker，包括它的 tmux session：`collab worker close <id> --reason "<why>" --kill-session`。关闭 managed subworker：`appsdk subworker close <id>`。
+2. Worker 或 subworker 不在线，允许关闭。需要产能时自己开 subworker，同时最多 5 个。默认按 `~/.appsdk/config.toml` 的 managed-child runtime 配置：cursor 开 cursor，codex/gcm 开 Codex。一个 runtime 起不来就切另一个一次，不要循环。
+3. 任务结束必须回收资源：清理 worktree，关闭为该任务开的 subworker。默认不清理、不关闭 worker。
+4. 不工作、不响应时，关闭前先 `appsdk subworker snapshot <id> --lines 40` 确认异常。处理不了可以关闭：默认关 subworker、保留 worker。只有 pane 确认已死、离线或 identity 丢失才关 worker。"#;
 
 pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 worker 通用）：
 
@@ -115,7 +115,7 @@ pub(crate) const NOTIFY_RULES: &str = r#"通知处理准则（master 和 worker 
 
 每条通知都带 `P<n> ACTION: <一个动作>`。优先级：
 - P0 人类消息、blocker 上报；`goal:` / `deadline` 唤醒 → 跑 longhorizon show 后排程。
-- P1 `task-keepalive`（继续自己的任务，或记录真实 blocker 与具体修复方案）、`worker-idle`（派活）、`worker-unresponsive`（先 snapshot 再恢复或关闭）、`subagent-status`（重派/关闭/明确留空）、`release`（恢复等这个资源的任务）。
+- P1 `task-keepalive`（继续自己的任务，或记录真实 blocker 与具体修复方案）、`worker-idle`（派活）、`worker-unresponsive`（先 snapshot 再恢复或关闭）、subworker 状态通知（底层兼容事件 `subagent-status`，重派/关闭/明确留空）、`release`（恢复等这个资源的任务）。
 - P2 回执类（delivery recorded、cleanup receipt）：记下就继续干，不要被打断，也不要当成新任务。
 
 高优先级是抢占，不是取消：处理完仍要回到原任务。不要用通知回复通知。"#;
@@ -127,14 +127,14 @@ const WORKER_CHARTER: &str = r#"你是独立 worker。你的职责是完成自�
 3. 遇到 blocker 先调查，再向 live master 上报根因、已尝试动作、提案和需要的决策。
 4. 没有可继续推进的运行条件是等待原因，不是空转；等待必须带解除条件和恢复触发。"#;
 
-const SUBAGENT_CHARTER: &str = r#"你是 managed subagent。你的职责是执行 parent 分配的任务：
+const SUBAGENT_CHARTER: &str = r#"你是 managed subworker。你的职责是执行 parent 分配的任务：
 
 1. 只修改 assignment 声明的 scope/worktree，不自行扩大任务，不管理其他 worker。
 2. 完成后向 parent/master 返回结构化交付证据；持久会话回到 managed idle，临时会话按策略回收。
 3. 发现新事项上报，不自动修复范围外问题。
 4. 没有任务时不要进入全局 backlog；回报 parent 并等待确认。"#;
 
-const UNKNOWN_CHARTER: &str = r#"身份未验证。当前不能获得 master、独立 worker 或 managed subagent 的任何执行能力。
+const UNKNOWN_CHARTER: &str = r#"身份未验证。当前不能获得 master、独立 worker 或 managed subworker 的任何执行能力。
 
 1. 先确认自己是哪个已注册 pane：`collab context`。
 2. 若身份仍不可验证，只允许恢复绑定/注册，不允许派单、关闭其他 peer 或接管全局 backlog。
@@ -153,7 +153,7 @@ impl ExecutionRole {
         match self {
             Self::Master => "MASTER",
             Self::Worker => "WORKER",
-            Self::ManagedSubagent => "SUBAGENT",
+            Self::ManagedSubagent => "SUBWORKER",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -193,7 +193,7 @@ mod tests {
         let prompt = generate_long_horizon_master_prompt(Path::new("goal.md"), "15m");
 
         assert!(prompt.contains("你是本项目的 master"));
-        assert!(prompt.contains("Worker / subagent 处理规则"));
+        assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
         assert_eq!(ExecutionRole::Master.fleet_rules(), POLICY.fleet_rules());
         assert!(ExecutionRole::Worker.fleet_rules().is_empty());

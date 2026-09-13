@@ -1,9 +1,9 @@
 # Persistent subworkers and shared policy
 
-This reference describes the persistent subworker policy. The `[subagent]`
-tables, `appsdk subagent ...` commands, `appsdk-subagent` MCP name, and the
-`-subagent-` tmux naming fragment are compatibility protocol tokens; they do
-not mean that Codex Desktop should use a native task/thread spawn command.
+This reference describes the persistent **subworker** policy. The `[subagent]`
+tables, `appsdk-subagent` MCP name, and the `-subagent-` tmux naming fragment
+are compatibility protocol tokens. They do not mean that Codex Desktop should
+use a native task/thread spawn command.
 
 Only `~/.appsdk/config.toml` owns startup/notification/timer policy. Run
 `appsdk config` from the project cwd to validate and inspect effective values.
@@ -61,12 +61,12 @@ daemon restart after a policy change. Existing tasks/mailboxes remain intact.
 From a registered tmux parent:
 
 ```text
-appsdk subagent start --id <unique-request-id>
-appsdk subagent list
-appsdk subagent status <id>
-appsdk subagent snapshot <id> --lines 40
-appsdk subagent send <id> --subject <topic> "<task>"
-appsdk subagent close <id>
+appsdk subworker start --id <unique-request-id>
+appsdk subworker list
+appsdk subworker status <id>
+appsdk subworker snapshot <id> --lines 40
+appsdk subworker send <id> --subject <topic> "<task>"
+appsdk subworker close <id>
 ```
 
 `start` probes each configured profile once, bounded by timeout, then launches
@@ -97,7 +97,7 @@ Three consecutive unconfirmed attempts exhaust the durable budget. After the
 third response window, status marks `suspected_offline`; it does not claim the
 process is dead. Failed/uncertain sends count, restart does not reset the budget,
 and no process is respawned. Only an explicit parent/operator request may use
-`appsdk subagent rearm <id>`; never rearm automatically to bypass exhaustion.
+`appsdk subworker rearm <id>`; never rearm automatically to bypass exhaustion.
 
 `status` returns observed state, task list, parent mailbox, keepalive counters
 and notification/ACK history. It never captures the screen. `snapshot` returns

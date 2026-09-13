@@ -5230,6 +5230,23 @@ fn producer_validate_attempt_ledger(root: &Path, module_id: &str) {
             .get("record")
             .filter(|record| record.is_object())
             .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+        for entry in records {
+            let record = entry
+                .get("record")
+                .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+            if let Some(record_json) = entry.get("record_json") {
+                let record_json = record_json
+                    .as_str()
+                    .unwrap_or_else(|| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+                let parsed = serde_json::from_str::<Value>(record_json)
+                    .unwrap_or_else(|_| fail("PRODUCER_RECORD_ARCHIVE_INVALID"));
+                if parsed != *record {
+                    fail("PRODUCER_RECORD_ARCHIVE_CONFLICT");
+                }
+            } else if !producer_legacy_record_is_unambiguous(record) {
+                fail("PRODUCER_RECORD_ARCHIVE_INVALID");
+            }
+        }
         let evidence_id =
             producer_string(evidence, "/evidence_id", "PRODUCER_RECORD_ARCHIVE_INVALID");
         let expected_evidence_path = producer_baseline_path(root, module_id, &evidence_id)
@@ -5282,11 +5299,11 @@ fn producer_archive_current_set(root: &Path, module_id: &str) -> bool {
     let mut present = 0usize;
     for target in &fixed_targets {
         assert_no_symlink_components(root, target, "producer_record_archive");
-        if let Some(record) =
-            producer_read_record_if_present(target, "PRODUCER_RECORD_ARCHIVE_INVALID")
+        if let Some((record, record_json)) =
+            producer_read_record_bytes_if_present(target, "PRODUCER_RECORD_ARCHIVE_INVALID")
         {
             present += 1;
-            fixed.push((target.clone(), record));
+            fixed.push((target.clone(), record, record_json));
         }
     }
     if present == 0 {
@@ -5303,22 +5320,25 @@ fn producer_archive_current_set(root: &Path, module_id: &str) -> bool {
     );
     let baseline_target = producer_baseline_path(root, module_id, &baseline_id);
     assert_no_symlink_components(root, &baseline_target, "producer_record_archive");
-    let baseline =
-        producer_read_record_if_present(&baseline_target, "PRODUCER_RECORD_SET_INCOMPLETE")
+    let (baseline, baseline_json) =
+        producer_read_record_bytes_if_present(&baseline_target, "PRODUCER_RECORD_SET_INCOMPLETE")
             .unwrap_or_else(|| fail("PRODUCER_RECORD_SET_INCOMPLETE"));
 
     let records = vec![
         serde_json::json!({
             "path": fixed[0].0.strip_prefix(root).unwrap_or(&fixed[0].0).to_string_lossy(),
-            "record": fixed[0].1
+            "record": fixed[0].1,
+            "record_json": fixed[0].2
         }),
         serde_json::json!({
             "path": fixed[1].0.strip_prefix(root).unwrap_or(&fixed[1].0).to_string_lossy(),
-            "record": fixed[1].1
+            "record": fixed[1].1,
+            "record_json": fixed[1].2
         }),
         serde_json::json!({
             "path": baseline_target.strip_prefix(root).unwrap_or(&baseline_target).to_string_lossy(),
-            "record": baseline
+            "record": baseline,
+            "record_json": baseline_json
         }),
     ];
     let record_hash = sha256(&canonical(&Value::Array(records.clone())));
@@ -6228,6 +6248,30 @@ fn producer_read_record_if_present(target: &Path, error: &str) -> Option<Value> 
     )
 }
 
+fn producer_read_record_bytes_if_present(target: &Path, error: &str) -> Option<(Value, String)> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error_value) if error_value.kind() == ErrorKind::NotFound => return None,
+        Err(_) => fail(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        fail(error);
+    }
+    let text = fs::read_to_string(target).unwrap_or_else(|_| fail(error));
+    let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| fail(error));
+    Some((value, text))
+}
+
+fn producer_legacy_record_is_unambiguous(record: &Value) -> bool {
+    let Ok(pretty) = serde_json::to_string_pretty(record) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&format!("{pretty}\n"))
+        .ok()
+        .as_ref()
+        == Some(record)
+}
+
 fn producer_without_fields(value: &Value, fields: &[&str]) -> Value {
     let mut value = value.clone();
     if let Some(object) = value.as_object_mut() {
@@ -7108,6 +7152,7 @@ fn lifecycle_chain_append_attempt_with_result(
     module_id: &str,
     kind: &str,
     record: &Value,
+    record_json: &str,
     result: &str,
 ) {
     if !matches!(result, "non_pass" | "stale") {
@@ -7136,6 +7181,7 @@ fn lifecycle_chain_append_attempt_with_result(
         "phase": kind,
         "result": result,
         "record_hash": record_hash,
+        "record_json": record_json,
         "record": record,
         "archived_at": Utc::now().to_rfc3339()
     });
@@ -7157,8 +7203,21 @@ fn lifecycle_chain_append_attempt_with_result(
     }
 }
 
-fn lifecycle_chain_append_attempt(root: &Path, module_id: &str, kind: &str, record: &Value) {
-    lifecycle_chain_append_attempt_with_result(root, module_id, kind, record, "non_pass");
+fn lifecycle_chain_append_attempt(
+    root: &Path,
+    module_id: &str,
+    kind: &str,
+    record: &Value,
+    record_json: &str,
+) {
+    lifecycle_chain_append_attempt_with_result(
+        root,
+        module_id,
+        kind,
+        record,
+        record_json,
+        "non_pass",
+    );
 }
 
 fn lifecycle_chain_validate_attempt_ledger(
@@ -7230,6 +7289,18 @@ fn lifecycle_chain_validate_attempt_ledger(
         if existing_attempt_id != expected_existing_attempt_id {
             fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
         }
+        if let Some(record_json) = existing.get("record_json") {
+            let record_json = record_json
+                .as_str()
+                .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+            let parsed = serde_json::from_str::<Value>(record_json)
+                .unwrap_or_else(|_| fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID"));
+            if parsed != *existing_record {
+                fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_CONFLICT");
+            }
+        } else if !producer_legacy_record_is_unambiguous(existing_record) {
+            fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_INVALID");
+        }
         if expected_existing_attempt_id == attempt_id {
             if existing_record_hash != record_hash || existing_record != record {
                 fail("LIFECYCLE_CHAIN_ATTEMPT_LEDGER_CONFLICT");
@@ -7279,8 +7350,9 @@ fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record
         );
     }
     if target.exists() {
-        let existing = producer_read_record_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
-            .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_RECORD_INVALID"));
+        let (existing, existing_json) =
+            producer_read_record_bytes_if_present(&target, "LIFECYCLE_CHAIN_RECORD_INVALID")
+                .unwrap_or_else(|| fail("LIFECYCLE_CHAIN_RECORD_INVALID"));
         record_time(&existing, &target.display().to_string());
         let existing_record_hash = sha256(&canonical(&existing));
         let existing_attempt_id =
@@ -7315,7 +7387,14 @@ fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record
             // current projection may advance to a new candidate identity. Keep
             // the complete old bytes in the append-only ledger before replacing
             // the current file.
-            lifecycle_chain_append_attempt_with_result(root, module_id, kind, &existing, "stale");
+            lifecycle_chain_append_attempt_with_result(
+                root,
+                module_id,
+                kind,
+                &existing,
+                &existing_json,
+                "stale",
+            );
         }
         if !existing_pass {
             if producer_without_fields(&existing, &["created_at"])
@@ -7323,7 +7402,7 @@ fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record
             {
                 fail("LIFECYCLE_CHAIN_STAGE_NOT_PASS");
             }
-            lifecycle_chain_append_attempt(root, module_id, kind, &existing);
+            lifecycle_chain_append_attempt(root, module_id, kind, &existing, &existing_json);
         }
         producer_durable_json(
             target.as_path(),

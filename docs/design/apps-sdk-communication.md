@@ -131,14 +131,22 @@ refresh、发送消息、接收消息或取得 master 权限。新地址已占�
 - 语义不同的相同 `messageId` 返回 `message_id_conflict`，不创建新事实，也不修改
   原消息；恢复过程只追加缺失事件，不能覆盖或丢弃原始 JSONL。
 
-每条消息（包括 daemon 产生的系统和 master wake 消息）在首次确认后都建立一个唯一的
-`message.delivery_attempt`。该事实绑定 `messageId`、`attemptId`、一次性 `nonce`、
-adapter、目标 runtime、runtime fingerprint、target 和开始时间；同一消息的幂等重试复用
-这条 attempt，不能创建第二条。外部 `record_delivery` 必须同时提交 `attemptId` 和 `nonce`，
-并且只能匹配已经持久化的 attempt；缺失、错配或目标 runtime 不一致时 fail-closed，不写入
-`message.state`。attempt 的 fingerprint 必须来自已登记的 runtime 观察；runtime 后续刷新不
-会改写历史 receipt，重放通过 fingerprint 历史记录验证。进程在 attempt 后、receipt 前崩溃
-时，attempt 保留为未决事实，不能推断为 `delivered` 或自动生成新的 attempt。
+每条新消息（包括 daemon 产生的系统和 master wake 消息）在首次确认后都建立一个唯一的
+`message.delivery_attempt`，并在 `message.created` 的 `deliveryAttemptRequired` 字段写入
+`true`。该事实绑定 `messageId`、`attemptId`、一次性 `nonce`、adapter、目标 runtime、
+runtime fingerprint、target 和开始时间；同一消息的幂等重试复用这条 attempt，不能创建第二条。
+外部 `record_delivery` 必须同时提交 `attemptId` 和 `nonce`，并且只能匹配已经持久化的 attempt；
+缺失、错配或目标 runtime 不一致时 fail-closed，不写入 `message.state`。attempt 的 fingerprint
+必须来自已登记的 runtime 观察；runtime 后续刷新不会改写历史 receipt，重放通过 fingerprint
+历史记录验证。进程在 attempt 后、receipt 前崩溃时，attempt 保留为未决事实，不能推断为
+`delivered` 或自动生成新的 attempt。
+
+升级前的 `message.created` 没有 `deliveryAttemptRequired` 字段，属于明确的 legacy message
+格式。其既有外部 receipt 继续按旧合同重放：必须有目标 runtime、已登记的历史 fingerprint
+和非空 receipt，且 runtime 必须仍匹配收件 agent；旧事件不能因为缺少新 attempt 字段而阻断
+整个 mailbox。只要 legacy message 已有 persisted attempt，或 receipt 出现任一新 attempt
+字段，就切换到严格新合同。这个兼容分支只影响历史重放；新的 `record_delivery` 请求始终
+要求 persisted attempt、`attemptId` 和 `nonce`，不会因为 legacy history 而放宽。
 
 adapter 或宿主只知道“已尝试”时，receipt 使用 `intent` 或 `accepted`；只有实际
   观察到承载成功才能使用 `delivered`。无法观察的结果保持未确认状态或记录

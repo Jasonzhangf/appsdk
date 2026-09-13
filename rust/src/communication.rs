@@ -620,6 +620,8 @@ struct MessageRecord {
     issue_id: Option<String>,
     #[serde(rename = "adapterId")]
     adapter_id: String,
+    #[serde(default, rename = "deliveryAttemptRequired")]
+    delivery_attempt_required: bool,
     #[serde(rename = "createdAt")]
     created_at: String,
     state: String,
@@ -3888,6 +3890,7 @@ impl CommunicationStore {
             coalesce_key: request.coalesce_key,
             issue_id: request.issue_id,
             adapter_id,
+            delivery_attempt_required: true,
             created_at: created_at.clone(),
             state: "created".into(),
             evidence: Vec::new(),
@@ -4445,6 +4448,7 @@ impl CommunicationStore {
             coalesce_key: Some(coalesce_key.into()),
             issue_id: None,
             adapter_id: adapter_id.into(),
+            delivery_attempt_required: true,
             created_at: at.into(),
             state: "accepted".into(),
             evidence: vec![DeliveryEvidence {
@@ -5473,8 +5477,22 @@ impl CommunicationStore {
                         CommError::new("event_data_invalid", "message target agent is missing")
                     })?;
                 let adapter = self.require_adapter(&message_record.adapter_id)?.clone();
-                let attempt_id = event.data.get("attemptId").and_then(Value::as_str);
-                let nonce = event.data.get("nonce").and_then(Value::as_str);
+                let attempt_id_value = event.data.get("attemptId");
+                let nonce_value = event.data.get("nonce");
+                if attempt_id_value.is_some_and(|value| !value.is_string()) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "message state attemptId must be a string",
+                    ));
+                }
+                if nonce_value.is_some_and(|value| !value.is_string()) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "message state nonce must be a string",
+                    ));
+                }
+                let attempt_id = attempt_id_value.and_then(Value::as_str);
+                let nonce = nonce_value.and_then(Value::as_str);
                 validate_replayed_delivery_evidence(
                     state,
                     &evidence,
@@ -6665,6 +6683,44 @@ fn validate_replayed_delivery_evidence(
             "external delivery evidence receipt must be a non-empty object",
         ));
     }
+    let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
+        CommError::new(
+            "event_data_invalid",
+            "external delivery evidence target has no runtime identity",
+        )
+    })?;
+    if target_runtime_id != runtime_id {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence runtimeId does not match message target",
+        ));
+    }
+    let runtime = global_registry::runtime(runtime_id)
+        .map_err(|error| CommError::new("event_data_invalid", error))?;
+    let known = global_registry::runtime_fingerprint_known(runtime_id, fingerprint)
+        .map_err(|error| CommError::new("event_data_invalid", error))?;
+    if !known {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence runtimeFingerprint is not registered",
+        ));
+    }
+
+    // Messages written before the persisted-attempt contract are identified
+    // by the absence of the explicit marker. Their historical receipts remain
+    // replayable under the old runtime/fingerprint/receipt contract. Any
+    // attempt metadata, or any persisted attempt, moves the event to the
+    // strict contract instead of silently treating missing fields as legacy.
+    let has_attempt_metadata = event_attempt_id.is_some()
+        || event_nonce.is_some()
+        || details.contains_key("attemptId")
+        || details.contains_key("nonce")
+        || details.contains_key("adapterId")
+        || details.contains_key("target");
+    if !message.delivery_attempt_required && attempt.is_none() && !has_attempt_metadata {
+        return Ok(());
+    }
+
     let attempt_id = event_attempt_id
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
@@ -6711,28 +6767,6 @@ fn validate_replayed_delivery_evidence(
         return Err(CommError::new(
             "event_data_invalid",
             "external delivery evidence target does not match adapter",
-        ));
-    }
-    let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
-        CommError::new(
-            "event_data_invalid",
-            "external delivery evidence target has no runtime identity",
-        )
-    })?;
-    if target_runtime_id != runtime_id {
-        return Err(CommError::new(
-            "event_data_invalid",
-            "external delivery evidence runtimeId does not match message target",
-        ));
-    }
-    let runtime = global_registry::runtime(runtime_id)
-        .map_err(|error| CommError::new("event_data_invalid", error))?;
-    let known = global_registry::runtime_fingerprint_known(runtime_id, fingerprint)
-        .map_err(|error| CommError::new("event_data_invalid", error))?;
-    if !known {
-        return Err(CommError::new(
-            "event_data_invalid",
-            "external delivery evidence runtimeFingerprint is not registered",
         ));
     }
     let attempt = attempt.ok_or_else(|| {

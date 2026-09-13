@@ -760,6 +760,7 @@
         "coalesceKey": {"type": ["string", "null"], "minLength": 1},
         "issueId": {"type": ["string", "null"]},
         "adapterId": {"type": "string", "minLength": 1},
+        "deliveryAttemptRequired": {"type": "boolean"},
         "createdAt": {"type": "string", "format": "date-time"},
         "state": {"type": "string", "minLength": 1},
         "evidence": {

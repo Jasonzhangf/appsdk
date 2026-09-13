@@ -690,6 +690,205 @@ fn message_delivery_receipt_requires_persisted_attempt_and_exact_identity() {
 }
 
 #[test]
+fn legacy_delivery_receipt_replays_and_retry_binds_a_new_attempt() {
+    let root = temp_root("legacy-delivery-replay");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "legacy receipt",
+                "priority": "p1",
+                "body": "replay a receipt written before persisted attempts",
+                "messageId": "legacy-receipt"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    assert_eq!(sent["message"]["deliveryAttemptRequired"], true);
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "legacy-compatible" }
+            }
+        }),
+    );
+
+    // Model a mailbox written by the pre-attempt binary: the message marker,
+    // persisted attempt event and new receipt identity fields did not exist.
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut rewritten = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.delivery_attempt" && event["data"]["messageId"] == message_id {
+            continue;
+        }
+        if event["kind"] == "message.created" && event["data"]["messageId"] == message_id {
+            event["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("deliveryAttemptRequired");
+        }
+        if event["kind"] == "message.state"
+            && event["data"]["messageId"] == message_id
+            && event["data"]["state"] == "delivered"
+        {
+            let data = event["data"].as_object_mut().unwrap();
+            data.remove("attemptId");
+            data.remove("nonce");
+            data.get_mut("evidence")
+                .and_then(Value::as_object_mut)
+                .and_then(|evidence| evidence.get_mut("details"))
+                .and_then(Value::as_object_mut)
+                .map(|details| {
+                    details.remove("attemptId");
+                    details.remove("nonce");
+                    details.remove("adapterId");
+                    details.remove("target");
+                });
+        }
+        rewritten.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", rewritten.join("\n"))).unwrap();
+
+    let replayed = call(&root, json!({ "op": "status" }));
+    let replayed_message = replayed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["messageId"] == message_id)
+        .unwrap();
+    assert_eq!(replayed_message["state"], "delivered");
+    assert!(replayed["messageDeliveryAttempts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Retrying the legacy message establishes a fresh persisted attempt. The
+    // new receipt path remains strict even though the message itself is legacy.
+    let retried = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "legacy receipt",
+                "priority": "p1",
+                "body": "replay a receipt written before persisted attempts",
+                "messageId": message_id
+            }
+        }),
+    );
+    let retry_attempt_id = retried["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let retry_nonce = retried["deliveryAttempt"]["nonce"].as_str().unwrap();
+    assert_ne!(retry_attempt_id, attempt_id);
+    assert_ne!(retry_nonce, nonce);
+    let progressed = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": retry_attempt_id,
+                "nonce": retry_nonce,
+                "state": "executed",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "legacy-retry-executed" }
+            }
+        }),
+    );
+    assert_eq!(progressed["message"]["state"], "executed");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn new_delivery_receipt_missing_attempt_identity_is_rejected_on_replay() {
+    let root = temp_root("new-delivery-replay-missing-attempt");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "strict receipt",
+                "priority": "p1",
+                "body": "new receipts require attempt identity",
+                "messageId": "strict-receipt"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "strict-receipt" }
+            }
+        }),
+    );
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut rewritten = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.state"
+            && event["data"]["messageId"] == message_id
+            && event["data"]["state"] == "delivered"
+        {
+            let data = event["data"].as_object_mut().unwrap();
+            data.remove("attemptId");
+            data.remove("nonce");
+            data.get_mut("evidence")
+                .and_then(Value::as_object_mut)
+                .and_then(|evidence| evidence.get_mut("details"))
+                .and_then(Value::as_object_mut)
+                .map(|details| {
+                    details.remove("attemptId");
+                    details.remove("nonce");
+                });
+        }
+        rewritten.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", rewritten.join("\n"))).unwrap();
+    let replay_error = call_error(&root, json!({ "op": "status" }));
+    assert!(replay_error.contains("journal_corrupt"), "{replay_error}");
+    assert!(
+        replay_error.contains("external delivery evidence attemptId is missing"),
+        "{replay_error}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn tampered_message_delivery_attempt_is_rejected_on_replay() {
     let root = temp_root("delivery-attempt-replay-tamper");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);

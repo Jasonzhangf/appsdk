@@ -30,6 +30,13 @@ conversation/session；宿主继续使用同一个 `runtimeId`，不能复制旧
   `hostMustExecute=true`。宿主没有回报执行证据前，状态不能升级为
   `delivered`、`executed` 或 `read`。
 
+通信 store 的命令 root 必须是存在的绝对 canonical 项目路径。root、`.appsdk-control`、
+通信目录、mailbox 和独占 lock 的任一已有路径组件是 symlink 时，store 在创建目录、取得
+锁或读取事实前拒绝操作。`register_runtime` 与 `register_scope` 携带的 `projectRoot`
+必须逐字匹配这个 canonical root；跨项目值不会写入 host registry 或项目 mailbox，
+重放 `scope.registered` 也会重新执行同一绑定校验。拒绝本身仍按统一错误链记录
+`error.recorded`，但不会产生 runtime 或 scope 成功事实。
+
 宿主完成真实投递或产生回复后，使用 `record_delivery` 把 receipt 回写到同一项目
 JSONL。请求必须带消息 ID、目标 `runtimeId`、状态和非空证据；AppSDK 会核对目标 agent
 绑定的 runtime，并只接受 `delivered -> executed -> replied -> read -> consumed` 的单调
@@ -45,7 +52,9 @@ JSONL。请求必须带消息 ID、目标 `runtimeId`、状态和非空证据；
 
 JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`、`kind` 和 `data`
 的事件；消息、状态、adapter receipt、通知、唤醒、Bug、Loop 和错误都追加到同一
-份记录。读取时从头重放得到 `status` 投影；投影不是第二份可写事实。
+份记录。读取时从头重放得到 `status` 投影；投影不是第二份可写事实。每个非空物理行都
+必须是完整 envelope，空行、坏 JSON、协议不匹配、未知事件和 envelope 字段错误均保留
+原始行号并 fail-closed；合法事件从头重放后继续得到同一 projection。
 
 同一个 mailbox 命令生命周期使用独占 `.jsonl.lock`：先取得锁，再重放、校验和追加，
 最后同步写入。锁被占用返回 `communication_busy`，不在旧投影上继续写。JSONL 坏行、

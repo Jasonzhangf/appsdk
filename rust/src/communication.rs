@@ -4450,6 +4450,12 @@ impl CommunicationStore {
                     format!("invalid JSONL at line {}: {error}", index + 1),
                 )
             })?;
+            validate_event_envelope(&event).map_err(|error| {
+                CommError::new(
+                    "journal_corrupt",
+                    format!("invalid envelope at line {}: {error}", index + 1),
+                )
+            })?;
             if event.protocol != PROTOCOL {
                 return Err(CommError::new(
                     "journal_protocol_mismatch",
@@ -5624,6 +5630,19 @@ fn is_lexically_canonical_absolute(path: &Path) -> bool {
     if !path.is_absolute() {
         return false;
     }
+    let Some(raw) = path.to_str() else {
+        return false;
+    };
+    let separator = std::path::MAIN_SEPARATOR_STR;
+    if raw.len() > separator.len() && raw.ends_with(separator) {
+        return false;
+    }
+    let mut raw_components = raw.split(separator);
+    raw_components.next();
+    if raw_components.any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return false;
+    }
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -5636,6 +5655,22 @@ fn is_lexically_canonical_absolute(path: &Path) -> bool {
         }
     }
     normalized == path
+}
+
+fn validate_event_envelope(event: &EventRecord) -> CommResult<()> {
+    if event.event_id.trim().is_empty() {
+        return Err(CommError::new(
+            "event_envelope_invalid",
+            "eventId must be non-empty",
+        ));
+    }
+    validate_time(&event.at).map_err(|error| {
+        CommError::new(
+            "event_envelope_invalid",
+            format!("at must be a valid RFC3339 timestamp: {error}"),
+        )
+    })?;
+    Ok(())
 }
 
 fn validate_scope_request(request: &ScopeRequest) -> CommResult<()> {

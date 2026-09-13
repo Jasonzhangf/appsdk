@@ -1449,6 +1449,16 @@ fn communication_store_rejects_noncanonical_and_symlink_roots() {
     );
     fs::remove_dir_all(&root).unwrap();
 
+    let root = temp_root("root-dot-path");
+    let name = root.file_name().unwrap().to_owned();
+    let embedded_dot = root.parent().unwrap().join(".").join(&name);
+    let rejected = call_error(&embedded_dot, json!({ "op": "status" }));
+    assert!(
+        rejected.contains("communication_root_not_canonical"),
+        "{rejected}"
+    );
+    fs::remove_dir_all(&root).unwrap();
+
     let target = temp_root("root-symlink-target");
     let alias = target.with_file_name("appsdk-communication-root-alias");
     #[cfg(unix)]
@@ -1533,6 +1543,34 @@ fn communication_replay_rejects_empty_lines_and_replays_valid_events() {
         "{envelope_error}"
     );
     assert!(envelope_error.contains("line 1"), "{envelope_error}");
+    fs::remove_dir_all(&root).unwrap();
+
+    let root = temp_root("replay-invalid-envelope-fields");
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    fs::create_dir_all(mailbox.parent().unwrap()).unwrap();
+    let event = json!({
+        "protocol": "appsdk-comm/v1",
+        "eventId": "",
+        "at": "not-a-timestamp",
+        "kind": "adapter.registered",
+        "data": {
+            "adapterId": "replay-adapter",
+            "kind": "mailbox",
+            "target": null,
+            "enabled": true,
+            "execute": false,
+            "recipient": null,
+            "registeredAt": "2026-01-01T00:00:00Z"
+        }
+    });
+    fs::write(
+        &mailbox,
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    let fields_error = call_error(&root, json!({ "op": "status" }));
+    assert!(fields_error.contains("journal_corrupt"), "{fields_error}");
+    assert!(fields_error.contains("line 1"), "{fields_error}");
     fs::remove_dir_all(&root).unwrap();
 
     let root = temp_root("replay-valid-event");

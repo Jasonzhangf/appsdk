@@ -52,7 +52,7 @@ JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`�
 协议不匹配或未知事件不跳过，统一以 `journal_corrupt` 或
 `journal_unknown_event` 失败。
 
-`message.created`、`message.state`、`notification.queued`、`notification.superseded`、
+`agent.rebound`、`message.created`、`message.state`、`notification.queued`、`notification.superseded`、
 `notification.delivery_attempt`、`notification.emitted`、`notification.batch_emitted`、
 `notification.delivery_failed`、`wakeup.reminder`、`master_wake.updated`、
 `master_wake.briefing`、`master_wake.decided`、`bug.*`、`loop.*` 和 `error.recorded` 是可重放事件。
@@ -74,6 +74,16 @@ agent 注册默认 `working`，默认 lease 为 7 天；`leaseMs` 最低为 1000
 `refresh_agent` 只延长该地址的 lease。需要活跃 agent 的发送、注册子 agent、Bug、
 Loop 和 adapter 绑定都在操作时检查 lease；过期地址返回 `agent_lease_expired`，
 不能被当作仍在线的收件人。
+
+会话压缩或 fork 后，宿主必须用 `rebind_agent` 携带旧地址、新地址和同一个
+`runtimeId` 完成显式重绑定。AppSDK 会重新校验旧 agent 的 live lease、scope、runtime
+和新 session 是否由 scope 声明；`agentId`、role、parent、`masterGrant`、lease 与逻辑
+状态从旧地址保留，观察时间和过期时间从重绑定时刻刷新。成功操作只追加一个
+`agent.rebound` 事件；旧地址从 active projection 移到只读 tombstone，不能重新注册、
+refresh、发送消息、接收消息或取得 master 权限。新地址已占用、runtime 不匹配、scope
+变化或旧地址已过期时 fail-closed。若被重绑定的是 scope master，`masterSessionId` 和
+其已有 wake projection 一并迁移到新地址；重复应用或篡改 before/after/tombstone 关系
+在 JSONL 重放时返回 `journal_corrupt`。
 
 路由规则如下：
 

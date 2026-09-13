@@ -174,6 +174,16 @@ struct AgentRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct RebindAgentRequest {
+    from: Address,
+    to: Address,
+    #[serde(rename = "runtimeId", alias = "runtime_id")]
+    runtime_id: String,
+    #[serde(default, alias = "observedAt", alias = "observed_at")]
+    at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RuntimeRequest {
     #[serde(rename = "runtimeId", alias = "runtime_id")]
     runtime_id: String,
@@ -298,7 +308,7 @@ struct ScopeRecord {
     runtime_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct AgentRecord {
     #[serde(rename = "scopeId")]
     scope_id: String,
@@ -340,6 +350,26 @@ impl AgentRecord {
             .map(|(now, expires)| expires > now)
             .unwrap_or(false)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AgentTombstone {
+    address: Address,
+    #[serde(rename = "agentId")]
+    agent_id: String,
+    #[serde(rename = "runtimeId")]
+    runtime_id: String,
+    #[serde(rename = "reboundTo")]
+    rebound_to: Address,
+    #[serde(rename = "reboundAt")]
+    rebound_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReboundEvent {
+    from: AgentRecord,
+    to: AgentRecord,
+    tombstone: AgentTombstone,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,6 +798,8 @@ struct LoopRecord {
 struct Projection {
     scopes: BTreeMap<String, ScopeRecord>,
     agents: BTreeMap<String, AgentRecord>,
+    #[serde(default, rename = "agentTombstones")]
+    agent_tombstones: BTreeMap<String, AgentTombstone>,
     messages: BTreeMap<String, MessageRecord>,
     notifications: BTreeMap<String, NotificationRecord>,
     adapters: BTreeMap<String, AdapterRecord>,
@@ -931,6 +963,7 @@ impl CommunicationStore {
             "mailboxPath": self.mailbox_path,
             "scopes": self.projection.scopes.values().collect::<Vec<_>>(),
             "agents": self.projection.agents.values().collect::<Vec<_>>(),
+            "agentTombstones": self.projection.agent_tombstones.values().collect::<Vec<_>>(),
             "messages": self.projection.messages.values().collect::<Vec<_>>(),
             "adapters": self.projection.adapters.values().collect::<Vec<_>>(),
             "activeBugs": active_bugs,
@@ -1226,6 +1259,20 @@ impl CommunicationStore {
             session_id: request.session_id.clone(),
         }
         .key();
+        if self.projection.agent_tombstones.contains_key(&key) {
+            let mut error = CommError::new(
+                "agent_address_rebound",
+                format!("agent address is a read-only rebound tombstone: {key}"),
+            );
+            error.context = json!({
+                "oldAddress": {
+                    "scopeId": request.scope_id,
+                    "sessionId": request.session_id
+                },
+                "tombstone": self.projection.agent_tombstones.get(&key)
+            });
+            return Err(error);
+        }
         if let Some(existing) = self.projection.agents.get(&key) {
             if existing.role == role
                 && existing.agent_id == request.agent_id
@@ -1288,6 +1335,107 @@ impl CommunicationStore {
         };
         self.commit("agent.refreshed", serde_json::to_value(&refreshed).unwrap())?;
         Ok(json!({ "agent": refreshed, "observedAt": at }))
+    }
+
+    fn rebind_agent(&mut self, request: RebindAgentRequest) -> CommResult<Value> {
+        validate_address(&request.from)?;
+        validate_address(&request.to)?;
+        validate_non_empty(&request.runtime_id, "runtimeId")?;
+        if request.from.scope_id != request.to.scope_id {
+            return Err(CommError::new(
+                "agent_rebind_scope_mismatch",
+                "agent rebind must keep the same scope",
+            ));
+        }
+        if request.from == request.to {
+            return Err(CommError::new(
+                "agent_address_occupied",
+                "agent rebind target must use a new session address",
+            ));
+        }
+
+        let current = self.require_live_agent(&request.from)?.clone();
+        if current.runtime_id.as_deref() != Some(request.runtime_id.as_str()) {
+            let mut error = CommError::new(
+                "agent_rebind_runtime_mismatch",
+                format!(
+                    "agent runtimeId does not match rebind runtimeId: {}",
+                    request.runtime_id
+                ),
+            );
+            error.context = json!({
+                "address": request.from,
+                "agentId": current.agent_id,
+                "agentRuntimeId": current.runtime_id,
+                "requestedRuntimeId": request.runtime_id
+            });
+            return Err(error);
+        }
+        let scope = self.require_scope(&request.from.scope_id)?.clone();
+        self.require_runtime_for_agent(&scope, Some(request.runtime_id.as_str()))?;
+        if !scope.session_ids.is_empty() && !scope.session_ids.contains(&request.to.session_id) {
+            return Err(CommError::new(
+                "session_not_declared",
+                format!(
+                    "session is not declared in scope: {}/{}",
+                    request.to.scope_id, request.to.session_id
+                ),
+            ));
+        }
+        if self.projection.agents.contains_key(&request.to.key())
+            || self
+                .projection
+                .agent_tombstones
+                .contains_key(&request.to.key())
+        {
+            let mut error = CommError::new(
+                "agent_address_occupied",
+                format!(
+                    "agent rebind target is already occupied: {}",
+                    request.to.key()
+                ),
+            );
+            error.context = json!({ "address": request.to });
+            return Err(error);
+        }
+        if current.role == "master"
+            && scope.master_session_id.as_deref() != Some(current.session_id.as_str())
+        {
+            return Err(CommError::new(
+                "master_registration_state_invalid",
+                "registered master address does not match the scope master session",
+            ));
+        }
+
+        let at = request
+            .at
+            .map(|value| validate_time(&value))
+            .transpose()?
+            .unwrap_or_else(now);
+        let rebound = AgentRecord {
+            session_id: request.to.session_id.clone(),
+            last_observed_at: at.clone(),
+            expires_at: add_millis(&at, current.lease_ms as i64)?,
+            ..current.clone()
+        };
+        let tombstone = AgentTombstone {
+            address: request.from.clone(),
+            agent_id: current.agent_id.clone(),
+            runtime_id: request.runtime_id,
+            rebound_to: rebound.address(),
+            rebound_at: at,
+        };
+        let event = AgentReboundEvent {
+            from: current,
+            to: rebound.clone(),
+            tombstone: tombstone.clone(),
+        };
+        self.commit("agent.rebound", serde_json::to_value(&event).unwrap())?;
+        Ok(json!({
+            "agent": rebound,
+            "tombstone": tombstone,
+            "idempotent": false
+        }))
     }
 
     fn send(&mut self, request: MessageRequest) -> CommResult<Value> {
@@ -4204,12 +4352,30 @@ impl CommunicationStore {
 
     fn require_agent(&self, address: &Address) -> CommResult<&AgentRecord> {
         validate_address(address)?;
-        self.projection.agents.get(&address.key()).ok_or_else(|| {
-            CommError::new(
-                "agent_not_registered",
-                format!("agent not registered: {}", address.key()),
-            )
-        })
+        if let Some(agent) = self.projection.agents.get(&address.key()) {
+            return Ok(agent);
+        }
+        if let Some(tombstone) = self.projection.agent_tombstones.get(&address.key()) {
+            let mut error = CommError::new(
+                "agent_address_rebound",
+                format!(
+                    "agent address was rebound to {}",
+                    tombstone.rebound_to.key()
+                ),
+            );
+            error.context = json!({
+                "oldAddress": tombstone.address,
+                "newAddress": tombstone.rebound_to,
+                "agentId": tombstone.agent_id,
+                "runtimeId": tombstone.runtime_id,
+                "reboundAt": tombstone.rebound_at
+            });
+            return Err(error);
+        }
+        Err(CommError::new(
+            "agent_not_registered",
+            format!("agent not registered: {}", address.key()),
+        ))
     }
 
     fn require_live_agent(&self, address: &Address) -> CommResult<&AgentRecord> {
@@ -4331,7 +4497,7 @@ impl CommunicationStore {
         if child
             .parent
             .as_ref()
-            .is_some_and(|parent| parent.key() == other.address().key())
+            .is_some_and(|parent| self.addresses_match_after_rebind(parent, &other.address()))
         {
             return true;
         }
@@ -4340,13 +4506,12 @@ impl CommunicationStore {
         }
         let mut current = child.parent.clone();
         while let Some(parent) = current {
-            if parent.key() == other.address().key() {
+            if self.addresses_match_after_rebind(&parent, &other.address()) {
                 return true;
             }
             current = self
-                .projection
-                .agents
-                .get(&parent.key())
+                .canonical_address(&parent)
+                .and_then(|address| self.projection.agents.get(&address.key()))
                 .and_then(|agent| agent.parent.clone());
         }
         self.projection
@@ -4354,6 +4519,24 @@ impl CommunicationStore {
             .get(&child.scope_id)
             .and_then(|scope| scope.master_session_id.as_ref())
             .is_some_and(|master| master == &other.session_id)
+    }
+
+    fn canonical_address(&self, address: &Address) -> Option<Address> {
+        let mut current = address.clone();
+        let mut visited = BTreeMap::new();
+        while let Some(tombstone) = self.projection.agent_tombstones.get(&current.key()) {
+            if visited.insert(current.key(), true).is_some() {
+                return None;
+            }
+            current = tombstone.rebound_to.clone();
+        }
+        Some(current)
+    }
+
+    fn addresses_match_after_rebind(&self, left: &Address, right: &Address) -> bool {
+        self.canonical_address(left)
+            .zip(self.canonical_address(right))
+            .is_some_and(|(left, right)| left == right)
     }
 
     fn commit(&mut self, kind: &str, data: Value) -> CommResult<String> {
@@ -4663,6 +4846,131 @@ impl CommunicationStore {
         Ok(())
     }
 
+    fn apply_agent_rebound_event(&mut self, data: &Value) -> CommResult<()> {
+        let rebound: AgentReboundEvent = decode(data, "agent rebound")?;
+        let from_key = rebound.from.address().key();
+        let to_key = rebound.to.address().key();
+
+        if from_key == to_key {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound must change the session address",
+            ));
+        }
+        if rebound.from.scope_id != rebound.to.scope_id {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound must keep the same scope",
+            ));
+        }
+        if rebound.from.agent_id != rebound.to.agent_id
+            || rebound.from.role != rebound.to.role
+            || rebound.from.master_grant != rebound.to.master_grant
+            || rebound.from.parent != rebound.to.parent
+            || rebound.from.lease_ms != rebound.to.lease_ms
+            || rebound.from.registered_at != rebound.to.registered_at
+            || rebound.from.state != rebound.to.state
+            || rebound.from.last_state_at != rebound.to.last_state_at
+            || rebound.from.runtime_id != rebound.to.runtime_id
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound changed stable agent identity or logical state",
+            ));
+        }
+        let runtime_id = rebound.from.runtime_id.as_deref().ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "agent rebound requires a verified runtime identity",
+            )
+        })?;
+        if rebound.tombstone.address != rebound.from.address()
+            || rebound.tombstone.rebound_to != rebound.to.address()
+            || rebound.tombstone.agent_id != rebound.from.agent_id
+            || rebound.tombstone.runtime_id != runtime_id
+            || rebound.tombstone.rebound_at != rebound.to.last_observed_at
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound tombstone does not match the before and after records",
+            ));
+        }
+        validate_time(&rebound.to.last_observed_at)?;
+        let expected_expires =
+            add_millis(&rebound.to.last_observed_at, rebound.to.lease_ms as i64)?;
+        if rebound.to.expires_at != expected_expires {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound lease expiry does not match the rebind observation time",
+            ));
+        }
+
+        let scope = self
+            .projection
+            .scopes
+            .get(&rebound.from.scope_id)
+            .ok_or_else(|| {
+                CommError::new("event_data_invalid", "agent rebound scope is missing")
+            })?;
+        if !scope.session_ids.is_empty() && !scope.session_ids.contains(&rebound.to.session_id) {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound target session is not declared in the scope",
+            ));
+        }
+        let current = self.projection.agents.get(&from_key).ok_or_else(|| {
+            CommError::new("event_data_invalid", "agent rebound source is missing")
+        })?;
+        if current != &rebound.from {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound source does not match the current projection",
+            ));
+        }
+        if self.projection.agents.contains_key(&to_key)
+            || self.projection.agent_tombstones.contains_key(&to_key)
+            || self.projection.agent_tombstones.contains_key(&from_key)
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound source or target is already tombstoned or occupied",
+            ));
+        }
+        if rebound.from.role == "master"
+            && scope.master_session_id.as_deref() != Some(rebound.from.session_id.as_str())
+        {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound master source does not match the scope master",
+            ));
+        }
+
+        self.projection.agents.remove(&from_key);
+        self.projection
+            .agents
+            .insert(to_key.clone(), rebound.to.clone());
+        self.projection
+            .agent_tombstones
+            .insert(from_key.clone(), rebound.tombstone.clone());
+
+        if rebound.from.role == "master" {
+            if let Some(scope) = self.projection.scopes.get_mut(&rebound.from.scope_id) {
+                scope.master_session_id = Some(rebound.to.session_id.clone());
+            }
+            if let Some(mut accumulator) = self.projection.master_wake.remove(&from_key) {
+                accumulator.address = rebound.to.address();
+                self.projection
+                    .master_wake
+                    .insert(to_key.clone(), accumulator);
+            }
+            if let Some(mut wakeup) = self.projection.wakeup.remove(&from_key) {
+                wakeup.address = rebound.to.address();
+                self.projection.wakeup.insert(to_key, wakeup);
+            }
+        }
+        Ok(())
+    }
+
     fn apply_event(&mut self, event: &EventRecord) -> CommResult<()> {
         match event.kind.as_str() {
             "scope.registered" => {
@@ -4688,6 +4996,12 @@ impl CommunicationStore {
             "agent.registered" => {
                 let record: AgentRecord = decode(&event.data, "agent")?;
                 let key = record.address().key();
+                if self.projection.agent_tombstones.contains_key(&key) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "agent registration attempts to reuse a rebound address",
+                    ));
+                }
                 if record.role == "master" {
                     if let Some(scope) = self.projection.scopes.get_mut(&record.scope_id) {
                         scope.master_session_id = Some(record.session_id.clone());
@@ -4717,10 +5031,21 @@ impl CommunicationStore {
             }
             "agent.refreshed" => {
                 let record: AgentRecord = decode(&event.data, "agent")?;
+                if self
+                    .projection
+                    .agent_tombstones
+                    .contains_key(&record.address().key())
+                {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "agent refresh attempts to update a rebound address",
+                    ));
+                }
                 self.projection
                     .agents
                     .insert(record.address().key(), record);
             }
+            "agent.rebound" => self.apply_agent_rebound_event(&event.data)?,
             "message.created" => {
                 let record: MessageRecord = decode(&event.data, "message")?;
                 self.projection
@@ -5247,6 +5572,9 @@ impl CommunicationStore {
                     decode(request.get("address").unwrap_or(&Value::Null), "address")?;
                 self.refresh_agent(address, request.get("at").and_then(Value::as_str))
             }
+            "rebind_agent" | "rebind-agent" => {
+                self.rebind_agent(decode(request.get("rebind").unwrap_or(request), "rebind")?)
+            }
             "send" => self.send(decode(
                 request.get("message").unwrap_or(request),
                 "message",
@@ -5408,7 +5736,7 @@ pub fn capabilities() -> Value {
     json!({
         "protocol": PROTOCOL,
         "execution": [
-                "register_runtime", "register_adapter", "register_scope", "register_agent", "refresh_agent",
+                "register_runtime", "register_adapter", "register_scope", "register_agent", "refresh_agent", "rebind_agent",
                 "send", "record_delivery", "set_agent_state", "tick", "accumulate_wake", "record_wake",
             "master_wake_decide", "flush_notifications", "report_bug",
             "update_bug", "create_loop", "advance_loop", "record_error"

@@ -18,6 +18,8 @@
         "register-agent",
         "refresh_agent",
         "refresh-agent",
+        "rebind_agent",
+        "rebind-agent",
         "send",
         "record_delivery",
         "record-delivery",
@@ -48,6 +50,7 @@
     "message": {"$ref": "#/$defs/message"},
     "scope": {"$ref": "#/$defs/scope"},
     "agent": {"$ref": "#/$defs/agent"},
+    "rebind": {"$ref": "#/$defs/rebind"},
     "runtime": {"$ref": "#/$defs/runtime"},
     "delivery": {"$ref": "#/$defs/delivery"},
     "adapter": {"$ref": "#/$defs/adapter"},
@@ -272,6 +275,17 @@
         "masterGrant": {"type": ["string", "null"]},
         "parent": {"$ref": "#/$defs/address"},
         "leaseMs": {"type": ["integer", "null"], "minimum": 1000}
+      },
+      "additionalProperties": false
+    },
+    "rebind": {
+      "type": "object",
+      "required": ["from", "to", "runtimeId"],
+      "properties": {
+        "from": {"$ref": "#/$defs/address"},
+        "to": {"$ref": "#/$defs/address"},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "at": {"type": ["string", "null"], "format": "date-time"}
       },
       "additionalProperties": false
     },

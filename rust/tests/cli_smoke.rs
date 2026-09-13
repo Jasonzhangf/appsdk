@@ -10529,6 +10529,18 @@ fn worktree_schema_requires_triage_only_for_non_legacy_issue_ids() {
     ))
     .unwrap();
     let required = schema["required"].as_array().unwrap();
+    let properties = schema["properties"].as_object().unwrap();
+    let goal_issue_id = properties
+        .get("goal_issue_id")
+        .expect("missing goal_issue_id property");
+    assert_eq!(goal_issue_id["type"], "string");
+    let goal_issue_binding = properties
+        .get("goal_issue_binding")
+        .expect("missing goal_issue_binding property");
+    assert_eq!(goal_issue_binding["type"], "string");
+    assert_eq!(goal_issue_binding["pattern"], "^sha256:[a-f0-9]{64}$");
+    assert!(!required.iter().any(|value| value == "goal_issue_id"));
+    assert!(!required.iter().any(|value| value == "goal_issue_binding"));
     assert!(!required.iter().any(|value| value == "bug_triage"));
     assert!(!required
         .iter()

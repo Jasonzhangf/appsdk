@@ -22,6 +22,8 @@
     "worktree_id": {"type": "string"},
     "milestone_id": {"type": "string"},
     "issue_id": {"type": "string"},
+    "goal_issue_id": {"type": "string"},
+    "goal_issue_binding": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "module_id": {"type": "string"},
     "base_ref": {"type": "string"},
     "base_commit": {"type": "string"},

@@ -4848,6 +4848,22 @@ impl CommunicationStore {
 
     fn apply_agent_rebound_event(&mut self, data: &Value) -> CommResult<()> {
         let rebound: AgentReboundEvent = decode(data, "agent rebound")?;
+        for (field, address) in [
+            ("from", rebound.from.address()),
+            ("to", rebound.to.address()),
+            ("tombstone.address", rebound.tombstone.address.clone()),
+            ("tombstone.reboundTo", rebound.tombstone.rebound_to.clone()),
+        ] {
+            validate_address(&address).map_err(|error| {
+                CommError::new(
+                    "event_data_invalid",
+                    format!(
+                        "agent rebound {field} address is invalid: {}",
+                        error.message
+                    ),
+                )
+            })?;
+        }
         let from_key = rebound.from.address().key();
         let to_key = rebound.to.address().key();
 

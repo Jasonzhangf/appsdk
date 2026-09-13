@@ -4144,3 +4144,42 @@ fn tampered_agent_rebind_event_fails_closed_on_replay() {
     assert!(error.contains("journal_corrupt"), "{error}");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn tampered_agent_rebind_address_fails_closed_on_replay() {
+    let root = temp_root("agent-rebind-address-tamper");
+    register_scope(&root, "scope", "app", "/project", &[]);
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut lines: Vec<Value> = contents
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rebound = lines
+        .iter_mut()
+        .find(|event| event["kind"] == "agent.rebound")
+        .unwrap();
+    rebound["data"]["to"]["sessionId"] = json!("");
+    rebound["data"]["tombstone"]["reboundTo"]["sessionId"] = json!("");
+    let rewritten = lines
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&mailbox, format!("{rewritten}\n")).unwrap();
+    let error = call_error(&root, json!({ "op": "status" }));
+    assert!(error.contains("journal_corrupt"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}

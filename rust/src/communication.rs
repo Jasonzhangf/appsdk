@@ -794,6 +794,7 @@ struct EventRecord {
 
 pub struct CommunicationStore {
     mailbox_path: PathBuf,
+    project_root: PathBuf,
     projection: Projection,
     _lock: CommunicationLock,
 }
@@ -805,6 +806,7 @@ struct CommunicationLock {
 impl CommunicationLock {
     fn acquire(mailbox_path: &Path) -> CommResult<Self> {
         let lock_path = mailbox_path.with_extension("jsonl.lock");
+        reject_symlink_components(&lock_path, "communication_lock")?;
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -842,12 +844,7 @@ impl CommunicationLock {
 
 impl CommunicationStore {
     pub fn open(root: &Path) -> CommResult<Self> {
-        if root.exists() && !root.is_dir() {
-            return Err(CommError::new(
-                "communication_root_not_directory",
-                format!("communication root is not a directory: {}", root.display()),
-            ));
-        }
+        validate_communication_root_input(root)?;
         if !root.exists() {
             fs::create_dir_all(root).map_err(|error| {
                 CommError::new(
@@ -856,10 +853,17 @@ impl CommunicationStore {
                 )
             })?;
         }
-        Self::open_mailbox(root.join(".appsdk-control/communication/mailbox.jsonl"))
+        let canonical_root = validate_communication_root(root)?;
+        Self::open_mailbox(canonical_root.join(".appsdk-control/communication/mailbox.jsonl"))
     }
 
     pub fn open_mailbox(mailbox_path: PathBuf) -> CommResult<Self> {
+        let project_root = infer_project_root(&mailbox_path)?;
+        Self::open_mailbox_at(mailbox_path, project_root)
+    }
+
+    fn open_mailbox_at(mailbox_path: PathBuf, project_root: PathBuf) -> CommResult<Self> {
+        reject_symlink_components(&mailbox_path, "communication_mailbox")?;
         if let Some(parent) = mailbox_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 CommError::new(
@@ -868,9 +872,11 @@ impl CommunicationStore {
                 )
             })?;
         }
+        reject_symlink_components(&mailbox_path, "communication_mailbox")?;
         let lock = CommunicationLock::acquire(&mailbox_path)?;
         let mut store = Self {
             mailbox_path,
+            project_root,
             projection: Projection::default(),
             _lock: lock,
         };
@@ -956,7 +962,30 @@ impl CommunicationStore {
             .unwrap_or(Priority::P3)
     }
 
+    fn validate_project_root(&self, project_root: &str) -> CommResult<()> {
+        let requested = Path::new(project_root);
+        if !is_lexically_canonical_absolute(requested) {
+            return Err(CommError::new(
+                "project_root_not_canonical",
+                format!("projectRoot must be an absolute canonical path: {project_root}"),
+            ));
+        }
+        reject_symlink_components(requested, "communication_project_root")?;
+        if requested != self.project_root {
+            return Err(CommError::new(
+                "project_root_mismatch",
+                format!(
+                    "projectRoot does not match communication root: expected {}, got {}",
+                    self.project_root.display(),
+                    requested.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn register_runtime(&mut self, request: RuntimeRequest) -> CommResult<Value> {
+        self.validate_project_root(&request.project_root)?;
         let identity = global_registry::RuntimeIdentity {
             runtime_id: request.runtime_id,
             appserver_id: request.appserver_id,
@@ -1118,6 +1147,7 @@ impl CommunicationStore {
 
     fn register_scope(&mut self, request: ScopeRequest) -> CommResult<Value> {
         validate_scope_request(&request)?;
+        self.validate_project_root(&request.project_root)?;
         let _runtime = self.require_runtime_for_scope(&request)?;
         let at = now();
         if let Some(existing) = self.projection.scopes.get(&request.scope_id) {
@@ -4409,7 +4439,10 @@ impl CommunicationStore {
         };
         for (index, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
-                continue;
+                return Err(CommError::new(
+                    "journal_corrupt",
+                    format!("empty JSONL line at line {}", index + 1),
+                ));
             }
             let event: EventRecord = serde_json::from_str(line).map_err(|error| {
                 CommError::new(
@@ -4667,6 +4700,7 @@ impl CommunicationStore {
         match event.kind.as_str() {
             "scope.registered" => {
                 let record: ScopeRecord = decode(&event.data, "scope")?;
+                self.validate_project_root(&record.project_root)?;
                 self.projection
                     .scopes
                     .insert(record.scope_id.clone(), record);
@@ -5449,6 +5483,159 @@ pub fn capabilities() -> Value {
             "loop": ["gate", "verification"]
         }
     })
+}
+
+fn validate_communication_root_input(root: &Path) -> CommResult<()> {
+    if !is_lexically_canonical_absolute(root) {
+        return Err(CommError::new(
+            "communication_root_not_canonical",
+            format!(
+                "communication root must be an absolute canonical path: {}",
+                root.display()
+            ),
+        ));
+    }
+    reject_symlink_components(root, "communication_root")?;
+    if root.exists() && !root.is_dir() {
+        return Err(CommError::new(
+            "communication_root_not_directory",
+            format!("communication root is not a directory: {}", root.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_communication_root(root: &Path) -> CommResult<PathBuf> {
+    validate_communication_root_input(root)?;
+    let canonical = root.canonicalize().map_err(|error| {
+        CommError::new(
+            "communication_root_canonicalize_failed",
+            format!("{}: {error}", root.display()),
+        )
+    })?;
+    if canonical != root && !is_platform_root_alias(root, &canonical) {
+        return Err(CommError::new(
+            "communication_root_not_canonical",
+            format!(
+                "communication root is not canonical: expected {}, got {}",
+                canonical.display(),
+                root.display()
+            ),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn infer_project_root(mailbox_path: &Path) -> CommResult<PathBuf> {
+    if !is_lexically_canonical_absolute(mailbox_path) {
+        return Err(CommError::new(
+            "communication_mailbox_not_canonical",
+            format!(
+                "communication mailbox must be an absolute canonical path: {}",
+                mailbox_path.display()
+            ),
+        ));
+    }
+    let communication = mailbox_path.parent().ok_or_else(|| {
+        CommError::new(
+            "communication_mailbox_layout_invalid",
+            "communication mailbox has no parent directory",
+        )
+    })?;
+    let control = communication.parent().ok_or_else(|| {
+        CommError::new(
+            "communication_mailbox_layout_invalid",
+            "communication mailbox has no control directory",
+        )
+    })?;
+    let root = control.parent().ok_or_else(|| {
+        CommError::new(
+            "communication_mailbox_layout_invalid",
+            "communication mailbox has no project root",
+        )
+    })?;
+    if mailbox_path.file_name().and_then(|name| name.to_str()) != Some("mailbox.jsonl")
+        || communication.file_name().and_then(|name| name.to_str()) != Some("communication")
+        || control.file_name().and_then(|name| name.to_str()) != Some(".appsdk-control")
+    {
+        return Err(CommError::new(
+            "communication_mailbox_layout_invalid",
+            format!(
+                "communication mailbox must be <project>/.appsdk-control/communication/mailbox.jsonl: {}",
+                mailbox_path.display()
+            ),
+        ));
+    }
+    validate_communication_root(root)
+}
+
+fn reject_symlink_components(path: &Path, label: &str) -> CommResult<()> {
+    if !path.is_absolute() {
+        return Err(CommError::new(
+            "communication_path_not_absolute",
+            format!("{label} path must be absolute: {}", path.display()),
+        ));
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let canonical = fs::canonicalize(&current).ok();
+                if canonical
+                    .as_deref()
+                    .is_none_or(|canonical| !is_platform_root_alias(&current, canonical))
+                {
+                    return Err(CommError::new(
+                        "communication_path_symlink",
+                        format!("{label} path contains symlink: {}", current.display()),
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(CommError::new(
+                    "communication_path_stat_failed",
+                    format!("{label} path stat failed at {}: {error}", current.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_platform_root_alias(path: &Path, canonical: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(relative) = path.strip_prefix("/").ok() else {
+            return false;
+        };
+        return canonical == Path::new("/private").join(relative);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, canonical);
+        false
+    }
+}
+
+fn is_lexically_canonical_absolute(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => {
+                normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR))
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir | std::path::Component::ParentDir => return false,
+        }
+    }
+    normalized == path
 }
 
 fn validate_scope_request(request: &ScopeRequest) -> CommResult<()> {

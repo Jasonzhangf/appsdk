@@ -2,6 +2,8 @@ use chrono::{DateTime, Duration, SecondsFormat};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -111,10 +113,12 @@ fn register_scope(
     root: &Path,
     scope_id: &str,
     appserver_id: &str,
-    project_root: &str,
+    _project_root: &str,
     sessions: &[&str],
 ) {
     let runtime_id = format!("runtime-{scope_id}");
+    let bound_project_root = root.canonicalize().unwrap();
+    let bound_project_root = bound_project_root.to_str().unwrap();
     call(
         root,
         json!({
@@ -124,7 +128,7 @@ fn register_scope(
                 "appserverId": appserver_id,
                 "namespace": "codex_tui",
                 "endpoint": format!("mock://{scope_id}"),
-                "projectRoot": project_root,
+                "projectRoot": bound_project_root,
                 "processId": std::process::id()
             }
         }),
@@ -138,7 +142,7 @@ fn register_scope(
                 "appserverId": appserver_id,
                 "namespace": "codex_tui",
                 "endpoint": format!("mock://{scope_id}"),
-                "projectRoot": project_root,
+                "projectRoot": bound_project_root,
                 "sessionIds": sessions,
                 "runtimeId": format!("runtime-{scope_id}")
             }
@@ -195,6 +199,7 @@ fn register_agent_with_lease(
 #[test]
 fn communication_runtime_identity_registration_is_required_bound_and_replayed() {
     let root = temp_root("runtime-identity");
+    let project_root = root.canonicalize().unwrap().to_str().unwrap().to_owned();
     let missing_runtime = call_error(
         &root,
         json!({
@@ -204,7 +209,7 @@ fn communication_runtime_identity_registration_is_required_bound_and_replayed() 
                 "appserverId": "app",
                 "namespace": "codex_tui",
                 "endpoint": "mock://scope",
-                "projectRoot": "/project",
+                "projectRoot": project_root,
                 "sessionIds": ["master"]
             }
         }),
@@ -220,7 +225,7 @@ fn communication_runtime_identity_registration_is_required_bound_and_replayed() 
                 "appserverId": "app",
                 "namespace": "codex_tui",
                 "endpoint": "mock://scope",
-                "projectRoot": "/project",
+                "projectRoot": project_root,
                 "processId": std::process::id()
             }
         }),
@@ -240,7 +245,7 @@ fn communication_runtime_identity_registration_is_required_bound_and_replayed() 
                 "appserverId": "app",
                 "namespace": "codex_tui",
                 "endpoint": "mock://forged",
-                "projectRoot": "/project",
+                "projectRoot": project_root,
                 "processId": std::process::id()
             }
         }),
@@ -256,7 +261,7 @@ fn communication_runtime_identity_registration_is_required_bound_and_replayed() 
                 "appserverId": "app",
                 "namespace": "codex_tui",
                 "endpoint": "mock://forged",
-                "projectRoot": "/project",
+                "projectRoot": project_root,
                 "sessionIds": ["master"],
                 "runtimeId": "runtime-a"
             }
@@ -276,7 +281,7 @@ fn communication_runtime_identity_registration_is_required_bound_and_replayed() 
                 "appserverId": "app",
                 "namespace": "codex_tui",
                 "endpoint": "mock://scope",
-                "projectRoot": "/project",
+                "projectRoot": project_root,
                 "sessionIds": ["master"],
                 "runtimeId": "runtime-a"
             }
@@ -329,6 +334,7 @@ fn communication_runtime_identity_registration_is_required_bound_and_replayed() 
 #[test]
 fn communication_runtime_identity_delivery_receipts_are_monotonic() {
     let root = temp_root("delivery-receipt");
+    let project_root = root.canonicalize().unwrap().to_str().unwrap().to_owned();
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
@@ -399,7 +405,7 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "appserverId": "app",
                 "namespace": "codex_tui",
                 "endpoint": "mock://scope",
-                "projectRoot": "/project",
+                "projectRoot": project_root,
                 "tmuxSession": "tui-scope",
                 "tmuxPane": "%7",
                 "processId": std::process::id() + 1
@@ -1366,6 +1372,187 @@ fn corrupted_mailbox_is_an_explicit_error() {
     fs::write(mailbox, "not-json\n").unwrap();
     let error = call_error(&root, json!({ "op": "status" }));
     assert!(error.contains("journal_corrupt"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_store_rejects_cross_project_root_writes() {
+    let root = temp_root("root-binding");
+    let foreign = temp_root("foreign-project");
+    let foreign_root = foreign.to_str().unwrap();
+    let rejected = call_error(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "foreign-runtime",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://foreign",
+                "projectRoot": foreign_root,
+                "processId": std::process::id()
+            }
+        }),
+    );
+    assert!(rejected.contains("project_root_mismatch"), "{rejected}");
+    assert!(!root.join(".appsdk-host/runtimes.jsonl").exists());
+
+    let project_root = root.canonicalize().unwrap().to_str().unwrap().to_owned();
+    call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "local-runtime",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://local",
+                "projectRoot": project_root,
+                "processId": std::process::id()
+            }
+        }),
+    );
+    let scope_rejected = call_error(
+        &root,
+        json!({
+            "op": "register_scope",
+            "scope": {
+                "scopeId": "foreign-scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://foreign",
+                "projectRoot": foreign_root,
+                "sessionIds": ["master"],
+                "runtimeId": "local-runtime"
+            }
+        }),
+    );
+    assert!(
+        scope_rejected.contains("project_root_mismatch"),
+        "{scope_rejected}"
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert!(!raw.contains("foreign-scope"));
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(foreign).unwrap();
+}
+
+#[test]
+fn communication_store_rejects_noncanonical_and_symlink_roots() {
+    let root = temp_root("root-path");
+    let name = root.file_name().unwrap().to_owned();
+    let noncanonical = root.join("..").join(&name);
+    let rejected = call_error(&noncanonical, json!({ "op": "status" }));
+    assert!(
+        rejected.contains("communication_root_not_canonical"),
+        "{rejected}"
+    );
+    fs::remove_dir_all(&root).unwrap();
+
+    let target = temp_root("root-symlink-target");
+    let alias = target.with_file_name("appsdk-communication-root-alias");
+    #[cfg(unix)]
+    symlink(&target, &alias).unwrap();
+    #[cfg(unix)]
+    {
+        let rejected = call_error(&alias, json!({ "op": "status" }));
+        assert!(
+            rejected.contains("communication_path_symlink"),
+            "{rejected}"
+        );
+        fs::remove_file(&alias).unwrap();
+    }
+    fs::remove_dir_all(target).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn communication_store_rejects_mailbox_lock_and_parent_symlinks() {
+    let parent_target = temp_root("parent-symlink-target");
+    let parent_root = temp_root("parent-symlink-root");
+    fs::remove_dir_all(&parent_root).unwrap();
+    symlink(&parent_target, &parent_root).unwrap();
+    let parent_error = call_error(&parent_root, json!({ "op": "status" }));
+    assert!(
+        parent_error.contains("communication_path_symlink"),
+        "{parent_error}"
+    );
+    fs::remove_file(&parent_root).unwrap();
+    fs::remove_dir_all(parent_target).unwrap();
+
+    let mailbox_root = temp_root("mailbox-symlink-root");
+    let mailbox_dir = mailbox_root.join(".appsdk-control/communication");
+    fs::create_dir_all(&mailbox_dir).unwrap();
+    let mailbox_target = temp_root("mailbox-symlink-target").join("mailbox.jsonl");
+    fs::write(&mailbox_target, "").unwrap();
+    symlink(&mailbox_target, mailbox_dir.join("mailbox.jsonl")).unwrap();
+    let mailbox_error = call_error(&mailbox_root, json!({ "op": "status" }));
+    assert!(
+        mailbox_error.contains("communication_path_symlink"),
+        "{mailbox_error}"
+    );
+    fs::remove_dir_all(mailbox_root).unwrap();
+    fs::remove_file(&mailbox_target).unwrap();
+    fs::remove_dir_all(mailbox_target.parent().unwrap()).unwrap();
+
+    let lock_root = temp_root("lock-symlink-root");
+    let lock_dir = lock_root.join(".appsdk-control/communication");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("mailbox.jsonl"), "").unwrap();
+    let lock_target = temp_root("lock-symlink-target").join("mailbox.jsonl.lock");
+    fs::write(&lock_target, "").unwrap();
+    symlink(&lock_target, lock_dir.join("mailbox.jsonl.lock")).unwrap();
+    let lock_error = call_error(&lock_root, json!({ "op": "status" }));
+    assert!(
+        lock_error.contains("communication_path_symlink"),
+        "{lock_error}"
+    );
+    fs::remove_dir_all(lock_root).unwrap();
+    fs::remove_file(&lock_target).unwrap();
+    fs::remove_dir_all(lock_target.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn communication_replay_rejects_empty_lines_and_replays_valid_events() {
+    let root = temp_root("replay-empty-line");
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    fs::create_dir_all(mailbox.parent().unwrap()).unwrap();
+    fs::write(&mailbox, "\n").unwrap();
+    let empty_error = call_error(&root, json!({ "op": "status" }));
+    assert!(empty_error.contains("journal_corrupt"), "{empty_error}");
+    assert!(empty_error.contains("line 1"), "{empty_error}");
+    fs::remove_dir_all(&root).unwrap();
+
+    let root = temp_root("replay-invalid-envelope");
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    fs::create_dir_all(mailbox.parent().unwrap()).unwrap();
+    fs::write(&mailbox, "{}\n").unwrap();
+    let envelope_error = call_error(&root, json!({ "op": "status" }));
+    assert!(
+        envelope_error.contains("journal_corrupt"),
+        "{envelope_error}"
+    );
+    assert!(envelope_error.contains("line 1"), "{envelope_error}");
+    fs::remove_dir_all(&root).unwrap();
+
+    let root = temp_root("replay-valid-event");
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "replay-adapter",
+                "kind": "mailbox",
+                "target": "local"
+            }
+        }),
+    );
+    let replayed = call(&root, json!({ "op": "status" }));
+    assert!(replayed["adapters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|adapter| adapter["adapterId"] == "replay-adapter"));
     fs::remove_dir_all(root).unwrap();
 }
 

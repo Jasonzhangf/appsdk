@@ -39,6 +39,7 @@
     },
     "data": {"type": "object"}
   },
+  "additionalProperties": false,
   "allOf": [
     {
       "if": {
@@ -559,6 +560,7 @@
       "properties": {
         "notificationId": {"type": "string", "minLength": 1},
         "messageId": {"type": "string", "minLength": 1},
+        "generation": {"type": "integer", "minimum": 0},
         "title": {"type": "string", "minLength": 1},
         "priority": {"enum": ["p0", "p1", "p2", "p3"]},
         "issueId": {"type": ["string", "null"]},
@@ -589,6 +591,7 @@
       "properties": {
         "notificationId": {"type": "string", "minLength": 1},
         "messageId": {"type": "string", "minLength": 1},
+        "generation": {"type": "integer", "minimum": 0},
         "recipient": {"$ref": "#/$defs/address"},
         "title": {"type": "string", "minLength": 1},
         "priority": {"enum": ["p0", "p1", "p2", "p3"]},

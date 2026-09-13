@@ -1156,6 +1156,394 @@ fn idle_notifications_are_idempotent_and_batched_after_two_minutes() {
 }
 
 #[test]
+fn idle_window_reopens_after_emitted_without_dropping_update() {
+    let root = temp_root("idle-window-reopen");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    for (message_id, title, created_at) in [
+        ("idle-window-first", "first update", "2026-01-01T00:00:00Z"),
+        (
+            "idle-window-second",
+            "second update",
+            "2026-01-01T00:02:01Z",
+        ),
+    ] {
+        call(
+            &root,
+            json!({
+                "op": "send",
+                "message": {
+                    "from": { "scopeId": "scope", "sessionId": "worker" },
+                    "to": { "scopeId": "scope", "sessionId": "master" },
+                    "title": title,
+                    "priority": "p2",
+                    "body": title,
+                    "deliveryMode": "idle",
+                    "coalesceKey": "project-progress",
+                    "messageId": message_id,
+                    "createdAt": created_at
+                }
+            }),
+        );
+        if message_id == "idle-window-first" {
+            let first = call(
+                &root,
+                json!({
+                    "op": "flush_notifications",
+                    "now": "2026-01-01T00:02:00Z"
+                }),
+            );
+            assert_eq!(first["batches"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                first["batches"][0]["items"][0]["messageId"],
+                "idle-window-first"
+            );
+            assert_eq!(first["batches"][0]["items"][0]["generation"], 0);
+        }
+    }
+
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["messageId"],
+        "idle-window-second"
+    );
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["generation"],
+        1
+    );
+
+    let second = call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2026-01-01T00:04:01Z"
+        }),
+    );
+    assert_eq!(second["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second["batches"][0]["items"][0]["messageId"],
+        "idle-window-second"
+    );
+    assert_eq!(second["batches"][0]["items"][0]["generation"], 1);
+
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 2);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.batch_emitted\"")
+            .count(),
+        2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn idle_window_retry_of_older_message_keeps_latest_generation() {
+    let root = temp_root("idle-window-old-message-retry");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let message_a = json!({
+        "from": { "scopeId": "scope", "sessionId": "worker" },
+        "to": { "scopeId": "scope", "sessionId": "master" },
+        "title": "generation A",
+        "priority": "p2",
+        "body": "first window",
+        "deliveryMode": "idle",
+        "coalesceKey": "same-window",
+        "messageId": "generation-a",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_a.clone() }));
+    let first = call(
+        &root,
+        json!({ "op": "flush_notifications", "now": "2026-01-01T00:02:00Z" }),
+    );
+    assert_eq!(first["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(first["batches"][0]["items"][0]["generation"], 0);
+
+    // Keep the message timestamp equal to A to exercise the tie case.  A
+    // fresh send after A is terminal must still open generation one.
+    let message_b = json!({
+        "from": { "scopeId": "scope", "sessionId": "worker" },
+        "to": { "scopeId": "scope", "sessionId": "master" },
+        "title": "generation B",
+        "priority": "p2",
+        "body": "second window",
+        "deliveryMode": "idle",
+        "coalesceKey": "same-window",
+        "messageId": "generation-b",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_b.clone() }));
+    let pending = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        pending["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        pending["notificationProjection"]["pending"][0]["messageId"],
+        "generation-b"
+    );
+    assert_eq!(
+        pending["notificationProjection"]["pending"][0]["generation"],
+        1
+    );
+
+    // Retrying old A while B is pending must return the current projection
+    // and append no third queued fact.
+    let retry_pending = call(&root, json!({ "op": "send", "message": message_a.clone() }));
+    assert_eq!(retry_pending["idempotent"], true);
+    let after_pending_retry = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        after_pending_retry["notificationProjection"]["pending"][0]["messageId"],
+        "generation-b"
+    );
+    assert_eq!(
+        after_pending_retry["notificationProjection"]["pending"][0]["generation"],
+        1
+    );
+
+    let second = call(
+        &root,
+        json!({ "op": "flush_notifications", "now": "2026-01-01T00:04:00Z" }),
+    );
+    assert_eq!(second["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second["batches"][0]["items"][0]["messageId"],
+        "generation-b"
+    );
+    assert_eq!(second["batches"][0]["items"][0]["generation"], 1);
+
+    // Retrying old A after B is terminal is still an idempotent read of the
+    // latest generation; it must not reopen generation two or batch A again.
+    let retry_terminal = call(&root, json!({ "op": "send", "message": message_a }));
+    assert_eq!(retry_terminal["idempotent"], true);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        status["notificationProjection"]["emitted"][0]["messageId"],
+        "generation-b"
+    );
+    assert_eq!(
+        status["notificationProjection"]["emitted"][0]["generation"],
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 2);
+    assert_eq!(
+        raw.matches("\"kind\":\"notification.batch_emitted\"")
+            .count(),
+        2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn same_timestamp_new_idle_message_recovers_after_notification_queue_prefix() {
+    let root = temp_root("idle-window-same-time-prefix");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let message_a = json!({
+        "from": { "scopeId": "scope", "sessionId": "worker" },
+        "to": { "scopeId": "scope", "sessionId": "master" },
+        "title": "prefix A",
+        "priority": "p2",
+        "body": "first window",
+        "deliveryMode": "idle",
+        "coalesceKey": "same-time-prefix",
+        "messageId": "prefix-a",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_a }));
+    call(
+        &root,
+        json!({ "op": "flush_notifications", "now": "2026-01-01T00:02:00Z" }),
+    );
+
+    let message_b = json!({
+        "from": { "scopeId": "scope", "sessionId": "worker" },
+        "to": { "scopeId": "scope", "sessionId": "master" },
+        "title": "prefix B",
+        "priority": "p2",
+        "body": "second window",
+        "deliveryMode": "idle",
+        "coalesceKey": "same-time-prefix",
+        "messageId": "prefix-b",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_b.clone() }));
+    // Keep B's message.created fact but drop its accepted state, attempt and
+    // notification queue.  The retry must recognize B as newer by event
+    // order even though A and B have identical createdAt values.
+    retain_mailbox_through_occurrence(&root, "message.created", 2);
+    let recovered = call(&root, json!({ "op": "send", "message": message_b }));
+    assert_eq!(recovered["idempotent"], true);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["messageId"],
+        "prefix-b"
+    );
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["generation"],
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 2);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn missing_coalesced_message_fact_fails_closed_before_new_prefix_recovery() {
+    let root = temp_root("idle-window-missing-message-fact");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let message_a = json!({
+        "from": { "scopeId": "scope", "sessionId": "master" },
+        "to": { "scopeId": "scope", "sessionId": "worker" },
+        "title": "fact A",
+        "priority": "p2",
+        "body": "first terminal window",
+        "deliveryMode": "idle",
+        "coalesceKey": "missing-fact",
+        "messageId": "fact-a",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_a }));
+    call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2026-01-01T00:02:00Z"
+        }),
+    );
+
+    let message_b = json!({
+        "from": { "scopeId": "scope", "sessionId": "master" },
+        "to": { "scopeId": "scope", "sessionId": "worker" },
+        "title": "fact B",
+        "priority": "p2",
+        "body": "second terminal window",
+        "deliveryMode": "idle",
+        "coalesceKey": "missing-fact",
+        "messageId": "fact-b",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_b }));
+    call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2026-01-01T00:04:00Z"
+        }),
+    );
+
+    let message_c = json!({
+        "from": { "scopeId": "scope", "sessionId": "master" },
+        "to": { "scopeId": "scope", "sessionId": "worker" },
+        "title": "fact C",
+        "priority": "p2",
+        "body": "new prefix after B",
+        "deliveryMode": "idle",
+        "coalesceKey": "missing-fact",
+        "messageId": "fact-c",
+        "createdAt": "2026-01-01T00:03:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_c.clone() }));
+
+    // Reproduce a malformed crash prefix: B's coalesced notification facts
+    // survived, but its message.created fact did not; C's message facts
+    // survived while its notification queue prefix did not.  Replay must not
+    // use B's generation or timestamp to swallow C.
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let retained: Vec<&str> = contents
+        .lines()
+        .filter(|line| {
+            let event: Value = serde_json::from_str(line).unwrap();
+            let kind = event["kind"].as_str().unwrap();
+            let data = &event["data"];
+            match kind {
+                "message.created" | "message.state" | "message.delivery_attempt" => {
+                    let message_id = data["messageId"]
+                        .as_str()
+                        .or_else(|| data["message"]["messageId"].as_str())
+                        .or_else(|| data["attempt"]["messageId"].as_str());
+                    message_id != Some("fact-b")
+                }
+                "notification.queued" => {
+                    data["notification"]["messageId"].as_str() != Some("fact-c")
+                }
+                _ => true,
+            }
+        })
+        .collect();
+    let malformed_prefix = format!("{}\n", retained.join("\n"));
+    fs::write(&mailbox, &malformed_prefix).unwrap();
+
+    let error = call_error(&root, json!({ "op": "send", "message": message_c }));
+    assert!(error.contains("journal_corrupt"), "{error}");
+    assert!(error.contains("fact-b"), "{error}");
+    assert!(error.contains("durable creation fact"), "{error}");
+    let after = fs::read_to_string(&mailbox).unwrap();
+    assert!(after.starts_with(&malformed_prefix));
+    assert_eq!(
+        after[malformed_prefix.len()..]
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .count(),
+        1
+    );
+    let recorded_error: Value =
+        serde_json::from_str(after[malformed_prefix.len()..].trim()).unwrap();
+    assert_eq!(recorded_error["kind"], "error.recorded");
+    assert_eq!(recorded_error["data"]["code"], "journal_corrupt");
+    assert_eq!(
+        after.matches("\"kind\":\"message.created\"").count(),
+        malformed_prefix
+            .matches("\"kind\":\"message.created\"")
+            .count()
+    );
+    assert_eq!(
+        after.matches("\"kind\":\"notification.queued\"").count(),
+        malformed_prefix
+            .matches("\"kind\":\"notification.queued\"")
+            .count()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn master_wakeup_is_state_driven_and_stops_after_three_reminders() {
     let root = temp_root("wakeup");
     register_scope(&root, "scope", "app", "/project", &["master"]);
@@ -1181,6 +1569,7 @@ fn master_wakeup_is_state_driven_and_stops_after_three_reminders() {
     }
     let status = call(&root, json!({ "op": "status" }));
     assert_eq!(status["wakeup"][0]["stopped"], true);
+    assert_eq!(status["wakeup"][0]["nextDueAt"], Value::Null);
     call(
         &root,
         json!({
@@ -2015,6 +2404,87 @@ fn communication_replay_rejects_empty_lines_and_replays_valid_events() {
 }
 
 #[test]
+fn communication_replay_rejects_duplicate_event_ids_missing_final_newline_and_unknown_fields() {
+    let root = temp_root("replay-duplicate-event-id");
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "replay-adapter",
+                "kind": "mailbox",
+                "target": "local"
+            }
+        }),
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let first = contents.lines().next().unwrap();
+    fs::write(&mailbox, format!("{contents}{first}\n")).unwrap();
+    let duplicate_error = call_error(&root, json!({ "op": "status" }));
+    assert!(
+        duplicate_error.contains("journal_corrupt"),
+        "{duplicate_error}"
+    );
+    assert!(duplicate_error.contains("duplicate"), "{duplicate_error}");
+    fs::remove_dir_all(&root).unwrap();
+
+    let root = temp_root("replay-missing-final-newline");
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "replay-adapter",
+                "kind": "mailbox",
+                "target": "local"
+            }
+        }),
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let mut contents = fs::read_to_string(&mailbox).unwrap();
+    assert!(contents.ends_with('\n'));
+    contents.pop();
+    fs::write(&mailbox, contents).unwrap();
+    let newline_error = call_error(&root, json!({ "op": "status" }));
+    assert!(newline_error.contains("journal_corrupt"), "{newline_error}");
+    assert!(newline_error.contains("newline"), "{newline_error}");
+    fs::remove_dir_all(&root).unwrap();
+
+    let root = temp_root("replay-unknown-envelope-field");
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    fs::create_dir_all(mailbox.parent().unwrap()).unwrap();
+    let event = json!({
+        "protocol": "appsdk-comm/v1",
+        "eventId": "event-with-extra-field",
+        "at": "2026-01-01T00:00:00Z",
+        "kind": "adapter.registered",
+        "data": {
+            "adapterId": "replay-adapter",
+            "kind": "mailbox",
+            "target": "local",
+            "enabled": true,
+            "execute": false,
+            "recipient": null,
+            "registeredAt": "2026-01-01T00:00:00Z"
+        },
+        "unexpected": true
+    });
+    fs::write(
+        &mailbox,
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    let fields_error = call_error(&root, json!({ "op": "status" }));
+    assert!(fields_error.contains("journal_corrupt"), "{fields_error}");
+    assert!(
+        fields_error.contains("unknown") || fields_error.contains("unexpected"),
+        "{fields_error}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn adapters_are_explicit_and_receipts_are_replayed() {
     let root = temp_root("adapters");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
@@ -2163,6 +2633,92 @@ fn adapter_failure_keeps_notification_pending_and_records_error() {
 }
 
 #[test]
+fn direct_and_p0_failures_are_never_downgraded_to_idle_batch() {
+    let root = temp_root("direct-p0-batch-failure");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "tmux-execute",
+                "kind": "tmux",
+                "target": "appsdk-test-scope:%1",
+                "execute": true,
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+
+    for (message_id, priority, delivery_mode) in [
+        ("direct-failure", "p1", "direct"),
+        ("p0-failure", "p0", "idle"),
+    ] {
+        let error = call_error(
+            &root,
+            json!({
+                "op": "send",
+                "message": {
+                    "from": { "scopeId": "scope", "sessionId": "worker" },
+                    "to": { "scopeId": "scope", "sessionId": "master" },
+                    "title": message_id,
+                    "priority": priority,
+                    "body": "adapter failure must remain direct",
+                    "deliveryMode": delivery_mode,
+                    "adapterId": "tmux-execute",
+                    "messageId": message_id,
+                    "createdAt": "2026-01-01T00:00:00Z"
+                }
+            }),
+        );
+        assert!(error.contains("tmux_delivery_failed"), "{error}");
+    }
+
+    let flush = Command::new(binary())
+        .args([
+            "communication",
+            root.to_str().unwrap(),
+            "--json",
+            &serde_json::to_string(&json!({
+                "op": "flush_notifications",
+                "now": "2026-01-01T00:10:00Z"
+            }))
+            .unwrap(),
+        ])
+        .env("APPSDK_HOME", root.join(".appsdk-host"))
+        .output()
+        .unwrap();
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let batch_attempts: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            event["kind"] == "notification.delivery_attempt"
+                && event["data"]["attempt"]["operation"] == "notification.batch_emitted"
+        })
+        .collect();
+    assert!(
+        batch_attempts.is_empty(),
+        "flush must not attempt a batch for direct or p0 failures; stderr={}",
+        String::from_utf8_lossy(&flush.stderr)
+    );
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn disabled_adapter_fails_before_message_persistence() {
     let root = temp_root("adapter-disabled");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
@@ -2294,8 +2850,11 @@ fn worker_idle_retries_notification_after_master_registration() {
         }),
     );
     assert_eq!(retry["idempotent"], true);
-    assert_eq!(retry["notification"]["message"]["state"], "accepted");
-    let message_id = retry["notification"]["message"]["messageId"]
+    // Master registration reconciles the persisted idle edge itself.  A
+    // later repeated state observation is a no-op and must not emit a second
+    // response or append another message fact.
+    assert!(retry["notification"].is_null());
+    let message_id = call(&root, json!({ "op": "status" }))["messages"][0]["messageId"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2322,6 +2881,109 @@ fn worker_idle_retries_notification_after_master_registration() {
     assert_eq!(status["messages"][0]["messageId"], message_id);
     let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
     assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_registration_reconciles_existing_worker_idle_edge_once() {
+    let root = temp_root("master-registration-idle-reconcile");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let error = call_error(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+    );
+    assert!(error.contains("master_not_registered"), "{error}");
+
+    register_agent(&root, "scope", "master", "master", "master", None);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["messageId"],
+        status["messages"][0]["messageId"]
+    );
+
+    register_agent(&root, "scope", "master", "master", "master", None);
+    let repeated = call(&root, json!({ "op": "status" }));
+    assert_eq!(repeated["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        repeated["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn master_registration_retry_reconciles_agent_registered_prefix() {
+    let root = temp_root("master-registration-prefix-retry");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let error = call_error(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "worker" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+    );
+    assert!(error.contains("master_not_registered"), "{error}");
+
+    register_agent(&root, "scope", "master", "master", "master", None);
+    // Simulate a crash immediately after agent.registered: the durable
+    // master identity remains, while reconciliation facts are absent.
+    retain_mailbox_through_occurrence(&root, "agent.registered", 2);
+    let retry = call(
+        &root,
+        json!({
+            "op": "register_agent",
+            "agent": {
+                "scopeId": "scope",
+                "sessionId": "master",
+                "agentId": "master",
+                "role": "master",
+                "masterGrant": "user approved master for this scope",
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    assert_eq!(retry["idempotent"], true);
+    assert_eq!(retry["reconciledIdle"].as_array().unwrap().len(), 1);
+    let status = call(&root, json!({ "op": "status" }));
+    assert_eq!(status["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        status["notificationProjection"]["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        status["notificationProjection"]["pending"][0]["messageId"],
+        status["messages"][0]["messageId"]
+    );
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    assert_eq!(raw.matches("\"kind\":\"agent.registered\"").count(), 2);
+    assert_eq!(raw.matches("\"kind\":\"message.created\"").count(), 1);
+    assert_eq!(raw.matches("\"kind\":\"notification.queued\"").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 

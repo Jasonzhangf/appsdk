@@ -1,4 +1,9 @@
-# Persistent subagents and shared policy
+# Persistent subworkers and shared policy
+
+This reference describes the persistent subworker policy. The `[subagent]`
+tables, `appsdk subagent ...` commands, `appsdk-subagent` MCP name, and the
+`-subagent-` tmux naming fragment are compatibility protocol tokens; they do
+not mean that Codex Desktop should use a native task/thread spawn command.
 
 Only `~/.appsdk/config.toml` owns startup/notification/timer policy. Run
 `appsdk config` from the project cwd to validate and inspect effective values.
@@ -49,7 +54,7 @@ name_template = "{cwd_name}-subagent-{short_id}"
 Event keys: `direct_message`, `resource_released`, `async_result`, `deadline`;
 each accepts `mode = "inherit" | "immediate" | "batch"`. A fixed batch window
 does not slide when new messages arrive. Disabled timers suppress deadline
-notification generation, not task timeout safety checks. New subagents read
+notification generation, not task timeout safety checks. New subworkers read
 config at creation; existing daemons read policy at startup. Use controlled
 daemon restart after a policy change. Existing tasks/mailboxes remain intact.
 
@@ -125,5 +130,5 @@ do not reuse its ID to create another process.
 
 Upgrade: install reviewed Collab and AppSDK releases, then `collab down` /
 `collab up` per already-running project. No migration/reset/init of old tasks
-is required. Preserve journals and running subagent sessions. Do not downgrade
-to an older reader after new subagent events have been written to the journal.
+is required. Preserve journals and running subworker sessions. Do not downgrade
+to an older reader after new subworker events have been written to the journal.

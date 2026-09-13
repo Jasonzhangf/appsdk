@@ -41,3 +41,39 @@ also run the existing DSH MCP contract tests and Node syntax checks.
 The SDK is a CLI, so service restart is not applicable. Shared Collab daemon
 replacement is outside this change; the existing daemon remains its own owner.
 No business project migration, remote merge or release is implied by this test.
+
+## Gate policy after ablation
+
+The development path checks only the changed surface: formatting, focused tests,
+type/check or build, and the declared contract. It does not require a freeze,
+full regression suite, installation, restart, or live replay when those surfaces
+are not part of the change.
+
+`verify` and its `--admission` mode are read-only graph, integrity, and
+freshness checks; they do not run external commands and accept a missing goal
+record. A goal is still required and must be confirmed before a mutation,
+compilation, promotion, review admission, or lifecycle producer writes
+evidence.
+
+Regression policy is stage-specific. A module may omit `regression` through
+`draft`, `source_implemented`, `contract_bound`, `compiled`,
+`controlled_verified`, and `architecture_stable`. A present declaration with
+`required_before_freeze=false` is rejected at `architecture_stable`, preserving
+the freeze boundary. A `frozen` or `retired` module must declare a valid
+regression contract and publish a matching passing whitebox/blackbox report. If
+a contract is present in an earlier stage, it is validated normally; malformed
+declarations never become an omission.
+
+Lifecycle producers reuse an existing PASS only when its recorded identity
+still matches the current candidate/tree, artifact, scope, producer and
+environment. The verifier also avoids rereading the same immutable JSON inputs
+within one check. A changed input, dependency, artifact, environment, or
+expired evidence invalidates only that phase and its downstream phases; the
+immutable prior PASS remains a historical witness. Declared external commands
+run again when their phase has no reusable evidence.
+
+Historical governance records do not block new development by themselves.
+Preserve/migrate keeps them immutable, while an explicitly authorized
+`fresh_init`/reset creates a new epoch without copying old PASS records. Collab,
+Guidance, Memory, and deployment operations block only work that actually
+depends on them.

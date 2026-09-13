@@ -133,6 +133,15 @@ AI confidence is optional annotation, never a required admission field or proof.
 
 Unit and focused tests may be whitebox-only. Regression suites and bug reproduction must include both whitebox and blackbox evidence. Freeze requires a non-zero passing report with no disallowed skips, exact command/suite identity, and matching source, scope, artifact, public API, and input hashes.
 
+The module `regression` declaration is required only when a module is `frozen`
+or `retired`. Development stages may omit it so a local change can use focused
+checks without manufacturing a freeze report. A declaration that is present in
+an earlier stage is still validated; `required_before_freeze=false` is invalid
+once a module reaches `architecture_stable`, and omission is the only permitted
+shortcut. `verify` and its read-only `--admission` preflight accept a missing
+goal record; mutation, promotion, review admission, and lifecycle producers
+still require a confirmed goal.
+
 After freeze, ordinary execution of the unchanged module's full regression suite may be disabled. The suite declaration and report remain immutable verification inputs. Source, contract, public API, artifact, or dependency changes invalidate the report and require regression re-enablement before a new version can freeze.
 
 ## Separated lifecycles

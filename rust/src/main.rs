@@ -1796,22 +1796,36 @@ fn assert_goal_confirmed(root: &Path) {
     assert_goal_contract(root, true);
 }
 
-fn read_goal(root: &Path) -> Value {
+fn read_goal_if_present(root: &Path) -> Option<Value> {
     let file = root.join(".appsdk/goal.json");
-    if fs::symlink_metadata(&file)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
+    let metadata = match fs::symlink_metadata(&file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(_) => fail("GOAL_RECORD_UNAVAILABLE"),
+    };
+    if metadata.file_type().is_symlink() {
         fail("GOVERNANCE_PATH_SYMLINK:goal");
     }
-    serde_json::from_str(
-        &fs::read_to_string(file).unwrap_or_else(|_| fail("MISSING_GOAL_CLARIFICATION_RECORD")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_GOAL_CLARIFICATION_RECORD"))
+    let text = fs::read_to_string(file).unwrap_or_else(|_| fail("GOAL_RECORD_UNAVAILABLE"));
+    Some(serde_json::from_str(&text).unwrap_or_else(|_| fail("INVALID_GOAL_CLARIFICATION_RECORD")))
+}
+
+fn read_goal(root: &Path) -> Value {
+    read_goal_if_present(root).unwrap_or_else(|| fail("MISSING_GOAL_CLARIFICATION_RECORD"))
 }
 
 fn assert_goal_contract(root: &Path, require_confirmed: bool) {
     let goal = read_goal(root);
+    validate_goal_contract(&goal, require_confirmed);
+}
+
+fn assert_goal_contract_if_present(root: &Path) {
+    if let Some(goal) = read_goal_if_present(root) {
+        validate_goal_contract(&goal, false);
+    }
+}
+
+fn validate_goal_contract(goal: &Value, require_confirmed: bool) {
     for key in [
         "goal_id",
         "raw_request",
@@ -1991,7 +2005,6 @@ fn build_artifact(project: &Value) -> Value {
                 "source_owner",
                 "active_artifact",
                 "generated_outputs",
-                "regression",
             ] {
                 output.insert(
                     key.into(),
@@ -2000,6 +2013,9 @@ fn build_artifact(project: &Value) -> Value {
                         .cloned()
                         .unwrap_or_else(|| fail(format!("INVALID_MODULE_SURFACES:{}", key))),
                 );
+            }
+            if let Some(regression) = module.get("regression") {
+                output.insert("regression".into(), regression.clone());
             }
             Value::Object(output)
         })
@@ -2644,6 +2660,91 @@ fn module_deployment_operations(module: &Value) -> Vec<&str> {
         operations.push(operation);
     }
     operations
+}
+
+fn assert_module_regression_contract(module: &Value, stage: &str, module_id: &str) {
+    let Some(regression_value) = module.get("regression") else {
+        if matches!(stage, "frozen" | "retired") {
+            fail(format!("REGRESSION_CONTRACT_REQUIRED:{}", module_id));
+        }
+        return;
+    };
+    let regression = regression_value
+        .as_object()
+        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+    let required_before_freeze = regression
+        .get("required_before_freeze")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+    if (!required_before_freeze && matches!(stage, "architecture_stable" | "frozen" | "retired"))
+        || regression
+            .get("suite_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        || regression
+            .get("input_paths")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values.is_empty()
+                    || values
+                        .iter()
+                        .any(|value| value.as_str().filter(|path| !path.is_empty()).is_none())
+            })
+            .unwrap_or(true)
+        || regression
+            .get("minimum_test_count")
+            .and_then(Value::as_u64)
+            .filter(|count| *count > 0)
+            .is_none()
+        || regression
+            .get("allow_skipped")
+            .and_then(Value::as_bool)
+            .is_none()
+        || regression
+            .get("ordinary_mode_after_freeze")
+            .and_then(Value::as_str)
+            != Some("disabled")
+        || regression
+            .get("reenable_on")
+            .and_then(Value::as_array)
+            .map(|values| {
+                [
+                    "source_change",
+                    "contract_change",
+                    "public_api_change",
+                    "artifact_change",
+                    "dependency_change",
+                ]
+                .iter()
+                .any(|required| !values.iter().any(|value| value.as_str() == Some(*required)))
+            })
+            .unwrap_or(true)
+    {
+        fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
+    }
+    let command = regression
+        .get("command")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+    if command
+        .get("program")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        || command
+            .get("working_directory")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        || command
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().any(|value| value.as_str().is_none()))
+            .unwrap_or(true)
+    {
+        fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
+    }
 }
 
 fn build_module_artifact(root: &Path, project: &Value, module: &Value, module_id: &str) -> Value {
@@ -3372,6 +3473,11 @@ fn assert_project_contract(root: &Path, project: &Value) {
         {
             fail(format!("INVALID_PROJECT_MODULE:{}", id));
         }
+        let stage = module
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail(format!("INVALID_PROJECT_MODULE:{}", id)));
+        assert_module_regression_contract(module, stage, id);
         if let Some(version_base) = module.get("version_base").filter(|value| !value.is_null()) {
             for path in [
                 "/previous_active_version",
@@ -7760,7 +7866,7 @@ fn assert_regression_report(
     }
     let policy = module
         .get("regression")
-        .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
+        .unwrap_or_else(|| fail(format!("REGRESSION_CONTRACT_REQUIRED:{}", module_id)));
     if record_str(&report, "/module_id", &name) != module_id
         || record_str(&report, "/source_commit", &name)
             != record_str(promotion, "/source_commit", "promotion-record.json")
@@ -8323,6 +8429,7 @@ fn assert_pre_review_validation_gate(root: &Path, module_id: &str, artifact: &Va
 fn verify_review_admission(root: &Path, module_id: &str) {
     assert_project_root_safe(root);
     assert_identifier(module_id, "INVALID_MODULE_ID");
+    assert_goal_confirmed(root);
     let project = read_project(root);
     let module = project
         .get("modules")
@@ -10191,6 +10298,7 @@ fn freeze_module(root: &Path, module_id: &str) {
     }
     let mut candidate = project.clone();
     candidate["modules"][index]["stage"] = Value::String("frozen".into());
+    assert_module_regression_contract(&candidate["modules"][index], "frozen", module_id);
     // Development artifacts are admissible inputs, never frozen publications.
     module_dependency_hashes(root, &candidate, &candidate["modules"][index], module_id);
     assert_compile_preconditions(root, &project, Some(module_id));
@@ -10985,84 +11093,6 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
         {
             fail(format!("INVALID_MODULE_BUILD_CONTRACT:{}", module_id));
         }
-        let regression = module
-            .get("regression")
-            .and_then(Value::as_object)
-            .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
-        let required_before_freeze = regression
-            .get("required_before_freeze")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
-        if (!required_before_freeze
-            && matches!(stage, "architecture_stable" | "frozen" | "retired"))
-            || regression
-                .get("suite_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .is_none()
-            || regression
-                .get("input_paths")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values.is_empty()
-                        || values
-                            .iter()
-                            .any(|value| value.as_str().filter(|path| !path.is_empty()).is_none())
-                })
-                .unwrap_or(true)
-            || regression
-                .get("minimum_test_count")
-                .and_then(Value::as_u64)
-                .filter(|count| *count > 0)
-                .is_none()
-            || regression
-                .get("allow_skipped")
-                .and_then(Value::as_bool)
-                .is_none()
-            || regression
-                .get("ordinary_mode_after_freeze")
-                .and_then(Value::as_str)
-                != Some("disabled")
-            || regression
-                .get("reenable_on")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    [
-                        "source_change",
-                        "contract_change",
-                        "public_api_change",
-                        "artifact_change",
-                        "dependency_change",
-                    ]
-                    .iter()
-                    .any(|required| !values.iter().any(|value| value.as_str() == Some(*required)))
-                })
-                .unwrap_or(true)
-        {
-            fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
-        }
-        let command = regression
-            .get("command")
-            .and_then(Value::as_object)
-            .unwrap_or_else(|| fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id)));
-        if command
-            .get("program")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .is_none()
-            || command
-                .get("working_directory")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .is_none()
-            || command
-                .get("args")
-                .and_then(Value::as_array)
-                .map(|values| values.iter().any(|value| value.as_str().is_none()))
-                .unwrap_or(true)
-        {
-            fail(format!("INVALID_REGRESSION_CONTRACT:{}", module_id));
-        }
     }
     let project_id = project
         .get("project_id")
@@ -11091,18 +11121,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
             "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
         ),
     );
-    assert_goal_contract(root, false);
-    let lock_file = root.join(".appsdk").join("sdk.lock");
-    let lock: Value = serde_json::from_str(
-        &fs::read_to_string(&lock_file).unwrap_or_else(|_| fail("MISSING_SDK_LOCK")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-    if lock.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || lock.get("version").and_then(Value::as_str)
-            != project.pointer("/sdk/version").and_then(Value::as_str)
-    {
-        fail("INVALID_SDK_LOCK");
-    }
+    assert_goal_contract_if_present(root);
     let artifact_file = generated_root(root, &project).join("project.compiled.json");
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
     if !admission
@@ -11114,15 +11133,14 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     {
         fail("COMPILED_STAGE_REQUIRES_ARTIFACT");
     }
-    if artifact_file.exists() {
-        let artifact = read_compiled_artifact(root, &project);
-        assert_artifact_matches(&project, &artifact);
-    }
-    let _artifact = if artifact_file.exists() {
+    let artifact = if artifact_file.exists() {
         Some(read_compiled_artifact(root, &project))
     } else {
         None
     };
+    if let Some(artifact) = artifact.as_ref() {
+        assert_artifact_matches(&project, artifact);
+    }
     for module in project
         .get("modules")
         .and_then(Value::as_array)
@@ -11234,7 +11252,6 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
             })
             .unwrap_or(false)
     {
-        let _artifact = read_compiled_artifact(root, &project);
         for module in project
             .get("modules")
             .and_then(Value::as_array)

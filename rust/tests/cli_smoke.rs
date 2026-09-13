@@ -8124,6 +8124,223 @@ fn new_project_rejects_unconfirmed_compile_and_promote() {
 }
 
 #[test]
+fn ordinary_verify_tolerates_absent_goal_but_mutation_requires_it() {
+    let root = temp_root("verify-without-goal");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let goal_file = root.join(".appsdk/goal.json");
+    let original_goal = fs::read_to_string(&goal_file).unwrap();
+    fs::remove_file(&goal_file).unwrap();
+
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&admission.stdout),
+        String::from_utf8_lossy(&admission.stderr)
+    );
+
+    let review_admission = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!review_admission.status.success());
+    assert!(String::from_utf8_lossy(&review_admission.stderr)
+        .contains("MISSING_GOAL_CLARIFICATION_RECORD"));
+
+    let compile = run(&["compile", root_text]);
+    assert!(!compile.status.success());
+    assert!(String::from_utf8_lossy(&compile.stderr).contains("MISSING_GOAL_CLARIFICATION_RECORD"));
+
+    fs::write(&goal_file, original_goal).unwrap();
+    let unconfirmed = run(&["verify", "--admission", root_text]);
+    assert!(
+        unconfirmed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&unconfirmed.stdout),
+        String::from_utf8_lossy(&unconfirmed.stderr)
+    );
+    let review_unconfirmed = run(&[
+        "verify",
+        "--review-admission",
+        root_text,
+        "--module",
+        "app-core",
+    ]);
+    assert!(!review_unconfirmed.status.success());
+    assert!(
+        String::from_utf8_lossy(&review_unconfirmed.stderr).contains("GOAL_NOT_CONFIRMED:received")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn development_stages_allow_omitted_regression_until_freeze() {
+    let root = temp_root("development-without-regression");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["modules"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("regression");
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_path,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    assert!(run(&["verify", root_text]).status.success());
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    let compiled = run(&["compile", root_text]);
+    assert!(
+        compiled.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let artifact: Value =
+        serde_json::from_slice(&fs::read(root.join("generated/project.compiled.json")).unwrap())
+            .unwrap();
+    assert!(artifact["modules"][0].get("regression").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_frozen_module_without_regression_contract() {
+    let root = temp_root("frozen-without-regression");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["modules"][0]["stage"] = Value::String("frozen".into());
+    project["modules"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("regression");
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&["verify", "--admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("REGRESSION_CONTRACT_REQUIRED:app-core")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn architecture_stable_rejects_disabled_regression_before_freeze() {
+    let root = temp_root("stable-disabled-regression");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["lifecycle"]["stage"] = Value::String("architecture_stable".into());
+    project["modules"][0]["stage"] = Value::String("architecture_stable".into());
+    project["modules"][0]["regression"]["required_before_freeze"] = Value::Bool(false);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&["verify", "--admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("INVALID_REGRESSION_CONTRACT:app-core")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn freeze_rejects_missing_regression_before_persisting_frozen_state() {
+    let root = temp_root("freeze-without-regression");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["lifecycle"]["stage"] = Value::String("architecture_stable".into());
+    project["modules"][0]["stage"] = Value::String("architecture_stable".into());
+    project["modules"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("regression");
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let goal_file = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_slice(&fs::read(&goal_file).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(
+        &goal_file,
+        serde_json::to_string_pretty(&goal).unwrap() + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+    let original_project = fs::read_to_string(&project_path).unwrap();
+
+    let rejected = run(&[
+        "promote-module",
+        root_text,
+        "--module",
+        "app-core",
+        "--to",
+        "frozen",
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("REGRESSION_CONTRACT_REQUIRED:app-core")
+    );
+    assert_eq!(fs::read_to_string(&project_path).unwrap(), original_project);
+    assert!(!root
+        .join(".appsdk/transactions")
+        .join("freeze-app-core")
+        .exists());
+    assert!(!root.join("protected/history/app-core").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_mutation_rejects_main_branch() {
     let root = temp_root("main-mutation");
     let root_text = root.to_str().unwrap();

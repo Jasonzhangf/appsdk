@@ -864,6 +864,10 @@ struct Projection {
     batches: Vec<NotificationBatch>,
     #[serde(skip)]
     completed_attempts: BTreeMap<String, String>,
+    #[serde(skip)]
+    event_ordinal: u64,
+    #[serde(skip)]
+    message_ordinals: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1385,13 +1389,22 @@ impl CommunicationStore {
             });
             return Err(error);
         }
-        if let Some(existing) = self.projection.agents.get(&key) {
+        if let Some(existing) = self.projection.agents.get(&key).cloned() {
             if existing.role == role
                 && existing.agent_id == request.agent_id
                 && existing.parent == request.parent
                 && existing.runtime_id.as_deref() == request.runtime_id.as_deref()
             {
-                return Ok(json!({ "agent": existing, "idempotent": true }));
+                let reconciled_idle = if existing.role == "master" {
+                    self.reconcile_idle_workers_for_master(&existing)?
+                } else {
+                    Vec::new()
+                };
+                return Ok(json!({
+                    "agent": existing,
+                    "idempotent": true,
+                    "reconciledIdle": reconciled_idle
+                }));
             }
             return Err(CommError::new(
                 "agent_conflict",
@@ -1451,6 +1464,9 @@ impl CommunicationStore {
         master: &AgentRecord,
     ) -> CommResult<Vec<Value>> {
         let observed_at = now();
+        if !master.live_at(&observed_at) {
+            return Ok(Vec::new());
+        }
         let workers: Vec<AgentRecord> = self
             .projection
             .agents
@@ -4118,7 +4134,27 @@ impl CommunicationStore {
             if notification.message_id == message.message_id {
                 return Ok(Some(notification));
             }
-            if parse_time(&notification.created_at)? > parse_time(&message.created_at)? {
+            // The current projection is the latest state of the coalescing
+            // bucket.  Compare durable message creation order first: unlike
+            // timestamps, it distinguishes a same-time new message whose
+            // notification queue event was lost in a crash prefix from a
+            // retry of an older message.  Generation/time are the fallback
+            // for legacy records that predate the in-memory ordinal index.
+            let current_is_newer = match (
+                self.projection
+                    .message_ordinals
+                    .get(&notification.message_id),
+                self.projection.message_ordinals.get(&message.message_id),
+            ) {
+                (Some(current_ordinal), Some(requested_ordinal)) => {
+                    current_ordinal > requested_ordinal
+                }
+                _ => {
+                    notification.generation > 0
+                        || parse_time(&notification.created_at)? >= parse_time(&message.created_at)?
+                }
+            };
+            if current_is_newer {
                 return Ok(Some(notification));
             }
             return self.notification_for(message, &message.created_at, None);
@@ -5427,6 +5463,14 @@ impl CommunicationStore {
     }
 
     fn apply_event(&mut self, event: &EventRecord) -> CommResult<()> {
+        self.projection.event_ordinal =
+            self.projection
+                .event_ordinal
+                .checked_add(1)
+                .ok_or_else(|| {
+                    CommError::new("journal_corrupt", "communication event ordinal exhausted")
+                })?;
+        let event_ordinal = self.projection.event_ordinal;
         match event.kind.as_str() {
             "scope.registered" => {
                 let record: ScopeRecord = decode(&event.data, "scope")?;
@@ -5504,6 +5548,10 @@ impl CommunicationStore {
             "agent.rebound" => self.apply_agent_rebound_event(&event.data)?,
             "message.created" => {
                 let record: MessageRecord = decode(&event.data, "message")?;
+                self.projection
+                    .message_ordinals
+                    .entry(record.message_id.clone())
+                    .or_insert(event_ordinal);
                 self.projection
                     .messages
                     .insert(record.message_id.clone(), record);
@@ -5979,6 +6027,10 @@ impl CommunicationStore {
                     }
                 }
                 self.projection.wakeup.insert(wakeup.address.key(), wakeup);
+                self.projection
+                    .message_ordinals
+                    .entry(message.message_id.clone())
+                    .or_insert(event_ordinal);
                 self.projection
                     .messages
                     .insert(message.message_id.clone(), message);

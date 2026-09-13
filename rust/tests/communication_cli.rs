@@ -129,6 +129,9 @@ fn register_scope(
                 "namespace": "codex_tui",
                 "endpoint": format!("mock://{scope_id}"),
                 "projectRoot": bound_project_root,
+                "capabilities": ["send_message_to_thread"],
+                "tmuxSession": format!("appsdk-test-{scope_id}"),
+                "tmuxPane": "%1",
                 "processId": std::process::id()
             }
         }),
@@ -1608,7 +1611,7 @@ fn adapters_are_explicit_and_receipts_are_replayed() {
             "adapter": {
                 "adapterId": "tmux-preview",
                 "kind": "tmux",
-                "target": "preview-pane",
+                "target": "appsdk-test-scope:%1",
                 "execute": false,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -1622,7 +1625,7 @@ fn adapters_are_explicit_and_receipts_are_replayed() {
             "adapter": {
                 "adapterId": "desktop-host",
                 "kind": "appserver",
-                "target": "appserver://desktop",
+                "target": "mock://scope",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
@@ -1704,7 +1707,7 @@ fn adapter_failure_keeps_notification_pending_and_records_error() {
             "adapter": {
                 "adapterId": "tmux-execute",
                 "kind": "tmux",
-                "target": "missing-pane",
+                "target": "appsdk-test-scope:%1",
                 "execute": true,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -1755,7 +1758,7 @@ fn disabled_adapter_fails_before_message_persistence() {
             "adapter": {
                 "adapterId": "disabled",
                 "kind": "tmux",
-                "target": "preview-pane",
+                "target": "appsdk-test-scope:%1",
                 "enabled": false,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -1800,7 +1803,7 @@ fn idle_flush_is_partitioned_by_adapter() {
             "adapter": {
                 "adapterId": "tmux-preview",
                 "kind": "tmux",
-                "target": "preview-pane",
+                "target": "appsdk-test-scope:%1",
                 "execute": false,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -2143,7 +2146,7 @@ fn direct_delivery_failures_keep_each_message_retryable() {
             "adapter": {
                 "adapterId": "tmux-execute",
                 "kind": "tmux",
-                "target": "missing-pane",
+                "target": "appsdk-test-scope:%1",
                 "execute": true,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -2271,7 +2274,7 @@ fn direct_retry_retries_known_failure_without_overwriting_identity() {
             "adapter": {
                 "adapterId": "tmux-execute",
                 "kind": "tmux",
-                "target": "missing-pane",
+                "target": "appsdk-test-scope:%1",
                 "execute": true,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -3556,7 +3559,7 @@ fn adapter_binding_and_bug_loop_gates_are_enforced() {
             "adapter": {
                 "adapterId": "master-pane",
                 "kind": "tmux",
-                "target": "master-pane",
+                "target": "appsdk-test-scope:%1",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
@@ -4406,5 +4409,206 @@ fn tampered_agent_rebind_address_fails_closed_on_replay() {
     fs::write(&mailbox, format!("{rewritten}\n")).unwrap();
     let error = call_error(&root, json!({ "op": "status" }));
     assert!(error.contains("journal_corrupt"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tmux_adapter_rejects_runtime_target_mismatch_and_stale_pane() {
+    let root = temp_root("tmux-runtime-target");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let mismatch = call_error(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "tmux-mismatch",
+                "kind": "tmux",
+                "target": "appsdk-test-scope:%42",
+                "execute": false,
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    assert!(mismatch.contains("tmux_target_mismatch"), "{mismatch}");
+
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "tmux-bound",
+                "kind": "tmux",
+                "target": "appsdk-test-scope:%1",
+                "execute": false,
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+
+    let project_root = root.canonicalize().unwrap();
+    let project_root = project_root.to_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": project_root,
+                "capabilities": ["send_message_to_thread"],
+                "tmuxSession": "appsdk-test-scope",
+                "tmuxPane": "%2",
+                "processId": std::process::id()
+            }
+        }),
+    );
+
+    let stale = call_error(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "worker" },
+                "to": { "scopeId": "scope", "sessionId": "master" },
+                "title": "stale tmux target",
+                "priority": "p1",
+                "body": "must not send to the old pane",
+                "deliveryMode": "direct",
+                "adapterId": "tmux-bound",
+                "messageId": "stale-tmux-target"
+            }
+        }),
+    );
+    assert!(stale.contains("tmux_target_stale"), "{stale}");
+    let status = call(&root, json!({ "op": "status" }));
+    assert!(status["messages"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn appserver_adapter_requires_endpoint_and_declared_send_capability() {
+    let root = temp_root("appserver-runtime-target");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let project_root = root.canonicalize().unwrap();
+    let project_root = project_root.to_str().unwrap();
+
+    call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": project_root,
+                "capabilities": [],
+                "processId": std::process::id()
+            }
+        }),
+    );
+
+    let missing_capability = call_error(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-missing-capability",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    assert!(
+        missing_capability.contains("appserver_capability_missing"),
+        "{missing_capability}"
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": project_root,
+                "capabilities": ["send_message_to_thread"],
+                "processId": std::process::id()
+            }
+        }),
+    );
+
+    let mismatch = call_error(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-mismatch",
+                "kind": "appserver",
+                "target": "mock://stale",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    assert!(mismatch.contains("appserver_target_mismatch"), "{mismatch}");
+
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-bound",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-scope",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://scope",
+                "projectRoot": project_root,
+                "capabilities": [],
+                "processId": std::process::id()
+            }
+        }),
+    );
+
+    let stale = call_error(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "worker" },
+                "to": { "scopeId": "scope", "sessionId": "master" },
+                "title": "stale appserver capability",
+                "priority": "p1",
+                "body": "must not queue without the declared send capability",
+                "deliveryMode": "direct",
+                "adapterId": "desktop-bound",
+                "messageId": "stale-appserver-capability"
+            }
+        }),
+    );
+    assert!(stale.contains("appserver_capability_missing"), "{stale}");
+    let status = call(&root, json!({ "op": "status" }));
+    assert!(status["messages"].as_array().unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }

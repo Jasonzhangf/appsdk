@@ -47,14 +47,20 @@ entry while its TUI route remains unbound or unavailable.
 
 The host runtime registry is the second append-only stream under the same root.
 `runtimes.jsonl` binds a stable `runtimeId` to one App Server endpoint,
-namespace, project root, optional tmux session/pane, process id and a derived
-fingerprint. `appsdk communication ... register_runtime` appends or reuses one
-binding. A later registration with the same ID but a changed endpoint, cwd or
-namespace fails with `GLOBAL_RUNTIME_IDENTITY_CONFLICT`; it never overwrites the
-old record. A scope or agent may be created only when its `runtimeId` resolves to
-this exact binding. The registry is an identity binding and replay source; it
-does not claim that an appserver delivered a message. The host must report that
-fact through the communication `record_delivery` operation.
+namespace, project root, declared capabilities, optional tmux session/pane,
+process id and a derived fingerprint. `appsdk communication ... register_runtime`
+appends or reuses one binding. A later registration with the same ID but a
+changed endpoint, cwd or namespace fails with `GLOBAL_RUNTIME_IDENTITY_CONFLICT`;
+it never overwrites the old record. Capability changes and volatile process or
+tmux fields use an append-only `runtime.refreshed` record while preserving the
+stable transport identity. Capability-bearing records use a versioned
+length-prefixed encoding for every identity field and capability item, so
+capability bytes cannot change field boundaries; capability-less records retain
+the legacy fingerprint for replay compatibility. A scope or agent may be
+created only when its `runtimeId` resolves to this exact binding. The registry
+is an identity binding and replay source; it does not claim that an appserver
+delivered a message. The host must report that fact through the communication
+`record_delivery` operation.
 
 ## Event contract
 

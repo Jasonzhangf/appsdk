@@ -10,8 +10,10 @@ AppSDK 自己拥有 `appsdk-comm/v1` 的通信协议、身份与 scope、路由�
 
 运行时身份由 AppSDK 的 host registry 单独持有：`~/.appsdk/runtimes.jsonl` 是
 append-only 的 `runtime.registered` 事实，记录稳定 `runtimeId`、App Server endpoint、
-namespace、项目 cwd、可选 tmux session/pane、进程和 fingerprint。会话压缩或 fork 只改变
-conversation/session；宿主继续使用同一个 `runtimeId`，不能复制旧 session token。
+namespace、项目 cwd、宿主声明的 capability、可选 tmux session/pane、进程和 fingerprint。
+会话压缩或 fork 只改变 conversation/session；宿主继续使用同一个 `runtimeId`，不能复制旧
+session token。`send_message_to_thread` 是 appserver adapter 的必要 capability；没有该
+声明的 runtime 仍可注册，但不能绑定或接收该 adapter 的发送。
 `register_runtime` 对相同身份幂等，对同一 ID 的 endpoint、cwd 或 namespace 变化返回
 `runtime_identity_conflict`。scope 和 agent 注册必须引用已经登记且完全匹配的
 `runtimeId`；缺失或不匹配在写入项目 mailbox 前失败。runtime registry 与项目事实分离，
@@ -29,6 +31,15 @@ conversation/session；宿主继续使用同一个 `runtimeId`，不能复制旧
 - `appserver` 只向绑定的 endpoint 返回 `intent`，receipt 带
   `hostMustExecute=true`。宿主没有回报执行证据前，状态不能升级为
   `delivered`、`executed` 或 `read`。
+
+`tmux` 和 `appserver` adapter 都绑定收件人的当前 runtime。tmux target 使用唯一的
+`<tmuxSession>:<tmuxPane>` 格式，必须与 `~/.appsdk/runtimes.jsonl` 的最新记录完全相同；
+appserver target 必须等于最新 runtime endpoint，并且该 runtime 必须声明
+`send_message_to_thread`。`register_adapter` 在写入 `adapter.registered` 前执行一次校验，
+每次真实发送或 idle flush 前再读取 registry 校验一次。runtime refresh 后旧 target 返回
+`tmux_target_stale` 或 `appserver_target_stale`，capability 被撤回返回
+`appserver_capability_missing`；这些失败发生在 `message.created` 之前，不产生假消息或假
+delivery 事实。
 
 通信 store 的命令 root 必须是存在的绝对 canonical 项目路径。root、`.appsdk-control`、
 通信目录、mailbox 和独占 lock 的任一已有路径组件是 symlink 时，store 在创建目录、取得

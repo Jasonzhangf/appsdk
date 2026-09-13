@@ -65,6 +65,8 @@ pub struct RuntimeIdentity {
     pub endpoint: String,
     #[serde(rename = "projectRoot", alias = "project_root")]
     pub project_root: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
     pub tmux_session: Option<String>,
     #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
@@ -116,6 +118,19 @@ fn project_id(project_root: &Path) -> String {
 }
 
 fn runtime_fingerprint(identity: &RuntimeIdentity) -> String {
+    // Capability-less records predate the capability field.  Keep their
+    // original digest so an existing registry remains replayable.  Once a
+    // capability is declared, use the versioned length-prefixed encoding;
+    // capability bytes are allowed to contain any UTF-8 content, including a
+    // NUL byte, without changing their boundaries.
+    if !identity.capabilities.is_empty() {
+        return runtime_fingerprint_with_capabilities(identity);
+    }
+
+    runtime_fingerprint_legacy(identity)
+}
+
+fn runtime_fingerprint_legacy(identity: &RuntimeIdentity) -> String {
     let mut digest = Sha256::new();
     digest.update(identity.runtime_id.as_bytes());
     digest.update([0]);
@@ -137,6 +152,39 @@ fn runtime_fingerprint(identity: &RuntimeIdentity) -> String {
     digest.update([0]);
     digest.update(identity.process_id.to_string().as_bytes());
     format!("runtime-{:x}", digest.finalize())
+}
+
+fn runtime_fingerprint_with_capabilities(identity: &RuntimeIdentity) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"appsdk-runtime-fingerprint-v2");
+    update_length_prefixed(&mut digest, identity.runtime_id.as_bytes());
+    update_length_prefixed(&mut digest, identity.appserver_id.as_bytes());
+    update_length_prefixed(&mut digest, identity.namespace.as_bytes());
+    update_length_prefixed(&mut digest, identity.endpoint.as_bytes());
+    update_length_prefixed(&mut digest, identity.project_root.as_bytes());
+    digest.update((identity.capabilities.len() as u64).to_be_bytes());
+    for capability in &identity.capabilities {
+        update_length_prefixed(&mut digest, capability.as_bytes());
+    }
+    update_optional_length_prefixed(&mut digest, identity.tmux_session.as_deref());
+    update_optional_length_prefixed(&mut digest, identity.tmux_pane.as_deref());
+    digest.update(identity.process_id.to_be_bytes());
+    format!("runtime-{:x}", digest.finalize())
+}
+
+fn update_length_prefixed(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+fn update_optional_length_prefixed(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            update_length_prefixed(digest, value.as_bytes());
+        }
+        None => digest.update([0]),
+    }
 }
 
 fn validate_runtime_identity(identity: &RuntimeIdentity) -> Result<(), String> {
@@ -168,6 +216,14 @@ fn validate_runtime_identity(identity: &RuntimeIdentity) -> Result<(), String> {
     }
     if identity.process_id == 0 {
         return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:process_id_zero".into());
+    }
+    for capability in &identity.capabilities {
+        if capability.trim().is_empty() {
+            return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:capability_empty".into());
+        }
+        if capability.chars().count() > 256 {
+            return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:capability_too_long".into());
+        }
     }
     match (&identity.tmux_session, &identity.tmux_pane) {
         (Some(session), Some(pane)) if !session.trim().is_empty() && !pane.trim().is_empty() => {}
@@ -1178,6 +1234,7 @@ mod tests {
             namespace: "codex_tui".into(),
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
+            capabilities: vec![],
             tmux_session: Some("tui-a".into()),
             tmux_pane: Some("%42".into()),
             process_id: std::process::id(),
@@ -1218,6 +1275,7 @@ mod tests {
             namespace: "codex_app".into(),
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
+            capabilities: vec![],
             tmux_session: None,
             tmux_pane: None,
             process_id: std::process::id(),
@@ -1242,6 +1300,64 @@ mod tests {
     }
 
     #[test]
+    fn capability_fingerprint_is_unambiguous_and_rejects_reused_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-capability-collision-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let first = RuntimeIdentity {
+            runtime_id: "runtime-capability-collision".into(),
+            appserver_id: "server-a".into(),
+            namespace: "codex_app".into(),
+            endpoint: "unix:///tmp/server-a.sock".into(),
+            project_root: "/workspace/app".into(),
+            capabilities: vec!["alpha\0beta".into(), "gamma".into()],
+            tmux_session: None,
+            tmux_pane: None,
+            process_id: std::process::id(),
+        };
+        let mut second = first.clone();
+        second.capabilities = vec!["alpha".into(), "beta\0gamma".into()];
+
+        let ambiguous_bytes = |capabilities: &[String]| {
+            let mut bytes = b"capabilities\0".to_vec();
+            for capability in capabilities {
+                bytes.extend_from_slice(capability.as_bytes());
+                bytes.push(0);
+            }
+            bytes
+        };
+        assert_eq!(
+            ambiguous_bytes(&first.capabilities),
+            ambiguous_bytes(&second.capabilities)
+        );
+        let first_fingerprint = runtime_fingerprint(&first);
+        let second_fingerprint = runtime_fingerprint(&second);
+        assert_ne!(first_fingerprint, second_fingerprint);
+
+        register_runtime_at(&first, &root).unwrap();
+        let path = root.join(RUNTIME_FILE);
+        let original = fs::read_to_string(&path).unwrap();
+        let mut forged: RuntimeRecord = serde_json::from_str(&original).unwrap();
+        forged.event = "runtime.refreshed".into();
+        forged.identity = second;
+        forged.fingerprint = first_fingerprint;
+        fs::write(
+            &path,
+            format!("{}{}\n", original, serde_json::to_string(&forged).unwrap()),
+        )
+        .unwrap();
+
+        let error = runtime_at("runtime-capability-collision", &root).unwrap_err();
+        assert!(
+            error.starts_with("GLOBAL_RUNTIME_REGISTRY_INVALID_EVENT:2:"),
+            "{error}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn malformed_runtime_registry_fails_closed() {
         let root = std::env::temp_dir().join(format!(
             "appsdk-runtime-registry-invalid-{}-{}",
@@ -1257,6 +1373,7 @@ mod tests {
             namespace: "codex_tui".into(),
             endpoint: "mock://server-a".into(),
             project_root: "/workspace/app".into(),
+            capabilities: vec![],
             tmux_session: None,
             tmux_pane: None,
             process_id: std::process::id(),

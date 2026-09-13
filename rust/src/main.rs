@@ -10890,7 +10890,7 @@ fn reset_governance_record_mode(root: &Path) -> Option<String> {
     Some(mode.to_string())
 }
 
-fn verify_sdk_migration_record(root: &Path) {
+fn verify_sdk_migration_record(root: &Path, admission: bool) {
     if reset_governance_record_mode(root).is_some() {
         let migration_root = sdk_map_migration_root(root);
         if fs::symlink_metadata(&migration_root).is_ok() {
@@ -10901,6 +10901,35 @@ fn verify_sdk_migration_record(root: &Path) {
         }
         return;
     }
+    if !admission {
+        // A project that still points at an older SDK bundle may continue
+        // ordinary development while its immutable migration witness awaits
+        // the explicit pin-lock/fresh-init owner.  Keep path integrity checks
+        // active, but do not turn an historical bundle mismatch into a
+        // development blocker.  Once the lock points at this Bundle, the
+        // strict migration validator below remains authoritative.
+        let migration_root = sdk_map_migration_root(root);
+        if fs::symlink_metadata(&migration_root).is_ok() {
+            assert_no_symlink_components(root, &migration_root, "sdk_migration");
+            let lock_path = root.join(".appsdk/sdk.lock");
+            let lock_bundle = fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|lock| {
+                    lock.get("bundle_digest")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
+            let current_bundle = sdk_bundle_digest();
+            if lock_bundle.as_deref() != Some(current_bundle.as_str()) {
+                eprintln!(
+                    "warning: legacy SDK migration history retained for ordinary development ({})",
+                    migration_root.display()
+                );
+                return;
+            }
+        }
+    }
     let _ = assert_sdk_migration_record(root);
 }
 
@@ -10908,7 +10937,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     assert_project_root_safe(root);
     let project = read_project(root);
     assert_governance_maps(root);
-    verify_sdk_migration_record(root);
+    verify_sdk_migration_record(root, admission);
     assert_declared_contracts(root, &project, true);
     assert_project_contract(root, &project);
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
@@ -11864,8 +11893,12 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     write_project_scaffold(root);
     if fresh_governance {
         write_project_agent_contract(root);
-        install_bundle_resources(root);
     }
+    // `init` is also the supported idempotent SDK refresh entrypoint.  The
+    // Bundle owns `.appsdk/contracts`, `.appsdk/docs`, `.appsdk/skills`, and
+    // the resource manifest; project contract, maps, records, Active, and
+    // Protected state remain project-owned and are not overwritten here.
+    install_bundle_resources(root);
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
     register_global_project(root);

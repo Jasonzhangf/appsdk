@@ -5819,6 +5819,103 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
 }
 
 #[test]
+fn repeated_init_refreshes_sdk_bundle_without_overwriting_project_truth() {
+    let root = temp_root("init-refreshes-sdk-bundle");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project = root.join(".appsdk/project.json");
+    let goal = root.join(".appsdk/goal.json");
+    let map = root.join(".appsdk/maps/resource-map.json");
+    let record = root.join(".appsdk/records/project-record.json");
+    let active = root.join("active/lib/project-active.txt");
+    let protected = root.join("protected/history/project-history.txt");
+    fs::write(
+        &project,
+        fs::read_to_string(&project)
+            .unwrap()
+            .replace("change-me", "project-owned"),
+    )
+    .unwrap();
+    let mut goal_value: Value = serde_json::from_slice(&fs::read(&goal).unwrap()).unwrap();
+    goal_value["raw_request"] = Value::String("project-owned request".into());
+    fs::write(&goal, serde_json::to_vec_pretty(&goal_value).unwrap()).unwrap();
+    fs::write(
+        &map,
+        "{\"schema_version\":1,\"resources\":[{\"resource_id\":\"project-owned\"}]}\n",
+    )
+    .unwrap();
+    fs::write(&record, "project record\n").unwrap();
+    fs::write(&active, "active\n").unwrap();
+    fs::write(&protected, "protected\n").unwrap();
+
+    let project_before = fs::read(&project).unwrap();
+    let goal_before = fs::read(&goal).unwrap();
+    let map_before = fs::read(&map).unwrap();
+    let record_before = fs::read(&record).unwrap();
+    let active_before = fs::read(&active).unwrap();
+    let protected_before = fs::read(&protected).unwrap();
+
+    let stale_contract = root.join(".appsdk/contracts/project.schema.json");
+    let stale_skill = root.join(".appsdk/skills/appsdk-project-governance/SKILL.md");
+    fs::write(&stale_contract, "stale contract\n").unwrap();
+    fs::write(&stale_skill, "stale skill\n").unwrap();
+
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert_eq!(fs::read(&project).unwrap(), project_before);
+    assert_eq!(fs::read(&goal).unwrap(), goal_before);
+    assert_eq!(fs::read(&map).unwrap(), map_before);
+    assert_eq!(fs::read(&record).unwrap(), record_before);
+    assert_eq!(fs::read(&active).unwrap(), active_before);
+    assert_eq!(fs::read(&protected).unwrap(), protected_before);
+    assert_eq!(
+        fs::read_to_string(stale_contract).unwrap(),
+        include_str!("../../contracts/project.schema.json")
+    );
+    assert_eq!(
+        fs::read_to_string(stale_skill).unwrap(),
+        include_str!("../../skills/appsdk-project-governance/SKILL.md")
+    );
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ordinary_verify_reports_stale_migration_without_blocking_development() {
+    let root = temp_root("ordinary-verify-stale-migration");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
+    fs::create_dir_all(&migration_root).unwrap();
+    fs::write(migration_root.join("record.json"), "{\"legacy\":true}\n").unwrap();
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    lock["bundle_digest"] = Value::String(format!("sha256:{}", "a".repeat(64)));
+    fs::write(&lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
+
+    let ordinary = run(&["verify", root_text]);
+    assert!(
+        ordinary.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&ordinary.stdout),
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ordinary.stderr).contains("legacy SDK migration history"));
+
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(!admission.status.success());
+    assert!(String::from_utf8_lossy(&admission.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verify_rejects_tampered_installed_sdk_resource() {
     let root = temp_root("sdk-resource-integrity");
     fs::create_dir_all(&root).unwrap();

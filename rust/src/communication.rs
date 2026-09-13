@@ -4131,30 +4131,42 @@ impl CommunicationStore {
         };
 
         if !immediate {
+            let current_ordinal = self
+                .projection
+                .message_ordinals
+                .get(&notification.message_id)
+                .ok_or_else(|| {
+                    CommError::new(
+                        "journal_corrupt",
+                        format!(
+                            "notification {key} references message without a durable creation fact: {}",
+                            notification.message_id
+                        ),
+                    )
+                })?;
+            let requested_ordinal = self
+                .projection
+                .message_ordinals
+                .get(&message.message_id)
+                .ok_or_else(|| {
+                    CommError::new(
+                        "journal_corrupt",
+                        format!(
+                            "message {} has no durable creation fact for notification recovery",
+                            message.message_id
+                        ),
+                    )
+                })?;
             if notification.message_id == message.message_id {
                 return Ok(Some(notification));
             }
             // The current projection is the latest state of the coalescing
-            // bucket.  Compare durable message creation order first: unlike
-            // timestamps, it distinguishes a same-time new message whose
-            // notification queue event was lost in a crash prefix from a
-            // retry of an older message.  Generation/time are the fallback
-            // for legacy records that predate the in-memory ordinal index.
-            let current_is_newer = match (
-                self.projection
-                    .message_ordinals
-                    .get(&notification.message_id),
-                self.projection.message_ordinals.get(&message.message_id),
-            ) {
-                (Some(current_ordinal), Some(requested_ordinal)) => {
-                    current_ordinal > requested_ordinal
-                }
-                _ => {
-                    notification.generation > 0
-                        || parse_time(&notification.created_at)? >= parse_time(&message.created_at)?
-                }
-            };
-            if current_is_newer {
+            // bucket.  Compare replay-established message creation order:
+            // unlike timestamps, it distinguishes a same-time new message
+            // from a retry of an older message.  Missing order is corruption;
+            // generation/time are not allowed to reconstruct this control
+            // fact and silently swallow a newer message prefix.
+            if current_ordinal > requested_ordinal {
                 return Ok(Some(notification));
             }
             return self.notification_for(message, &message.created_at, None);

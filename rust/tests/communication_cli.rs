@@ -1422,6 +1422,128 @@ fn same_timestamp_new_idle_message_recovers_after_notification_queue_prefix() {
 }
 
 #[test]
+fn missing_coalesced_message_fact_fails_closed_before_new_prefix_recovery() {
+    let root = temp_root("idle-window-missing-message-fact");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+
+    let message_a = json!({
+        "from": { "scopeId": "scope", "sessionId": "master" },
+        "to": { "scopeId": "scope", "sessionId": "worker" },
+        "title": "fact A",
+        "priority": "p2",
+        "body": "first terminal window",
+        "deliveryMode": "idle",
+        "coalesceKey": "missing-fact",
+        "messageId": "fact-a",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_a }));
+    call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2026-01-01T00:02:00Z"
+        }),
+    );
+
+    let message_b = json!({
+        "from": { "scopeId": "scope", "sessionId": "master" },
+        "to": { "scopeId": "scope", "sessionId": "worker" },
+        "title": "fact B",
+        "priority": "p2",
+        "body": "second terminal window",
+        "deliveryMode": "idle",
+        "coalesceKey": "missing-fact",
+        "messageId": "fact-b",
+        "createdAt": "2026-01-01T00:00:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_b }));
+    call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2026-01-01T00:04:00Z"
+        }),
+    );
+
+    let message_c = json!({
+        "from": { "scopeId": "scope", "sessionId": "master" },
+        "to": { "scopeId": "scope", "sessionId": "worker" },
+        "title": "fact C",
+        "priority": "p2",
+        "body": "new prefix after B",
+        "deliveryMode": "idle",
+        "coalesceKey": "missing-fact",
+        "messageId": "fact-c",
+        "createdAt": "2026-01-01T00:03:00Z"
+    });
+    call(&root, json!({ "op": "send", "message": message_c.clone() }));
+
+    // Reproduce a malformed crash prefix: B's coalesced notification facts
+    // survived, but its message.created fact did not; C's message facts
+    // survived while its notification queue prefix did not.  Replay must not
+    // use B's generation or timestamp to swallow C.
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let retained: Vec<&str> = contents
+        .lines()
+        .filter(|line| {
+            let event: Value = serde_json::from_str(line).unwrap();
+            let kind = event["kind"].as_str().unwrap();
+            let data = &event["data"];
+            match kind {
+                "message.created" | "message.state" | "message.delivery_attempt" => {
+                    let message_id = data["messageId"]
+                        .as_str()
+                        .or_else(|| data["message"]["messageId"].as_str())
+                        .or_else(|| data["attempt"]["messageId"].as_str());
+                    message_id != Some("fact-b")
+                }
+                "notification.queued" => {
+                    data["notification"]["messageId"].as_str() != Some("fact-c")
+                }
+                _ => true,
+            }
+        })
+        .collect();
+    let malformed_prefix = format!("{}\n", retained.join("\n"));
+    fs::write(&mailbox, &malformed_prefix).unwrap();
+
+    let error = call_error(&root, json!({ "op": "send", "message": message_c }));
+    assert!(error.contains("journal_corrupt"), "{error}");
+    assert!(error.contains("fact-b"), "{error}");
+    assert!(error.contains("durable creation fact"), "{error}");
+    let after = fs::read_to_string(&mailbox).unwrap();
+    assert!(after.starts_with(&malformed_prefix));
+    assert_eq!(
+        after[malformed_prefix.len()..]
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .count(),
+        1
+    );
+    let recorded_error: Value =
+        serde_json::from_str(after[malformed_prefix.len()..].trim()).unwrap();
+    assert_eq!(recorded_error["kind"], "error.recorded");
+    assert_eq!(recorded_error["data"]["code"], "journal_corrupt");
+    assert_eq!(
+        after.matches("\"kind\":\"message.created\"").count(),
+        malformed_prefix
+            .matches("\"kind\":\"message.created\"")
+            .count()
+    );
+    assert_eq!(
+        after.matches("\"kind\":\"notification.queued\"").count(),
+        malformed_prefix
+            .matches("\"kind\":\"notification.queued\"")
+            .count()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn master_wakeup_is_state_driven_and_stops_after_three_reminders() {
     let root = temp_root("wakeup");
     register_scope(&root, "scope", "app", "/project", &["master"]);

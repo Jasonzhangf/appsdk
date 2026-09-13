@@ -94,7 +94,8 @@ appsdk compile
 ```
 
 fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` worktree，
-先验证并保留现有项目合同，再清除旧 `.appsdk/` 审计与迁移记录、`.appsdk-control/` 和声明的可重建 generated
+先验证并保留现有项目合同语义；支持的旧 SDK pin 只在新 staging 中显式规范为当前 SDK 版本，
+再清除旧 `.appsdk/` 审计与迁移记录、`.appsdk-control/` 和声明的可重建 generated
 root，刷新当前 record/transition contracts，记录 `mode: "fresh_init"`，保留业务源码、
 运行数据、`active/`、`protected/`。普通 `appsdk init` 与底层
 `appsdk reset-governance --discard-legacy` 的既有非破坏/幂等语义保持不变；旧

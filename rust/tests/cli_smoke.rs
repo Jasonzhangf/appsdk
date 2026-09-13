@@ -583,6 +583,109 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
 }
 
 #[test]
+fn init_fresh_migrates_supported_legacy_sdk_pin_and_preserves_project_contract() {
+    let root = temp_root("init-fresh-legacy-sdk-pin");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("legacy-sdk-project".into());
+    project["sdk"]["version"] = Value::String("0.1.5".into());
+    project["modules"][0]["module_id"] = Value::String("legacy-module".into());
+    project["modules"][0]["source_owner"] = Value::String("legacy-module".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(root.join("business.txt"), "preserve\n").unwrap();
+    fs::write(root.join("protected/history/legacy.txt"), "preserve\n").unwrap();
+    fs::write(root.join("active/legacy.txt"), "preserve\n").unwrap();
+    fs::create_dir_all(root.join("generated/legacy-output")).unwrap();
+    fs::write(root.join("generated/legacy-output/result"), "remove\n").unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    let mut expected = project;
+    expected["sdk"]["version"] = Value::String("0.1.6".into());
+    assert_eq!(after, expected);
+    let lock: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
+    assert_eq!(lock["version"], "0.1.6");
+    let reset: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reset["mode"], "fresh_init");
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "preserve\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("protected/history/legacy.txt")).unwrap(),
+        "preserve\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("active/legacy.txt")).unwrap(),
+        "preserve\n"
+    );
+    assert!(!root.join("generated/legacy-output").exists());
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_rejects_unsupported_sdk_pin_before_resetting_state() {
+    let root = temp_root("init-fresh-unsupported-sdk-pin");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["sdk"]["version"] = Value::String("0.1.2".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(root.join("business.txt"), "preserve\n").unwrap();
+    fs::create_dir_all(root.join("generated/legacy-output")).unwrap();
+    fs::write(root.join("generated/legacy-output/result"), "retain\n").unwrap();
+    init_git(&root);
+
+    let project_before = fs::read(&project_path).unwrap();
+    let generated_before = fs::read_to_string(root.join("generated/legacy-output/result")).unwrap();
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.6"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
+    assert_eq!(
+        fs::read_to_string(root.join("generated/legacy-output/result")).unwrap(),
+        generated_before
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_creation_and_initialization_persist_host_registration() {
     let root = temp_root("global-registration-cli");
     let registry = temp_root("global-registration-home");

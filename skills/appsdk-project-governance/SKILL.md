@@ -126,10 +126,11 @@ Choose exactly one of these routes for a managed business project:
   `appsdk init <project> --fresh --discard-legacy`; it performs the canonical
   reset and current-contract rebuild together, and records `mode: "fresh_init"`.
   The reset validates and carries the existing `.appsdk/project.json` forward
-  as project-owned contract truth; it must not replace the project's identity,
-  module ownership, build, or lifecycle boundaries with the generic
-  `change-me/app-core` scaffold. Records, maps, and rebuildable projections are
-  reset and must be produced again for the new governance epoch.
+  as project-owned contract truth; a supported legacy SDK pin is explicitly
+  normalized to the current SDK version in staging. It must not replace the
+  project's identity, module ownership, build, or lifecycle boundaries with the
+  generic `change-me/app-core` scaffold. Records, maps, and rebuildable
+  projections are reset and must be produced again for the new governance epoch.
   The lower-level `appsdk reset-governance --discard-legacy` remains available
   for its existing idempotent reset route. Neither route inherits delivery,
   review, freeze, or deployment claims.
@@ -211,8 +212,9 @@ resources but never overwrites project AGENTS, Skills, records, Active or
 Protected. The explicit `appsdk init --fresh --discard-legacy` route is the
 user-authorized exception: it removes only the named legacy control plane and
 rebuilds current SDK-managed contracts while carrying the validated existing
-project contract forward; it still preserves business source, runtime, Active
-and Protected. Merely auditing rules does not require running initialization
+project contract semantics forward; a supported legacy SDK pin is normalized
+in staging, while business source, runtime, Active and Protected are
+preserved. Merely auditing rules does not require running initialization
 or changing setup.
 
 ## Optional Collab coordination

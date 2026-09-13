@@ -165,7 +165,9 @@ appsdk init <project> --fresh --discard-legacy
 This is the only init path that discards a legacy control plane. It requires an
 existing `.appsdk/project.json`, a clean non-`main`/`master` worktree, and the
 explicit `--discard-legacy` confirmation. It validates and carries the existing
-`.appsdk/project.json` contract into the new `.appsdk` root, removes the
+`.appsdk/project.json` contract semantics into the new `.appsdk` root; when the
+contract pins a supported older SDK, only that pin is explicitly normalized to
+the current SDK version in staging. It removes the
 remaining AppSDK-owned control state, `.appsdk-control/`, and declared
 generated roots, then rebuilds the current `.appsdk` state and refreshes
 SDK-managed record/transition contracts. It records `mode: "fresh_init"`.

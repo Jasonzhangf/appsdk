@@ -142,6 +142,9 @@ not ordinary `init` behavior. It requires `.appsdk/project.json`, a clean
 non-`main`/`master` worktree, and the discard confirmation. It preserves
 business source, runtime data, `active/`, `protected/`, and human documents;
 only the named AppSDK control plane and declared generated roots are removed.
+When the contract pins a supported older SDK, only that pin is explicitly
+normalized to the current SDK version in staging; project identity, module
+ownership, build, and lifecycle fields remain project-owned.
 The new reset record has `mode: "fresh_init"` and proves the reset operation
 only. It does not inherit old PASS, review, delivery, or freeze claims.
 

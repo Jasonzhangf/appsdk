@@ -13316,22 +13316,56 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
         .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_MISSING"));
     let project: Value = serde_json::from_slice(&project_bytes)
         .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_INVALID"));
+    let staging_project = normalize_fresh_project_contract(&project);
+    let staging_project_bytes = if staging_project == project {
+        project_bytes.clone()
+    } else {
+        let mut bytes = serde_json::to_vec_pretty(&staging_project)
+            .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_INVALID"));
+        bytes.push(b'\n');
+        bytes
+    };
     let staging_root = transaction_dir.join("staging");
     new_project(&staging_root, false);
     // Fresh init resets the control-plane records and rebuildable projections,
-    // but the existing project contract remains project-owned truth.  The
+    // but the existing project contract remains project-owned truth. The
     // scaffold only supplies the new SDK-owned layout; restore the validated
-    // project contract byte-for-byte before publishing the transaction.
+    // contract before publishing the transaction. A supported legacy SDK pin
+    // is normalized to this bundle's version; all other project fields stay
+    // unchanged and unsupported pins fail before any project path is moved.
     reset_transaction_write_bytes(
         transaction_dir,
         &staging_root.join(".appsdk/project.json"),
-        &project_bytes,
+        &staging_project_bytes,
     )
     .unwrap_or_else(|error| fail(error));
     // Validate against the freshly built SDK resources so stale legacy
     // projections do not prevent a valid contract from being checked.  The
     // transaction has not quarantined or published any project paths yet.
-    assert_project_contract(&staging_root, &project);
+    assert_project_contract(&staging_root, &staging_project);
+}
+
+fn normalize_fresh_project_contract(project: &Value) -> Value {
+    let sdk_version = project
+        .pointer("/sdk/version")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
+    if sdk_version == SDK_VERSION {
+        return project.clone();
+    }
+    if sdk_version != "0.1.5" {
+        fail(format!(
+            "UNSUPPORTED_SDK_MIGRATION:{}:{}",
+            sdk_version, SDK_VERSION
+        ));
+    }
+    let mut normalized = project.clone();
+    normalized
+        .get_mut("sdk")
+        .and_then(Value::as_object_mut)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT"))
+        .insert("version".into(), Value::String(SDK_VERSION.into()));
+    normalized
 }
 
 fn sdk_map_migration_root(root: &Path) -> PathBuf {

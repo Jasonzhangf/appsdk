@@ -65,6 +65,8 @@ pub struct RuntimeIdentity {
     pub endpoint: String,
     #[serde(rename = "projectRoot", alias = "project_root")]
     pub project_root: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
     pub tmux_session: Option<String>,
     #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
@@ -127,6 +129,17 @@ fn runtime_fingerprint(identity: &RuntimeIdentity) -> String {
     digest.update([0]);
     digest.update(identity.project_root.as_bytes());
     digest.update([0]);
+    // Keep the original fingerprint for capability-less legacy records.  A
+    // non-empty capability declaration is part of the new fingerprint so a
+    // tampered appserver capability cannot authorize a route.
+    if !identity.capabilities.is_empty() {
+        digest.update(b"capabilities");
+        digest.update([0]);
+        for capability in &identity.capabilities {
+            digest.update(capability.as_bytes());
+            digest.update([0]);
+        }
+    }
     if let Some(value) = identity.tmux_session.as_deref() {
         digest.update(value.as_bytes());
     }
@@ -168,6 +181,14 @@ fn validate_runtime_identity(identity: &RuntimeIdentity) -> Result<(), String> {
     }
     if identity.process_id == 0 {
         return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:process_id_zero".into());
+    }
+    for capability in &identity.capabilities {
+        if capability.trim().is_empty() {
+            return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:capability_empty".into());
+        }
+        if capability.chars().count() > 256 {
+            return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:capability_too_long".into());
+        }
     }
     match (&identity.tmux_session, &identity.tmux_pane) {
         (Some(session), Some(pane)) if !session.trim().is_empty() && !pane.trim().is_empty() => {}
@@ -1178,6 +1199,7 @@ mod tests {
             namespace: "codex_tui".into(),
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
+            capabilities: vec![],
             tmux_session: Some("tui-a".into()),
             tmux_pane: Some("%42".into()),
             process_id: std::process::id(),
@@ -1218,6 +1240,7 @@ mod tests {
             namespace: "codex_app".into(),
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
+            capabilities: vec![],
             tmux_session: None,
             tmux_pane: None,
             process_id: std::process::id(),
@@ -1257,6 +1280,7 @@ mod tests {
             namespace: "codex_tui".into(),
             endpoint: "mock://server-a".into(),
             project_root: "/workspace/app".into(),
+            capabilities: vec![],
             tmux_session: None,
             tmux_pane: None,
             process_id: std::process::id(),

@@ -25,6 +25,7 @@ const BUG_LOOP_WORK: &str = "triage -> fix in an independent worktree";
 const BUG_LOOP_GATE: &str = "project verification and review";
 const BUG_LOOP_STATE: &str = "persist bug evidence and next action";
 const BUG_LOOP_STOP: &str = "resolved, merged, and reporter notified";
+const APPSERVER_SEND_CAPABILITY: &str = "send_message_to_thread";
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -193,6 +194,8 @@ struct RuntimeRequest {
     endpoint: String,
     #[serde(rename = "projectRoot", alias = "project_root")]
     project_root: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
     #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
     tmux_session: Option<String>,
     #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
@@ -471,6 +474,7 @@ impl CommunicationAdapter for MailboxAdapter {
 
 struct TmuxAdapter {
     adapter_id: String,
+    runtime_id: String,
     target: String,
     execute: bool,
 }
@@ -495,7 +499,11 @@ impl CommunicationAdapter for TmuxAdapter {
             kind: "tmux".into(),
             state: if self.execute { "delivered" } else { "intent" }.into(),
             target: Some(self.target.clone()),
-            evidence: json!({ "preview": preview, "executed": self.execute }),
+            evidence: json!({
+                "preview": preview,
+                "executed": self.execute,
+                "runtimeId": self.runtime_id
+            }),
         })
     }
 
@@ -522,14 +530,20 @@ impl CommunicationAdapter for TmuxAdapter {
             kind: "tmux".into(),
             state: if self.execute { "delivered" } else { "intent" }.into(),
             target: Some(self.target.clone()),
-            evidence: json!({ "preview": preview, "executed": self.execute }),
+            evidence: json!({
+                "preview": preview,
+                "executed": self.execute,
+                "runtimeId": self.runtime_id
+            }),
         })
     }
 }
 
 struct AppserverAdapter {
     adapter_id: String,
+    runtime_id: String,
     endpoint: String,
+    capability: String,
 }
 
 impl CommunicationAdapter for AppserverAdapter {
@@ -541,7 +555,9 @@ impl CommunicationAdapter for AppserverAdapter {
             target: Some(self.endpoint.clone()),
             evidence: json!({
                 "messageId": message.message_id,
-                "hostMustExecute": true
+                "hostMustExecute": true,
+                "runtimeId": self.runtime_id,
+                "capability": self.capability
             }),
         })
     }
@@ -554,7 +570,9 @@ impl CommunicationAdapter for AppserverAdapter {
             target: Some(self.endpoint.clone()),
             evidence: json!({
                 "batchId": batch.batch_id,
-                "hostMustExecute": true
+                "hostMustExecute": true,
+                "runtimeId": self.runtime_id,
+                "capability": self.capability
             }),
         })
     }
@@ -1025,6 +1043,7 @@ impl CommunicationStore {
             namespace: request.namespace,
             endpoint: request.endpoint,
             project_root: request.project_root,
+            capabilities: request.capabilities,
             tmux_session: request.tmux_session,
             tmux_pane: request.tmux_pane,
             process_id: request.process_id,
@@ -1103,7 +1122,7 @@ impl CommunicationStore {
             .map_err(|error| CommError::new("runtime_registration_required", error))
     }
 
-    fn require_agent_runtime(&self, agent: &AgentRecord) -> CommResult<()> {
+    fn runtime_for_agent(&self, agent: &AgentRecord) -> CommResult<global_registry::RuntimeRecord> {
         let runtime_id = agent.runtime_id.as_deref().ok_or_else(|| {
             CommError::new(
                 "runtime_registration_required",
@@ -1114,8 +1133,11 @@ impl CommunicationStore {
             )
         })?;
         global_registry::runtime(runtime_id)
-            .map(|_| ())
             .map_err(|error| CommError::new("runtime_registration_required", error))
+    }
+
+    fn require_agent_runtime(&self, agent: &AgentRecord) -> CommResult<()> {
+        self.runtime_for_agent(agent).map(|_| ())
     }
 
     fn register_adapter(&mut self, request: AdapterRequest) -> CommResult<Value> {
@@ -1149,7 +1171,25 @@ impl CommunicationStore {
             ));
         }
         if let Some(recipient) = request.recipient.as_ref() {
-            self.require_live_agent(recipient)?;
+            let agent = self.require_live_agent(recipient)?.clone();
+            if request.kind != "mailbox" {
+                let runtime = self.runtime_for_agent(&agent)?;
+                let target = request.target.as_deref().ok_or_else(|| {
+                    CommError::new(
+                        if request.kind == "tmux" {
+                            "tmux_target_required"
+                        } else {
+                            "appserver_target_required"
+                        },
+                        if request.kind == "tmux" {
+                            "tmux adapter requires target pane"
+                        } else {
+                            "appserver adapter requires endpoint"
+                        },
+                    )
+                })?;
+                validate_adapter_runtime_target(&request.kind, target, &runtime, false)?;
+            }
         }
         let record = AdapterRecord {
             adapter_id: request.adapter_id.clone(),
@@ -4313,6 +4353,38 @@ impl CommunicationStore {
                 ));
             }
         }
+        let runtime = if record.kind == "mailbox" {
+            None
+        } else {
+            let bound_recipient = record.recipient.as_ref().ok_or_else(|| {
+                CommError::new(
+                    "adapter_recipient_required",
+                    format!("adapter {adapter_id} has no registered recipient address"),
+                )
+            })?;
+            let agent = self.require_live_agent(bound_recipient)?.clone();
+            let runtime = self.runtime_for_agent(&agent)?;
+            let target = record
+                .target
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    CommError::new(
+                        if record.kind == "tmux" {
+                            "tmux_target_required"
+                        } else {
+                            "appserver_target_required"
+                        },
+                        if record.kind == "tmux" {
+                            "tmux adapter requires target pane"
+                        } else {
+                            "appserver adapter requires endpoint"
+                        },
+                    )
+                })?;
+            validate_adapter_runtime_target(&record.kind, target, &runtime, true)?;
+            Some(runtime)
+        };
         match record.kind.as_str() {
             "mailbox" => Ok(Box::new(MailboxAdapter {
                 adapter_id: record.adapter_id.clone(),
@@ -4328,6 +4400,12 @@ impl CommunicationStore {
                     })?;
                 Ok(Box::new(TmuxAdapter {
                     adapter_id: record.adapter_id.clone(),
+                    runtime_id: runtime
+                        .as_ref()
+                        .expect("tmux adapter runtime was validated")
+                        .identity
+                        .runtime_id
+                        .clone(),
                     target,
                     execute: record.execute,
                 }))
@@ -4345,7 +4423,14 @@ impl CommunicationStore {
                     })?;
                 Ok(Box::new(AppserverAdapter {
                     adapter_id: record.adapter_id.clone(),
+                    runtime_id: runtime
+                        .as_ref()
+                        .expect("appserver adapter runtime was validated")
+                        .identity
+                        .runtime_id
+                        .clone(),
                     endpoint,
+                    capability: APPSERVER_SEND_CAPABILITY.into(),
                 }))
             }
             other => Err(CommError::new(
@@ -6043,6 +6128,81 @@ fn validate_scope_request(request: &ScopeRequest) -> CommResult<()> {
             "runtime_registration_required",
             "scope registration requires runtimeId",
         ));
+    }
+    Ok(())
+}
+
+fn validate_adapter_runtime_target(
+    kind: &str,
+    target: &str,
+    runtime: &global_registry::RuntimeRecord,
+    stale: bool,
+) -> CommResult<()> {
+    match kind {
+        "tmux" => {
+            let session = runtime
+                .identity
+                .tmux_session
+                .as_deref()
+                .filter(|value| !value.trim().is_empty());
+            let pane = runtime
+                .identity
+                .tmux_pane
+                .as_deref()
+                .filter(|value| !value.trim().is_empty());
+            let (Some(session), Some(pane)) = (session, pane) else {
+                return Err(CommError::new(
+                    "tmux_runtime_target_required",
+                    format!(
+                        "recipient runtime {} has no registered tmux session and pane",
+                        runtime.identity.runtime_id
+                    ),
+                ));
+            };
+            let expected = format!("{session}:{pane}");
+            if target != expected {
+                return Err(CommError::new(
+                    if stale {
+                        "tmux_target_stale"
+                    } else {
+                        "tmux_target_mismatch"
+                    },
+                    format!(
+                        "tmux adapter target {target} does not match recipient runtime target {expected}"
+                    ),
+                ));
+            }
+        }
+        "appserver" => {
+            if target != runtime.identity.endpoint {
+                return Err(CommError::new(
+                    if stale {
+                        "appserver_target_stale"
+                    } else {
+                        "appserver_target_mismatch"
+                    },
+                    format!(
+                        "appserver adapter target {target} does not match recipient runtime endpoint {}",
+                        runtime.identity.endpoint
+                    ),
+                ));
+            }
+            if !runtime
+                .identity
+                .capabilities
+                .iter()
+                .any(|capability| capability == APPSERVER_SEND_CAPABILITY)
+            {
+                return Err(CommError::new(
+                    "appserver_capability_missing",
+                    format!(
+                        "recipient runtime {} does not declare capability {}",
+                        runtime.identity.runtime_id, APPSERVER_SEND_CAPABILITY
+                    ),
+                ));
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

@@ -310,9 +310,11 @@
     },
     "delivery": {
       "type": "object",
-      "required": ["messageId", "state", "runtimeId", "evidence"],
+      "required": ["messageId", "attemptId", "nonce", "state", "runtimeId", "evidence"],
       "properties": {
         "messageId": {"type": "string", "minLength": 1},
+        "attemptId": {"type": "string", "minLength": 1},
+        "nonce": {"type": "string", "minLength": 1},
         "state": {"enum": ["delivered", "executed", "replied", "read", "consumed", "unknown"]},
         "runtimeId": {"type": "string", "minLength": 1},
         "evidence": {"type": "object", "minProperties": 1},

@@ -131,6 +131,15 @@ refresh、发送消息、接收消息或取得 master 权限。新地址已占�
 - 语义不同的相同 `messageId` 返回 `message_id_conflict`，不创建新事实，也不修改
   原消息；恢复过程只追加缺失事件，不能覆盖或丢弃原始 JSONL。
 
+每条消息（包括 daemon 产生的系统和 master wake 消息）在首次确认后都建立一个唯一的
+`message.delivery_attempt`。该事实绑定 `messageId`、`attemptId`、一次性 `nonce`、
+adapter、目标 runtime、runtime fingerprint、target 和开始时间；同一消息的幂等重试复用
+这条 attempt，不能创建第二条。外部 `record_delivery` 必须同时提交 `attemptId` 和 `nonce`，
+并且只能匹配已经持久化的 attempt；缺失、错配或目标 runtime 不一致时 fail-closed，不写入
+`message.state`。attempt 的 fingerprint 必须来自已登记的 runtime 观察；runtime 后续刷新不
+会改写历史 receipt，重放通过 fingerprint 历史记录验证。进程在 attempt 后、receipt 前崩溃
+时，attempt 保留为未决事实，不能推断为 `delivered` 或自动生成新的 attempt。
+
 adapter 或宿主只知道“已尝试”时，receipt 使用 `intent` 或 `accepted`；只有实际
   观察到承载成功才能使用 `delivered`。无法观察的结果保持未确认状态或记录
   `unknown` 观测，并保留错误上下文；不得把未知、超时或只生成 intent 当成
@@ -287,6 +296,9 @@ projection；变更返回投影和本次写入的事实 ID。
 - 每次真实 adapter 调用只追加一个 `notification.delivery_attempt`；idle flush 重复执行
   不重复写 `notification.queued`，attempt 与 terminal event 的 `attemptId` 必须一致；
   attempt 后崩溃会得到 `unknown`，不能自动重发或冒充成功。
+- message delivery receipt 覆盖缺失 attempt、错 `attemptId`、错 `nonce`、runtime 刷新后
+  的历史 receipt 幂等、attempt 重放篡改和系统 wake 消息的 attempt 持久化；没有对应 attempt
+  的 receipt 不会写入 `message.state`。
 - `cargo` 定向通信测试、全量测试、release build、JSON Schema 语法检查和实际 CLI
   黑盒入口均绑定同一个最终 commit/tree；codexapp 未被修改，也没有外部通信实现
   编译依赖。

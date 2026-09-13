@@ -55,6 +55,31 @@ fn call_error(root: &Path, request: Value) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn delivery_attempt_fields(root: &Path, message_id: &str) -> (String, String) {
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(mailbox).unwrap();
+    contents
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find_map(|event| {
+            (event["kind"] == "message.delivery_attempt"
+                && event["data"]["messageId"] == message_id)
+                .then(|| {
+                    (
+                        event["data"]["attempt"]["attemptId"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                        event["data"]["attempt"]["nonce"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    )
+                })
+        })
+        .unwrap()
+}
+
 fn retain_mailbox_through(root: &Path, event_kind: &str) {
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
     let contents = fs::read_to_string(&mailbox).unwrap();
@@ -355,12 +380,16 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
         }),
     );
     let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
     let forged = call_error(
         &root,
         json!({
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-forged",
                 "evidence": { "receiptId": "forged" }
@@ -375,6 +404,8 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": {}
@@ -392,6 +423,8 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "target-received" }
@@ -421,6 +454,8 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "target-received" }
@@ -434,6 +469,8 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "executed",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "target-executed" }
@@ -446,6 +483,8 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "unknown",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "delivery-observation-lost" }
@@ -462,6 +501,8 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "too-early" }
@@ -495,12 +536,16 @@ fn communication_runtime_identity_replay_rejects_forged_delivery_receipt() {
         }),
     );
     let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
     call(
         &root,
         json!({
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "worker-received" }
@@ -518,6 +563,176 @@ fn communication_runtime_identity_replay_rejects_forged_delivery_receipt() {
             && event["data"]["state"] == "delivered"
         {
             event["data"]["evidence"]["details"]["runtimeId"] = json!("runtime-forged");
+        }
+        tampered.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", tampered.join("\n"))).unwrap();
+    let replay_error = call_error(&root, json!({ "op": "status" }));
+    assert!(replay_error.contains("journal_corrupt"), "{replay_error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn message_delivery_receipt_requires_persisted_attempt_and_exact_identity() {
+    let root = temp_root("delivery-attempt-contract");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "attempt contract",
+                "priority": "p1",
+                "body": "receipt must bind to a persisted attempt",
+                "messageId": "attempt-contract"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+
+    remove_mailbox_events(&root, "message.delivery_attempt");
+    let missing = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "missing-attempt" }
+            }
+        }),
+    );
+    assert!(missing.contains("delivery_attempt_required"), "{missing}");
+
+    let restored = call(
+        &root,
+        json!({ "op": "send", "message": {
+            "from": { "scopeId": "scope", "sessionId": "master" },
+            "to": { "scopeId": "scope", "sessionId": "worker" },
+            "title": "attempt contract",
+            "priority": "p1",
+            "body": "receipt must bind to a persisted attempt",
+            "messageId": "attempt-contract"
+        }}),
+    );
+    let restored_attempt_id = restored["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let restored_nonce = restored["deliveryAttempt"]["nonce"].as_str().unwrap();
+    assert_ne!(restored_attempt_id, attempt_id);
+    assert_ne!(restored_nonce, nonce);
+
+    let wrong_attempt = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": "attempt-forged",
+                "nonce": restored_nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "wrong-attempt" }
+            }
+        }),
+    );
+    assert!(
+        wrong_attempt.contains("delivery_attempt_mismatch"),
+        "{wrong_attempt}"
+    );
+
+    let wrong_nonce = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": restored_attempt_id,
+                "nonce": "nonce-forged",
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "wrong-nonce" }
+            }
+        }),
+    );
+    assert!(
+        wrong_nonce.contains("delivery_attempt_nonce_mismatch"),
+        "{wrong_nonce}"
+    );
+
+    let delivered = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": restored_attempt_id,
+                "nonce": restored_nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "valid" }
+            }
+        }),
+    );
+    assert_eq!(delivered["message"]["state"], "delivered");
+    assert_eq!(
+        delivered["message"]["evidence"][1]["details"]["attemptId"],
+        restored_attempt_id
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tampered_message_delivery_attempt_is_rejected_on_replay() {
+    let root = temp_root("delivery-attempt-replay-tamper");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "tampered attempt",
+                "priority": "p1",
+                "body": "replay must reject a changed nonce",
+                "messageId": "tampered-attempt"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "valid" }
+            }
+        }),
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut tampered = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.delivery_attempt" && event["data"]["messageId"] == message_id {
+            event["data"]["attempt"]["nonce"] = json!("nonce-tampered");
         }
         tampered.push(serde_json::to_string(&event).unwrap());
     }
@@ -1080,12 +1295,15 @@ fn wakeup_delivery_receipt_prefix_recovers_when_message_is_already_delivered() {
         .as_str()
         .unwrap()
         .to_owned();
+    let (attempt_id, nonce) = delivery_attempt_fields(&root, &message_id);
     call(
         &root,
         json!({
             "op": "record_delivery",
             "delivery": {
                 "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": { "receiptId": "master-received" }

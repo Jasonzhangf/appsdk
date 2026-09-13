@@ -15,6 +15,8 @@ The first host-wide record is the append-only project registry:
   projects.jsonl.lock
   runtimes.jsonl
   runtimes.jsonl.lock
+  communication.jsonl
+  communication.jsonl.lock
 ```
 
 `projects.jsonl` is the source of truth. The lock file only serializes writers;
@@ -35,6 +37,7 @@ delivery with mutable host state.
 | --- | --- | --- | --- |
 | Host-wide AppSDK project registry | AppSDK | `~/.appsdk/projects.jsonl` | `appsdk new` and `appsdk init` append or reuse one entry |
 | Host-wide AppSDK configuration | Collab integration/its declared owner | `~/.appsdk/config.toml` when enabled | AppSDK forwards configuration; it does not create a shadow copy |
+| Host-wide communication discovery | AppSDK communication owner | `~/.appsdk/communication.jsonl` | Scope/agent registration appends or reuses one address owner |
 | Project governance contract | Managed project | `<project>/.appsdk/` | Committed project state; never copied into the host registry |
 | Project run/control cache | Managed project | `<project>/.appsdk-control/` | Ignored local state; not host-wide registration truth |
 | Collab daemon, journal, mailbox, claims, bindings | Collab | Collab's canonical state root | AppSDK never hand-edits or relocates it |
@@ -61,6 +64,35 @@ created only when its `runtimeId` resolves to this exact binding. The registry
 is an identity binding and replay source; it does not claim that an appserver
 delivered a message. The host must report that fact through the communication
 `record_delivery` operation.
+
+The communication discovery registry is the third host-wide stream. It maps a
+`scopeId/sessionId` address to the canonical project root whose
+`.appsdk-control/communication/mailbox.jsonl` owns the complete scope and agent
+record. It contains no role, lease, parent, route, message, or delivery state;
+the target project mailbox remains the only source for those facts. A sender
+uses the mapping only to locate the target mailbox, replays its identity events,
+and then applies the existing route policy. Cross-project discovery therefore
+works with separate project mailboxes without turning the host index into a
+second authority.
+
+`communication.jsonl` accepts `communication.scope.registered`,
+`communication.agent.registered`, and `communication.agent.rebound` events.
+Addresses and project roots are canonical and length-bounded. Rebinding leaves
+an old-address tombstone; lookup reports the new address, while a send to the
+old address fails with `agent_address_rebound` rather than silently rewriting
+the caller's request. Scope or address conflicts, malformed lines, unknown
+events, missing final newlines, symlinked paths, and a busy lock fail closed.
+Registration is idempotent only when the address and canonical project owner
+are unchanged.
+
+Communication registration is recoverable across the project mailbox and this
+host projection. The project first records a `discovery.pending` intent with the
+complete scope, agent, or rebind record, then commits the local mailbox fact,
+publishes the host event, and finally records `discovery.reconciled`. A process
+stop or write error between those stores leaves the intent and the original
+error; the next normal mailbox open retries from that intent. The host stream
+never becomes an uncommitted source of truth, and repair never edits or copies
+historical JSONL by hand.
 
 ## Event contract
 

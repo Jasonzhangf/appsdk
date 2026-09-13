@@ -292,7 +292,7 @@ struct AdapterRequest {
     recipient: Option<Address>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ScopeRecord {
     #[serde(rename = "scopeId")]
     scope_id: String,
@@ -371,11 +371,33 @@ struct AgentTombstone {
     rebound_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct AgentReboundEvent {
     from: AgentRecord,
     to: AgentRecord,
     tombstone: AgentTombstone,
+}
+
+/// A local, append-only intent that bridges the project mailbox and the
+/// host-wide discovery index.  The mailbox is the source of truth; the host
+/// index is a rebuildable projection.  Keeping the complete local record in
+/// the intent lets recovery finish a local commit if the process stops between
+/// the two durable stores.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum DiscoveryOperation {
+    Scope { record: ScopeRecord },
+    Agent { record: AgentRecord },
+    Rebind { event: AgentReboundEvent },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DiscoveryPendingRecord {
+    #[serde(rename = "pendingId")]
+    pending_id: String,
+    operation: DiscoveryOperation,
+    #[serde(rename = "createdAt")]
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -850,6 +872,8 @@ struct Projection {
     agents: BTreeMap<String, AgentRecord>,
     #[serde(default, rename = "agentTombstones")]
     agent_tombstones: BTreeMap<String, AgentTombstone>,
+    #[serde(default, rename = "discoveryPending")]
+    discovery_pending: BTreeMap<String, DiscoveryPendingRecord>,
     messages: BTreeMap<String, MessageRecord>,
     #[serde(default, rename = "messageDeliveryAttempts")]
     message_delivery_attempts: BTreeMap<String, MessageDeliveryAttempt>,
@@ -889,10 +913,14 @@ pub struct CommunicationStore {
 }
 
 struct CommunicationLock {
-    _file: File,
+    _file: Option<File>,
 }
 
 impl CommunicationLock {
+    fn read_only() -> Self {
+        Self { _file: None }
+    }
+
     fn acquire(mailbox_path: &Path) -> CommResult<Self> {
         let lock_path = mailbox_path.with_extension("jsonl.lock");
         reject_symlink_components(&lock_path, "communication_lock")?;
@@ -927,7 +955,7 @@ impl CommunicationLock {
             }
         }
 
-        Ok(Self { _file: file })
+        Ok(Self { _file: Some(file) })
     }
 }
 
@@ -949,6 +977,38 @@ impl CommunicationStore {
     pub fn open_mailbox(mailbox_path: PathBuf) -> CommResult<Self> {
         let project_root = infer_project_root(&mailbox_path)?;
         Self::open_mailbox_at(mailbox_path, project_root)
+    }
+
+    fn open_mailbox_read_only(mailbox_path: PathBuf) -> CommResult<Self> {
+        let project_root = infer_project_root(&mailbox_path)?;
+        reject_symlink_components(&mailbox_path, "communication_mailbox")?;
+        if !mailbox_path.is_file() {
+            return Err(CommError::new(
+                "communication_mailbox_missing",
+                format!(
+                    "communication mailbox is missing: {}",
+                    mailbox_path.display()
+                ),
+            ));
+        }
+        let mut store = Self {
+            mailbox_path,
+            project_root,
+            projection: Projection::default(),
+            _lock: CommunicationLock::read_only(),
+        };
+        store
+            .projection
+            .adapters
+            .insert("mailbox".into(), default_mailbox_adapter());
+        // A project store already holds its own exclusive mailbox lock while
+        // resolving a cross-project target.  Replaying the target's complete
+        // mailbox here would recursively acquire that lock (and can form an
+        // A -> B -> A cycle).  Discovery only needs the target identity
+        // projection; the target project performs full journal validation when
+        // it is opened as the owner of its mailbox.
+        store.replay_identity_only()?;
+        Ok(store)
     }
 
     fn open_mailbox_at(mailbox_path: PathBuf, project_root: PathBuf) -> CommResult<Self> {
@@ -977,6 +1037,7 @@ impl CommunicationStore {
             .adapters
             .insert("mailbox".into(), default_mailbox_adapter());
         store.replay()?;
+        store.reconcile_discovery_pending()?;
         Ok(store)
     }
 
@@ -1029,6 +1090,7 @@ impl CommunicationStore {
             "scopes": self.projection.scopes.values().collect::<Vec<_>>(),
             "agents": self.projection.agents.values().collect::<Vec<_>>(),
             "agentTombstones": self.projection.agent_tombstones.values().collect::<Vec<_>>(),
+            "discoveryPending": self.projection.discovery_pending.values().collect::<Vec<_>>(),
             "messages": self.projection.messages.values().collect::<Vec<_>>(),
             "messageDeliveryAttempts": self
                 .projection
@@ -1186,6 +1248,355 @@ impl CommunicationStore {
         self.runtime_for_agent(agent).map(|_| ())
     }
 
+    fn global_address(address: &Address) -> global_registry::CommunicationAddress {
+        global_registry::CommunicationAddress {
+            scope_id: address.scope_id.clone(),
+            session_id: address.session_id.clone(),
+        }
+    }
+
+    fn discovery_registration_error(error: String) -> CommError {
+        CommError::new(
+            "communication_discovery_registration_failed",
+            format!("global communication discovery registration failed: {error}"),
+        )
+    }
+
+    fn discovery_pending_error(mut error: CommError, pending_id: &str) -> CommError {
+        let cause = error.context;
+        error.context = json!({
+            "pendingId": pending_id,
+            "cause": cause
+        });
+        error
+    }
+
+    fn discovery_recovery_error(
+        pending: &DiscoveryPendingRecord,
+        error: impl Into<String>,
+    ) -> CommError {
+        let mut failure = CommError::new(
+            "communication_discovery_recovery_failed",
+            format!(
+                "unable to reconcile host communication discovery for pending operation {}: {}",
+                pending.pending_id,
+                error.into()
+            ),
+        );
+        failure.context = json!({
+            "pendingId": &pending.pending_id,
+            "operation": &pending.operation,
+        });
+        failure
+    }
+
+    fn begin_discovery(&mut self, operation: DiscoveryOperation) -> CommResult<String> {
+        let pending = DiscoveryPendingRecord {
+            pending_id: new_id("discovery"),
+            operation,
+            created_at: now(),
+        };
+        let pending_id = pending.pending_id.clone();
+        self.commit(
+            "discovery.pending",
+            serde_json::to_value(&pending).expect("discovery pending record is serializable"),
+        )?;
+        Ok(pending_id)
+    }
+
+    fn publish_discovery(&self, operation: &DiscoveryOperation) -> Result<(), String> {
+        match operation {
+            DiscoveryOperation::Scope { record } => {
+                global_registry::register_communication_scope(
+                    &record.scope_id,
+                    Path::new(&record.project_root),
+                )?;
+            }
+            DiscoveryOperation::Agent { record } => {
+                let scope = self
+                    .projection
+                    .scopes
+                    .get(&record.scope_id)
+                    .ok_or_else(|| "scope is missing while publishing agent".to_string())?;
+                global_registry::register_communication_agent(
+                    &record.scope_id,
+                    &record.session_id,
+                    Path::new(&scope.project_root),
+                )?;
+            }
+            DiscoveryOperation::Rebind { event } => {
+                let scope = self
+                    .projection
+                    .scopes
+                    .get(&event.to.scope_id)
+                    .ok_or_else(|| "scope is missing while publishing rebind".to_string())?;
+                global_registry::rebind_communication_agent(
+                    &event.from.scope_id,
+                    &event.from.session_id,
+                    &event.to.session_id,
+                    Path::new(&scope.project_root),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_discovery(&mut self, pending_id: &str) -> CommResult<()> {
+        if !self.projection.discovery_pending.contains_key(pending_id) {
+            return Err(CommError::new(
+                "discovery_pending_missing",
+                format!("discovery pending operation is missing: {pending_id}"),
+            ));
+        }
+        self.commit("discovery.reconciled", json!({ "pendingId": pending_id }))
+            .map(|_| ())
+    }
+
+    fn publish_and_finish(
+        &mut self,
+        pending_id: &str,
+        operation: &DiscoveryOperation,
+    ) -> CommResult<()> {
+        if let Err(error) = self.publish_discovery(operation) {
+            return Err(Self::discovery_pending_error(
+                Self::discovery_registration_error(error),
+                pending_id,
+            ));
+        }
+        self.finish_discovery(pending_id)
+            .map_err(|error| Self::discovery_pending_error(error, pending_id))
+    }
+
+    fn ensure_local_discovery_operation(
+        &mut self,
+        operation: &DiscoveryOperation,
+    ) -> CommResult<()> {
+        match operation {
+            DiscoveryOperation::Scope { record } => {
+                match self.projection.scopes.get(&record.scope_id) {
+                    None => {
+                        self.commit(
+                            "scope.registered",
+                            serde_json::to_value(record).expect("scope record is serializable"),
+                        )?;
+                    }
+                    Some(existing) if existing == record => {}
+                    Some(_) => {
+                        return Err(CommError::new(
+                            "discovery_recovery_conflict",
+                            format!(
+                                "scope changed while discovery was pending: {}",
+                                record.scope_id
+                            ),
+                        ));
+                    }
+                }
+            }
+            DiscoveryOperation::Agent { record } => {
+                let key = record.address().key();
+                match self.projection.agents.get(&key) {
+                    None if self.projection.agent_tombstones.contains_key(&key) => {
+                        return Err(CommError::new(
+                            "discovery_recovery_conflict",
+                            format!("agent address is already rebound: {key}"),
+                        ));
+                    }
+                    None => {
+                        self.require_scope(&record.scope_id)?;
+                        self.commit("agent.registered", json!({ "agent": record }))?;
+                    }
+                    Some(existing) if existing == record => {}
+                    Some(_) => {
+                        return Err(CommError::new(
+                            "discovery_recovery_conflict",
+                            format!("agent changed while discovery was pending: {key}"),
+                        ));
+                    }
+                }
+            }
+            DiscoveryOperation::Rebind { event } => {
+                let from_key = event.from.address().key();
+                let to_key = event.to.address().key();
+                let local_rebound = self
+                    .projection
+                    .agents
+                    .get(&to_key)
+                    .is_some_and(|agent| agent == &event.to)
+                    && self
+                        .projection
+                        .agent_tombstones
+                        .get(&from_key)
+                        .is_some_and(|tombstone| tombstone == &event.tombstone);
+                if local_rebound {
+                    return Ok(());
+                }
+                if self.projection.agents.get(&from_key) != Some(&event.from)
+                    || self.projection.agents.contains_key(&to_key)
+                    || self.projection.agent_tombstones.contains_key(&from_key)
+                    || self.projection.agent_tombstones.contains_key(&to_key)
+                {
+                    return Err(CommError::new(
+                        "discovery_recovery_conflict",
+                        format!(
+                            "agent rebind state changed while discovery was pending: {from_key}"
+                        ),
+                    ));
+                }
+                self.commit(
+                    "agent.rebound",
+                    serde_json::to_value(event).expect("agent rebound event is serializable"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_discovery_pending(&mut self) -> CommResult<()> {
+        let pending: Vec<DiscoveryPendingRecord> = self
+            .projection
+            .discovery_pending
+            .values()
+            .cloned()
+            .collect();
+        for record in pending {
+            if let Err(error) = self.ensure_local_discovery_operation(&record.operation) {
+                return Err(Self::discovery_recovery_error(&record, error.to_string()));
+            }
+            if let Err(error) = self.publish_discovery(&record.operation) {
+                return Err(Self::discovery_recovery_error(&record, error));
+            }
+            self.finish_discovery(&record.pending_id)
+                .map_err(|error| Self::discovery_recovery_error(&record, error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn discovery_lookup_error(error: String) -> CommError {
+        CommError::new(
+            "communication_discovery_failed",
+            format!("global communication discovery lookup failed: {error}"),
+        )
+    }
+
+    fn target_mailbox_root(target: &global_registry::CommunicationTarget) -> CommResult<PathBuf> {
+        let mailbox = target
+            .project_root
+            .join(".appsdk-control/communication/mailbox.jsonl");
+        if !mailbox.is_file() {
+            return Err(CommError::new(
+                "communication_target_mailbox_missing",
+                format!(
+                    "registered target mailbox is missing: {}",
+                    mailbox.display()
+                ),
+            ));
+        }
+        Ok(target.project_root.clone())
+    }
+
+    fn resolve_agent(&self, address: &Address) -> CommResult<AgentRecord> {
+        let key = address.key();
+        if self.projection.agents.contains_key(&key)
+            || self.projection.agent_tombstones.contains_key(&key)
+        {
+            return self.require_agent(address).cloned();
+        }
+
+        let target = global_registry::communication_target(&Self::global_address(address))
+            .map_err(Self::discovery_lookup_error)?
+            .ok_or_else(|| {
+                CommError::new(
+                    "agent_not_registered",
+                    format!("agent not registered: {}", address.key()),
+                )
+            })?;
+        if let Some(rebound_from) = target.rebound_from.as_ref() {
+            let mut error = CommError::new(
+                "agent_address_rebound",
+                format!("agent address was rebound to {}", target.address.session_id),
+            );
+            error.context = json!({
+                "oldAddress": rebound_from,
+                "newAddress": target.address,
+                "projectRoot": target.project_root,
+            });
+            return Err(error);
+        }
+        let project_root = Self::target_mailbox_root(&target)?;
+        if project_root == self.project_root {
+            return Err(CommError::new(
+                "agent_not_registered",
+                format!("agent not registered: {}", address.key()),
+            ));
+        }
+        let external = Self::open_mailbox_read_only(
+            project_root.join(".appsdk-control/communication/mailbox.jsonl"),
+        )
+        .map_err(|mut error| {
+            error.context = json!({
+                "targetAddress": address,
+                "targetProjectRoot": project_root,
+                "cause": error.context,
+            });
+            error
+        })?;
+        let external_address = Address {
+            scope_id: target.address.scope_id.clone(),
+            session_id: target.address.session_id.clone(),
+        };
+        external.require_agent(&external_address).cloned()
+    }
+
+    fn resolve_live_agent(&self, address: &Address) -> CommResult<AgentRecord> {
+        let agent = self.resolve_agent(address)?;
+        if !agent.live_at(&now()) {
+            return Err(CommError::new(
+                "agent_lease_expired",
+                format!("agent lease expired: {}", address.key()),
+            ));
+        }
+        Ok(agent)
+    }
+
+    fn resolve_scope_for_agent(&self, agent: &AgentRecord) -> CommResult<ScopeRecord> {
+        if let Some(scope) = self.projection.scopes.get(&agent.scope_id) {
+            return Ok(scope.clone());
+        }
+        let target = global_registry::communication_target(&Self::global_address(&agent.address()))
+            .map_err(Self::discovery_lookup_error)?
+            .ok_or_else(|| {
+                CommError::new(
+                    "scope_not_found",
+                    format!("scope not found: {}", agent.scope_id),
+                )
+            })?;
+        if target.rebound_from.is_some() {
+            return Err(CommError::new(
+                "agent_address_rebound",
+                format!("agent address was rebound: {}", agent.address().key()),
+            ));
+        }
+        let project_root = Self::target_mailbox_root(&target)?;
+        if project_root == self.project_root {
+            return Err(CommError::new(
+                "scope_not_found",
+                format!("scope not found: {}", agent.scope_id),
+            ));
+        }
+        let external = Self::open_mailbox_read_only(
+            project_root.join(".appsdk-control/communication/mailbox.jsonl"),
+        )
+        .map_err(|mut error| {
+            error.context = json!({
+                "targetAddress": agent.address(),
+                "targetProjectRoot": project_root,
+                "cause": error.context,
+            });
+            error
+        })?;
+        external.require_scope(&agent.scope_id).cloned()
+    }
+
     fn register_adapter(&mut self, request: AdapterRequest) -> CommResult<Value> {
         validate_non_empty(&request.adapter_id, "adapterId")?;
         if !matches!(request.kind.as_str(), "mailbox" | "tmux" | "appserver") {
@@ -1217,7 +1628,7 @@ impl CommunicationStore {
             ));
         }
         if let Some(recipient) = request.recipient.as_ref() {
-            let agent = self.require_live_agent(recipient)?.clone();
+            let agent = self.resolve_live_agent(recipient)?;
             if request.kind != "mailbox" {
                 let runtime = self.runtime_for_agent(&agent)?;
                 let target = request.target.as_deref().ok_or_else(|| {
@@ -1269,7 +1680,7 @@ impl CommunicationStore {
         self.validate_project_root(&request.project_root)?;
         let _runtime = self.require_runtime_for_scope(&request)?;
         let at = now();
-        if let Some(existing) = self.projection.scopes.get(&request.scope_id) {
+        if let Some(existing) = self.projection.scopes.get(&request.scope_id).cloned() {
             if existing.appserver_id == request.appserver_id
                 && existing.namespace == request.namespace
                 && existing.endpoint == request.endpoint
@@ -1277,6 +1688,11 @@ impl CommunicationStore {
                 && existing.session_ids == request.session_ids
                 && existing.runtime_id.as_deref() == request.runtime_id.as_deref()
             {
+                let operation = DiscoveryOperation::Scope {
+                    record: existing.clone(),
+                };
+                let pending_id = self.begin_discovery(operation.clone())?;
+                self.publish_and_finish(&pending_id, &operation)?;
                 return Ok(json!({ "scope": existing, "idempotent": true }));
             }
             return Err(CommError::new(
@@ -1299,7 +1715,15 @@ impl CommunicationStore {
             master_session_id: None,
             runtime_id: request.runtime_id,
         };
-        self.commit("scope.registered", serde_json::to_value(&record).unwrap())?;
+        let operation = DiscoveryOperation::Scope {
+            record: record.clone(),
+        };
+        let pending_id = self.begin_discovery(operation.clone())?;
+        if let Err(error) = self.commit("scope.registered", serde_json::to_value(&record).unwrap())
+        {
+            return Err(Self::discovery_pending_error(error, &pending_id));
+        }
+        self.publish_and_finish(&pending_id, &operation)?;
         Ok(json!({ "scope": record, "idempotent": false }))
     }
 
@@ -1395,6 +1819,11 @@ impl CommunicationStore {
                 && existing.parent == request.parent
                 && existing.runtime_id.as_deref() == request.runtime_id.as_deref()
             {
+                let operation = DiscoveryOperation::Agent {
+                    record: existing.clone(),
+                };
+                let pending_id = self.begin_discovery(operation.clone())?;
+                self.publish_and_finish(&pending_id, &operation)?;
                 let reconciled_idle = if existing.role == "master" {
                     self.reconcile_idle_workers_for_master(&existing)?
                 } else {
@@ -1446,7 +1875,15 @@ impl CommunicationStore {
             last_state_at: at,
             runtime_id: request.runtime_id,
         };
-        self.commit("agent.registered", serde_json::to_value(&record).unwrap())?;
+        let operation = DiscoveryOperation::Agent {
+            record: record.clone(),
+        };
+        let pending_id = self.begin_discovery(operation.clone())?;
+        if let Err(error) = self.commit("agent.registered", serde_json::to_value(&record).unwrap())
+        {
+            return Err(Self::discovery_pending_error(error, &pending_id));
+        }
+        self.publish_and_finish(&pending_id, &operation)?;
         let reconciled_idle = if record.role == "master" {
             self.reconcile_idle_workers_for_master(&record)?
         } else {
@@ -1625,7 +2062,14 @@ impl CommunicationStore {
             to: rebound.clone(),
             tombstone: tombstone.clone(),
         };
-        self.commit("agent.rebound", serde_json::to_value(&event).unwrap())?;
+        let operation = DiscoveryOperation::Rebind {
+            event: event.clone(),
+        };
+        let pending_id = self.begin_discovery(operation.clone())?;
+        if let Err(error) = self.commit("agent.rebound", serde_json::to_value(&event).unwrap()) {
+            return Err(Self::discovery_pending_error(error, &pending_id));
+        }
+        self.publish_and_finish(&pending_id, &operation)?;
         Ok(json!({
             "agent": rebound,
             "tombstone": tombstone,
@@ -1636,7 +2080,7 @@ impl CommunicationStore {
     fn send(&mut self, request: MessageRequest) -> CommResult<Value> {
         validate_message_request(&request)?;
         let source = self.require_live_agent(&request.from)?.clone();
-        let target = self.require_live_agent(&request.to)?.clone();
+        let target = self.resolve_live_agent(&request.to)?;
         self.require_agent_runtime(&source)?;
         self.require_agent_runtime(&target)?;
         let route = self.resolve_route(&source, &target)?;
@@ -1696,7 +2140,7 @@ impl CommunicationStore {
         }) {
             return Ok(json!({ "message": message, "idempotent": true }));
         }
-        let target = self.require_live_agent(&message.to)?.clone();
+        let target = self.resolve_live_agent(&message.to)?;
         let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
             CommError::new(
                 "runtime_registration_required",
@@ -1802,7 +2246,7 @@ impl CommunicationStore {
             .get(&message.message_id)
             .cloned()
         {
-            let target = self.require_live_agent(&message.to)?.clone();
+            let target = self.resolve_live_agent(&message.to)?;
             let runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
                 CommError::new(
                     "runtime_registration_required",
@@ -1825,7 +2269,7 @@ impl CommunicationStore {
             return Ok(existing);
         }
 
-        let target = self.require_live_agent(&message.to)?.clone();
+        let target = self.resolve_live_agent(&message.to)?;
         let runtime_id = target.runtime_id.clone().ok_or_else(|| {
             CommError::new(
                 "runtime_registration_required",
@@ -4884,7 +5328,7 @@ impl CommunicationStore {
 
     fn resolve_route(&self, source: &AgentRecord, target: &AgentRecord) -> CommResult<RouteRecord> {
         let source_scope = self.require_scope(&source.scope_id)?;
-        let target_scope = self.require_scope(&target.scope_id)?;
+        let target_scope = self.resolve_scope_for_agent(target)?;
         let same_scope = source.scope_id == target.scope_id;
         let same_appserver = source_scope.appserver_id == target_scope.appserver_id;
         let same_project = source_scope.project_root == target_scope.project_root;
@@ -5103,6 +5547,126 @@ impl CommunicationStore {
         for notification in self.projection.notifications.values_mut() {
             if notification.delivery_attempt.is_some() {
                 notification.status = "unknown".into();
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_identity_only(&mut self) -> CommResult<()> {
+        let text = fs::read_to_string(&self.mailbox_path).map_err(|error| {
+            CommError::new(
+                "journal_read_failed",
+                format!("{}: {error}", self.mailbox_path.display()),
+            )
+        })?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err(CommError::new(
+                "journal_corrupt",
+                "communication JSONL must end with a newline",
+            ));
+        }
+        let mut event_ids = BTreeMap::new();
+        for (index, line) in text.lines().enumerate() {
+            let line_number = index + 1;
+            if line.trim().is_empty() {
+                return Err(CommError::new(
+                    "journal_corrupt",
+                    format!("empty JSONL line at line {line_number}"),
+                ));
+            }
+            let event: EventRecord = serde_json::from_str(line).map_err(|error| {
+                CommError::new(
+                    "journal_corrupt",
+                    format!("invalid JSONL at line {line_number}: {error}"),
+                )
+            })?;
+            validate_event_envelope(&event).map_err(|error| {
+                CommError::new(
+                    "journal_corrupt",
+                    format!("invalid envelope at line {line_number}: {error}"),
+                )
+            })?;
+            if event.protocol != PROTOCOL {
+                return Err(CommError::new(
+                    "journal_protocol_mismatch",
+                    format!("unsupported communication protocol at line {line_number}"),
+                ));
+            }
+            if event_ids
+                .insert(event.event_id.clone(), line_number)
+                .is_some()
+            {
+                return Err(CommError::new(
+                    "journal_corrupt",
+                    format!("duplicate eventId at line {line_number}"),
+                ));
+            }
+            match event.kind.as_str() {
+                "scope.registered" | "scope.unregistered" | "agent.registered" | "agent.state"
+                | "agent.refreshed" | "agent.rebound" => {
+                    self.apply_event(&event).map_err(|error| {
+                        CommError::new(
+                            "journal_corrupt",
+                            format!(
+                                "invalid identity event at line {line_number}: {}",
+                                error.message
+                            ),
+                        )
+                    })?
+                }
+                "discovery.pending" => {
+                    let _: DiscoveryPendingRecord = decode(&event.data, "discovery pending")
+                        .map_err(|error| {
+                            CommError::new(
+                                "journal_corrupt",
+                                format!(
+                                    "invalid discovery pending event at line {line_number}: {}",
+                                    error.message
+                                ),
+                            )
+                        })?;
+                }
+                "discovery.reconciled" => {
+                    if event
+                        .data
+                        .get("pendingId")
+                        .and_then(Value::as_str)
+                        .is_none_or(|value| value.trim().is_empty())
+                    {
+                        return Err(CommError::new(
+                            "journal_corrupt",
+                            format!(
+                                "invalid discovery reconciled event at line {line_number}: pendingId missing"
+                            ),
+                        ));
+                    }
+                }
+                "adapter.registered"
+                | "message.created"
+                | "message.delivery_attempt"
+                | "message.state"
+                | "notification.queued"
+                | "notification.superseded"
+                | "notification.delivery_attempt"
+                | "notification.emitted"
+                | "notification.batch_emitted"
+                | "notification.delivery_failed"
+                | "wakeup.updated"
+                | "master_wake.updated"
+                | "master_wake.decided"
+                | "master_wake.briefing"
+                | "wakeup.reminder"
+                | "bug.reported"
+                | "bug.updated"
+                | "loop.created"
+                | "loop.updated"
+                | "error.recorded" => {}
+                other => {
+                    return Err(CommError::new(
+                        "journal_unknown_event",
+                        format!("unknown communication event: {other}"),
+                    ));
+                }
             }
         }
         Ok(())
@@ -5558,6 +6122,44 @@ impl CommunicationStore {
                     .insert(record.address().key(), record);
             }
             "agent.rebound" => self.apply_agent_rebound_event(&event.data)?,
+            "discovery.pending" => {
+                let pending: DiscoveryPendingRecord = decode(&event.data, "discovery pending")?;
+                if self
+                    .projection
+                    .discovery_pending
+                    .insert(pending.pending_id.clone(), pending)
+                    .is_some()
+                {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "discovery pending operation is duplicated",
+                    ));
+                }
+            }
+            "discovery.reconciled" => {
+                let pending_id = event
+                    .data
+                    .get("pendingId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "discovery reconciled pendingId missing",
+                        )
+                    })?;
+                if self
+                    .projection
+                    .discovery_pending
+                    .remove(pending_id)
+                    .is_none()
+                {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        format!("discovery pending operation is missing: {pending_id}"),
+                    ));
+                }
+            }
             "message.created" => {
                 let record: MessageRecord = decode(&event.data, "message")?;
                 self.projection
@@ -5601,17 +6203,15 @@ impl CommunicationStore {
                             format!("message delivery attempt message not found: {message_id}"),
                         )
                     })?;
-                let target = self
-                    .projection
-                    .agents
-                    .get(&message.to.key())
-                    .cloned()
-                    .ok_or_else(|| {
-                        CommError::new(
-                            "event_data_invalid",
-                            "message delivery attempt target agent is missing",
-                        )
-                    })?;
+                let target = self.resolve_agent(&message.to).map_err(|error| {
+                    CommError::new(
+                        "event_data_invalid",
+                        format!(
+                            "message delivery attempt target agent is missing: {}",
+                            error.message
+                        ),
+                    )
+                })?;
                 let runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
                     CommError::new(
                         "event_data_invalid",
@@ -5664,13 +6264,12 @@ impl CommunicationStore {
                     .get(message_id)
                     .cloned()
                     .ok_or_else(|| CommError::new("event_data_invalid", "message not found"))?;
-                let target = self
-                    .projection
-                    .agents
-                    .get(&message_record.to.key())
-                    .ok_or_else(|| {
-                        CommError::new("event_data_invalid", "message target agent is missing")
-                    })?;
+                let target = self.resolve_agent(&message_record.to).map_err(|error| {
+                    CommError::new(
+                        "event_data_invalid",
+                        format!("message target agent is missing: {}", error.message),
+                    )
+                })?;
                 let adapter = self.require_adapter(&message_record.adapter_id)?.clone();
                 let attempt_id_value = event.data.get("attemptId");
                 let nonce_value = event.data.get("nonce");
@@ -5691,7 +6290,7 @@ impl CommunicationStore {
                 validate_replayed_delivery_evidence(
                     state,
                     &evidence,
-                    target,
+                    &target,
                     message_id,
                     &message_record,
                     self.projection.message_delivery_attempts.get(message_id),

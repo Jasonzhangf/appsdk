@@ -22,6 +22,10 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 fn call(root: &Path, request: Value) -> Value {
+    call_with_host(root, &root.join(".appsdk-host"), request)
+}
+
+fn call_with_host(root: &Path, host: &Path, request: Value) -> Value {
     let output = Command::new(binary())
         .args([
             "communication",
@@ -29,7 +33,7 @@ fn call(root: &Path, request: Value) -> Value {
             "--json",
             &serde_json::to_string(&request).unwrap(),
         ])
-        .env("APPSDK_HOME", root.join(".appsdk-host"))
+        .env("APPSDK_HOME", host)
         .output()
         .unwrap();
     assert!(
@@ -41,6 +45,10 @@ fn call(root: &Path, request: Value) -> Value {
 }
 
 fn call_error(root: &Path, request: Value) -> String {
+    call_error_with_host(root, &root.join(".appsdk-host"), request)
+}
+
+fn call_error_with_host(root: &Path, host: &Path, request: Value) -> String {
     let output = Command::new(binary())
         .args([
             "communication",
@@ -48,7 +56,7 @@ fn call_error(root: &Path, request: Value) -> String {
             "--json",
             &serde_json::to_string(&request).unwrap(),
         ])
-        .env("APPSDK_HOME", root.join(".appsdk-host"))
+        .env("APPSDK_HOME", host)
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -141,11 +149,28 @@ fn register_scope(
     _project_root: &str,
     sessions: &[&str],
 ) {
+    register_scope_with_host(
+        root,
+        &root.join(".appsdk-host"),
+        scope_id,
+        appserver_id,
+        sessions,
+    );
+}
+
+fn register_scope_with_host(
+    root: &Path,
+    host: &Path,
+    scope_id: &str,
+    appserver_id: &str,
+    sessions: &[&str],
+) {
     let runtime_id = format!("runtime-{scope_id}");
     let bound_project_root = root.canonicalize().unwrap();
     let bound_project_root = bound_project_root.to_str().unwrap();
-    call(
+    call_with_host(
         root,
+        host,
         json!({
             "op": "register_runtime",
             "runtime": {
@@ -161,8 +186,9 @@ fn register_scope(
             }
         }),
     );
-    call(
+    call_with_host(
         root,
+        host,
         json!({
             "op": "register_scope",
             "scope": {
@@ -186,6 +212,26 @@ fn register_agent(
     role: &str,
     parent: Option<Value>,
 ) {
+    register_agent_with_host(
+        root,
+        &root.join(".appsdk-host"),
+        scope_id,
+        session_id,
+        agent_id,
+        role,
+        parent,
+    );
+}
+
+fn register_agent_with_host(
+    root: &Path,
+    host: &Path,
+    scope_id: &str,
+    session_id: &str,
+    agent_id: &str,
+    role: &str,
+    parent: Option<Value>,
+) {
     let mut agent = json!({
         "scopeId": scope_id,
         "sessionId": session_id,
@@ -199,7 +245,11 @@ fn register_agent(
     if let Some(parent) = parent {
         agent["parent"] = parent;
     }
-    call(root, json!({ "op": "register_agent", "agent": agent }));
+    call_with_host(
+        root,
+        host,
+        json!({ "op": "register_agent", "agent": agent }),
+    );
 }
 
 fn register_agent_with_lease(
@@ -1072,6 +1122,264 @@ fn routing_requires_explicit_master_and_respects_scope_boundaries() {
         }),
     );
     assert!(auto_role.contains("role_auto_forbidden"), "{auto_role}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cross_project_master_messages_use_shared_host_discovery_and_replay_target_mailbox() {
+    let project_a = temp_root("cross-project-a");
+    let project_b = temp_root("cross-project-b");
+    let host = temp_root("cross-project-host");
+
+    register_scope_with_host(&project_a, &host, "scope-a", "app-a", &["master-a"]);
+    register_scope_with_host(&project_b, &host, "scope-b", "app-b", &["master-b"]);
+    register_agent_with_host(
+        &project_a, &host, "scope-a", "master-a", "master-a", "master", None,
+    );
+    register_agent_with_host(
+        &project_b, &host, "scope-b", "master-b", "master-b", "master", None,
+    );
+
+    let a_to_b = call_with_host(
+        &project_a,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope-a", "sessionId": "master-a" },
+                "to": { "scopeId": "scope-b", "sessionId": "master-b" },
+                "title": "cross project request",
+                "priority": "p1",
+                "body": "A asks B to coordinate"
+            }
+        }),
+    );
+    assert_eq!(a_to_b["route"]["mode"], "cross-scope-master");
+    assert_eq!(a_to_b["route"]["sameAppserver"], false);
+    assert_eq!(a_to_b["route"]["sameProject"], false);
+    assert_eq!(a_to_b["message"]["state"], "accepted");
+
+    let b_to_a = call_with_host(
+        &project_b,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope-b", "sessionId": "master-b" },
+                "to": { "scopeId": "scope-a", "sessionId": "master-a" },
+                "title": "cross project response",
+                "priority": "p1",
+                "body": "B confirms coordination"
+            }
+        }),
+    );
+    assert_eq!(b_to_a["route"]["mode"], "cross-scope-master");
+
+    let status_a = call_with_host(&project_a, &host, json!({ "op": "status" }));
+    assert_eq!(status_a["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(status_a["messages"][0]["to"]["sessionId"], "master-b");
+    let status_b = call_with_host(&project_b, &host, json!({ "op": "status" }));
+    assert_eq!(status_b["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(status_b["messages"][0]["to"]["sessionId"], "master-a");
+
+    let registry = fs::read_to_string(host.join("communication.jsonl")).unwrap();
+    assert_eq!(registry.lines().count(), 4);
+    assert!(registry.contains("\"scopeId\":\"scope-a\""));
+    assert!(registry.contains("\"scopeId\":\"scope-b\""));
+
+    fs::remove_dir_all(project_a).unwrap();
+    fs::remove_dir_all(project_b).unwrap();
+    fs::remove_dir_all(host).unwrap();
+}
+
+#[test]
+fn cross_project_peer_and_unknown_target_remain_fail_closed_after_discovery() {
+    let project_a = temp_root("cross-project-peer-a");
+    let project_b = temp_root("cross-project-peer-b");
+    let host = temp_root("cross-project-peer-host");
+
+    register_scope_with_host(
+        &project_a,
+        &host,
+        "scope-a",
+        "app-a",
+        &["master-a", "peer-a"],
+    );
+    register_scope_with_host(
+        &project_b,
+        &host,
+        "scope-b",
+        "app-b",
+        &["master-b", "peer-b"],
+    );
+    register_agent_with_host(
+        &project_a, &host, "scope-a", "master-a", "master-a", "master", None,
+    );
+    register_agent_with_host(
+        &project_a, &host, "scope-a", "peer-a", "peer-a", "peer", None,
+    );
+    register_agent_with_host(
+        &project_b, &host, "scope-b", "master-b", "master-b", "master", None,
+    );
+    register_agent_with_host(
+        &project_b, &host, "scope-b", "peer-b", "peer-b", "peer", None,
+    );
+
+    let peer_cross = call_error_with_host(
+        &project_a,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope-a", "sessionId": "peer-a" },
+                "to": { "scopeId": "scope-b", "sessionId": "master-b" },
+                "title": "forbidden cross project peer",
+                "priority": "p2",
+                "body": "peer cannot cross scope"
+            }
+        }),
+    );
+    assert!(
+        peer_cross.contains("cross_scope_master_required"),
+        "{peer_cross}"
+    );
+
+    let unknown = call_error_with_host(
+        &project_a,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope-a", "sessionId": "master-a" },
+                "to": { "scopeId": "scope-z", "sessionId": "master-z" },
+                "title": "unknown target",
+                "priority": "p2",
+                "body": "must fail closed"
+            }
+        }),
+    );
+    assert!(unknown.contains("agent_not_registered"), "{unknown}");
+
+    let status_a = call_with_host(&project_a, &host, json!({ "op": "status" }));
+    assert!(status_a["messages"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(project_a).unwrap();
+    fs::remove_dir_all(project_b).unwrap();
+    fs::remove_dir_all(host).unwrap();
+}
+
+#[test]
+fn discovery_registration_failure_replays_from_local_pending_intent() {
+    let root = temp_root("discovery-registration-recovery");
+    let host = root.join(".appsdk-host");
+    let project_root = root.canonicalize().unwrap();
+    let project_root = project_root.to_str().unwrap();
+    call_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-recovery",
+                "appserverId": "app-recovery",
+                "namespace": "codex_tui",
+                "endpoint": "mock://recovery",
+                "projectRoot": project_root,
+                "capabilities": ["send_message_to_thread"],
+                "tmuxSession": "appsdk-recovery",
+                "tmuxPane": "%1",
+                "processId": std::process::id()
+            }
+        }),
+    );
+    let registry_file = host.join("communication.jsonl");
+    fs::create_dir_all(&registry_file).unwrap();
+    let error = call_error_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "register_scope",
+            "scope": {
+                "scopeId": "scope-recovery",
+                "appserverId": "app-recovery",
+                "namespace": "codex_tui",
+                "endpoint": "mock://recovery",
+                "projectRoot": project_root,
+                "sessionIds": ["master"],
+                "runtimeId": "runtime-recovery"
+            }
+        }),
+    );
+    assert!(
+        error.contains("communication_discovery_registration_failed"),
+        "{error}"
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let raw = fs::read_to_string(&mailbox).unwrap();
+    assert!(raw.contains("\"kind\":\"discovery.pending\""));
+    assert!(raw.contains("\"kind\":\"scope.registered\""));
+
+    fs::remove_dir_all(&registry_file).unwrap();
+    let status = call_with_host(&root, &host, json!({ "op": "status" }));
+    assert_eq!(status["scopes"].as_array().unwrap().len(), 1);
+    assert_eq!(status["discoveryPending"].as_array().unwrap().len(), 0);
+    assert!(host.join("communication.jsonl").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rebind_failure_replays_from_local_pending_intent() {
+    let root = temp_root("discovery-rebind-recovery");
+    let host = root.join(".appsdk-host");
+    register_scope_with_host(
+        &root,
+        &host,
+        "scope-rebind-recovery",
+        "app-rebind-recovery",
+        &["master-old", "master-new"],
+    );
+    register_agent_with_host(
+        &root,
+        &host,
+        "scope-rebind-recovery",
+        "master-old",
+        "master",
+        "master",
+        None,
+    );
+
+    let registry_file = host.join("communication.jsonl");
+    let registry_backup = host.join("communication.jsonl.backup");
+    fs::rename(&registry_file, &registry_backup).unwrap();
+    fs::create_dir_all(&registry_file).unwrap();
+    let error = call_error_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope-rebind-recovery", "sessionId": "master-old" },
+                "to": { "scopeId": "scope-rebind-recovery", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope-rebind-recovery"
+            }
+        }),
+    );
+    assert!(
+        error.contains("communication_discovery_registration_failed"),
+        "{error}"
+    );
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let raw = fs::read_to_string(&mailbox).unwrap();
+    assert!(raw.contains("\"kind\":\"discovery.pending\""));
+    assert!(raw.contains("\"kind\":\"agent.rebound\""));
+
+    fs::remove_dir_all(&registry_file).unwrap();
+    fs::rename(&registry_backup, &registry_file).unwrap();
+    let status = call_with_host(&root, &host, json!({ "op": "status" }));
+    assert_eq!(status["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(status["agents"][0]["sessionId"], "master-new");
+    assert_eq!(status["discoveryPending"].as_array().unwrap().len(), 0);
+    let registry = fs::read_to_string(&registry_file).unwrap();
+    assert!(registry.contains("\"event\":\"communication.agent.rebound\""));
     fs::remove_dir_all(root).unwrap();
 }
 

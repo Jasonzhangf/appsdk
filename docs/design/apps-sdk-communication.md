@@ -79,6 +79,20 @@ JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`�
 错误处理也必须追加事实；如果
 错误事实本身写入失败，返回包含主错误和次级写入错误的错误链。
 
+跨项目目标发现使用同一台主机的 `~/.appsdk/communication.jsonl`。该索引只保存
+`scopeId/sessionId -> canonical project root`，不复制角色、lease、parent 或路由状态。
+发送端先从索引定位目标项目，再从目标 mailbox 重放 scope/agent 身份并执行原有的
+跨-scope master 规则；目标地址未知、冲突、过期或不满足 route policy 时仍然失败。
+目标 mailbox 的身份重放采用只读路径，避免发送端持有本地独占锁时形成 A→B→A 的锁
+反转；完整 mailbox 仍由目标项目的正常打开路径做全量校验。目标文件缺失、截断、坏行、
+未知事件或索引损坏都保留明确错误，不会自动改写地址或把消息复制进另一个项目的 mailbox。
+
+项目 mailbox 与 host 索引之间使用可恢复的两阶段事实顺序：先追加带完整本地记录的
+`discovery.pending` 意图，再追加 scope/agent/rebind 的本地事实，最后发布 host 索引并追加
+`discovery.reconciled`。任一步失败都会保留原始错误和 pending id；下一次打开该项目 mailbox
+时按意图补齐本地事实、重试 host 投影并关闭意图。不会把 host 索引当成提交成功，也不会
+要求手工复制、删除或改写任一 JSONL。
+
 ## 地址、scope、角色和 lease
 
 通信地址固定为 `scopeId/sessionId`，运行时绑定使用稳定 `runtimeId`。Scope 记录 `appserverId`、宿主声明的

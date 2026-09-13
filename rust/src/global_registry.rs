@@ -53,6 +53,82 @@ pub struct RegistrationReceipt {
     pub idempotent: bool,
 }
 
+/// A validated registration that keeps the host registry lock until the
+/// caller has finished initializing the project workspace.
+///
+/// Initialization writes project-owned governance files before publishing the
+/// append-only host event. Holding the lock across that small transaction
+/// closes the race where a competing writer changes the registry between a
+/// preflight check and the final append. Dropping this value without calling
+/// `commit` leaves no project event behind.
+pub struct ProjectRegistrationReservation {
+    registry_root: PathBuf,
+    registry_path: PathBuf,
+    canonical_root: PathBuf,
+    canonical_root_text: String,
+    project_id: String,
+    sdk_version: String,
+    matching_version: bool,
+    _lock: File,
+}
+
+impl ProjectRegistrationReservation {
+    /// Publish the registration event after the caller's local transaction has
+    /// completed. The registry lock is released when this method returns.
+    pub fn commit(self) -> Result<RegistrationReceipt, String> {
+        let Self {
+            registry_root,
+            registry_path,
+            canonical_root,
+            canonical_root_text,
+            project_id,
+            sdk_version,
+            matching_version,
+            _lock,
+        } = self;
+
+        if matching_version {
+            return Ok(RegistrationReceipt {
+                registry_root,
+                registry_path,
+                project_id,
+                project_root: canonical_root,
+                sdk_version,
+                idempotent: true,
+            });
+        }
+
+        let event = RegistrationEvent {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            event: REGISTRY_EVENT.to_string(),
+            project_id: project_id.clone(),
+            project_root: canonical_root_text,
+            sdk_version: sdk_version.clone(),
+            registered_at: Utc::now().to_rfc3339(),
+            source: REGISTRY_SOURCE.to_string(),
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&registry_path)
+            .map_err(|error| format!("GLOBAL_REGISTRY_OPEN_FAILED:{error}"))?;
+        let mut line = serde_json::to_vec(&event)
+            .map_err(|error| format!("GLOBAL_REGISTRY_SERIALIZE_FAILED:{error}"))?;
+        line.push(b'\n');
+        file.write_all(&line)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("GLOBAL_REGISTRY_WRITE_FAILED:{error}"))?;
+        Ok(RegistrationReceipt {
+            registry_root,
+            registry_path,
+            project_id,
+            project_root: canonical_root,
+            sdk_version,
+            idempotent: false,
+        })
+    }
+}
+
 /// Host runtime identity supplied by a native host or TUI adapter.
 ///
 /// The identity is intentionally separate from a conversation/session id.  A
@@ -1384,22 +1460,31 @@ fn has_registered_version(
 
 /// Record one project registration in the host-wide AppSDK registry.
 /// Re-registering the same canonical root and SDK version is idempotent.
+#[allow(dead_code)]
 pub fn register_project(root: &Path, sdk_version: &str) -> Result<RegistrationReceipt, String> {
     let registry_root = registry_root()?;
     register_project_at(root, registry_root.as_path(), sdk_version)
 }
 
-/// Record a project registration at an explicit registry root.
-///
-/// This is the same operation as [`register_project`], with the registry
-/// location injected for isolated tests and controlled migration tooling.
-/// Production callers should use [`register_project`] so the canonical host
-/// location remains `~/.appsdk`.
-pub fn register_project_at(
+/// Validate a project registration and reserve the host registry for the
+/// caller's initialization transaction. The reservation is intentionally
+/// separate from the append so local project writes can complete before the
+/// host-wide event becomes visible.
+pub fn reserve_project(
+    root: &Path,
+    sdk_version: &str,
+) -> Result<ProjectRegistrationReservation, String> {
+    let registry_root = registry_root()?;
+    reserve_project_at(root, registry_root.as_path(), sdk_version)
+}
+
+/// Test/integration variant of [`reserve_project`] with an explicit registry
+/// root. Production callers should use [`reserve_project`].
+pub fn reserve_project_at(
     project_root: &Path,
     registry_root: &Path,
     sdk_version: &str,
-) -> Result<RegistrationReceipt, String> {
+) -> Result<ProjectRegistrationReservation, String> {
     let (canonical_root, canonical_root_text) = validate_project_root(project_root)?;
     if sdk_version.trim().is_empty() {
         return Err("GLOBAL_REGISTRY_SDK_VERSION_INVALID: version must not be empty".into());
@@ -1411,47 +1496,35 @@ pub fn register_project_at(
     let lock_path = registry_root.join(REGISTRY_LOCK);
     ensure_no_symlink(&path, "registry_file")?;
     ensure_no_symlink(&lock_path, "registry_lock")?;
-    let _lock = lock_registry(&lock_path)?;
+    let lock = lock_registry(&lock_path)?;
     let id = project_id(&canonical_root);
     let matching_version = has_registered_version(&path, &canonical_root_text, sdk_version)?;
-    if matching_version {
-        return Ok(RegistrationReceipt {
-            registry_root: registry_root.to_path_buf(),
-            registry_path: path,
-            project_id: id,
-            project_root: canonical_root,
-            sdk_version: sdk_version.to_string(),
-            idempotent: true,
-        });
-    }
-    let event = RegistrationEvent {
-        schema_version: REGISTRY_SCHEMA_VERSION,
-        event: REGISTRY_EVENT.to_string(),
-        project_id: id.clone(),
-        project_root: canonical_root_text.to_string(),
-        sdk_version: sdk_version.to_string(),
-        registered_at: Utc::now().to_rfc3339(),
-        source: REGISTRY_SOURCE.to_string(),
-    };
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| format!("GLOBAL_REGISTRY_OPEN_FAILED:{error}"))?;
-    let mut line = serde_json::to_vec(&event)
-        .map_err(|error| format!("GLOBAL_REGISTRY_SERIALIZE_FAILED:{error}"))?;
-    line.push(b'\n');
-    file.write_all(&line)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("GLOBAL_REGISTRY_WRITE_FAILED:{error}"))?;
-    Ok(RegistrationReceipt {
-        registry_root: registry_root.to_path_buf(),
+
+    Ok(ProjectRegistrationReservation {
+        registry_root,
         registry_path: path,
+        canonical_root,
+        canonical_root_text,
         project_id: id,
-        project_root: canonical_root,
         sdk_version: sdk_version.to_string(),
-        idempotent: false,
+        matching_version,
+        _lock: lock,
     })
+}
+
+/// Record a project registration at an explicit registry root.
+///
+/// This is the same operation as [`register_project`], with the registry
+/// location injected for isolated tests and controlled migration tooling.
+/// Production callers should use [`register_project`] so the canonical host
+/// location remains `~/.appsdk`.
+#[allow(dead_code)]
+pub fn register_project_at(
+    project_root: &Path,
+    registry_root: &Path,
+    sdk_version: &str,
+) -> Result<RegistrationReceipt, String> {
+    reserve_project_at(project_root, registry_root, sdk_version)?.commit()
 }
 
 pub fn receipt_json(receipt: &RegistrationReceipt) -> Value {

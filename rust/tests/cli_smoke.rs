@@ -929,6 +929,77 @@ fn initialization_failure_does_not_persist_global_registration() {
 }
 
 #[test]
+fn registration_failure_is_preflighted_before_new_workspace_scaffold() {
+    let root = temp_root("global-registration-preflight");
+    let registry_parent = temp_root("global-registration-preflight-home");
+    let registry_target = registry_parent.join("real");
+    let registry = registry_parent.join("linked");
+    fs::create_dir_all(&registry_target).unwrap();
+    symlink(&registry_target, &registry).unwrap();
+
+    let created = Command::new(binary())
+        .args(["new", root.to_str().unwrap()])
+        .env("APPSDK_HOME", registry.to_str().unwrap())
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!created.status.success());
+    assert!(
+        String::from_utf8_lossy(&created.stderr).contains("GLOBAL_REGISTRY_SYMLINK:registry_root")
+    );
+    assert!(root.is_dir());
+    assert!(!root.join(".appsdk").exists());
+    assert!(!root.join(".gitignore").exists());
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(registry_parent).unwrap();
+}
+
+#[test]
+fn registration_failure_is_preflighted_before_existing_workspace_refresh() {
+    let root = temp_root("global-registration-existing-preflight");
+    let registry_parent = temp_root("global-registration-existing-preflight-home");
+    let registry = registry_parent.join("linked");
+    let root_text = root.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    let created = Command::new(binary())
+        .args(["new", root_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let project_before = fs::read(root.join(".appsdk/project.json")).unwrap();
+    let lock_before = fs::read(root.join(".appsdk/sdk.lock")).unwrap();
+    fs::remove_dir_all(&registry).unwrap();
+
+    let real_registry = registry_parent.join("real");
+    fs::create_dir_all(&real_registry).unwrap();
+    symlink(&real_registry, &registry).unwrap();
+    let initialized = Command::new(binary())
+        .args(["init", root_text])
+        .env("APPSDK_HOME", registry.to_str().unwrap())
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!initialized.status.success());
+    assert!(String::from_utf8_lossy(&initialized.stderr)
+        .contains("GLOBAL_REGISTRY_SYMLINK:registry_root"));
+    assert_eq!(
+        fs::read(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read(root.join(".appsdk/sdk.lock")).unwrap(),
+        lock_before
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(registry_parent).unwrap();
+}
+
+#[test]
 fn init_fresh_nested_project_ignores_its_transaction_lock_when_checking_clean_worktree() {
     let workspace = temp_root("init-fresh-nested-project-lock");
     fs::create_dir_all(&workspace).unwrap();

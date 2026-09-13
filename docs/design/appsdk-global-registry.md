@@ -125,18 +125,22 @@ operator action; there is no tight retry loop or silent fallback.
 
 ## Initialization ordering
 
-`appsdk init` and `appsdk new` use the same order:
+`appsdk init` and `appsdk new` use the same two-phase order:
 
 ```text
 resolve project root
   -> create only the empty target directory when `new` needs it
-  -> register in ~/.appsdk/projects.jsonl
-  -> emit the registration receipt
+  -> validate and reserve ~/.appsdk/projects.jsonl (hold its writer lock)
   -> write project governance scaffold
+  -> append the registration event and emit the receipt
   -> attempt one optional Collab bootstrap
 ```
 
-Registration failure stops before project governance files are written. A
+Registry validation or reservation failure stops before project governance
+files are written. The reservation keeps competing writers out until the local
+initialization transaction has completed; dropping it on any local failure
+publishes no project event. A final append or sync failure remains an explicit
+`GLOBAL_REGISTRY_*` error and never becomes a successful initialization. A
 successful registration does not make optional Collab bootstrap failure look
 successful. The command prints a machine-readable `appsdk-registration` line
 containing the registry path, canonical project root, project ID, SDK version,

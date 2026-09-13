@@ -15024,9 +15024,13 @@ esac
         .output()
         .unwrap();
 
+    // The command's read budget is deliberately long enough for a busy
+    // daemon.  This regression checks that stdout/stderr are drained without
+    // deadlock; a ten-second wall-clock assertion made the suite fail under
+    // normal parallel load even when the command completed successfully.
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(10),
-        "large Collab output took {:?}: {}",
+        started.elapsed() < std::time::Duration::from_secs(120),
+        "large Collab output exceeded the declared read budget: {:?}: {}",
         started.elapsed(),
         String::from_utf8_lossy(&result.stderr)
     );

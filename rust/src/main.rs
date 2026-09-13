@@ -3951,6 +3951,20 @@ fn assert_project_contract(root: &Path, project: &Value) {
     {
         fail("INVALID_PROJECT_CONTRACT");
     }
+    if project
+        .pointer("/sdk/bundle_manifest")
+        .and_then(Value::as_str)
+        != Some(".appsdk/contracts/sdk-bundle.manifest.json")
+    {
+        fail("INVALID_SDK_CONTRACT:/sdk/bundle_manifest");
+    }
+    if project
+        .pointer("/sdk/resource_record")
+        .and_then(Value::as_str)
+        != Some(".appsdk/sdk-resources.json")
+    {
+        fail("INVALID_SDK_CONTRACT:/sdk/resource_record");
+    }
     let sdk_version = project
         .pointer("/sdk/version")
         .and_then(Value::as_str)
@@ -12269,18 +12283,6 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     assert_project_contract(root, &project);
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
         fail("UNSUPPORTED_PROJECT_SCHEMA");
-    }
-    if required_str(&project, "/sdk/name", "INVALID_SDK_CONTRACT") != "appsdk"
-        || project
-            .pointer("/sdk/bundle_manifest")
-            .and_then(Value::as_str)
-            != Some(".appsdk/contracts/sdk-bundle.manifest.json")
-        || project
-            .pointer("/sdk/resource_record")
-            .and_then(Value::as_str)
-            != Some(".appsdk/sdk-resources.json")
-    {
-        fail("INVALID_SDK_CONTRACT");
     }
     if project
         .pointer("/access/protected_paths")

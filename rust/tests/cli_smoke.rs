@@ -1279,6 +1279,145 @@ fn init_fresh_rejects_semantically_invalid_project_contract_before_resetting_sta
     fs::remove_dir_all(root).unwrap();
 }
 
+fn assert_init_fresh_rejects_invalid_sdk_contract(
+    name: &str,
+    expected_error: &str,
+    mutate: impl FnOnce(&mut Value),
+) {
+    let root = temp_root(&format!("init-fresh-invalid-sdk-{name}"));
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    mutate(&mut project);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    fs::create_dir_all(root.join("generated/legacy-output")).unwrap();
+    fs::write(root.join("generated/legacy-output/result"), "retain\n").unwrap();
+    fs::write(root.join("protected/history/legacy.txt"), "retain\n").unwrap();
+    fs::write(root.join("active/legacy.txt"), "retain\n").unwrap();
+    init_git(&root);
+
+    let project_before = fs::read(&project_path).unwrap();
+    let reset_path = root.join(".appsdk/records/reset-governance-record.json");
+    let reset_before = fs::read_to_string(&reset_path).ok();
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        !rejected.status.success(),
+        "case={name} stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains(expected_error),
+        "case={name} stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(
+        fs::read(&project_path).unwrap(),
+        project_before,
+        "case={name}"
+    );
+    assert_eq!(
+        fs::read_to_string(&reset_path).ok(),
+        reset_before,
+        "case={name}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n",
+        "case={name}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("generated/legacy-output/result")).unwrap(),
+        "retain\n",
+        "case={name}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("protected/history/legacy.txt")).unwrap(),
+        "retain\n",
+        "case={name}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("active/legacy.txt")).unwrap(),
+        "retain\n",
+        "case={name}"
+    );
+    assert!(root.join(".appsdk-control").is_dir(), "case={name}");
+
+    let transaction_dir = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let marker_path = transaction_dir.join("marker.json");
+    let marker_phase = if marker_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&marker_path).unwrap())
+            .unwrap()
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+    assert_eq!(
+        marker_phase, "build_failed",
+        "case={name} expected failure before reset publish"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+    let _ = fs::remove_file(reset_transaction_lock_path(&root));
+    let _ = fs::remove_dir_all(transaction_dir);
+}
+
+#[test]
+fn init_fresh_rejects_missing_sdk_contract_fields_before_reset_publish() {
+    for (name, field, expected_error) in [
+        (
+            "missing-bundle-manifest",
+            "bundle_manifest",
+            "INVALID_SDK_CONTRACT:/sdk/bundle_manifest",
+        ),
+        (
+            "missing-resource-record",
+            "resource_record",
+            "INVALID_SDK_CONTRACT:/sdk/resource_record",
+        ),
+    ] {
+        assert_init_fresh_rejects_invalid_sdk_contract(name, expected_error, |project| {
+            project["sdk"].as_object_mut().unwrap().remove(field);
+        });
+    }
+}
+
+#[test]
+fn init_fresh_rejects_wrong_sdk_contract_fields_before_reset_publish() {
+    for (name, field, bad_value, expected_error) in [
+        (
+            "wrong-bundle-manifest",
+            "bundle_manifest",
+            ".appsdk/contracts/tampered-sdk-bundle.manifest.json",
+            "INVALID_SDK_CONTRACT:/sdk/bundle_manifest",
+        ),
+        (
+            "wrong-resource-record",
+            "resource_record",
+            ".appsdk/tampered-sdk-resources.json",
+            "INVALID_SDK_CONTRACT:/sdk/resource_record",
+        ),
+    ] {
+        assert_init_fresh_rejects_invalid_sdk_contract(name, expected_error, |project| {
+            project["sdk"][field] = Value::String(bad_value.into());
+        });
+    }
+}
+
 #[test]
 fn init_fresh_preserves_compiled_project_contract_for_rebuild() {
     let root = temp_root("init-fresh-compiled-project-contract");

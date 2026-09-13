@@ -2969,14 +2969,8 @@ fn previous_active_matches_module(module: &Value, artifact: &Value) {
     }
 }
 
-fn compile_module(root: &Path, module_id: &str) -> Value {
-    assert_project_root_safe(root);
-    assert_mutation_worktree(root);
+fn compile_module_with_project(root: &Path, project: &Value, module_id: &str) -> Value {
     assert_identifier(module_id, "INVALID_MODULE_ID");
-    let project = read_project(root);
-    assert_declared_contracts(root, &project);
-    assert_goal_confirmed(root);
-    assert_project_contract(root, &project);
     let modules = project
         .get("modules")
         .and_then(Value::as_array)
@@ -3000,10 +2994,121 @@ fn compile_module(root: &Path, module_id: &str) -> Value {
         .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"))
         .to_string();
     module_with_stage["stage"] = Value::String(target_stage);
-    let artifact = build_module_artifact(root, &project, &module_with_stage, module_id);
-    write_module_artifact_value(root, &project, module_id, &artifact);
+    let artifact = build_module_artifact(root, project, &module_with_stage, module_id);
+    write_module_artifact_value(root, project, module_id, &artifact);
     println!("{}", serde_json::to_string_pretty(&artifact).unwrap());
     artifact
+}
+
+struct CompileControlSnapshot {
+    files: Vec<(PathBuf, &'static str, String)>,
+}
+
+fn compile_control_snapshot(root: &Path, project: &Value) -> CompileControlSnapshot {
+    let manifest_path = project
+        .pointer("/development_scenarios/manifest")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/development_scenarios/manifest"));
+    let zone = contract_root(root, project, "/governance/zone_transition_contract");
+    let mut paths = vec![
+        (project_file(root), "project_contract"),
+        (root.join(".appsdk/goal.json"), "goal"),
+        (
+            safe_owned_path(root, manifest_path, "development_scenarios"),
+            "development_scenarios",
+        ),
+        (zone.clone(), "zone_transition_contract"),
+        (
+            zone.with_file_name("zone-transition.manifest.json"),
+            "canonical_zone_contract",
+        ),
+    ];
+    for declared in project
+        .pointer("/governance/record_contracts")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"))
+    {
+        let relative = declared
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"));
+        paths.push((
+            safe_owned_path(root, relative, "record_contract"),
+            "record_contract",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let files = paths
+        .into_iter()
+        .filter_map(|(path, label)| {
+            if !seen.insert(path.clone()) {
+                return None;
+            }
+            assert_no_symlink_components(root, &path, label);
+            Some((path.clone(), label, file_sha256(&path, label)))
+        })
+        .collect();
+    CompileControlSnapshot { files }
+}
+
+fn assert_compile_control_snapshot(
+    root: &Path,
+    project: &Value,
+    snapshot: &CompileControlSnapshot,
+) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    assert_compile_module_paths_safe(root, project);
+    for (path, label, expected) in &snapshot.files {
+        assert_no_symlink_components(root, path, label);
+        if file_sha256(path, label) != *expected {
+            fail("COMPILE_CONTROL_INPUT_DRIFT");
+        }
+    }
+}
+
+fn assert_compile_module_paths_safe(root: &Path, project: &Value) {
+    for module in project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
+    {
+        for (key, label) in [
+            ("owned_paths", "module_owned_path"),
+            ("generated_outputs", "module_generated_output"),
+            ("contract_paths", "module_contract_path"),
+        ] {
+            for value in module
+                .get(key)
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"))
+            {
+                let relative = value
+                    .as_str()
+                    .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"));
+                safe_owned_path(root, relative, label);
+            }
+        }
+        let active_artifact = module
+            .get("active_artifact")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"));
+        safe_owned_path(root, active_artifact, "module_active_artifact");
+        let working_directory = module
+            .pointer("/build/working_directory")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_PROJECT_MODULE"));
+        safe_owned_path(root, working_directory, "module_build_working_directory");
+    }
+}
+
+fn compile_module(root: &Path, module_id: &str) -> Value {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    let project = read_project(root);
+    assert_declared_contracts(root, &project);
+    assert_goal_confirmed(root);
+    assert_project_contract(root, &project);
+    compile_module_with_project(root, &project, module_id)
 }
 
 fn write_artifact_value(root: &Path, project: &Value, artifact: &Value) {
@@ -3606,12 +3711,18 @@ fn compile(root: &Path) {
     // A later module failure must not leave verification bound to an older
     // lifecycle snapshot; the projection itself contains no build output.
     write_artifact(root, &project);
+    let control_snapshot = compile_control_snapshot(root, &project);
     for module in modules {
         let module_id = record_str(module, "/module_id", "module");
         if module.get("stage").and_then(Value::as_str) != Some("frozen") {
-            compile_module(root, module_id);
+            // Module builds are external commands. Recheck the mutable control
+            // inputs at each boundary while reusing the already validated
+            // project value and avoiding a second full contract parse.
+            assert_compile_control_snapshot(root, &project, &control_snapshot);
+            compile_module_with_project(root, &project, module_id);
         }
     }
+    assert_compile_control_snapshot(root, &project, &control_snapshot);
     let artifact = write_artifact(root, &project);
     println!("{}", serde_json::to_string_pretty(&artifact).unwrap());
 }
@@ -11802,7 +11913,7 @@ fn initialize_collab_peer() {
             serde_json::json!({
                 "notification_channel":"none", "subscription_created":false,
                 "independent_work_allowed":true,
-                "next_action":"No push channel. Check subagent status (includes parent mailbox) yourself; use subagent snapshot explicitly for screen diagnostics. Do not wait for an automatic completion notification."
+                "next_action":"No push channel. Check subworker status (includes parent mailbox) yourself; use subworker snapshot explicitly for screen diagnostics. Do not wait for an automatic completion notification."
             })
         );
         return;
@@ -18088,7 +18199,7 @@ where
     }
 }
 
-const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.";
+const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.\nManaged child compatibility entry: appsdk subworker <start|list|status|snapshot|send|close> ...";
 
 fn is_help(value: &str) -> bool {
     matches!(value, "help" | "--help" | "-h")
@@ -18149,19 +18260,22 @@ where
 
 fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();
-    // Collab owns configuration interpretation, coordination, and subagent runtime truth.
+    // Collab owns configuration interpretation, coordination, and subworker runtime truth.
     // Forward argv/environment unchanged; do not create an AppSDK registry.
-    if argv
-        .first()
-        .is_some_and(|arg| arg == "subagent" || arg == "config" || arg == "collab")
-    {
-        let collab_args: &[String] = if argv[0] == "collab" {
-            &argv[1..]
+    if argv.first().is_some_and(|arg| {
+        arg == "subagent" || arg == "subworker" || arg == "config" || arg == "collab"
+    }) {
+        let collab_args = if argv[0] == "collab" {
+            argv[1..].to_vec()
+        } else if argv[0] == "subworker" {
+            let mut args = vec!["subagent".to_owned()];
+            args.extend(argv[1..].iter().cloned());
+            args
         } else {
-            &argv[..]
+            argv.clone()
         };
         let status = Command::new("collab")
-            .args(collab_args)
+            .args(&collab_args)
             .status()
             .unwrap_or_else(|error| fail(format!("COLLAB_UNAVAILABLE:{error}")));
         std::process::exit(status.code().unwrap_or(1));

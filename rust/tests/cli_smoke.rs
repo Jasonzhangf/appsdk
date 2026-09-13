@@ -5561,6 +5561,29 @@ fn subagent_entry_forwards_without_governance_or_second_registry() {
 }
 
 #[test]
+fn subworker_entry_uses_the_compatibility_child_route_without_governance() {
+    let root = temp_root("subworker-forward");
+    fs::create_dir_all(&root).unwrap();
+    let fake = root.join("collab");
+    fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 23\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(binary())
+        .args(["subworker", "status", "child"])
+        .current_dir(&root)
+        .env("PATH", &root)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "subagent\nstatus\nchild\n"
+    );
+    assert!(!root.join(".appsdk").exists());
+    assert!(!root.join(".agent-collab").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn collab_entry_forwards_without_governance_or_second_registry() {
     let root = temp_root("collab-forward");
     fs::create_dir_all(&root).unwrap();
@@ -8597,6 +8620,99 @@ fn development_dependencies_require_current_artifacts_and_freeze_order() {
         String::from_utf8_lossy(&freeze.stderr)
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn compile_rejects_control_drift_between_module_builds() {
+    let root = temp_root("compile-control-drift");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let goal_path = root.join(".appsdk/goal.json");
+    let mut goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+    goal["status"] = Value::String("confirmed".into());
+    goal["confirmed_by"] = Value::String("test".into());
+    goal["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(&goal_path, serde_json::to_vec_pretty(&goal).unwrap()).unwrap();
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    let mut edge = project["modules"][0].clone();
+    edge["module_id"] = Value::String("app-edge".into());
+    edge["source_owner"] = Value::String("app-edge".into());
+    edge["owned_paths"] = serde_json::json!(["playground/edge/**"]);
+    edge["active_artifact"] = Value::String("active/lib/app-edge/**".into());
+    edge["generated_outputs"] = serde_json::json!(["generated/modules/app-edge/**"]);
+    edge["build"]["args"] = serde_json::json!([
+        "-c",
+        "mkdir -p generated/modules/app-edge/lib && printf edge > generated/modules/app-edge/lib/edge.txt"
+    ]);
+    edge["artifact_paths"] = serde_json::json!(["edge.txt"]);
+    project["modules"].as_array_mut().unwrap().push(edge);
+    fs::create_dir_all(root.join("playground/edge")).unwrap();
+
+    project["modules"][0]["build"]["args"] = serde_json::json!([
+        "-c",
+        "mkdir -p generated/modules/app-core/lib && printf core > generated/modules/app-core/lib/app-core.placeholder && printf drift > .appsdk/goal.json"
+    ]);
+    fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+    pin_test_lock(root_text);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+
+    let compile = run(&["compile", root_text]);
+    assert!(!compile.status.success());
+    assert!(String::from_utf8_lossy(&compile.stderr).contains("COMPILE_CONTROL_INPUT_DRIFT"));
+    assert!(!root
+        .join("generated/modules/app-edge/module.compiled.json")
+        .exists());
+
+    fs::write(
+        &goal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "goal_id": "goal-1",
+            "raw_request": "compile",
+            "understood_objective": "compile modules",
+            "acceptance_criteria": ["build"],
+            "non_goals": [],
+            "assumptions": [],
+            "ambiguities": [],
+            "questions": [],
+            "status": "confirmed",
+            "confirmed_by": "test",
+            "confirmed_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let outside = root
+        .parent()
+        .unwrap()
+        .join("appsdk-compile-control-drift-outside");
+    let symlink_command = format!(
+        "mkdir -p generated/modules/app-core/lib && printf core > generated/modules/app-core/lib/app-core.placeholder && rm -rf generated/modules/app-edge && ln -s '{}' generated/modules/app-edge",
+        outside.display()
+    );
+    project = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["modules"][0]["build"]["args"] = serde_json::json!(["-c", symlink_command]);
+    fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+
+    let symlink_compile = run(&["compile", root_text]);
+    assert!(!symlink_compile.status.success());
+    assert!(
+        String::from_utf8_lossy(&symlink_compile.stderr)
+            .contains("GOVERNANCE_PATH_SYMLINK:module_generated_output"),
+        "{}",
+        String::from_utf8_lossy(&symlink_compile.stderr)
+    );
+    assert!(!outside.join("lib/edge.txt").exists());
+    fs::remove_dir_all(root).unwrap();
+    let _ = fs::remove_dir_all(outside);
 }
 
 #[test]
@@ -14236,7 +14352,7 @@ esac
     assert!(text.contains("最多 5 个"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab worker close"));
-    assert!(text.contains("collab subagent snapshot"));
+    assert!(text.contains("appsdk subworker snapshot"));
 
     // Goal objective is read out of the markdown, past the frontmatter.
     assert!(text.contains("# Ship It"));

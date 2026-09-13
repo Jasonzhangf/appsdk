@@ -1,16 +1,6 @@
 ---
 name: appsdk-project-governance
-description: >
-  AppSDK engineering quality gates and defect tracking
-  (appsdk bug new/list/show/comment/close): defects and cross-round blockers
-  enter the bug lifecycle. Master triages via `appsdk bug list -q`, reopens or
-  creates `appsdk bug new -t -m -l "P0,mod"`, manages priorities, and dispatches
-  workers. Worker inspects `appsdk bug show`, stays focused, reports new
-  discoveries via `appsdk bug new` without auto-fixing unrelated work, reports
-  blockers to master, and closes with `appsdk bug close ID -m "Solution: ..."`.
-  Features use a confirmed goal/plan and are not bugs by default. Dependency
-  managed via `appsdk setup-deps [--check]`. Use optional Guidance for planning;
-  keep automatic Collab separate from quality admission.
+description: "AppSDK quality gates and defect tracking; keep optional coordination separate from quality admission."
 ---
 
 # AppSDK Project Governance
@@ -162,100 +152,31 @@ live communication.
 5. Review exact validated changes under the shared review standard. Block
    concrete correctness, safety, contract or material structural regressions;
    optional simplifications are advisory.
-6. Reuse still-valid evidence when relevant source, inputs, dependencies,
-   configuration, artifact and environment remain unchanged. Rerun affected
-   checks after changes; verify an altered integration candidate.
+6. Treat each stage as a re-entrant gate. Persist candidate/tree, scope,
+   dependency, artifact, producer and environment identity with its PASS
+   evidence. Reuse only when that identity is unchanged and fresh; otherwise
+   rerun from the first invalidated stage and its downstream dependants. A
+   stage-name or session change alone never forces a full rerun. Report reused
+   and rerun stages separately.
 7. Deliver within authorization. Report test, review, merge, install, publish
    and resource cleanup as separate achieved states.
 
 ## Conditional delivery gates
 
-Candidate, review, integration, publication, and runtime replay are separate
-evidence states. A local development or documentation change stops after its
-applicable checks and review. Install, restart, freeze, and deployed replay are
-required only when the module declares that public runtime or deployment surface
-and the requested operation includes it.
+Candidate, review, integration, publication and runtime replay are separate
+evidence states. Run only the checks and service operations declared by the
+changed module and requested delivery. Ordinary development or documentation
+work stops after its applicable checks and review; it does not acquire a
+freeze, install, restart, live replay or full-suite ceremony by default.
 
-```text
-clean playground worktree
-  -> candidate tests/build
-  -> independent review
-  -> clean main integration
-  -> main tests/build
-  -> push + remote receipt
-  -> official global install
-  -> exact service-scoped restart
-  -> deployed public-entrypoint replay
-  -> task/worktree cleanup and close
-```
-
-These are separate evidence states. A candidate, review PASS, local merge,
-remote push, installed binary, daemon restart, live replay, or cleanup receipt
-does not imply any other state. Never install or restart from a worker branch.
-When a delivery surface is not declared, its operation is not a missing gate;
-it is outside that change's scope.
-
-### Delivery procedure when selected
-
-Use the following procedure when the change is authorized for mainline delivery
-or declares a deployment operation. Ordinary local development uses only the
-candidate checks and review that its scope requires.
-
-1. Create `playground/<slug>` from current `origin/main`. The worker never
-   edits `main` or shares a worktree.
-2. Run focused tests, relevant full suite, formatter, diff check, and release
-   build. Record the candidate commit, tree, artifact, and exact commands.
-3. Use an independent review and replay the unchanged-source effectiveness
-   case. Review PASS is required before integration.
-4. Integrate only into a clean local `main`. If tracked or untracked user
-   changes exist, stop and report exact paths; never reset, restore, stash,
-   overwrite, or silently absorb them.
-5. Re-run affected tests, full tests, formatter, diff check, and release build
-   on the exact merged commit. Record the merge commit and artifact hash.
-6. Push only that tested main commit. Verify remote truth with
-   `git ls-remote <remote> <ref>`; a local tracking ref is not publication.
-7. Install through the canonical AppSDK entry point:
-
-   ```bash
-   scripts/install-global-appsdk.sh
-   appsdk version
-   shasum -a 256 "$(command -v appsdk)"
-   ```
-
-   Preserve source commit, installed path, version, and digest. Do not copy a
-   binary by hand or leave a second global SDK entry.
-8. Restart only affected services with their official service-scoped command.
-   For Collab, use exactly:
-
-   ```bash
-   env -u TMUX_PANE collab down
-   env -u TMUX_PANE collab up
-   ```
-
-   Run this once per exact project root. Record old/new PID, socket, binary
-   path, and digest. Never use `pkill`, `killall`, `xargs kill`, or broad PID
-   commands.
-9. Run the deployed public-entrypoint replay and negative path. For Collab,
-   verify `collab who`, `collab context`, `collab task status`, `collab inbox`,
-   one real notification/consume path, and single-daemon identity after
-   restart. Source tests are not live replay evidence.
-10. Only after remote receipt, install/restart, and replay pass may the owner
-    release its claim and clean its own worktree through the official task
-    close operation. Cleanup records the removed path and receipt; it never
-    deletes another task's worktree, mailbox, journal, or token.
-
-The documented command surface must match the installed Collab binary. Before
-using an optional lifecycle subcommand, run `collab task --help`. If the
-installed version has no dedicated review or integration command, record the
-same evidence with the supported `collab task update --status ... --next ...`,
-`collab task deliver`, bug comments, and the mainline/remote receipts; never
-invent a successful command or claim that an unavailable subcommand ran.
-
-If an applicable gate fails, preserve the exact error and leave the task
-explicitly blocked with owner, unblock condition, next check, and recovery
-trigger. Never report deployed from a candidate branch or merged from a
-local-only ref. A development result may complete with candidate/review
-evidence when no delivery operation is in scope.
+Use [review-delivery.md](references/review-delivery.md) for the selected
+delivery path. It binds every phase to the exact candidate, artifact,
+environment and producer identity. Reuse unchanged PASS evidence after a
+lightweight integrity/freshness check; do not rerun the external test,
+deployment, merge or publication action merely because a later phase started.
+If a required input changes, invalidate only that phase and its downstream
+dependants. A candidate, review PASS, merge, push, install, restart or cleanup
+receipt never implies any other state.
 
 ## Optional Guidance
 
@@ -278,66 +199,22 @@ rebuilds current SDK-managed contracts; it still preserves business source,
 runtime, Active and Protected. Merely auditing rules does not require running
 initialization or changing setup.
 
-## Automatic Collab
+## Optional Collab coordination
 
-Persistent subworkers and project-specific notification policy:
-[subagents-config.md](references/subagents-config.md). All policies live in
-`~/.appsdk/config.toml`; `appsdk config` shows effective configuration.
-The `appsdk subagent start/list/status/send/close` commands are compatibility
-protocol names and delegate to the Collab owner; they are not native Desktop
-task/thread spawn instructions.
+Collab is a coordination adapter, not a quality-admission prerequisite. The
+AppSDK source repository and a managed consumer project keep separate owners;
+initializing one never grants authority over the other. A missing tmux peer,
+daemon, mailbox or native task route leaves independent AppSDK work runnable;
+only an operation that explicitly needs shared ownership or communication
+waits, with the exact Collab error preserved.
 
-`appsdk init` attempts official `collab init` once in a live tmux peer, preserving
-the inherited environment. Successful initialization registers identity and the
-finite direct-message subscription. Do not duplicate that initialization.
-Once task/worktree scope is known, use the Collab task lifecycle to register
-feature/resource and file ownership before concurrent edits. Do not invent
-task scope inside AppSDK initialization.
-
-No tmux peer means pending. An unavailable/failed Collab reports its error;
-independent work continues, while operations requiring shared ownership wait.
-Keep automatic communication and file/task collaboration enabled; a serial
-merge queue is required only when the project selects that integration mode.
-Its ownership and tested-integration protections remain mandatory.
-
-### SDK-source Codex TUI identity and route proof
-
-The AppSDK source repository may opt into Collab for its own TUI development,
-but source-repository communication and AppSDK consumer-project governance are
-separate facts. In the source repository, use the standalone official Collab
-registration once from the live Codex TUI pane when that route is explicitly
-enabled; do not run `appsdk init` merely to manufacture a consumer contract.
-For a managed project, the one bootstrap path remains `appsdk init .`. Never
-run either initialization twice for the same live endpoint.
-
-Identity is accepted only when the same live pane proves all of the following:
-
-1. The pane and process are live, owned by the expected TUI, and their `cwd`
-   is the intended SDK worktree or managed project root. A process listing,
-   screenshot, `TMUX_PANE` value copied from another pane, or a shared directory
-   alone is diagnostic evidence, not registration. Project scope is derived
-   from that live `cwd`; an appserver or session name cannot override it.
-2. `collab context` exposes the registered address and authority: `scopeId`,
-   stable `sessionId`, `appserverId`/namespace when supplied, project root,
-   role, `identity_valid`, and `endpoint_live`. `collab who` must show the
-   expected registered peer(s). `collab status --all` proves daemon health only;
-   it does not prove identity or a route.
-3. The global Collab daemon has one authoritative PID/socket, and the route
-   points to the same registered endpoint. A per-project or second daemon is
-   not a recovery path. `PROJECT_SCOPE_UNKNOWN`, timeout, `identity-mismatch`,
-   absent endpoint, or an unbound pane is a failed identity gate and must remain
-   visible.
-4. A two-way replay completes with separate evidence: the sender's durable
-   message/notification ID and `accepted` result, delivery/consume evidence in
-   the receiving TUI (`collab recv`), and a reply that the sender consumes.
-   Do not call mailbox append, tmux preview, `accepted`, ACK, or daemon health
-   a bidirectional reply by itself. Use a title and priority on each message.
-
-The address is the registered `scopeId/sessionId`; compression, fork, model
-name, or a changed pane does not silently preserve it. A new runtime address
-must complete the official re-registration/rebind path and a fresh route proof.
-Only an explicit user grant can make that registered peer a `master`; the SDK
-repository, TUI root, first registration, and goal text cannot grant it.
+When managed child coordination is selected, use the canonical **subworker**
+term and the `appsdk subworker` compatibility entry documented in the
+[subworker policy](references/subagents-config.md). That entry forwards to
+Collab and never creates a second registry, native Desktop thread or quality
+gate. For identity, scope, route and two-way delivery evidence, follow the
+Collab Skill and its live-route contract; do not duplicate that state machine in
+AppSDK governance. Desktop does not register or subscribe a long-horizon goal.
 
 ## Universal Bug Tracking & Defect Governance
 
@@ -446,7 +323,7 @@ appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
   the authorized live TUI/master endpoint; a prompt, appserver status, or
   daemon health cannot substitute for that authority.
 - Master is awakened periodically to:
-  1. Inspect worker states (`collab who` / `appsdk subagent status`); dispatch decomposed tasks to keep workers saturated whenever any worker is idle.
+  1. Inspect worker states (`collab who` / `appsdk subworker status`); dispatch decomposed tasks to keep workers saturated whenever any worker is idle.
   2. Enforce AppSDK lifecycle governance across all subworker tasks.
   3. Report any upstream AppSDK framework issues via `appsdk bug new --upstream`.
   4. Conclude only when all goal DoD conditions pass.

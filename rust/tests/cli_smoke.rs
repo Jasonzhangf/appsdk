@@ -399,6 +399,98 @@ fn sdk_source_registry_enforces_single_active_owner_for_long_horizon_sources() {
     ));
 }
 
+#[test]
+fn sdk_source_registry_requires_project_contract_before_ignoring_governance_files() {
+    let result = sdk_source_registry_result(
+        "sdk-source-registry-project-governance",
+        serde_json::json!([
+            {
+                "module_id": "architecture-registry",
+                "status": "active",
+                "owner": "appsdk::architecture",
+                "owned_paths": ["contracts/maps/**"],
+                "forbidden_paths": ["active/lib/**", "protected/**"]
+            },
+            {
+                "module_id": "runtime-core",
+                "status": "active",
+                "owner": "appsdk::runtime",
+                "owned_paths": ["rust/src/main.rs"],
+                "forbidden_paths": ["active/lib/**", "protected/**"]
+            }
+        ]),
+        &[
+            "AGENTS.md",
+            ".appsdk-prepare.json",
+            ".appsdk/records/legacy.json",
+            "rust/src/main.rs",
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_SOURCE_OWNER_CARDINALITY:"));
+}
+
+#[test]
+fn sdk_source_registry_rejects_invalid_project_contract() {
+    let result = sdk_source_registry_result(
+        "sdk-source-registry-invalid-project-contract",
+        serde_json::json!([{
+            "module_id": "runtime-core",
+            "status": "active",
+            "owner": "appsdk::runtime",
+            "owned_paths": ["rust/src/main.rs"],
+            "forbidden_paths": []
+        }]),
+        &[".appsdk/project.json", "rust/src/main.rs"],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("INVALID_PROJECT_CONTRACT"));
+}
+
+#[test]
+fn sdk_source_registry_ignores_project_governance_files_with_valid_contract() {
+    let root = temp_root("sdk-source-registry-initialized-workspace");
+    let root_text = root.to_str().unwrap();
+    let created = run(&["new", root_text]);
+    assert!(
+        created.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let prepared = run(&["prepare", root_text]);
+    assert!(
+        prepared.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&prepared.stdout),
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    fs::create_dir_all(root.join("contracts/maps")).unwrap();
+    fs::write(
+        root.join("contracts/maps/module-registry.json"),
+        include_str!("../../contracts/maps/module-registry.json"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("rust/src")).unwrap();
+    fs::write(root.join("rust/src/main.rs"), "fn main() {}\n").unwrap();
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    init_git(&root);
+    let result = run_in(&root, &["verify-sdk-source-registry", "."]);
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("\"gate\":\"sdk_source_registry\""));
+}
+
 fn confirm_preparation(root: &PathBuf, project_root: &str, change_kind: &str) {
     fs::write(
         root.join(".appsdk-prepare.json"),

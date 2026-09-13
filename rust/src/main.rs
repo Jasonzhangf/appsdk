@@ -2241,8 +2241,33 @@ fn registry_path_matches(pattern: &str, path: &str) -> bool {
         .unwrap_or(pattern == path)
 }
 
+fn is_project_governance_path(path: &str) -> bool {
+    path == "AGENTS.md"
+        || path == ".appsdk-prepare.json"
+        || path == ".appsdk"
+        || path.starts_with(".appsdk/")
+}
+
+fn has_valid_project_governance_contract(root: &Path) -> bool {
+    let project = project_file(root);
+    match fs::symlink_metadata(&project) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fail("GOVERNANCE_PATH_SYMLINK:project")
+        }
+        Ok(metadata) if metadata.is_file() => {
+            let value = read_project(root);
+            assert_project_contract(root, &value);
+            true
+        }
+        Ok(_) => fail("INVALID_PROJECT_CONTRACT"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => fail(format!("PROJECT_CONTRACT_MISSING:{}", project.display())),
+    }
+}
+
 fn assert_sdk_source_registry(root: &Path) {
     assert_project_root_safe(root);
+    let governed_workspace = has_valid_project_governance_contract(root);
     let registry: Value = serde_json::from_str(
         &fs::read_to_string(root.join("contracts/maps/module-registry.json"))
             .unwrap_or_else(|_| fail("MISSING_SDK_MODULE_REGISTRY")),
@@ -2270,6 +2295,13 @@ fn assert_sdk_source_registry(root: &Path) {
         .filter(|v| !v.is_empty())
     {
         let path = std::str::from_utf8(bytes).unwrap_or_else(|_| fail("INVALID_SDK_SOURCE_PATH"));
+        // An initialized workspace owns its project control plane through the
+        // project contract; keep the SDK source registry focused on SDK source
+        // paths. Without a valid project contract these names remain ordinary
+        // source paths and are checked strictly below.
+        if governed_workspace && is_project_governance_path(path) {
+            continue;
+        }
         let mut owners = Vec::new();
         for module in modules {
             let module_id = record_str(module, "/module_id", "module-registry.json");

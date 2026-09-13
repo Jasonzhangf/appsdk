@@ -672,6 +672,51 @@ fn project_creation_and_initialization_persist_host_registration() {
 }
 
 #[test]
+fn initialization_failure_does_not_persist_global_registration() {
+    let root = temp_root("global-registration-order");
+    let registry = temp_root("global-registration-order-home");
+    let root_text = root.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    let created = Command::new(binary())
+        .args(["new", root_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    // Remove the successful registration so the following failed init can
+    // prove that no new event is appended before local initialization ends.
+    fs::remove_dir_all(&registry).unwrap();
+    let gitignore_target = temp_root("global-registration-order-gitignore");
+    fs::write(&gitignore_target, "managed elsewhere\n").unwrap();
+    fs::remove_file(root.join(".gitignore")).unwrap();
+    symlink(&gitignore_target, root.join(".gitignore")).unwrap();
+
+    let initialized = Command::new(binary())
+        .args(["init", root_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!initialized.status.success());
+    assert!(
+        String::from_utf8_lossy(&initialized.stderr).contains("GOVERNANCE_PATH_SYMLINK:gitignore")
+    );
+    assert!(!registry.join("projects.jsonl").exists());
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(registry).unwrap_or(());
+    fs::remove_file(gitignore_target).unwrap();
+}
+
+#[test]
 fn init_fresh_nested_project_ignores_its_transaction_lock_when_checking_clean_worktree() {
     let workspace = temp_root("init-fresh-nested-project-lock");
     fs::create_dir_all(&workspace).unwrap();

@@ -11836,10 +11836,10 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         }
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
-    register_global_project(root);
     if fresh {
         reset_governance_internal(root, true, true).unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
+        register_global_project(root);
         initialize_collab_peer();
         if let Err(reason) = memory::initialize_project(root) {
             eprintln!("{}; optional project memory initialization skipped", reason);
@@ -11868,6 +11868,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     }
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
+    register_global_project(root);
     initialize_collab_peer();
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
@@ -11928,15 +11929,15 @@ fn new_project(root: &Path, register: bool) {
         }
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
-    if register {
-        register_global_project(root);
-    }
     ensure_governance_layout(root);
     write_project_scaffold(root);
     write_project_agent_contract(root);
     install_bundle_resources(root);
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
+    if register {
+        register_global_project(root);
+    }
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
     }

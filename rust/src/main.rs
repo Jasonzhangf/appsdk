@@ -13165,8 +13165,24 @@ fn initialize_collab_peer() {
 }
 
 fn reserve_global_project(root: &Path) -> global_registry::ProjectRegistrationReservation {
-    global_registry::reserve_project(root, SDK_VERSION)
-        .unwrap_or_else(|error| fail(format!("GLOBAL_PROJECT_REGISTRATION_FAILED:{error}")))
+    // Project initialization is a short host-wide transaction, but several
+    // projects may initialize at once.  Wait with bounded backoff for the
+    // expected writer contention; malformed registry state and lock I/O
+    // failures still fail immediately at the unique registry owner.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut delay = Duration::from_millis(10);
+    loop {
+        match global_registry::reserve_project(root, SDK_VERSION) {
+            Ok(reservation) => return reservation,
+            Err(error)
+                if error.starts_with("GLOBAL_REGISTRY_BUSY:") && Instant::now() < deadline =>
+            {
+                thread::sleep(delay);
+                delay = (delay + delay).min(Duration::from_millis(250));
+            }
+            Err(error) => fail(format!("GLOBAL_PROJECT_REGISTRATION_FAILED:{error}")),
+        }
+    }
 }
 
 fn commit_global_project(reservation: global_registry::ProjectRegistrationReservation) {

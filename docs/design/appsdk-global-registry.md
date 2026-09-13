@@ -117,11 +117,14 @@ root and SDK version returns an `idempotent: true` receipt and appends nothing.
 A later SDK version appends a new version event; history remains recoverable and
 the latest matching event is the current registration view.
 
-The writer takes an exclusive non-blocking lock, validates every existing line,
-appends the event, and calls `sync_all`. Blank lines, malformed JSON, an
-unsupported event shape, a symlinked registry path, or a busy lock fail closed.
-The caller must preserve the exact error and may retry only through a deliberate
-operator action; there is no tight retry loop or silent fallback.
+The writer takes an exclusive lock, validates every existing line, appends the
+event, and calls `sync_all`. Project initialization waits up to 30 seconds with
+bounded backoff when another AppSDK initialization holds the writer lock; this
+only handles expected contention and never changes the event or project root.
+Blank lines, malformed JSON, an unsupported event shape, a symlinked registry
+path, lock I/O failures, or contention that exceeds the deadline fail closed
+with the original `GLOBAL_REGISTRY_*` error. There is no unbounded retry or
+silent fallback.
 
 ## Initialization ordering
 

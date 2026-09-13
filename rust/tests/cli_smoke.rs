@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_appsdk"))
@@ -953,6 +953,59 @@ fn registration_failure_is_preflighted_before_new_workspace_scaffold() {
 
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(registry_parent).unwrap();
+}
+
+#[test]
+fn project_registration_waits_for_busy_host_lock() {
+    let workspace = temp_root("global-registration-busy-waits");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = workspace.join("project");
+    let registry = workspace.join("registry");
+    fs::create_dir_all(&registry).unwrap();
+    let lock_path = registry.join("projects.jsonl.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    hold_advisory_lock(&lock);
+
+    let root_text = root.to_str().unwrap();
+    let mut child = Command::new(binary())
+        .args(["new", root_text])
+        .env("APPSDK_HOME", registry.to_str().unwrap())
+        .env_remove("TMUX_PANE")
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("registration exited while host lock was held: {status}");
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    drop(lock);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join(".appsdk/project.json").is_file());
+    assert_eq!(
+        fs::read_to_string(registry.join("projects.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]

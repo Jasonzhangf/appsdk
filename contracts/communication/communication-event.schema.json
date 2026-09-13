@@ -17,6 +17,7 @@
         "agent.rebound",
         "agent.state",
         "message.created",
+        "message.delivery_attempt",
         "message.state",
         "notification.queued",
         "notification.superseded",
@@ -58,6 +59,16 @@
       "then": {
         "properties": {
           "data": {"$ref": "#/$defs/messageStateEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "message.delivery_attempt"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/messageDeliveryAttemptEvent"}
         }
       }
     },
@@ -474,7 +485,43 @@
       "properties": {
         "messageId": {"type": "string", "minLength": 1},
         "state": {"type": "string", "minLength": 1},
+        "attemptId": {"type": "string", "minLength": 1},
+        "nonce": {"type": "string", "minLength": 1},
         "evidence": {"$ref": "#/$defs/deliveryEvidence"}
+      },
+      "additionalProperties": false
+    },
+    "messageDeliveryAttemptEvent": {
+      "type": "object",
+      "required": ["messageId", "attempt"],
+      "properties": {
+        "messageId": {"type": "string", "minLength": 1},
+        "attempt": {
+          "type": "object",
+          "required": [
+            "attemptId",
+            "messageId",
+            "operation",
+            "adapterId",
+            "runtimeId",
+            "runtimeFingerprint",
+            "target",
+            "nonce",
+            "startedAt"
+          ],
+          "properties": {
+            "attemptId": {"type": "string", "minLength": 1},
+            "messageId": {"type": "string", "minLength": 1},
+            "operation": {"const": "message.delivery"},
+            "adapterId": {"type": "string", "minLength": 1},
+            "runtimeId": {"type": "string", "minLength": 1},
+            "runtimeFingerprint": {"type": "string", "minLength": 1},
+            "target": {"type": ["string", "null"]},
+            "nonce": {"type": "string", "minLength": 1},
+            "startedAt": {"type": "string", "format": "date-time"}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
@@ -713,6 +760,7 @@
         "coalesceKey": {"type": ["string", "null"], "minLength": 1},
         "issueId": {"type": ["string", "null"]},
         "adapterId": {"type": "string", "minLength": 1},
+        "deliveryAttemptRequired": {"type": "boolean"},
         "createdAt": {"type": "string", "format": "date-time"},
         "state": {"type": "string", "minLength": 1},
         "evidence": {

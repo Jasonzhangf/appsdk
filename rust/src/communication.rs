@@ -231,6 +231,9 @@ struct MessageRequest {
 struct DeliveryRequest {
     #[serde(rename = "messageId", alias = "message_id")]
     message_id: String,
+    #[serde(rename = "attemptId", alias = "attempt_id")]
+    attempt_id: String,
+    nonce: String,
     state: String,
     #[serde(rename = "runtimeId", alias = "runtime_id")]
     runtime_id: String,
@@ -440,6 +443,25 @@ struct DeliveryAttempt {
     batch_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MessageDeliveryAttempt {
+    #[serde(rename = "attemptId")]
+    attempt_id: String,
+    #[serde(rename = "messageId")]
+    message_id: String,
+    operation: String,
+    #[serde(rename = "adapterId")]
+    adapter_id: String,
+    #[serde(rename = "runtimeId")]
+    runtime_id: String,
+    #[serde(rename = "runtimeFingerprint")]
+    runtime_fingerprint: String,
+    target: Option<String>,
+    nonce: String,
+    #[serde(rename = "startedAt")]
+    started_at: String,
+}
+
 trait CommunicationAdapter {
     fn deliver(&self, message: &MessageRecord) -> CommResult<TransportReceipt>;
     fn emit_batch(&self, batch: &NotificationBatch) -> CommResult<TransportReceipt>;
@@ -598,6 +620,8 @@ struct MessageRecord {
     issue_id: Option<String>,
     #[serde(rename = "adapterId")]
     adapter_id: String,
+    #[serde(default, rename = "deliveryAttemptRequired")]
+    delivery_attempt_required: bool,
     #[serde(rename = "createdAt")]
     created_at: String,
     state: String,
@@ -819,6 +843,8 @@ struct Projection {
     #[serde(default, rename = "agentTombstones")]
     agent_tombstones: BTreeMap<String, AgentTombstone>,
     messages: BTreeMap<String, MessageRecord>,
+    #[serde(default, rename = "messageDeliveryAttempts")]
+    message_delivery_attempts: BTreeMap<String, MessageDeliveryAttempt>,
     notifications: BTreeMap<String, NotificationRecord>,
     adapters: BTreeMap<String, AdapterRecord>,
     wakeup: BTreeMap<String, WakeupRecord>,
@@ -930,12 +956,14 @@ impl CommunicationStore {
             projection: Projection::default(),
             _lock: lock,
         };
-        store.replay()?;
+        // The built-in mailbox adapter is part of the replay baseline. Events
+        // created through the default adapter must validate against it while
+        // replaying, before any journal-sourced adapter registrations apply.
         store
             .projection
             .adapters
-            .entry("mailbox".into())
-            .or_insert_with(default_mailbox_adapter);
+            .insert("mailbox".into(), default_mailbox_adapter());
+        store.replay()?;
         Ok(store)
     }
 
@@ -989,6 +1017,11 @@ impl CommunicationStore {
             "agents": self.projection.agents.values().collect::<Vec<_>>(),
             "agentTombstones": self.projection.agent_tombstones.values().collect::<Vec<_>>(),
             "messages": self.projection.messages.values().collect::<Vec<_>>(),
+            "messageDeliveryAttempts": self
+                .projection
+                .message_delivery_attempts
+                .values()
+                .collect::<Vec<_>>(),
             "adapters": self.projection.adapters.values().collect::<Vec<_>>(),
             "activeBugs": active_bugs,
             "bugs": self.projection.bugs.values().collect::<Vec<_>>(),
@@ -1520,6 +1553,8 @@ impl CommunicationStore {
 
     fn record_delivery(&mut self, request: DeliveryRequest) -> CommResult<Value> {
         validate_non_empty(&request.message_id, "messageId")?;
+        validate_non_empty(&request.attempt_id, "attemptId")?;
+        validate_non_empty(&request.nonce, "nonce")?;
         validate_non_empty(&request.runtime_id, "runtimeId")?;
         validate_non_empty(&request.state, "state")?;
         if request
@@ -1553,6 +1588,22 @@ impl CommunicationStore {
                     format!("message not found: {}", request.message_id),
                 )
             })?;
+        // An exact replay of an already committed receipt is idempotent even
+        // when the runtime has since refreshed its volatile transport fields.
+        // It creates no new fact; a new state still goes through the current
+        // runtime and attempt validation below.
+        if message.evidence.iter().any(|evidence| {
+            evidence.state == state
+                && evidence.details.get("runtimeId").and_then(Value::as_str)
+                    == Some(request.runtime_id.as_str())
+                && evidence.details.get("receipt") == Some(&request.evidence)
+                && evidence.details.get("attemptId").and_then(Value::as_str)
+                    == Some(request.attempt_id.as_str())
+                && evidence.details.get("nonce").and_then(Value::as_str)
+                    == Some(request.nonce.as_str())
+        }) {
+            return Ok(json!({ "message": message, "idempotent": true }));
+        }
         let target = self.require_live_agent(&message.to)?.clone();
         let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
             CommError::new(
@@ -1574,6 +1625,43 @@ impl CommunicationStore {
         }
         let runtime = global_registry::runtime(&request.runtime_id)
             .map_err(|error| CommError::new("runtime_registration_required", error))?;
+        let attempt = self
+            .projection
+            .message_delivery_attempts
+            .get(&request.message_id)
+            .cloned()
+            .ok_or_else(|| {
+                CommError::new(
+                    "delivery_attempt_required",
+                    format!(
+                        "message has no persisted delivery attempt: {}",
+                        request.message_id
+                    ),
+                )
+            })?;
+        validate_message_delivery_attempt(
+            &attempt,
+            &message,
+            &target,
+            &runtime,
+            self.require_adapter(&message.adapter_id)?,
+            false,
+        )?;
+        if attempt.attempt_id != request.attempt_id {
+            return Err(CommError::new(
+                "delivery_attempt_mismatch",
+                format!(
+                    "delivery attempt {} does not match persisted attempt {}",
+                    request.attempt_id, attempt.attempt_id
+                ),
+            ));
+        }
+        if attempt.nonce != request.nonce {
+            return Err(CommError::new(
+                "delivery_attempt_nonce_mismatch",
+                "delivery receipt nonce does not match persisted delivery attempt",
+            ));
+        }
         let at = request
             .observed_at
             .as_deref()
@@ -1582,17 +1670,13 @@ impl CommunicationStore {
             .unwrap_or_else(now);
         let details = json!({
             "runtimeId": request.runtime_id,
-            "runtimeFingerprint": runtime.fingerprint,
+            "runtimeFingerprint": attempt.runtime_fingerprint,
+            "attemptId": request.attempt_id,
+            "nonce": request.nonce,
+            "adapterId": attempt.adapter_id,
+            "target": attempt.target,
             "receipt": request.evidence
         });
-        if message.evidence.iter().any(|evidence| {
-            evidence.state == state
-                && evidence.details.get("runtimeId").and_then(Value::as_str)
-                    == Some(request.runtime_id.as_str())
-                && evidence.details.get("receipt") == Some(&request.evidence)
-        }) {
-            return Ok(json!({ "message": message, "idempotent": true }));
-        }
         validate_delivery_state_transition(&message.state, &state)?;
         let evidence = DeliveryEvidence {
             state: state.clone(),
@@ -1604,7 +1688,9 @@ impl CommunicationStore {
             json!({
                 "messageId": request.message_id,
                 "state": state,
-                "evidence": evidence
+                "evidence": evidence,
+                "attemptId": request.attempt_id,
+                "nonce": request.nonce
             }),
         )?;
         Ok(json!({
@@ -1612,6 +1698,79 @@ impl CommunicationStore {
             "idempotent": false,
             "observedAt": at
         }))
+    }
+
+    fn ensure_message_delivery_attempt(
+        &mut self,
+        message: &MessageRecord,
+    ) -> CommResult<MessageDeliveryAttempt> {
+        if let Some(existing) = self
+            .projection
+            .message_delivery_attempts
+            .get(&message.message_id)
+            .cloned()
+        {
+            let target = self.require_live_agent(&message.to)?.clone();
+            let runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
+                CommError::new(
+                    "runtime_registration_required",
+                    format!(
+                        "message target has no runtime identity: {}",
+                        message.to.key()
+                    ),
+                )
+            })?;
+            let runtime = global_registry::runtime(runtime_id)
+                .map_err(|error| CommError::new("runtime_registration_required", error))?;
+            validate_message_delivery_attempt(
+                &existing,
+                message,
+                &target,
+                &runtime,
+                self.require_adapter(&message.adapter_id)?,
+                false,
+            )?;
+            return Ok(existing);
+        }
+
+        let target = self.require_live_agent(&message.to)?.clone();
+        let runtime_id = target.runtime_id.clone().ok_or_else(|| {
+            CommError::new(
+                "runtime_registration_required",
+                format!(
+                    "message target has no runtime identity: {}",
+                    message.to.key()
+                ),
+            )
+        })?;
+        let runtime = global_registry::runtime(&runtime_id)
+            .map_err(|error| CommError::new("runtime_registration_required", error))?;
+        let adapter = self.require_adapter(&message.adapter_id)?;
+        let attempt = MessageDeliveryAttempt {
+            attempt_id: new_id("attempt"),
+            message_id: message.message_id.clone(),
+            operation: "message.delivery".into(),
+            adapter_id: message.adapter_id.clone(),
+            runtime_id,
+            runtime_fingerprint: runtime.fingerprint.clone(),
+            target: adapter.target.clone(),
+            nonce: new_id("nonce"),
+            started_at: now(),
+        };
+        validate_message_delivery_attempt(&attempt, message, &target, &runtime, adapter, false)?;
+        self.commit(
+            "message.delivery_attempt",
+            json!({
+                "messageId": message.message_id,
+                "attempt": attempt
+            }),
+        )?;
+        Ok(self
+            .projection
+            .message_delivery_attempts
+            .get(&message.message_id)
+            .cloned()
+            .expect("message delivery attempt committed"))
     }
 
     pub fn set_agent_state(
@@ -3353,6 +3512,9 @@ impl CommunicationStore {
                 .messages
                 .get(&notification.message_id)
                 .cloned();
+            if let Some(message) = message.as_ref() {
+                self.ensure_message_delivery_attempt(message)?;
+            }
             return Ok(json!({
                 "message": message,
                 "notification": notification.summary()
@@ -3728,6 +3890,7 @@ impl CommunicationStore {
             coalesce_key: request.coalesce_key,
             issue_id: request.issue_id,
             adapter_id,
+            delivery_attempt_required: true,
             created_at: created_at.clone(),
             state: "created".into(),
             evidence: Vec::new(),
@@ -3754,6 +3917,7 @@ impl CommunicationStore {
             .get(&message.message_id)
             .cloned()
             .unwrap();
+        let delivery_attempt = self.ensure_message_delivery_attempt(&current)?;
         let notification = self.notification_for(&current, &created_at, available_at_override)?;
         let direct = notification
             .as_ref()
@@ -3762,6 +3926,7 @@ impl CommunicationStore {
         Ok(json!({
             "message": current,
             "route": current.route,
+            "deliveryAttempt": delivery_attempt,
             "notification": direct,
             "idempotent": false
         }))
@@ -3769,6 +3934,7 @@ impl CommunicationStore {
 
     fn recover_idempotent_message(&mut self, existing: MessageRecord) -> CommResult<Value> {
         let current = self.recover_message_state(existing)?;
+        let delivery_attempt = self.ensure_message_delivery_attempt(&current)?;
         let notification = self.recover_message_notification(&current)?;
         let direct = notification
             .as_ref()
@@ -3777,6 +3943,7 @@ impl CommunicationStore {
         Ok(json!({
             "message": current,
             "route": current.route,
+            "deliveryAttempt": delivery_attempt,
             "notification": direct,
             "idempotent": true
         }))
@@ -3822,6 +3989,7 @@ impl CommunicationStore {
         &mut self,
         message: &MessageRecord,
     ) -> CommResult<Option<NotificationRecord>> {
+        self.ensure_message_delivery_attempt(message)?;
         let immediate = matches!(message.delivery_mode, DeliveryMode::Direct)
             || message.priority.is_breakthrough();
         let existing = if immediate {
@@ -4172,7 +4340,7 @@ impl CommunicationStore {
                     ),
                 ));
             }
-            return self
+            let current = self
                 .projection
                 .messages
                 .get(&expected.message_id)
@@ -4185,7 +4353,9 @@ impl CommunicationStore {
                             expected.message_id
                         ),
                     )
-                });
+                })?;
+            self.ensure_message_delivery_attempt(&current)?;
+            return Ok(current);
         }
 
         let mut created = expected.clone();
@@ -4206,7 +4376,8 @@ impl CommunicationStore {
                 "evidence": accepted
             }),
         )?;
-        self.projection
+        let current = self
+            .projection
             .messages
             .get(&created.message_id)
             .cloned()
@@ -4218,7 +4389,14 @@ impl CommunicationStore {
                         created.message_id
                     ),
                 )
-            })
+            })?;
+        self.ensure_message_delivery_attempt(&current)?;
+        Ok(self
+            .projection
+            .messages
+            .get(&created.message_id)
+            .cloned()
+            .expect("wakeup message remains after delivery attempt"))
     }
 
     fn commit_wakeup_reminder(
@@ -4270,6 +4448,7 @@ impl CommunicationStore {
             coalesce_key: Some(coalesce_key.into()),
             issue_id: None,
             adapter_id: adapter_id.into(),
+            delivery_attempt_required: true,
             created_at: at.into(),
             state: "accepted".into(),
             evidence: vec![DeliveryEvidence {
@@ -4311,6 +4490,7 @@ impl CommunicationStore {
         )?;
         message.issue_id = issue_id.map(str::to_string);
         self.commit("message.created", serde_json::to_value(&message).unwrap())?;
+        self.ensure_message_delivery_attempt(&message)?;
         let notification = self.notification_for(&message, at, available_at_override)?;
         Ok(json!({
             "message": message,
@@ -5193,6 +5373,75 @@ impl CommunicationStore {
                     .messages
                     .insert(record.message_id.clone(), record);
             }
+            "message.delivery_attempt" => {
+                let message_id = event
+                    .data
+                    .get("messageId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "message delivery attempt messageId missing",
+                        )
+                    })?;
+                let attempt: MessageDeliveryAttempt = decode(
+                    event.data.get("attempt").unwrap_or(&Value::Null),
+                    "message delivery attempt",
+                )?;
+                if attempt.message_id != message_id {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "message delivery attempt messageId does not match attempt record",
+                    ));
+                }
+                let message = self
+                    .projection
+                    .messages
+                    .get(message_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            format!("message delivery attempt message not found: {message_id}"),
+                        )
+                    })?;
+                let target = self
+                    .projection
+                    .agents
+                    .get(&message.to.key())
+                    .cloned()
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            "message delivery attempt target agent is missing",
+                        )
+                    })?;
+                let runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
+                    CommError::new(
+                        "event_data_invalid",
+                        "message delivery attempt target has no runtime identity",
+                    )
+                })?;
+                let runtime = global_registry::runtime(runtime_id)
+                    .map_err(|error| CommError::new("event_data_invalid", error))?;
+                let adapter = self.require_adapter(&message.adapter_id)?;
+                validate_message_delivery_attempt(
+                    &attempt, &message, &target, &runtime, adapter, false,
+                )?;
+                if let Some(existing) = self.projection.message_delivery_attempts.get(message_id) {
+                    if existing != &attempt {
+                        return Err(CommError::new(
+                            "event_data_invalid",
+                            format!("message delivery attempt already differs: {message_id}"),
+                        ));
+                    }
+                    return Ok(());
+                }
+                self.projection
+                    .message_delivery_attempts
+                    .insert(message_id.into(), attempt);
+            }
             "message.state" => {
                 let message_id = event
                     .data
@@ -5214,15 +5463,47 @@ impl CommunicationStore {
                         "message state evidence does not match message state",
                     ));
                 }
-                let target = self
+                let message_record = self
                     .projection
                     .messages
                     .get(message_id)
-                    .and_then(|message| self.projection.agents.get(&message.to.key()))
+                    .cloned()
+                    .ok_or_else(|| CommError::new("event_data_invalid", "message not found"))?;
+                let target = self
+                    .projection
+                    .agents
+                    .get(&message_record.to.key())
                     .ok_or_else(|| {
                         CommError::new("event_data_invalid", "message target agent is missing")
                     })?;
-                validate_replayed_delivery_evidence(state, &evidence, target)?;
+                let adapter = self.require_adapter(&message_record.adapter_id)?.clone();
+                let attempt_id_value = event.data.get("attemptId");
+                let nonce_value = event.data.get("nonce");
+                if attempt_id_value.is_some_and(|value| !value.is_string()) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "message state attemptId must be a string",
+                    ));
+                }
+                if nonce_value.is_some_and(|value| !value.is_string()) {
+                    return Err(CommError::new(
+                        "event_data_invalid",
+                        "message state nonce must be a string",
+                    ));
+                }
+                let attempt_id = attempt_id_value.and_then(Value::as_str);
+                let nonce = nonce_value.and_then(Value::as_str);
+                validate_replayed_delivery_evidence(
+                    state,
+                    &evidence,
+                    target,
+                    message_id,
+                    &message_record,
+                    self.projection.message_delivery_attempts.get(message_id),
+                    attempt_id,
+                    nonce,
+                    &adapter,
+                )?;
                 let message = self
                     .projection
                     .messages
@@ -6263,10 +6544,96 @@ fn validate_delivery_state_transition(current: &str, next: &str) -> CommResult<(
     Ok(())
 }
 
+fn validate_message_delivery_attempt(
+    attempt: &MessageDeliveryAttempt,
+    message: &MessageRecord,
+    target: &AgentRecord,
+    runtime: &global_registry::RuntimeRecord,
+    adapter: &AdapterRecord,
+    require_current_runtime: bool,
+) -> CommResult<()> {
+    validate_non_empty(&attempt.attempt_id, "attemptId")?;
+    validate_non_empty(&attempt.message_id, "messageId")?;
+    validate_non_empty(&attempt.operation, "operation")?;
+    validate_non_empty(&attempt.adapter_id, "adapterId")?;
+    validate_non_empty(&attempt.runtime_id, "runtimeId")?;
+    validate_non_empty(&attempt.runtime_fingerprint, "runtimeFingerprint")?;
+    validate_non_empty(&attempt.nonce, "nonce")?;
+    validate_time(&attempt.started_at)?;
+    if attempt.operation != "message.delivery" {
+        return Err(CommError::new(
+            "delivery_attempt_operation_invalid",
+            format!(
+                "unsupported message delivery attempt operation: {}",
+                attempt.operation
+            ),
+        ));
+    }
+    if attempt.message_id != message.message_id {
+        return Err(CommError::new(
+            "delivery_attempt_message_mismatch",
+            "delivery attempt does not match message",
+        ));
+    }
+    if attempt.adapter_id != message.adapter_id || attempt.adapter_id != adapter.adapter_id {
+        return Err(CommError::new(
+            "delivery_attempt_adapter_mismatch",
+            "delivery attempt does not match message adapter",
+        ));
+    }
+    let target_runtime_id = target.runtime_id.as_deref().ok_or_else(|| {
+        CommError::new(
+            "runtime_registration_required",
+            format!(
+                "message target has no runtime identity: {}",
+                message.to.key()
+            ),
+        )
+    })?;
+    if attempt.runtime_id != target_runtime_id || runtime.identity.runtime_id != attempt.runtime_id
+    {
+        return Err(CommError::new(
+            "delivery_attempt_runtime_mismatch",
+            "delivery attempt does not match message target runtime",
+        ));
+    }
+    if require_current_runtime {
+        if attempt.runtime_fingerprint != runtime.fingerprint {
+            return Err(CommError::new(
+                "delivery_attempt_runtime_stale",
+                "delivery attempt runtime binding is stale",
+            ));
+        }
+    } else if !global_registry::runtime_fingerprint_known(
+        &attempt.runtime_id,
+        &attempt.runtime_fingerprint,
+    )
+    .map_err(|error| CommError::new("runtime_registration_required", error))?
+    {
+        return Err(CommError::new(
+            "delivery_attempt_runtime_unknown",
+            "delivery attempt runtime fingerprint is not registered",
+        ));
+    }
+    if attempt.target != adapter.target {
+        return Err(CommError::new(
+            "delivery_attempt_target_mismatch",
+            "delivery attempt target does not match adapter target",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_replayed_delivery_evidence(
     state: &str,
     evidence: &DeliveryEvidence,
     target: &AgentRecord,
+    message_id: &str,
+    message: &MessageRecord,
+    attempt: Option<&MessageDeliveryAttempt>,
+    event_attempt_id: Option<&str>,
+    event_nonce: Option<&str>,
+    adapter: &AdapterRecord,
 ) -> CommResult<()> {
     if !matches!(
         state,
@@ -6328,6 +6695,8 @@ fn validate_replayed_delivery_evidence(
             "external delivery evidence runtimeId does not match message target",
         ));
     }
+    let runtime = global_registry::runtime(runtime_id)
+        .map_err(|error| CommError::new("event_data_invalid", error))?;
     let known = global_registry::runtime_fingerprint_known(runtime_id, fingerprint)
         .map_err(|error| CommError::new("event_data_invalid", error))?;
     if !known {
@@ -6336,6 +6705,89 @@ fn validate_replayed_delivery_evidence(
             "external delivery evidence runtimeFingerprint is not registered",
         ));
     }
+
+    // Messages written before the persisted-attempt contract are identified
+    // by the absence of the explicit marker. Their historical receipts remain
+    // replayable under the old runtime/fingerprint/receipt contract. Any
+    // attempt metadata, or any persisted attempt, moves the event to the
+    // strict contract instead of silently treating missing fields as legacy.
+    let has_attempt_metadata = event_attempt_id.is_some()
+        || event_nonce.is_some()
+        || details.contains_key("attemptId")
+        || details.contains_key("nonce")
+        || details.contains_key("adapterId")
+        || details.contains_key("target");
+    if !message.delivery_attempt_required && attempt.is_none() && !has_attempt_metadata {
+        return Ok(());
+    }
+
+    let attempt_id = event_attempt_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "external delivery evidence attemptId is missing",
+            )
+        })?;
+    let nonce = event_nonce
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "external delivery evidence nonce is missing",
+            )
+        })?;
+    if details.get("attemptId").and_then(Value::as_str) != Some(attempt_id)
+        || details.get("nonce").and_then(Value::as_str) != Some(nonce)
+    {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence attempt identity does not match message state",
+        ));
+    }
+    let adapter_id = details
+        .get("adapterId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CommError::new(
+                "event_data_invalid",
+                "external delivery evidence adapterId is missing",
+            )
+        })?;
+    if adapter_id != message.adapter_id {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence adapterId does not match message",
+        ));
+    }
+    let expected_target = serde_json::to_value(&adapter.target).unwrap();
+    let observed_target = details.get("target").cloned().unwrap_or(Value::Null);
+    if observed_target != expected_target {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence target does not match adapter",
+        ));
+    }
+    let attempt = attempt.ok_or_else(|| {
+        CommError::new(
+            "event_data_invalid",
+            format!("message {message_id} has no persisted delivery attempt"),
+        )
+    })?;
+    if attempt.attempt_id != attempt_id || attempt.nonce != nonce {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence does not match persisted delivery attempt",
+        ));
+    }
+    if attempt.runtime_fingerprint != fingerprint {
+        return Err(CommError::new(
+            "event_data_invalid",
+            "external delivery evidence runtimeFingerprint does not match attempt",
+        ));
+    }
+    validate_message_delivery_attempt(attempt, message, target, &runtime, adapter, false)?;
     Ok(())
 }
 

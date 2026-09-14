@@ -7661,6 +7661,54 @@ fn repeated_init_refreshes_sdk_bundle_without_overwriting_project_truth() {
 }
 
 #[test]
+fn repeated_init_preserves_historical_migration_bundle_witness() {
+    let root = temp_root("init-preserves-migration-bundle-witness");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
+
+    // Model an SDK that already advanced once: the lock currently points at an
+    // intermediate bundle and records the historical migration bundle as the
+    // previous witness. A later init must keep that historical witness rather
+    // than overwrite it with the immediate intermediate bundle.
+    let intermediate_bundle_digest = format!("sha256:{}", "9".repeat(64));
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["bundle_digest"] = Value::String(intermediate_bundle_digest.clone());
+    lock["previous_bundle_digest"] = Value::String(previous_bundle_digest.clone());
+    fs::write(&lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
+
+    let initialized = run(&["init", root_text]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let lock: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
+    let resources: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk-resources.json")).unwrap())
+            .unwrap();
+    assert_eq!(lock["bundle_digest"], resources["bundle_digest"]);
+    assert_eq!(lock["previous_bundle_digest"], previous_bundle_digest);
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        original_record
+    );
+
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ordinary_verify_reports_stale_migration_without_blocking_development() {
     let root = temp_root("ordinary-verify-stale-migration");
     let root_text = root.to_str().unwrap();

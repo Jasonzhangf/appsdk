@@ -12893,19 +12893,21 @@ fn write_current_sdk_lock(root: &Path) {
         if let Some(value) = existing.get("binary_ref").and_then(Value::as_str) {
             lock.insert("binary_ref".into(), Value::String(value.into()));
         }
-        let existing_bundle = existing.get("bundle_digest").and_then(Value::as_str);
-        let previous_bundle = if existing_bundle.is_some_and(|value| {
+        let valid_bundle = |value: &str| {
             value.len() == 71
                 && value.starts_with("sha256:")
                 && value[7..].chars().all(|c| c.is_ascii_hexdigit())
                 && value != current_bundle_digest
-        }) {
-            existing_bundle
-        } else {
-            existing
-                .get("previous_bundle_digest")
-                .and_then(Value::as_str)
         };
+        // Keep the historical migration witness if the lock already records one.
+        // Overwriting it with the immediate bundle severs the 0.1.5->0.1.6
+        // witness chain and makes admission reject the lock.
+        let existing_bundle = existing.get("bundle_digest").and_then(Value::as_str);
+        let previous_bundle = existing
+            .get("previous_bundle_digest")
+            .and_then(Value::as_str)
+            .filter(|value| valid_bundle(value))
+            .or_else(|| existing_bundle.filter(|value| valid_bundle(value)));
         if let Some(value) = previous_bundle {
             if value.len() == 71
                 && value.starts_with("sha256:")

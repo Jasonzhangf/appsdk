@@ -12323,7 +12323,7 @@ fn verify_internal(
 ) {
     assert_project_root_safe(root);
     let reset_epoch = reset_governance_record_mode(root).is_some();
-    let mut delivery_verified = admission;
+    let mut delivery_verified = false;
     let mut baseline_status = if reset_epoch { "required" } else { "current" };
     let project = read_project(root);
     assert_governance_maps(root);
@@ -12713,14 +12713,16 @@ fn verify_internal(
     }
     if emit_result {
         let command_ok = true;
-        let ok = if reset_epoch {
-            delivery_verified
-        } else {
-            command_ok
-        };
-        let final_baseline_status = if delivery_verified {
-            "current"
-        } else if reset_epoch {
+        // `verify --admission` runs the delivery checks above; reaching this
+        // point means they passed. Ordinary `verify` is a development probe:
+        // it may succeed without evaluating delivery, so it must not report
+        // delivery as verified or emit a success-shaped `ok`.
+        let delivery_assessed = admission;
+        if delivery_assessed {
+            delivery_verified = true;
+        }
+        let ok = delivery_verified;
+        let final_baseline_status = if reset_epoch && !admission {
             "required"
         } else {
             baseline_status
@@ -12732,13 +12734,14 @@ fn verify_internal(
             "stage": required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT"),
             "development_ready": true,
             "delivery_verified": delivery_verified,
+            "delivery_assessed": delivery_assessed,
             "baseline_status": final_baseline_status,
-            "reason": if delivery_verified {
-                Value::Null
-            } else if reset_epoch {
+            "reason": if reset_epoch && !admission {
                 Value::String("baseline_required".into())
+            } else if delivery_assessed {
+                Value::Null
             } else {
-                Value::String("admission_not_requested".into())
+                Value::String("delivery_not_evaluated".into())
             }
         });
         println!("{}", result);
@@ -13346,7 +13349,6 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         );
         return;
     }
-    let registration = reserve_global_project(root);
     let fresh_governance = !root.join(".appsdk/project.json").is_file();
     let existing_project_needs_guidance = !fresh_governance
         && serde_json::from_str::<Value>(
@@ -13368,7 +13370,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     install_bundle_resources(root);
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
-    commit_global_project(registration);
+    try_register_global_project(root);
     initialize_collab_peer();
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
@@ -13589,6 +13591,17 @@ fn rebuild_fresh_project_contract(project: &Value, scaffold: &Value) -> Value {
             .filter(|value| !value.is_empty())
         {
             rebuilt_governance.insert(key.into(), Value::String(value.to_string()));
+        }
+    }
+    for key in [
+        "freeze_requirements",
+        "promotion_requires",
+        "runtime_forbidden_roots",
+        "protected_kinds",
+        "generated_kinds",
+    ] {
+        if let Some(value) = project.pointer(&format!("/governance/{key}")) {
+            rebuilt_governance.insert(key.into(), value.clone());
         }
     }
 

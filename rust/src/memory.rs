@@ -150,8 +150,13 @@ fn review_status(value: &Value) -> &str {
 }
 
 fn detail_relative_path(id: &str, level: i64) -> String {
-    let filename = id.replace('/', "--");
-    format!("L{}/{}.md", level, filename)
+    format!("L{}/{}.md", level, detail_filename(id))
+}
+
+fn detail_filename(id: &str) -> String {
+    // `%` is not allowed in memory IDs, so this encoding is injective for the
+    // full accepted ID alphabet and cannot collide with a literal `--` ID.
+    id.replace('/', "%2F")
 }
 
 fn detail_display_path(global: bool, id: &str, level: i64) -> String {
@@ -410,13 +415,12 @@ fn read_selected_details(root: &Path, global: bool, l3_only: bool) -> Vec<Value>
             }
             let value = parse_detail(&path);
             let id = entry_id(&value);
-            if l3_only
-                && !expected_levels.contains_key(&id)
-                && path.file_stem().and_then(|name| name.to_str()) != Some(id.as_str())
-            {
+            let filename_matches = path.file_stem().and_then(|name| name.to_str())
+                == Some(detail_filename(&id).as_str());
+            if l3_only && !expected_levels.contains_key(&id) && !filename_matches {
                 fail(
                     "MEMORY_DETAIL_FILENAME_MISMATCH",
-                    "name a new L3 detail <metadata-id>.md before importing it",
+                    "name a new L3 detail <encoded-metadata-id>.md before importing it",
                 );
             }
             if let Some(level) = level {
@@ -620,6 +624,40 @@ fn home_dir() -> PathBuf {
             env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/project-memory"))
         })
         .unwrap_or_else(|| fail("MEMORY_HOME_UNAVAILABLE", "set PROJECT_MEMORY_HOME"))
+}
+
+/// Resolve the global Collab persistence root with the same precedence as the
+/// Collab host endpoint: `COLLAB_STATE_DIR`, then `XDG_STATE_HOME/collab`,
+/// then `~/.collab`. Run notes live under this root, not inside a project.
+fn collab_home_dir() -> PathBuf {
+    if let Some(value) = nonempty_env("COLLAB_STATE_DIR") {
+        return PathBuf::from(value);
+    }
+    if let Some(value) = nonempty_env("XDG_STATE_HOME") {
+        return PathBuf::from(value).join("collab");
+    }
+    nonempty_env("HOME")
+        .map(|home| PathBuf::from(home).join(".collab"))
+        .unwrap_or_else(|| {
+            fail(
+                "MEMORY_HOME_UNAVAILABLE",
+                "set COLLAB_STATE_DIR, XDG_STATE_HOME, or HOME",
+            )
+        })
+}
+
+fn collab_home_display() -> String {
+    if let Some(value) = nonempty_env("COLLAB_STATE_DIR") {
+        return PathBuf::from(value).display().to_string();
+    }
+    if let Some(value) = nonempty_env("XDG_STATE_HOME") {
+        return PathBuf::from(value).join("collab").display().to_string();
+    }
+    "~/.collab".to_string()
+}
+
+fn nonempty_env(name: &str) -> Option<std::ffi::OsString> {
+    env::var_os(name).filter(|value| !value.is_empty())
 }
 
 fn project_id(root: &Path) -> String {
@@ -1867,10 +1905,8 @@ fn get(root: &Path, id: &str) -> Value {
 
 fn review(root: &Path, run_id: &str) -> Value {
     assert_id(run_id);
-    let path = root
-        .join(".agent-collab/runs")
-        .join(run_id)
-        .join("notes.jsonl");
+    let collab_home = collab_home_dir();
+    let path = collab_home.join("runs").join(run_id).join("notes.jsonl");
     if !path.is_file() {
         fail(
             "MEMORY_RUN_NOT_FOUND",
@@ -1899,7 +1935,8 @@ fn review(root: &Path, run_id: &str) -> Value {
         }
         if value.get("source_refs").is_none() {
             value["source_refs"] = json!([format!(
-                ".agent-collab/runs/{}/notes.jsonl#{}",
+                "{}/runs/{}/notes.jsonl#{}",
+                collab_home_display(),
                 run_id,
                 index + 1
             )]);
@@ -2043,10 +2080,10 @@ fn verify(root: &Path) -> Value {
     json!({"ok":ok,"schema_version":1,"scopes":scopes,"categories":CATEGORIES,"semantic_backend":"wemm-adapter","semantic_status":"candidate-only","vector_backend":"sqlite-vec-compatible schema"})
 }
 
-fn run_notes(root: &Path, run_id: &str) -> (PathBuf, Vec<Value>) {
+fn run_notes(_root: &Path, run_id: &str) -> (PathBuf, Vec<Value>) {
     assert_id(run_id);
-    let path = root
-        .join(".agent-collab/runs")
+    let path = collab_home_dir()
+        .join("runs")
         .join(run_id)
         .join("notes.jsonl");
     if !path.is_file() {

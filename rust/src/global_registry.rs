@@ -1048,11 +1048,20 @@ fn apply_communication_event(
     Ok(())
 }
 
-fn read_communication_projection(path: &Path) -> Result<CommunicationProjection, String> {
+fn read_communication_projection(
+    path: &Path,
+    missing_index_is_empty: bool,
+) -> Result<CommunicationProjection, String> {
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
+        Err(error) if error.kind() == ErrorKind::NotFound && missing_index_is_empty => {
             return Ok(CommunicationProjection::default())
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(format!(
+                "GLOBAL_COMMUNICATION_REGISTRY_UNAVAILABLE:{}",
+                path.display()
+            ))
         }
         Err(error) => return Err(format!("GLOBAL_COMMUNICATION_REGISTRY_READ_FAILED:{error}")),
     };
@@ -1163,7 +1172,7 @@ pub fn register_communication_scope_at(
     )?;
     let (registry_root, path, lock_path) = communication_registry_paths(registry_root)?;
     let _lock = communication_lock(&lock_path)?;
-    let projection = read_communication_projection(&path)?;
+    let projection = read_communication_projection(&path, true)?;
     if let Some(existing) = projection.scopes.get(scope_id) {
         if existing == &event.project_root {
             return Ok(CommunicationReceipt {
@@ -1206,7 +1215,7 @@ pub fn register_communication_agent_at(
     )?;
     let (registry_root, path, lock_path) = communication_registry_paths(registry_root)?;
     let _lock = communication_lock(&lock_path)?;
-    let projection = read_communication_projection(&path)?;
+    let projection = read_communication_projection(&path, true)?;
     if projection.scopes.get(scope_id) != Some(&event.project_root) {
         return Err(format!("GLOBAL_COMMUNICATION_SCOPE_NOT_FOUND:{scope_id}"));
     }
@@ -1271,7 +1280,7 @@ pub fn rebind_communication_agent_at(
     )?;
     let (registry_root, path, lock_path) = communication_registry_paths(registry_root)?;
     let _lock = communication_lock(&lock_path)?;
-    let projection = read_communication_projection(&path)?;
+    let projection = read_communication_projection(&path, true)?;
     if projection.scopes.get(scope_id) != Some(&event.project_root) {
         return Err(format!("GLOBAL_COMMUNICATION_SCOPE_NOT_FOUND:{scope_id}"));
     }
@@ -1322,7 +1331,7 @@ pub fn communication_target_at(
     validate_communication_part(&address.session_id, "session_id")?;
     let (registry_root, path, lock_path) = communication_registry_paths(registry_root)?;
     let _lock = communication_lock(&lock_path)?;
-    let projection = read_communication_projection(&path)?;
+    let projection = read_communication_projection(&path, false)?;
     let original = address.clone();
     let mut current = address.clone();
     let mut visited = BTreeMap::new();

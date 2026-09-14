@@ -1268,6 +1268,67 @@ fn cross_project_peer_and_unknown_target_remain_fail_closed_after_discovery() {
 }
 
 #[test]
+fn missing_host_discovery_index_is_unavailable_not_unknown_agent() {
+    let project_a = temp_root("missing-host-index-a");
+    let host = temp_root("missing-host-index-host");
+
+    register_scope_with_host(&project_a, &host, "scope-a", "app-a", &["master-a"]);
+    register_agent_with_host(
+        &project_a, &host, "scope-a", "master-a", "master-a", "master", None,
+    );
+
+    fs::remove_file(host.join("communication.jsonl")).unwrap();
+
+    let missing = call_error_with_host(
+        &project_a,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope-a", "sessionId": "master-a" },
+                "to": { "scopeId": "scope-z", "sessionId": "master-z" },
+                "title": "target registry missing",
+                "priority": "p2",
+                "body": "must not be classified as unknown agent"
+            }
+        }),
+    );
+    assert!(
+        missing.contains("GLOBAL_COMMUNICATION_REGISTRY_UNAVAILABLE"),
+        "{missing}"
+    );
+    assert!(!missing.contains("agent_not_registered"), "{missing}");
+
+    register_scope_with_host(&project_a, &host, "scope-a", "app-a", &["master-a"]);
+    register_agent_with_host(
+        &project_a, &host, "scope-a", "master-a", "master-a", "master", None,
+    );
+
+    let unknown = call_error_with_host(
+        &project_a,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope-a", "sessionId": "master-a" },
+                "to": { "scopeId": "scope-z", "sessionId": "master-z" },
+                "title": "unknown target",
+                "priority": "p2",
+                "body": "valid unknown agent must stay fail closed"
+            }
+        }),
+    );
+    assert!(unknown.contains("agent_not_registered"), "{unknown}");
+    assert!(
+        !unknown.contains("GLOBAL_COMMUNICATION_REGISTRY_UNAVAILABLE"),
+        "{unknown}"
+    );
+
+    fs::remove_dir_all(project_a).unwrap();
+    fs::remove_dir_all(host).unwrap();
+}
+
+#[test]
 fn discovery_registration_failure_replays_from_local_pending_intent() {
     let root = temp_root("discovery-registration-recovery");
     let host = root.join(".appsdk-host");

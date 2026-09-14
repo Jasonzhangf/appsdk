@@ -507,8 +507,32 @@ fn reset_governance_discards_only_control_plane_and_is_idempotent() {
     let root = temp_root("reset-governance");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("preserved-reset-project".into());
+    project["modules"][0]["module_note"] = Value::String("preserve-module-field".into());
+    project["modules"][0]["build"]["args"][1] =
+        Value::String("mkdir -p generated/modules/app-core/lib && printf 'preserved\\n' > generated/modules/app-core/lib/app-core.placeholder".into());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let project_before = fs::read(&project_path).unwrap();
     fs::write(root.join("business.txt"), "keep\n").unwrap();
+    fs::write(root.join("active/legacy.txt"), "retain-active\n").unwrap();
+    fs::write(
+        root.join("protected/history/legacy.txt"),
+        "retain-protected\n",
+    )
+    .unwrap();
     fs::write(root.join(".appsdk/legacy-record.json"), "legacy\n").unwrap();
+    fs::write(
+        root.join(".appsdk/records/reset-governance-record.json"),
+        "{\"schema_version\":1,\"reset_id\":\"legacy-reset\",\"mode\":\"discard_legacy_control_plane\",\"preserved\":[\"business_source\"],\"removed\":[\".appsdk\"],\"branch\":\"codex/legacy\",\"created_at\":\"2026-01-01T00:00:00Z\"}\n",
+    )
+    .unwrap();
     fs::create_dir_all(root.join("generated/old-artifact")).unwrap();
     fs::write(root.join("generated/old-artifact/artifact.bin"), "old\n").unwrap();
     fs::create_dir_all(root.join(".appsdk-control/runtime")).unwrap();
@@ -529,15 +553,164 @@ fn reset_governance_discards_only_control_plane_and_is_idempotent() {
         fs::read_to_string(root.join("business.txt")).unwrap(),
         "keep\n"
     );
+    assert_eq!(
+        fs::read_to_string(root.join("active/legacy.txt")).unwrap(),
+        "retain-active\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("protected/history/legacy.txt")).unwrap(),
+        "retain-protected\n"
+    );
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
     assert!(root
         .join(".appsdk/records/reset-governance-record.json")
         .exists());
     assert!(!root.join(".appsdk/legacy-record.json").exists());
     assert!(!root.join(".appsdk-control/runtime").exists());
     assert!(!root.join("generated/old-artifact").exists());
+    let reset_path = root.join(".appsdk/records/reset-governance-record.json");
+    let first: Value = serde_json::from_str(&fs::read_to_string(&reset_path).unwrap()).unwrap();
+    assert_eq!(first["mode"], "discard_legacy_control_plane");
+    let first_transaction_id = first["transaction_id"].as_str().unwrap().to_string();
+    assert_eq!(first["reset_id"], first["transaction_id"]);
+    assert!(first_transaction_id.starts_with("reset-governance-"));
+    assert_ne!(first_transaction_id, "legacy-reset");
+    assert_reset_lock_released(&reset_transaction_lock_path(&root));
+
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "commit first reset"])
+        .status()
+        .unwrap()
+        .success());
+    fs::write(root.join(".appsdk/after-first.txt"), "must be removed\n").unwrap();
+    fs::write(
+        root.join(".appsdk/records/old-review-record.json"),
+        "{\"old\":true}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".appsdk-control/runtime-two")).unwrap();
+    fs::create_dir_all(root.join("generated/old-artifact-two")).unwrap();
+    fs::write(
+        root.join("generated/old-artifact-two/artifact.bin"),
+        "old-two\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "commit",
+            "-m",
+            "commit second reset inputs",
+        ])
+        .status()
+        .unwrap()
+        .success());
+
     assert!(run(&["reset-governance", root_text, "--discard-legacy"])
         .status
         .success());
+    assert!(!root.join(".appsdk/after-first.txt").exists());
+    assert!(!root.join(".appsdk/records/old-review-record.json").exists());
+    assert!(!root.join(".appsdk-control/runtime-two").exists());
+    assert!(!root.join("generated/old-artifact-two").exists());
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
+    let second: Value = serde_json::from_str(&fs::read_to_string(&reset_path).unwrap()).unwrap();
+    assert_eq!(second["mode"], "discard_legacy_control_plane");
+    let second_transaction_id = second["transaction_id"].as_str().unwrap().to_string();
+    assert_eq!(second["reset_id"], second["transaction_id"]);
+    assert_ne!(second_transaction_id, first_transaction_id);
+    assert_reset_lock_released(&reset_transaction_lock_path(&root));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_governance_recovers_committed_discard_transaction_marker() {
+    let root = temp_root("reset-governance-committed-discard-marker");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project_path = root.join(".appsdk/project.json");
+    let project = fs::read_to_string(&project_path).unwrap();
+    fs::write(
+        &project_path,
+        project.replace(
+            "\"generated_root\": \"generated/**\"",
+            "\"generated_root\": \"build-output/**\"",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("build-output")).unwrap();
+    fs::write(root.join("build-output/legacy.bin"), "legacy\n").unwrap();
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&root);
+
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(
+        reset.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reset.stdout),
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let reset_path = root.join(".appsdk/records/reset-governance-record.json");
+    let record: Value = serde_json::from_str(&fs::read_to_string(&reset_path).unwrap()).unwrap();
+    let transaction_id = record["transaction_id"].as_str().unwrap().to_string();
+    assert_eq!(record["mode"], "discard_legacy_control_plane");
+    assert!(!root.join("build-output").exists());
+
+    let transaction = root.parent().unwrap().join(format!(
+        ".appsdk-reset-transaction-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(transaction.join("quarantine")).unwrap();
+    let mut targets = fresh_reset_marker_targets(&root, &["generated", "build-output"]);
+    for target in &mut targets {
+        target["original_exists"] = Value::Bool(true);
+        target["quarantined"] = Value::Bool(true);
+        target["published"] = Value::Bool(target["staged"].is_string());
+    }
+    fs::write(
+        transaction.join("marker.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "transaction_id": transaction_id,
+            "root": root.to_string_lossy(),
+            "mode": "discard_legacy_control_plane",
+            "phase": "committed",
+            "error": null,
+            "created_dirs": [],
+            "generated_roots": ["generated", "build-output"],
+            "targets": targets,
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    fs::write(transaction.join("marker.staging.123.456"), "partial\n").unwrap();
+
+    let resumed = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(
+        resumed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(!transaction.exists());
+    assert!(!root.join("build-output").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("business.txt")).unwrap(),
+        "keep\n"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -7407,6 +7580,22 @@ fn reset_receipt_validation_is_mode_aware_and_fail_closed() {
     let receipt_path = root.join(".appsdk/records/reset-governance-record.json");
     let receipt_before = fs::read(&receipt_path).unwrap();
     assert!(run(&["verify", root_text]).status.success());
+
+    let mut discard_without_transaction: Value = serde_json::from_slice(&receipt_before).unwrap();
+    discard_without_transaction
+        .as_object_mut()
+        .unwrap()
+        .remove("transaction_id");
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&discard_without_transaction).unwrap() + "\n",
+    )
+    .unwrap();
+    let missing_discard_transaction = run(&["verify", root_text]);
+    assert!(!missing_discard_transaction.status.success());
+    assert!(String::from_utf8_lossy(&missing_discard_transaction.stderr)
+        .contains("INVALID_RESET_GOVERNANCE_RECORD"));
+    fs::write(&receipt_path, &receipt_before).unwrap();
 
     let mut fresh_without_transaction: Value = serde_json::from_slice(&receipt_before).unwrap();
     fresh_without_transaction["mode"] = Value::String("fresh_init".into());

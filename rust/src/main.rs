@@ -12183,25 +12183,15 @@ fn reset_governance_record_mode(root: &Path) -> Option<String> {
             fail("INVALID_RESET_GOVERNANCE_RECORD");
         }
     }
-    if mode == "fresh_init"
-        && record
-            .get("transaction_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .is_none()
+    if record
+        .get("transaction_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .is_none()
     {
         fail("INVALID_RESET_GOVERNANCE_RECORD");
     }
-    if let Some(transaction_id) = record.get("transaction_id") {
-        if transaction_id
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .is_none()
-        {
-            fail("INVALID_RESET_GOVERNANCE_RECORD");
-        }
-    }
-    if mode == "fresh_init" && record.get("reset_id") != record.get("transaction_id") {
+    if record.get("reset_id") != record.get("transaction_id") {
         fail("INVALID_RESET_GOVERNANCE_RECORD");
     }
     let created_at = record
@@ -13224,7 +13214,8 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
     let registration = reserve_global_project(root);
     if fresh {
-        reset_governance_internal(root, true, true).unwrap_or_else(|error| fail(error));
+        reset_governance_internal(root, true, ResetMode::FreshInit)
+            .unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
         commit_global_project(registration);
         initialize_collab_peer();
@@ -14031,6 +14022,35 @@ struct ResetTransactionTarget {
     published: bool,
 }
 
+// A governance reset and a fresh init are the same transactional operation.
+// Both entries share the single staging/quarantine/publish/rollback owner
+// below while retaining their existing output and cleanliness-scope behavior.
+// Recording the mode keeps the write-ahead marker honest without claiming a
+// separate engine. `fresh_init` records the same `reset_id`/`transaction_id`
+// receipt shape as the historical fresh path so older recovery markers stay
+// readable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResetMode {
+    FreshInit,
+    DiscardLegacy,
+}
+
+impl ResetMode {
+    fn record_mode(self) -> &'static str {
+        match self {
+            ResetMode::FreshInit => "fresh_init",
+            ResetMode::DiscardLegacy => "discard_legacy_control_plane",
+        }
+    }
+
+    fn applied_message(self) -> &'static str {
+        match self {
+            ResetMode::FreshInit => "governance fresh init applied",
+            ResetMode::DiscardLegacy => "governance reset applied",
+        }
+    }
+}
+
 #[cfg(unix)]
 const RESET_TRANSACTION_LOCK_EX: c_int = 2;
 #[cfg(unix)]
@@ -14441,7 +14461,15 @@ fn reset_transaction_committed_record_matches(root: &Path, marker: &Value) -> bo
     let Ok(record) = serde_json::from_str::<Value>(&text) else {
         return false;
     };
-    record.get("mode").and_then(Value::as_str) == Some("fresh_init")
+    // Both shared-engine modes publish identical `reset_id`/`transaction_id`
+    // receipts. New markers bind the mode as well; legacy markers without a
+    // mode remain readable only for the historical fresh-init path.
+    let record_mode = record.get("mode").and_then(Value::as_str);
+    let mode_matches = match marker.get("mode").and_then(Value::as_str) {
+        Some(mode) => record_mode == Some(mode),
+        None => record_mode == Some("fresh_init"),
+    };
+    mode_matches
         && record.get("transaction_id").and_then(Value::as_str) == Some(transaction_id)
         && record.get("reset_id").and_then(Value::as_str) == Some(transaction_id)
 }
@@ -14480,6 +14508,14 @@ fn reset_transaction_validate_marker(
 ) -> Result<(), String> {
     if marker.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid schema_version".into());
+    }
+    if let Some(mode) = marker.get("mode") {
+        if !matches!(
+            mode.as_str(),
+            Some("fresh_init" | "discard_legacy_control_plane")
+        ) {
+            return Err("GOVERNANCE_RESET_RECOVERY_REQUIRED:invalid mode".into());
+        }
     }
     let marker_root = marker
         .get("root")
@@ -14863,12 +14899,16 @@ fn reset_transaction_dir(root: &Path) -> PathBuf {
         .join(format!(".appsdk-reset-transaction-{name}"))
 }
 
-fn reset_transaction_id() -> Result<String, String> {
+fn reset_transaction_id(mode: ResetMode) -> Result<String, String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("RESET_TRANSACTION_NONCE_FAILED:{error}"))?
         .as_nanos();
-    Ok(format!("fresh-init-{}-{nonce}", std::process::id()))
+    let prefix = match mode {
+        ResetMode::FreshInit => "fresh-init",
+        ResetMode::DiscardLegacy => "reset-governance",
+    };
+    Ok(format!("{prefix}-{}-{nonce}", std::process::id()))
 }
 
 fn reset_transaction_write_bytes(
@@ -15283,6 +15323,7 @@ fn reset_transaction_marker(
     transaction_dir: &Path,
     transaction_id: &str,
     root: &Path,
+    mode: ResetMode,
     phase: &str,
     error: Option<&str>,
     targets: &[ResetTransactionTarget],
@@ -15293,6 +15334,7 @@ fn reset_transaction_marker(
         "schema_version": 1,
         "transaction_id": transaction_id,
         "root": root.to_string_lossy(),
+        "mode": mode.record_mode(),
         "phase": phase,
         "error": error,
         "created_dirs": created_dirs,
@@ -15620,6 +15662,7 @@ fn reset_transaction_build_staging(
     generated_roots: &[String],
     transaction_id: &str,
     branch: &str,
+    mode: ResetMode,
 ) -> Result<(), String> {
     let staging_root = transaction_dir.join("staging");
     reset_transaction_symlink_components(transaction_dir, &staging_root)?;
@@ -15693,7 +15736,7 @@ fn reset_transaction_build_staging(
         "schema_version": 1,
         "reset_id": transaction_id,
         "transaction_id": transaction_id,
-        "mode": "fresh_init",
+        "mode": mode.record_mode(),
         "preserved": ["business_source", "runtime_data", "active", "protected"],
         "removed": removed,
         "branch": branch,
@@ -15714,6 +15757,7 @@ fn reset_transaction_rollback(
     targets: &[ResetTransactionTarget],
     created_dirs: &[String],
     generated_roots: &[String],
+    mode: ResetMode,
     cause: &str,
 ) -> Result<(), String> {
     let mut first_error = None;
@@ -15764,6 +15808,7 @@ fn reset_transaction_rollback(
             transaction_dir,
             transaction_id,
             root,
+            mode,
             "rollback_failed",
             Some(&combined),
             targets,
@@ -15780,6 +15825,7 @@ fn reset_transaction_rollback(
             transaction_dir,
             transaction_id,
             root,
+            mode,
             "rollback_failed",
             Some(&combined),
             targets,
@@ -15798,6 +15844,7 @@ fn reset_transaction_rollback_or_combine(
     targets: &[ResetTransactionTarget],
     created_dirs: &[String],
     generated_roots: &[String],
+    mode: ResetMode,
     cause: &str,
 ) -> String {
     match reset_transaction_rollback(
@@ -15807,6 +15854,7 @@ fn reset_transaction_rollback_or_combine(
         targets,
         created_dirs,
         generated_roots,
+        mode,
         cause,
     ) {
         Ok(()) => cause.to_string(),
@@ -15814,10 +15862,11 @@ fn reset_transaction_rollback_or_combine(
     }
 }
 
-fn reset_transaction_fresh(
+fn reset_transaction_run(
     root: &Path,
     branch: &str,
     generated_roots: &[String],
+    mode: ResetMode,
 ) -> Result<(), String> {
     let transaction_dir = reset_transaction_dir(root);
     reset_transaction_symlink_components(
@@ -15841,13 +15890,14 @@ fn reset_transaction_fresh(
     }
     fs::create_dir_all(&transaction_dir)
         .map_err(|error| format!("GOVERNANCE_RESET_TRANSACTION_CREATE_FAILED:{error}"))?;
-    let transaction_id = reset_transaction_id()?;
+    let transaction_id = reset_transaction_id(mode)?;
     let empty_targets = Vec::new();
     let empty_created = Vec::new();
     reset_transaction_marker(
         &transaction_dir,
         &transaction_id,
         root,
+        mode,
         "building",
         None,
         &empty_targets,
@@ -15862,11 +15912,13 @@ fn reset_transaction_fresh(
         generated_roots,
         &transaction_id,
         branch,
+        mode,
     ) {
         let _ = reset_transaction_marker(
             &transaction_dir,
             &transaction_id,
             root,
+            mode,
             "build_failed",
             Some(&error),
             &empty_targets,
@@ -15888,6 +15940,7 @@ fn reset_transaction_fresh(
                 &transaction_dir,
                 &transaction_id,
                 root,
+                mode,
                 "preflight_failed",
                 Some(&error),
                 &empty_targets,
@@ -15902,6 +15955,7 @@ fn reset_transaction_fresh(
         &transaction_dir,
         &transaction_id,
         root,
+        mode,
         "prepared",
         None,
         &targets,
@@ -15926,6 +15980,7 @@ fn reset_transaction_fresh(
                 &targets,
                 &created_dirs,
                 generated_roots,
+                mode,
                 &cause,
             );
             return Err(failure);
@@ -15935,6 +15990,7 @@ fn reset_transaction_fresh(
             &transaction_dir,
             &transaction_id,
             root,
+            mode,
             "quarantining",
             None,
             &targets,
@@ -15948,6 +16004,7 @@ fn reset_transaction_fresh(
                 &targets,
                 &created_dirs,
                 generated_roots,
+                mode,
                 &error,
             );
             return Err(failure);
@@ -15964,6 +16021,7 @@ fn reset_transaction_fresh(
                 &targets,
                 &created_dirs,
                 generated_roots,
+                mode,
                 &cause,
             );
             return Err(failure);
@@ -15978,6 +16036,7 @@ fn reset_transaction_fresh(
                     &targets,
                     &created_dirs,
                     generated_roots,
+                    mode,
                     &cause,
                 );
                 return Err(failure);
@@ -16002,6 +16061,7 @@ fn reset_transaction_fresh(
                 &targets,
                 &created_dirs,
                 generated_roots,
+                mode,
                 &cause,
             );
             return Err(failure);
@@ -16018,6 +16078,7 @@ fn reset_transaction_fresh(
                 &targets,
                 &created_dirs,
                 generated_roots,
+                mode,
                 &cause,
             );
             return Err(failure);
@@ -16027,6 +16088,7 @@ fn reset_transaction_fresh(
             &transaction_dir,
             &transaction_id,
             root,
+            mode,
             "publishing",
             None,
             &targets,
@@ -16040,6 +16102,7 @@ fn reset_transaction_fresh(
                 &targets,
                 &created_dirs,
                 generated_roots,
+                mode,
                 &error,
             );
             return Err(failure);
@@ -16049,6 +16112,7 @@ fn reset_transaction_fresh(
         &transaction_dir,
         &transaction_id,
         root,
+        mode,
         "committed",
         None,
         &targets,
@@ -16062,6 +16126,7 @@ fn reset_transaction_fresh(
                 &transaction_dir,
                 &transaction_id,
                 root,
+                mode,
                 "cleanup_failed",
                 Some(&cleanup),
                 &targets,
@@ -16077,6 +16142,7 @@ fn reset_transaction_fresh(
             &transaction_dir,
             &transaction_id,
             root,
+            mode,
             "cleanup_failed",
             Some(&cleanup),
             &targets,
@@ -16267,22 +16333,19 @@ fn reset_generated_roots(root: &Path) -> Result<Vec<String>, String> {
 }
 
 fn reset_governance(root: &Path, discard_legacy: bool) {
-    reset_governance_internal(root, discard_legacy, false).unwrap_or_else(|error| fail(error));
+    reset_governance_internal(root, discard_legacy, ResetMode::DiscardLegacy)
+        .unwrap_or_else(|error| fail(error));
 }
 
 fn reset_governance_internal(
     root: &Path,
     discard_legacy: bool,
-    fresh_init: bool,
+    mode: ResetMode,
 ) -> Result<(), String> {
     if !discard_legacy {
         return Err("RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION".into());
     }
     assert_project_root_safe(root);
-    let reset_record = root
-        .join(".appsdk")
-        .join("records")
-        .join("reset-governance-record.json");
 
     let branch = Command::new("git")
         .args([
@@ -16300,30 +16363,23 @@ fn reset_governance_internal(
     if branch.is_empty() || branch == "main" || branch == "master" {
         return Err("RESET_REQUIRES_NON_MAIN_WORKTREE".into());
     }
-    if reset_record.exists() && !fresh_init {
-        println!("governance reset already applied");
-        return Ok(());
-    }
 
-    let _fresh_lock = if fresh_init {
-        Some(reset_transaction_acquire_lock(root)?)
-    } else {
-        None
-    };
-    if fresh_init {
-        match reset_transaction_recover(root) {
-            Ok(Some(true)) => {
-                println!("governance fresh init already applied");
-                return Ok(());
-            }
-            Ok(Some(false)) => return Err("GOVERNANCE_RESET_RECOVERED_RETRY".into()),
-            Ok(None) => {}
-            Err(error) => return Err(error),
+    let _lock = reset_transaction_acquire_lock(root)?;
+    match reset_transaction_recover(root) {
+        Ok(Some(true)) => {
+            println!("{}", mode.applied_message());
+            return Ok(());
         }
+        Ok(Some(false)) => return Err("GOVERNANCE_RESET_RECOVERED_RETRY".into()),
+        Ok(None) => {}
+        Err(error) => return Err(error),
     }
     let mut status_command = Command::new("git");
     status_command.args(["-C", root.to_str().unwrap_or(""), "status", "--porcelain"]);
-    if fresh_init {
+    // `init --fresh` historically scoped cleanliness to the project root so a
+    // nested project did not fail on unrelated parent changes. Preserve that
+    // exact gate for fresh mode; the reset entry remains whole-worktree.
+    if mode == ResetMode::FreshInit {
         status_command.args(["--", "."]);
     }
     let status = status_command
@@ -16336,68 +16392,8 @@ fn reset_governance_internal(
         return Err("RESET_REQUIRES_CLEAN_WORKTREE".into());
     }
     let generated_roots = reset_generated_roots(root)?;
-    if fresh_init {
-        reset_transaction_fresh(root, &branch, &generated_roots)?;
-        println!("governance fresh init applied");
-        return Ok(());
-    }
-    let mut removed = vec![".appsdk".to_string(), ".appsdk-control".to_string()];
-    removed.extend(generated_roots.iter().cloned());
-    let reset_targets = [".appsdk", ".appsdk-control"]
-        .into_iter()
-        .chain(generated_roots.iter().map(String::as_str))
-        .map(|relative| (relative.to_string(), root.join(relative)))
-        .collect::<Vec<_>>();
-    // Validate every deletion target before removing the first one. A later
-    // symlink or reserved-root failure must leave the legacy control plane
-    // untouched.
-    for (relative, target) in &reset_targets {
-        match fs::symlink_metadata(target) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                fail(format!("GOVERNANCE_PATH_SYMLINK:{}", relative));
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                fail(format!("GOVERNANCE_PATH_NOT_DIRECTORY:{}", relative));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() != ErrorKind::NotFound => {
-                fail(format!("GOVERNANCE_PATH_METADATA_FAILED:{}", relative));
-            }
-            Err(_) => {}
-        }
-    }
-    for (_, target) in reset_targets {
-        if target.exists() {
-            fs::remove_dir_all(&target).unwrap_or_else(|_| fail("GOVERNANCE_RESET_FAILED"));
-        }
-    }
-
-    ensure_governance_layout(root);
-    write_project_scaffold(root);
-    install_bundle_resources(root);
-    write_current_sdk_lock(root);
-    atomic_write_json(
-        &reset_record,
-        &serde_json::json!({
-            "schema_version": 1,
-            "reset_id": format!("reset-{}", std::process::id()),
-            "mode": if fresh_init {
-                "fresh_init"
-            } else {
-                "discard_legacy_control_plane"
-            },
-            "preserved": ["business_source", "runtime_data", "active", "protected"],
-            "removed": removed,
-            "branch": branch,
-            "created_at": Utc::now().to_rfc3339()
-        }),
-        "GOVERNANCE_RESET_RECORD_FAILED",
-    );
-    if fresh_init {
-        println!("governance fresh init applied");
-    } else {
-        println!("governance reset applied");
-    }
+    reset_transaction_run(root, &branch, &generated_roots, mode)?;
+    println!("{}", mode.applied_message());
     Ok(())
 }
 

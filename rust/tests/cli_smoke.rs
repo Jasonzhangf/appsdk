@@ -7809,14 +7809,119 @@ fn reset_receipt_validation_is_mode_aware_and_fail_closed() {
         .as_object_mut()
         .unwrap()
         .remove("transaction_id");
+    discard_without_transaction["reset_id"] = Value::String("reset-12345".into());
     fs::write(
         &receipt_path,
         serde_json::to_string_pretty(&discard_without_transaction).unwrap() + "\n",
     )
     .unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "add",
+            ".appsdk/records/reset-governance-record.json"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "legacy reset receipt"])
+        .status()
+        .unwrap()
+        .success());
     let missing_discard_transaction = run(&["verify", root_text]);
-    assert!(!missing_discard_transaction.status.success());
+    assert!(
+        missing_discard_transaction.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&missing_discard_transaction.stdout),
+        String::from_utf8_lossy(&missing_discard_transaction.stderr)
+    );
     assert!(String::from_utf8_lossy(&missing_discard_transaction.stderr)
+        .contains("authorized legacy governance reset receipt has no transaction_id"));
+    let missing_discard_result: Value =
+        serde_json::from_slice(&missing_discard_transaction.stdout).unwrap();
+    assert_eq!(missing_discard_result["baseline_status"], "required");
+    assert_eq!(missing_discard_result["reason"], "baseline_required");
+
+    let mut tampered_legacy_discard = discard_without_transaction;
+    tampered_legacy_discard["branch"] = Value::String("codex/tampered".into());
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&tampered_legacy_discard).unwrap() + "\n",
+    )
+    .unwrap();
+    let tampered_legacy = run(&["verify", root_text]);
+    assert!(!tampered_legacy.status.success());
+    assert!(String::from_utf8_lossy(&tampered_legacy.stderr)
+        .contains("INVALID_RESET_GOVERNANCE_RECORD"));
+
+    fs::write(&receipt_path, &receipt_before).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "add",
+            ".appsdk/records/reset-governance-record.json"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "commit",
+            "-m",
+            "restore transactional reset receipt"
+        ])
+        .status()
+        .unwrap()
+        .success());
+
+    let mut malformed_legacy_discard: Value = serde_json::from_slice(&receipt_before).unwrap();
+    malformed_legacy_discard
+        .as_object_mut()
+        .unwrap()
+        .remove("transaction_id");
+    malformed_legacy_discard["reset_id"] = Value::String("reset-not-a-pid".into());
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&malformed_legacy_discard).unwrap() + "\n",
+    )
+    .unwrap();
+    let malformed_legacy = run(&["verify", root_text]);
+    assert!(!malformed_legacy.status.success());
+    assert!(String::from_utf8_lossy(&malformed_legacy.stderr)
+        .contains("INVALID_RESET_GOVERNANCE_RECORD"));
+    fs::write(&receipt_path, &receipt_before).unwrap();
+
+    let mut discard_with_empty_transaction: Value =
+        serde_json::from_slice(&receipt_before).unwrap();
+    discard_with_empty_transaction["transaction_id"] = Value::String(String::new());
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&discard_with_empty_transaction).unwrap() + "\n",
+    )
+    .unwrap();
+    let empty_discard_transaction = run(&["verify", root_text]);
+    assert!(!empty_discard_transaction.status.success());
+    assert!(String::from_utf8_lossy(&empty_discard_transaction.stderr)
+        .contains("INVALID_RESET_GOVERNANCE_RECORD"));
+    fs::write(&receipt_path, &receipt_before).unwrap();
+
+    let mut mismatched_discard_transaction: Value =
+        serde_json::from_slice(&receipt_before).unwrap();
+    mismatched_discard_transaction["transaction_id"] = Value::String("transaction-1".into());
+    mismatched_discard_transaction["reset_id"] = Value::String("reset-1".into());
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&mismatched_discard_transaction).unwrap() + "\n",
+    )
+    .unwrap();
+    let mismatched_discard = run(&["verify", root_text]);
+    assert!(!mismatched_discard.status.success());
+    assert!(String::from_utf8_lossy(&mismatched_discard.stderr)
         .contains("INVALID_RESET_GOVERNANCE_RECORD"));
     fs::write(&receipt_path, &receipt_before).unwrap();
 

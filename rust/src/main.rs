@@ -12182,16 +12182,67 @@ fn reset_governance_record_mode(root: &Path) -> Option<String> {
             fail("INVALID_RESET_GOVERNANCE_RECORD");
         }
     }
-    if record
+    let transaction_id = record
         .get("transaction_id")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
+        .filter(|value| !value.is_empty());
+    if record.get("transaction_id").is_some() && transaction_id.is_none() {
         fail("INVALID_RESET_GOVERNANCE_RECORD");
     }
-    if record.get("reset_id") != record.get("transaction_id") {
-        fail("INVALID_RESET_GOVERNANCE_RECORD");
+    match transaction_id {
+        Some(_) if record.get("reset_id") != record.get("transaction_id") => {
+            fail("INVALID_RESET_GOVERNANCE_RECORD");
+        }
+        Some(_) => {}
+        None if mode == "fresh_init" => fail("INVALID_RESET_GOVERNANCE_RECORD"),
+        // Legacy discard receipts predate the transactional reset owner. They
+        // bind the operation through the historical `reset-<pid>` identity and
+        // are accepted only when the full receipt below validates and the
+        // receipt is a committed blob, not a working-tree fabrication.
+        None => {
+            let reset_id = record
+                .get("reset_id")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+            let suffix = reset_id
+                .strip_prefix("reset-")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| fail("INVALID_RESET_GOVERNANCE_RECORD"));
+            if !suffix.chars().all(|value| value.is_ascii_digit()) {
+                fail("INVALID_RESET_GOVERNANCE_RECORD");
+            }
+            let prefix = Command::new("git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap_or(""),
+                    "rev-parse",
+                    "--show-prefix",
+                ])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .unwrap_or_default();
+            let committed = Command::new("git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap_or(""),
+                    "show",
+                    &format!("HEAD:{prefix}.appsdk/records/reset-governance-record.json"),
+                ])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| output.stdout)
+                .is_some_and(|bytes| fs::read(&path).is_ok_and(|current| current == bytes));
+            if !committed {
+                fail("INVALID_RESET_GOVERNANCE_RECORD");
+            }
+            eprintln!(
+                "warning: authorized legacy governance reset receipt has no transaction_id ({})",
+                path.display()
+            );
+        }
     }
     let created_at = record
         .get("created_at")

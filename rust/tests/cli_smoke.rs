@@ -1538,24 +1538,40 @@ fn init_fresh_rejects_wrong_sdk_contract_fields_before_reset_publish() {
 }
 
 #[test]
-fn init_fresh_preserves_compiled_project_contract_for_rebuild() {
-    let root = temp_root("init-fresh-compiled-project-contract");
+fn init_fresh_reset_epoch_skips_compiled_artifact_requirement_but_preserves_contract() {
+    let root = temp_root("init-fresh-reset-epoch-artifact");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
+
     let project_path = root.join(".appsdk/project.json");
     let mut project: Value =
         serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
-    project["project_id"] = Value::String("compiled-project".into());
-    project["lifecycle"]["stage"] = Value::String("compiled".into());
-    project["modules"][0]["stage"] = Value::String("compiled".into());
+    project["project_id"] = Value::String("reset-epoch-artifact-project".into());
+    project["lifecycle"]["stage"] = Value::String("controlled_verified".into());
+    project["modules"][0]["stage"] = Value::String("frozen".into());
     fs::write(
         &project_path,
         serde_json::to_string_pretty(&project).unwrap() + "\n",
     )
     .unwrap();
+    let project_before = fs::read(&project_path).unwrap();
+
+    let old_record = root.join(".appsdk/records/review-record-app-core.json");
+    fs::create_dir_all(old_record.parent().unwrap()).unwrap();
+    fs::write(&old_record, "{\"old\":true}\n").unwrap();
+    fs::create_dir_all(root.join("generated/modules/app-core")).unwrap();
+    fs::write(
+        root.join("generated/modules/app-core/module.compiled.json"),
+        "old\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("generated/project.compiled.json"),
+        "old-project\n",
+    )
+    .unwrap();
     init_git(&root);
 
-    let project_before = fs::read(&project_path).unwrap();
     let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
     assert!(
         initialized.status.success(),
@@ -1563,17 +1579,58 @@ fn init_fresh_preserves_compiled_project_contract_for_rebuild() {
         String::from_utf8_lossy(&initialized.stdout),
         String::from_utf8_lossy(&initialized.stderr)
     );
-    assert_eq!(fs::read(&project_path).unwrap(), project_before);
     assert!(root
         .join(".appsdk/records/reset-governance-record.json")
         .is_file());
-    let verify = run(&["verify", root_text]);
-    assert!(!verify.status.success());
+    assert_eq!(
+        fs::read(&project_path).unwrap(),
+        project_before,
+        "fresh init must preserve the existing project contract"
+    );
     assert!(
-        String::from_utf8_lossy(&verify.stderr).contains("COMPILED_STAGE_REQUIRES_ARTIFACT"),
+        !root
+            .join(".appsdk/records/review-record-app-core.json")
+            .exists(),
+        "fresh init must not copy legacy lifecycle records"
+    );
+    assert!(
+        !root
+            .join("generated/modules/app-core/module.compiled.json")
+            .exists(),
+        "fresh init must not copy legacy generated module artifacts"
+    );
+    assert!(
+        !root.join("generated/project.compiled.json").exists(),
+        "fresh init must not copy legacy project artifacts"
+    );
+
+    let current_project = fs::read(&project_path).unwrap();
+    let after: Value = serde_json::from_slice(&current_project).unwrap();
+    let before: Value = serde_json::from_slice(&project_before).unwrap();
+    assert_eq!(after, before);
+    assert_eq!(after["project_id"], "reset-epoch-artifact-project");
+    assert_eq!(after["modules"][0]["module_id"], "app-core");
+    assert_eq!(after["modules"][0]["source_owner"], "app-core");
+    for key in ["owned_paths", "build", "contract_paths"] {
+        assert_eq!(
+            after["modules"][0][key], before["modules"][0][key],
+            "fresh init must preserve module {key}"
+        );
+    }
+
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission.status.success(),
         "stdout={} stderr={}",
-        String::from_utf8_lossy(&verify.stdout),
-        String::from_utf8_lossy(&verify.stderr)
+        String::from_utf8_lossy(&admission.stdout),
+        String::from_utf8_lossy(&admission.stderr)
+    );
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
     );
     fs::remove_dir_all(root).unwrap();
 }

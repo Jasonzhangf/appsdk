@@ -12484,6 +12484,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     let artifact_file = generated_root(root, &project).join("project.compiled.json");
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
     if !admission
+        && !reset_epoch
         && matches!(
             stage,
             "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"

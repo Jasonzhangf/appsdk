@@ -9787,7 +9787,7 @@ fn verify_review_admission(root: &Path, module_id: &str) {
         // generated checkout projection may have been intentionally removed,
         // so review admission must resolve the artifact from the immutable
         // historical archive and validate the publication graph only.
-        verify_internal(root, true, false);
+        verify_internal(root, true, false, false, false);
         let artifact = read_historical_module_artifact(root, &project, module, module_id);
         if !matches!(
             artifact.get("stage").and_then(Value::as_str),
@@ -9810,7 +9810,7 @@ fn verify_review_admission(root: &Path, module_id: &str) {
     module_artifact_matches_project(module, &artifact);
     explain_review_admission_preflight(root, module_id, module);
     assert_pre_review_validation_gate(root, module_id, &artifact);
-    verify_internal(root, true, false);
+    verify_internal(root, true, true, true, false);
     println!(
         "{{\"ok\":true,\"gate\":\"review_admission\",\"module_id\":\"{}\"}}",
         module_id
@@ -12018,10 +12018,10 @@ fn publish_active_internal(
     println!("active {} {}", module_id, version);
 }
 
-fn assert_sdk_resources(root: &Path, required: bool) {
+fn assert_sdk_resources(root: &Path, required: bool, allow_reset_resource_gaps: bool) {
     let path = root.join(".appsdk/sdk-resources.json");
     if !path.exists() {
-        if required {
+        if required && !allow_reset_resource_gaps {
             fail("MISSING_SDK_RESOURCES");
         }
         return;
@@ -12058,7 +12058,6 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     if entries.is_empty() {
         fail("INVALID_SDK_RESOURCES");
     }
-    let reset_mode = reset_governance_record_mode(root);
     let bundle_entries = sdk_bundle_resource_entries();
     let mut known = BTreeSet::new();
     for (source, class, _) in &bundle_entries {
@@ -12117,7 +12116,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
         let target = root.join(relative);
         assert_no_symlink_components(root, &target, "sdk_resource_record");
         if !target.exists() {
-            if reset_mode.is_some() {
+            if allow_reset_resource_gaps {
                 eprintln!(
                     "warning: SDK resource missing after authorized governance reset ({})",
                     relative
@@ -12133,7 +12132,7 @@ fn assert_sdk_resources(root: &Path, required: bool) {
     for (source, class, _) in bundle_entries {
         let key = format!("{}\0{}", class, source);
         if !seen.contains(&key) {
-            if reset_mode.is_some() {
+            if allow_reset_resource_gaps {
                 eprintln!(
                     "warning: SDK resource record entry missing after authorized governance reset ({})",
                     source
@@ -12222,7 +12221,7 @@ fn reset_governance_record_mode(root: &Path) -> Option<String> {
 }
 
 fn verify_sdk_migration_record(root: &Path, admission: bool) {
-    if reset_governance_record_mode(root).is_some() {
+    if !admission && reset_governance_record_mode(root).is_some() {
         let migration_root = sdk_map_migration_root(root);
         if fs::symlink_metadata(&migration_root).is_ok() {
             eprintln!(
@@ -12264,9 +12263,17 @@ fn verify_sdk_migration_record(root: &Path, admission: bool) {
     let _ = assert_sdk_migration_record(root);
 }
 
-fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
+fn verify_internal(
+    root: &Path,
+    admission: bool,
+    require_project_artifact: bool,
+    check_module_publications: bool,
+    emit_result: bool,
+) {
     assert_project_root_safe(root);
     let reset_epoch = reset_governance_record_mode(root).is_some();
+    let mut delivery_verified = admission;
+    let mut baseline_status = if reset_epoch { "required" } else { "current" };
     let project = read_project(root);
     assert_governance_maps(root);
     verify_sdk_migration_record(root, admission);
@@ -12469,17 +12476,18 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
             stage,
             "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
         ),
+        reset_epoch && !admission,
     );
     assert_goal_contract_if_present(root);
     let artifact_file = generated_root(root, &project).join("project.compiled.json");
     let stage = required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT");
-    if !admission
-        && !reset_epoch
+    if require_project_artifact
         && matches!(
             stage,
             "compiled" | "controlled_verified" | "architecture_stable" | "frozen" | "retired"
         )
         && !artifact_file.exists()
+        && !(reset_epoch && !admission)
     {
         fail("COMPILED_STAGE_REQUIRES_ARTIFACT");
     }
@@ -12491,14 +12499,14 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     if let Some(artifact) = artifact.as_ref() {
         assert_artifact_matches(&project, artifact);
     }
+    let development_gap = reset_epoch && !admission;
+    let verify_publication_graph = check_module_publications && !development_gap;
     for module in project
         .get("modules")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
     {
-        if !admission
-            && !reset_epoch
-            && module.get("stage").and_then(Value::as_str) == Some("frozen")
+        if verify_publication_graph && module.get("stage").and_then(Value::as_str) == Some("frozen")
         {
             let id = module
                 .get("module_id")
@@ -12590,9 +12598,12 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
                 }
             }
         }
+        if development_gap && module.get("stage").and_then(Value::as_str) == Some("frozen") {
+            delivery_verified = false;
+            baseline_status = "required";
+        }
     }
-    if !admission
-        && !reset_epoch
+    if verify_publication_graph
         && project
             .get("modules")
             .and_then(Value::as_array)
@@ -12650,16 +12661,41 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
         }
     }
     if emit_result {
-        println!(
-            "{{\"ok\":true,\"project_id\":\"{}\",\"stage\":\"{}\"}}",
-            required_str(&project, "/project_id", "INVALID_PROJECT_ID"),
-            required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT")
-        );
+        let command_ok = true;
+        let ok = if reset_epoch {
+            delivery_verified
+        } else {
+            command_ok
+        };
+        let final_baseline_status = if delivery_verified {
+            "current"
+        } else if reset_epoch {
+            "required"
+        } else {
+            baseline_status
+        };
+        let result = serde_json::json!({
+            "ok": ok,
+            "command_ok": command_ok,
+            "project_id": required_str(&project, "/project_id", "INVALID_PROJECT_ID"),
+            "stage": required_str(&project, "/lifecycle/stage", "INVALID_LIFECYCLE_CONTRACT"),
+            "development_ready": true,
+            "delivery_verified": delivery_verified,
+            "baseline_status": final_baseline_status,
+            "reason": if delivery_verified {
+                Value::Null
+            } else if reset_epoch {
+                Value::String("baseline_required".into())
+            } else {
+                Value::String("admission_not_requested".into())
+            }
+        });
+        println!("{}", result);
     }
 }
 
 fn verify(root: &Path, admission: bool) {
-    verify_internal(root, admission, true);
+    verify_internal(root, admission, true, true, true);
 }
 
 const APPSDK_GITIGNORE_BEGIN: &str = "# BEGIN APPSDK MANAGED";
@@ -13131,6 +13167,8 @@ fn prepare_project(workspace: &Path) {
     }
 }
 
+const COLLAB_INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn initialize_collab_peer() {
     if env::var_os("TMUX_PANE").is_none() {
         println!("collab peer bootstrap pending: no live tmux pane");
@@ -13144,8 +13182,18 @@ fn initialize_collab_peer() {
         );
         return;
     }
-    let output = match Command::new("collab").arg("init").output() {
+    let mut command = Command::new("collab");
+    command.arg("init");
+    let output = match run_goal_collab_command(command, COLLAB_INIT_TIMEOUT) {
         Ok(output) => output,
+        Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT" => {
+            eprintln!("COLLAB_INIT_TIMEOUT; shared collaboration unavailable; independent work may continue");
+            return;
+        }
+        Err(error) if error == "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT" => {
+            eprintln!("COLLAB_INIT_OUTPUT_TIMEOUT; shared collaboration unavailable; independent work may continue");
+            return;
+        }
         Err(error) => {
             eprintln!("COLLAB_INIT_UNAVAILABLE:{}; shared collaboration unavailable; independent work may continue", error);
             return;
@@ -13159,6 +13207,23 @@ fn initialize_collab_peer() {
     let result = String::from_utf8_lossy(&output.stdout);
     if !result.trim().is_empty() {
         println!("collab {}", result.trim());
+    }
+}
+
+fn try_register_global_project(root: &Path) {
+    match global_registry::reserve_project(root, SDK_VERSION) {
+        Ok(reservation) => match reservation.commit() {
+            Ok(receipt) => println!(
+                "appsdk-registration {}",
+                serde_json::to_string(&global_registry::receipt_json(&receipt)).unwrap()
+            ),
+            Err(error) => eprintln!(
+                "GLOBAL_PROJECT_REGISTRATION_PENDING:{error}; local governance epoch is complete; host registration is unavailable or deferred"
+            ),
+        },
+        Err(error) => eprintln!(
+            "GLOBAL_PROJECT_REGISTRATION_PENDING:{error}; local governance epoch is complete; host registration is unavailable or deferred"
+        ),
     }
 }
 
@@ -13212,12 +13277,11 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         }
     }
     fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
-    let registration = reserve_global_project(root);
     if fresh {
         reset_governance_internal(root, true, ResetMode::FreshInit)
             .unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
-        commit_global_project(registration);
+        try_register_global_project(root);
         initialize_collab_peer();
         if let Err(reason) = memory::initialize_project(root) {
             eprintln!("{}; optional project memory initialization skipped", reason);
@@ -13229,6 +13293,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
         );
         return;
     }
+    let registration = reserve_global_project(root);
     let fresh_governance = !root.join(".appsdk/project.json").is_file();
     let existing_project_needs_guidance = !fresh_governance
         && serde_json::from_str::<Value>(
@@ -13371,7 +13436,14 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
         .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_MISSING"));
     let project: Value = serde_json::from_slice(&project_bytes)
         .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_INVALID"));
-    let staging_project = normalize_fresh_project_contract(&project);
+    let staging_root = transaction_dir.join("staging");
+    new_project(&staging_root, false);
+    let scaffold: Value = serde_json::from_str(
+        &fs::read_to_string(staging_root.join(".appsdk/project.json"))
+            .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_INVALID")),
+    )
+    .unwrap_or_else(|_| fail("GOVERNANCE_RESET_PROJECT_CONTRACT_INVALID"));
+    let staging_project = rebuild_fresh_project_contract(&project, &scaffold);
     let staging_project_bytes = if staging_project == project {
         project_bytes.clone()
     } else {
@@ -13380,14 +13452,12 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
         bytes.push(b'\n');
         bytes
     };
-    let staging_root = transaction_dir.join("staging");
-    new_project(&staging_root, false);
-    // Fresh init resets the control-plane records and rebuildable projections,
-    // but the existing project contract remains project-owned truth. The
-    // scaffold only supplies the new SDK-owned layout; restore the validated
-    // contract before publishing the transaction. A supported legacy SDK pin
-    // is normalized to this bundle's version; all other project fields stay
-    // unchanged and unsupported pins fail before any project path is moved.
+    // Fresh init resets the control-plane records and rebuildable projections.
+    // The current scaffold is the reset baseline for SDK-owned fields; the
+    // existing project contract contributes only project-owned identity,
+    // ownership, build, and protection boundaries. Legacy SDK pins and witness
+    // files are ignored. Validate the rebuilt current-format contract before
+    // publishing the transaction.
     reset_transaction_write_bytes(
         transaction_dir,
         &staging_root.join(".appsdk/project.json"),
@@ -13400,27 +13470,123 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
     assert_project_contract(&staging_root, &staging_project);
 }
 
-fn normalize_fresh_project_contract(project: &Value) -> Value {
-    let sdk_version = project
-        .pointer("/sdk/version")
+fn rebuild_fresh_project_contract(project: &Value, scaffold: &Value) -> Value {
+    if !project.is_object() {
+        fail("INVALID_PROJECT_CONTRACT");
+    }
+    let project_object = project
+        .as_object()
+        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT"));
+    let project_id = project
+        .get("project_id")
         .and_then(Value::as_str)
-        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
-    if sdk_version == SDK_VERSION {
-        return project.clone();
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_CONTRACT_REQUIRED:project_id"));
+    let access = project
+        .get("access")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_CONTRACT_REQUIRED:access"));
+    if access
+        .get("protected_paths")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        fail("GOVERNANCE_RESET_CONTRACT_REQUIRED:access.protected_paths");
     }
-    if sdk_version != "0.1.5" {
-        fail(format!(
-            "UNSUPPORTED_SDK_MIGRATION:{}:{}",
-            sdk_version, SDK_VERSION
-        ));
-    }
-    let mut normalized = project.clone();
-    normalized
-        .get_mut("sdk")
+    let modules = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_CONTRACT_REQUIRED:modules"));
+
+    // The current scaffold is the reset baseline. Legacy SDK shape, version,
+    // guidance, lifecycle machinery, record contracts, and other rebuildable
+    // projections are deliberately not copied. Only project-owned boundaries
+    // are overlaid onto the current baseline.
+    let mut rebuilt = scaffold.clone();
+    rebuilt["project_id"] = Value::String(project_id.to_string());
+    let rebuilt_access = rebuilt
+        .get_mut("access")
         .and_then(Value::as_object_mut)
-        .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT"))
-        .insert("version".into(), Value::String(SDK_VERSION.into()));
-    normalized
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_STAGING_CONTRACT_INVALID"));
+    for (key, value) in access {
+        rebuilt_access.insert(key.clone(), value.clone());
+    }
+    if let Some(stage) = project.pointer("/lifecycle/stage").and_then(Value::as_str) {
+        rebuilt["lifecycle"]["stage"] = Value::String(stage.to_string());
+    }
+    if let Some(enabled) = project
+        .pointer("/development_scenarios/enabled")
+        .and_then(Value::as_array)
+    {
+        rebuilt["development_scenarios"]["enabled"] = Value::Array(enabled.clone());
+    }
+    let rebuilt_governance = rebuilt
+        .get_mut("governance")
+        .and_then(Value::as_object_mut)
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_STAGING_CONTRACT_INVALID"));
+    for key in [
+        "playground_root",
+        "active_root",
+        "protected_root",
+        "generated_root",
+    ] {
+        if let Some(value) = project
+            .pointer(&format!("/governance/{key}"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            rebuilt_governance.insert(key.into(), Value::String(value.to_string()));
+        }
+    }
+
+    let module_template = scaffold
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| modules.first())
+        .cloned()
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_STAGING_CONTRACT_INVALID"));
+    let mut rebuilt_modules = Vec::with_capacity(modules.len());
+    for module in modules {
+        let module = module
+            .as_object()
+            .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/modules"));
+        let mut current = module_template.clone();
+        let current_object = current
+            .as_object_mut()
+            .unwrap_or_else(|| fail("GOVERNANCE_RESET_STAGING_CONTRACT_INVALID"));
+        for (key, value) in module {
+            // version_base binds the old epoch to old Active artifacts. It is
+            // rebuilt only when the new epoch actually needs a version move.
+            if key != "version_base" {
+                current_object.insert(key.clone(), value.clone());
+            }
+        }
+        current_object
+            .entry("dependency_modules")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        rebuilt_modules.push(current);
+    }
+    rebuilt["modules"] = Value::Array(rebuilt_modules);
+
+    for (key, value) in project_object {
+        if matches!(
+            key.as_str(),
+            "schema_version"
+                | "project_id"
+                | "sdk"
+                | "lifecycle"
+                | "access"
+                | "development_scenarios"
+                | "guidance"
+                | "governance"
+                | "lifecycles"
+                | "modules"
+        ) {
+            continue;
+        }
+        rebuilt[key] = value.clone();
+    }
+    rebuilt
 }
 
 fn sdk_map_migration_root(root: &Path) -> PathBuf {
@@ -14051,6 +14217,22 @@ impl ResetMode {
     }
 }
 
+fn print_reset_result(mode: ResetMode) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "operation": "governance.reset",
+            "mode": mode.record_mode(),
+            "status": "completed",
+            "development_ready": true,
+            "delivery_verified": false,
+            "baseline_status": "required",
+            "registration_status": "pending",
+            "next_action": "run_applicable_validation"
+        })
+    );
+}
+
 #[cfg(unix)]
 const RESET_TRANSACTION_LOCK_EX: c_int = 2;
 #[cfg(unix)]
@@ -14220,6 +14402,16 @@ fn reset_transaction_parse_generated_roots(
     Ok(roots)
 }
 
+fn reset_transaction_generated_roots_with_current_baseline(
+    project: &Value,
+    case_insensitive: bool,
+) -> Result<Vec<String>, String> {
+    if project.pointer("/governance/generated_root").is_none() {
+        return Ok(vec!["generated".to_string()]);
+    }
+    reset_transaction_parse_generated_roots(project, case_insensitive)
+}
+
 fn reset_transaction_generated_root_allowed(relative: &str) -> bool {
     reset_transaction_validate_relative(relative).is_ok()
         && reset_transaction_parse_generated_root(relative, true).is_ok()
@@ -14371,7 +14563,7 @@ fn reset_transaction_recovery_generated_roots(
             // as a new root.
             true
         };
-        reset_transaction_parse_generated_roots(&project, case_insensitive)
+        reset_transaction_generated_roots_with_current_baseline(&project, case_insensitive)
     });
 
     match (derived, marker_roots) {
@@ -16303,7 +16495,7 @@ fn reset_generated_roots(root: &Path) -> Result<Vec<String>, String> {
         .map_err(|_| format!("PROJECT_CONTRACT_MISSING:{}", project.display()))?;
     let value: Value =
         serde_json::from_str(&text).map_err(|_| "INVALID_PROJECT_CONTRACT".to_string())?;
-    let roots = reset_transaction_parse_generated_roots(
+    let roots = reset_transaction_generated_roots_with_current_baseline(
         &value,
         reset_root_filesystem_is_case_insensitive(root),
     )?;
@@ -16368,6 +16560,7 @@ fn reset_governance_internal(
     match reset_transaction_recover(root) {
         Ok(Some(true)) => {
             println!("{}", mode.applied_message());
+            print_reset_result(mode);
             return Ok(());
         }
         Ok(Some(false)) => return Err("GOVERNANCE_RESET_RECOVERED_RETRY".into()),
@@ -16394,6 +16587,7 @@ fn reset_governance_internal(
     let generated_roots = reset_generated_roots(root)?;
     reset_transaction_run(root, &branch, &generated_roots, mode)?;
     println!("{}", mode.applied_message());
+    print_reset_result(mode);
     Ok(())
 }
 

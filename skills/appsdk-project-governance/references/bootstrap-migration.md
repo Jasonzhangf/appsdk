@@ -142,17 +142,18 @@ not ordinary `init` behavior. It requires `.appsdk/project.json`, a clean
 non-`main`/`master` worktree, and the discard confirmation. It preserves
 business source, runtime data, `active/`, `protected/`, and human documents;
 only the named AppSDK control plane and declared generated roots are removed.
-When the contract pins a supported older SDK, only that pin is explicitly
-normalized to the current SDK version in staging; project identity, module
-ownership, build, and lifecycle fields remain project-owned.
+The current SDK scaffold is the only reset baseline: legacy SDK pins, migration
+witnesses, indexes, and SDK-owned contract projections are ignored and
+regenerated; missing SDK-owned fields are refilled. Project identity, module
+ownership, build, and protection boundaries are carried forward.
 The new reset record has `mode: "fresh_init"` and proves the reset operation
 only. It does not inherit old PASS, review, delivery, or freeze claims.
 
 The lower-level `appsdk reset-governance --discard-legacy` command remains
-available for its existing idempotent reset route. Neither command authorizes
-manual deletion or hand-editing of version/hash/ReviewRecord, and neither
-permits two active governance roots. If old Active/Protected artifacts are also
-obsolete, name exact paths and authorize a separate cleanup.
+available and uses the same transactional reset owner. Neither command
+authorizes manual deletion or hand-editing of version/hash/ReviewRecord, and
+neither permits two active governance roots. If old Active/Protected artifacts
+are also obsolete, name exact paths and authorize a separate cleanup.
 
 ### What to do with old reports and delivery output
 

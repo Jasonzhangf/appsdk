@@ -442,7 +442,7 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-forged",
-                "evidence": { "receiptId": "forged" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "forged" }
             }
         }),
     );
@@ -477,7 +477,7 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "target-received" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "target-received" }
             }
         }),
     );
@@ -508,7 +508,7 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "target-received" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "target-received" }
             }
         }),
     );
@@ -523,7 +523,7 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "nonce": nonce,
                 "state": "executed",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "target-executed" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "target-executed" }
             }
         }),
     );
@@ -537,7 +537,7 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "nonce": nonce,
                 "state": "unknown",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "delivery-observation-lost" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "delivery-observation-lost" }
             }
         }),
     );
@@ -555,13 +555,692 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "too-early" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "too-early" }
             }
         }),
     );
     assert!(
         regression.contains("delivery_state_regression"),
         "{regression}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_record_delivery_rejects_empty_shell_receipt_before_state_change() {
+    let root = temp_root("delivery-receipt-shape");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "shape receipt",
+                "priority": "p1",
+                "body": "delivery evidence must match adapter contract"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    let rejected = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "receiptId": "fake" }
+            }
+        }),
+    );
+    assert!(rejected.contains("delivery_evidence_invalid"), "{rejected}");
+    let status = call(&root, json!({ "op": "status" }));
+    let message = status["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["messageId"] == message_id)
+        .unwrap();
+    assert_eq!(message["state"], "accepted");
+
+    let delivered = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "accepted" }
+            }
+        }),
+    );
+    assert_eq!(delivered["message"]["state"], "delivered");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_record_delivery_uses_adapter_kind_receipt_contract() {
+    let root = temp_root("delivery-receipt-adapter-kinds");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "tmux-bound",
+                "kind": "tmux",
+                "target": "appsdk-test-scope:%1",
+                "execute": false,
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-bound",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+
+    let tmux = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "worker" },
+                "to": { "scopeId": "scope", "sessionId": "master" },
+                "title": "tmux receipt",
+                "priority": "p1",
+                "body": "preview",
+                "deliveryMode": "direct",
+                "adapterId": "tmux-bound",
+                "messageId": "tmux-receipt"
+            }
+        }),
+    );
+    let tmux_message_id = tmux["message"]["messageId"].as_str().unwrap();
+    let tmux_attempt_id = tmux["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let tmux_nonce = tmux["deliveryAttempt"]["nonce"].as_str().unwrap();
+    let tmux_delivered = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": tmux_message_id,
+                "attemptId": tmux_attempt_id,
+                "nonce": tmux_nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "executed": true,
+                    "preview": "preview",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert_eq!(tmux_delivered["message"]["state"], "delivered");
+
+    let appserver = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "worker" },
+                "to": { "scopeId": "scope", "sessionId": "master" },
+                "title": "appserver receipt",
+                "priority": "p1",
+                "body": "host must execute",
+                "deliveryMode": "direct",
+                "adapterId": "desktop-bound",
+                "messageId": "appserver-receipt"
+            }
+        }),
+    );
+    let appserver_message_id = appserver["message"]["messageId"].as_str().unwrap();
+    let appserver_attempt_id = appserver["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let appserver_nonce = appserver["deliveryAttempt"]["nonce"].as_str().unwrap();
+    let intent_only = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": appserver_message_id,
+                "attemptId": appserver_attempt_id,
+                "nonce": appserver_nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert!(
+        intent_only.contains("independent host execution evidence"),
+        "{intent_only}"
+    );
+
+    let appserver_delivered = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": appserver_message_id,
+                "attemptId": appserver_attempt_id,
+                "nonce": appserver_nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "hostExecuted": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert_eq!(appserver_delivered["message"]["state"], "delivered");
+
+    let executed_intent_only = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": appserver_message_id,
+                "attemptId": appserver_attempt_id,
+                "nonce": appserver_nonce,
+                "state": "executed",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert!(
+        executed_intent_only.contains("independent host execution evidence"),
+        "{executed_intent_only}"
+    );
+
+    let executed = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": appserver_message_id,
+                "attemptId": appserver_attempt_id,
+                "nonce": appserver_nonce,
+                "state": "executed",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "hostExecuted": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert_eq!(executed["message"]["state"], "executed");
+
+    let read_intent_only = call_error(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": appserver_message_id,
+                "attemptId": appserver_attempt_id,
+                "nonce": appserver_nonce,
+                "state": "read",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert!(
+        read_intent_only.contains("independent host execution evidence"),
+        "{read_intent_only}"
+    );
+
+    let read = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": appserver_message_id,
+                "attemptId": appserver_attempt_id,
+                "nonce": appserver_nonce,
+                "state": "read",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "hostExecuted": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert_eq!(read["message"]["state"], "read");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_record_delivery_appserver_replied_and_consumed_require_host_execution() {
+    let root = temp_root("appserver-replied-consumed-host-execution");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-bound",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+
+    for (message_id, state) in [
+        ("appserver-replied-direct", "replied"),
+        ("appserver-consumed-direct", "consumed"),
+    ] {
+        let sent = call(
+            &root,
+            json!({
+                "op": "send",
+                "message": {
+                    "from": { "scopeId": "scope", "sessionId": "worker" },
+                    "to": { "scopeId": "scope", "sessionId": "master" },
+                    "title": "appserver terminal receipt",
+                    "priority": "p1",
+                    "body": "host execution is required before terminal success",
+                    "deliveryMode": "direct",
+                    "adapterId": "desktop-bound",
+                    "messageId": message_id
+                }
+            }),
+        );
+        let sent_message_id = sent["message"]["messageId"].as_str().unwrap();
+        let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+        let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+        let intent_only = call_error(
+            &root,
+            json!({
+                "op": "record_delivery",
+                "delivery": {
+                    "messageId": sent_message_id,
+                    "attemptId": attempt_id,
+                    "nonce": nonce,
+                    "state": state,
+                    "runtimeId": "runtime-scope",
+                    "evidence": {
+                        "hostMustExecute": true,
+                        "capability": "send_message_to_thread",
+                        "runtimeId": "runtime-scope"
+                    }
+                }
+            }),
+        );
+        assert!(
+            intent_only.contains("independent host execution evidence"),
+            "{intent_only}"
+        );
+        let status = call(&root, json!({ "op": "status" }));
+        let message = status["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["messageId"] == sent_message_id)
+            .unwrap();
+        assert_eq!(message["state"], "accepted");
+
+        let executed = call(
+            &root,
+            json!({
+                "op": "record_delivery",
+                "delivery": {
+                    "messageId": sent_message_id,
+                    "attemptId": attempt_id,
+                    "nonce": nonce,
+                    "state": state,
+                    "runtimeId": "runtime-scope",
+                    "evidence": {
+                        "hostMustExecute": true,
+                        "hostExecuted": true,
+                        "capability": "send_message_to_thread",
+                        "runtimeId": "runtime-scope"
+                    }
+                }
+            }),
+        );
+        assert_eq!(executed["message"]["state"], state);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_record_delivery_appserver_unknown_allows_missing_host_execution() {
+    let root = temp_root("appserver-unknown-without-host-execution");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-bound",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "worker" },
+                "to": { "scopeId": "scope", "sessionId": "master" },
+                "title": "appserver unknown",
+                "priority": "p1",
+                "body": "an unobserved host result remains unknown",
+                "deliveryMode": "direct",
+                "adapterId": "desktop-bound",
+                "messageId": "appserver-unknown"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    let unknown = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "unknown",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert_eq!(unknown["message"]["state"], "unknown");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_replay_rejects_record_delivery_receipt_shape() {
+    let root = temp_root("delivery-replay-receipt-shape");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "replay shape",
+                "priority": "p1",
+                "body": "replay must share the adapter receipt validator"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "accepted" }
+            }
+        }),
+    );
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut tampered = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.state"
+            && event["data"]["messageId"] == message_id
+            && event["data"]["state"] == "delivered"
+        {
+            event["data"]["evidence"]["details"]["receipt"] = json!({ "receiptId": "fake" });
+        }
+        tampered.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", tampered.join("\n"))).unwrap();
+    let replay_error = call_error(&root, json!({ "op": "status" }));
+    assert!(replay_error.contains("journal_corrupt"), "{replay_error}");
+    assert!(
+        replay_error.contains("mailbox delivery evidence"),
+        "{replay_error}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_replay_rejects_appserver_intent_without_host_execution() {
+    let root = temp_root("appserver-replay-intent");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-bound",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "worker" },
+                "to": { "scopeId": "scope", "sessionId": "master" },
+                "title": "appserver replay",
+                "priority": "p1",
+                "body": "replay must reject intent as execution evidence",
+                "deliveryMode": "direct",
+                "adapterId": "desktop-bound",
+                "messageId": "appserver-replay-intent"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "hostExecuted": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut tampered = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.state"
+            && event["data"]["messageId"] == message_id
+            && event["data"]["state"] == "delivered"
+        {
+            event["data"]["evidence"]["details"]["receipt"] = json!({
+                "hostMustExecute": true,
+                "capability": "send_message_to_thread",
+                "runtimeId": "runtime-scope"
+            });
+        }
+        tampered.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", tampered.join("\n"))).unwrap();
+    let replay_error = call_error(&root, json!({ "op": "status" }));
+    assert!(replay_error.contains("journal_corrupt"), "{replay_error}");
+    assert!(
+        replay_error.contains("independent host execution evidence"),
+        "{replay_error}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn communication_replay_rejects_appserver_replied_and_consumed_without_host_execution() {
+    let root = temp_root("appserver-replay-replied-consumed");
+    register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker", "worker", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "desktop-bound",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "master" }
+            }
+        }),
+    );
+
+    for (message_id, state) in [
+        ("appserver-replay-replied", "replied"),
+        ("appserver-replay-consumed", "consumed"),
+    ] {
+        let sent = call(
+            &root,
+            json!({
+                "op": "send",
+                "message": {
+                    "from": { "scopeId": "scope", "sessionId": "worker" },
+                    "to": { "scopeId": "scope", "sessionId": "master" },
+                    "title": "appserver replay terminal receipt",
+                    "priority": "p1",
+                    "body": "replay must reject intent-only terminal success",
+                    "deliveryMode": "direct",
+                    "adapterId": "desktop-bound",
+                    "messageId": message_id
+                }
+            }),
+        );
+        let sent_message_id = sent["message"]["messageId"].as_str().unwrap();
+        let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+        let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+        let terminal = call(
+            &root,
+            json!({
+                "op": "record_delivery",
+                "delivery": {
+                    "messageId": sent_message_id,
+                    "attemptId": attempt_id,
+                    "nonce": nonce,
+                    "state": state,
+                    "runtimeId": "runtime-scope",
+                    "evidence": {
+                        "hostMustExecute": true,
+                        "hostExecuted": true,
+                        "capability": "send_message_to_thread",
+                        "runtimeId": "runtime-scope"
+                    }
+                }
+            }),
+        );
+        assert_eq!(terminal["message"]["state"], state);
+    }
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut tampered = Vec::new();
+    for line in contents.lines() {
+        let mut event: Value = serde_json::from_str(line).unwrap();
+        if event["kind"] == "message.state"
+            && (event["data"]["messageId"] == "appserver-replay-replied"
+                || event["data"]["messageId"] == "appserver-replay-consumed")
+        {
+            event["data"]["evidence"]["details"]["receipt"] = json!({
+                "hostMustExecute": true,
+                "capability": "send_message_to_thread",
+                "runtimeId": "runtime-scope"
+            });
+        }
+        tampered.push(serde_json::to_string(&event).unwrap());
+    }
+    fs::write(&mailbox, format!("{}\n", tampered.join("\n"))).unwrap();
+    let replay_error = call_error(&root, json!({ "op": "status" }));
+    assert!(replay_error.contains("journal_corrupt"), "{replay_error}");
+    assert!(
+        replay_error.contains("independent host execution evidence"),
+        "{replay_error}"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -598,7 +1277,7 @@ fn communication_runtime_identity_replay_rejects_forged_delivery_receipt() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "worker-received" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "worker-received" }
             }
         }),
     );
@@ -657,7 +1336,7 @@ fn message_delivery_receipt_requires_persisted_attempt_and_exact_identity() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "missing-attempt" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "missing-attempt" }
             }
         }),
     );
@@ -689,7 +1368,7 @@ fn message_delivery_receipt_requires_persisted_attempt_and_exact_identity() {
                 "nonce": restored_nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "wrong-attempt" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "wrong-attempt" }
             }
         }),
     );
@@ -708,7 +1387,7 @@ fn message_delivery_receipt_requires_persisted_attempt_and_exact_identity() {
                 "nonce": "nonce-forged",
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "wrong-nonce" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "wrong-nonce" }
             }
         }),
     );
@@ -727,7 +1406,7 @@ fn message_delivery_receipt_requires_persisted_attempt_and_exact_identity() {
                 "nonce": restored_nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "valid" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "valid" }
             }
         }),
     );
@@ -773,7 +1452,7 @@ fn legacy_delivery_receipt_replays_and_retry_binds_a_new_attempt() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "legacy-compatible" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "legacy-compatible" }
             }
         }),
     );
@@ -859,7 +1538,7 @@ fn legacy_delivery_receipt_replays_and_retry_binds_a_new_attempt() {
                 "nonce": retry_nonce,
                 "state": "executed",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "legacy-retry-executed" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "legacy-retry-executed" }
             }
         }),
     );
@@ -900,7 +1579,7 @@ fn new_delivery_receipt_missing_attempt_identity_is_rejected_on_replay() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "strict-receipt" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "strict-receipt" }
             }
         }),
     );
@@ -971,7 +1650,7 @@ fn tampered_message_delivery_attempt_is_rejected_on_replay() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "valid" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "valid" }
             }
         }),
     );
@@ -2263,7 +2942,7 @@ fn wakeup_delivery_receipt_prefix_recovers_when_message_is_already_delivered() {
                 "nonce": nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
-                "evidence": { "receiptId": "master-received" }
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "master-received" }
             }
         }),
     );

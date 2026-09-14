@@ -2124,6 +2124,13 @@ impl CommunicationStore {
                     format!("message not found: {}", request.message_id),
                 )
             })?;
+        let adapter = self.require_adapter(&message.adapter_id)?;
+        validate_adapter_delivery_receipt(
+            &adapter.kind,
+            &request.evidence,
+            &request.runtime_id,
+            &state,
+        )?;
         // An exact replay of an already committed receipt is idempotent even
         // when the runtime has since refreshed its volatile transport fields.
         // It creates no new fact; a new state still goes through the current
@@ -7422,6 +7429,101 @@ fn validate_message_delivery_attempt(
     Ok(())
 }
 
+fn validate_adapter_delivery_receipt(
+    kind: &str,
+    receipt: &Value,
+    runtime_id: &str,
+    state: &str,
+) -> CommResult<()> {
+    let object = receipt.as_object().ok_or_else(|| {
+        CommError::new(
+            "delivery_evidence_invalid",
+            "delivery evidence must match the registered adapter receipt contract",
+        )
+    })?;
+    match kind {
+        "mailbox" => {
+            if object.get("durable").and_then(Value::as_bool) != Some(true) {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "mailbox delivery evidence must confirm a durable mailbox receipt",
+                ));
+            }
+            if object
+                .get("format")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "mailbox delivery evidence must include a non-empty receipt format",
+                ));
+            }
+        }
+        "tmux" => {
+            if object.get("executed").and_then(Value::as_bool) != Some(true) {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "tmux delivery evidence must confirm an executed tmux send",
+                ));
+            }
+            if object
+                .get("preview")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "tmux delivery evidence must include the sent preview text",
+                ));
+            }
+            if object.get("runtimeId").and_then(Value::as_str) != Some(runtime_id) {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "tmux delivery evidence runtimeId does not match delivery request",
+                ));
+            }
+        }
+        "appserver" => {
+            if object.get("hostMustExecute").and_then(Value::as_bool) != Some(true) {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "appserver delivery evidence must confirm host must execute",
+                ));
+            }
+            if object.get("capability").and_then(Value::as_str) != Some(APPSERVER_SEND_CAPABILITY) {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "appserver delivery evidence must include the send capability contract",
+                ));
+            }
+            if object.get("runtimeId").and_then(Value::as_str) != Some(runtime_id) {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "appserver delivery evidence runtimeId does not match delivery request",
+                ));
+            }
+            if matches!(
+                state,
+                "delivered" | "executed" | "replied" | "read" | "consumed"
+            ) && object.get("hostExecuted").and_then(Value::as_bool) != Some(true)
+            {
+                return Err(CommError::new(
+                    "delivery_evidence_invalid",
+                    "appserver terminal delivery evidence must include independent host execution evidence",
+                ));
+            }
+        }
+        other => {
+            return Err(CommError::new(
+                "invalid_adapter_kind",
+                format!("adapter kind is unsupported: {other}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_replayed_delivery_evidence(
     state: &str,
     evidence: &DeliveryEvidence,
@@ -7515,9 +7617,19 @@ fn validate_replayed_delivery_evidence(
         || details.contains_key("nonce")
         || details.contains_key("adapterId")
         || details.contains_key("target");
+    let receipt = details.get("receipt").expect("receipt was checked above");
     if !message.delivery_attempt_required && attempt.is_none() && !has_attempt_metadata {
+        if adapter.kind == "appserver"
+            && matches!(
+                state,
+                "delivered" | "executed" | "replied" | "read" | "consumed"
+            )
+        {
+            validate_adapter_delivery_receipt(&adapter.kind, receipt, runtime_id, state)?;
+        }
         return Ok(());
     }
+    validate_adapter_delivery_receipt(&adapter.kind, receipt, runtime_id, state)?;
 
     let attempt_id = event_attempt_id
         .filter(|value| !value.trim().is_empty())

@@ -12276,6 +12276,7 @@ fn verify_sdk_migration_record(root: &Path, admission: bool) {
 
 fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
     assert_project_root_safe(root);
+    let reset_epoch = reset_governance_record_mode(root).is_some();
     let project = read_project(root);
     assert_governance_maps(root);
     verify_sdk_migration_record(root, admission);
@@ -12504,7 +12505,10 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_MODULES_CONTRACT"))
     {
-        if !admission && module.get("stage").and_then(Value::as_str) == Some("frozen") {
+        if !admission
+            && !reset_epoch
+            && module.get("stage").and_then(Value::as_str) == Some("frozen")
+        {
             let id = module
                 .get("module_id")
                 .and_then(Value::as_str)
@@ -12597,6 +12601,7 @@ fn verify_internal(root: &Path, admission: bool, emit_result: bool) {
         }
     }
     if !admission
+        && !reset_epoch
         && project
             .get("modules")
             .and_then(Value::as_array)

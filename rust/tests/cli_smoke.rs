@@ -675,6 +675,125 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
 }
 
 #[test]
+fn init_fresh_resets_frozen_lifecycle_evidence_while_preserving_contract() {
+    let root = temp_root("init-fresh-frozen-lifecycle-evidence");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["lifecycle"]["stage"] = Value::String("source_implemented".into());
+    project["modules"][0]["stage"] = Value::String("frozen".into());
+    project["modules"][0]["regression"] = serde_json::json!({
+        "required_before_freeze": true,
+        "suite_id": "app-core-regression",
+        "command": {
+            "program": "cargo",
+            "args": ["test", "--test", "app-core"],
+            "working_directory": "."
+        },
+        "input_paths": ["playground/experiments/**"],
+        "minimum_test_count": 1,
+        "allow_skipped": false,
+        "ordinary_mode_after_freeze": "disabled",
+        "reenable_on": [
+            "source_change",
+            "contract_change",
+            "public_api_change",
+            "artifact_change",
+            "dependency_change"
+        ]
+    });
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    let project_before = fs::read(&project_path).unwrap();
+    init_git(&root);
+
+    let admission_before = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission_before.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&admission_before.stdout),
+        String::from_utf8_lossy(&admission_before.stderr)
+    );
+    let verify_before = run(&["verify", root_text]);
+    assert!(!verify_before.status.success());
+    assert!(
+        String::from_utf8_lossy(&verify_before.stderr)
+            .contains("MISSING_RECORD:freeze-record-app-core.json"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verify_before.stdout),
+        String::from_utf8_lossy(&verify_before.stderr)
+    );
+
+    let old_record = root.join(".appsdk/records/review-record-app-core.json");
+    fs::create_dir_all(old_record.parent().unwrap()).unwrap();
+    fs::write(&old_record, "{\"old\":true}\n").unwrap();
+    fs::create_dir_all(root.join("generated/modules/app-core")).unwrap();
+    fs::write(
+        root.join("generated/modules/app-core/module.compiled.json"),
+        "old\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["-C", root_text, "add", "."])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", root_text, "commit", "-m", "legacy lifecycle witness"])
+        .status()
+        .unwrap()
+        .success());
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert_eq!(fs::read(&project_path).unwrap(), project_before);
+    assert!(!old_record.exists());
+    assert!(!root
+        .join(".appsdk/records/freeze-record-app-core.json")
+        .exists());
+    assert!(!root
+        .join("generated/modules/app-core/module.compiled.json")
+        .exists());
+
+    let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    assert_eq!(
+        after,
+        serde_json::from_slice::<Value>(&project_before).unwrap(),
+        "fresh init must preserve the existing project contract"
+    );
+    assert_eq!(after["modules"][0]["module_id"], "app-core");
+    assert_eq!(after["modules"][0]["source_owner"], "app-core");
+    assert_eq!(after["modules"][0]["stage"], "frozen");
+
+    let admission_after = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission_after.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&admission_after.stdout),
+        String::from_utf8_lossy(&admission_after.stderr)
+    );
+    let verified = run(&["verify", root_text]);
+    assert!(
+        verified.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_fresh_migrates_supported_legacy_sdk_pin_and_preserves_project_contract() {
     let root = temp_root("init-fresh-legacy-sdk-pin");
     let root_text = root.to_str().unwrap();

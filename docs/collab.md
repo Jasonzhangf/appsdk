@@ -5,13 +5,13 @@ The binary lives in `~/code/collab`; the installed command is
 `~/.cargo/bin/collab`.
 
 The daemon is detached. Normal commands may start it when no explicit `DOWN`
-marker exists. `collab init` creates the local
-`.agent-collab/server` skeleton, so old projects need no manual repair. Use
+marker exists. `collab init` creates the global `~/.collab` persistence directory,
+so old projects need no manual repair. Use
 `collab down` only for an explicit stop; use `collab up` to clear that stop and
 start it again. Never start a second daemon.
 Existing projects migrate through `collab migrate inspect`, `plan`, `apply`,
 controlled daemon upgrade/restart, identity rebind, and `verify`;
-deleting `.agent-collab`, editing JSON state, clearing mailboxes, copying
+deleting `~/.collab`, editing JSON state, clearing mailboxes, copying
 tokens, mixed runtime writes, and guessing pane identity are deprecated.
 
 ## Runtime boundary

@@ -128,7 +128,7 @@ silent fallback.
 
 ## Initialization ordering
 
-`appsdk init` and `appsdk new` use the same two-phase order:
+`appsdk new` uses the fail-closed two-phase order:
 
 ```text
 resolve project root
@@ -139,15 +139,35 @@ resolve project root
   -> attempt one optional Collab bootstrap
 ```
 
-Registry validation or reservation failure stops before project governance
-files are written. The reservation keeps competing writers out until the local
-initialization transaction has completed; dropping it on any local failure
-publishes no project event. A final append or sync failure remains an explicit
-`GLOBAL_REGISTRY_*` error and never becomes a successful initialization. A
-successful registration does not make optional Collab bootstrap failure look
-successful. The command prints a machine-readable `appsdk-registration` line
-containing the registry path, canonical project root, project ID, SDK version,
-and idempotency flag.
+Registry validation or reservation failure stops `appsdk new` before project
+governance files are written. The reservation keeps competing writers out
+until the local initialization transaction has completed; dropping it on any
+local failure publishes no project event. A final append or sync failure
+remains an explicit `GLOBAL_REGISTRY_*` error and never becomes a successful
+initialization. A successful registration does not make optional Collab
+bootstrap failure look successful. The command prints a machine-readable
+`appsdk-registration` line containing the registry path, canonical project
+root, project ID, SDK version, and idempotency flag.
+
+`appsdk init` (including fresh reset and idempotent SDK refresh) treats global
+registration as an auxiliary capability. It completes local governance first,
+then attempts registration:
+
+- On success it prints the same `appsdk-registration` receipt.
+- On any `GLOBAL_REGISTRY_*` failure it prints
+  `GLOBAL_PROJECT_REGISTRATION_PENDING:<exact error>` to stderr and still
+  succeeds locally. The error is surfaced verbatim; nothing is written to
+  `projects.jsonl`, so a failed or unknown registry is never reported as a
+  successful registration and no partial event is fabricated.
+
+Local governance (project contract, maps, records, Active/Protected state,
+`sdk.lock`) does not depend on the host registry, so a damaged or busy
+registry must not freeze independent development or recovery. The boundary
+stays explicit: operations that consume global identity, shared ownership, or
+cross-project coordination must check the registration capability
+separately and remain blocked until a real registration receipt exists.
+`GLOBAL_PROJECT_REGISTRATION_PENDING` means exactly "local work may continue,
+host registration is not established".
 
 ## Recovery and migration
 

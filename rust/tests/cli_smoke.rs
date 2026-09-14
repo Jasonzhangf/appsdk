@@ -258,6 +258,7 @@ fn run_memory(root: &Path, args: &[&str], home: &Path) -> std::process::Output {
         .args(args)
         .current_dir(root)
         .env("PROJECT_MEMORY_HOME", home)
+        .env("COLLAB_STATE_DIR", home.join("collab"))
         .output()
         .unwrap()
 }
@@ -857,8 +858,14 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
     );
     let result: Value = serde_json::from_slice(&verified.stdout).unwrap();
     assert_eq!(result["command_ok"], true);
+    assert_eq!(
+        result["ok"], false,
+        "ordinary verify must not claim delivery verification"
+    );
+    assert_eq!(result["delivery_assessed"], false);
     assert_eq!(result["development_ready"], true);
     assert_eq!(result["delivery_verified"], false);
+    assert_eq!(result["delivery_assessed"], false);
     assert_eq!(result["baseline_status"], "required");
     assert_eq!(result["reason"], "baseline_required");
     fs::remove_dir_all(root).unwrap();
@@ -1373,7 +1380,7 @@ fn project_registration_waits_for_busy_host_lock() {
 }
 
 #[test]
-fn registration_failure_is_preflighted_before_existing_workspace_refresh() {
+fn registration_failure_degrades_before_existing_workspace_refresh() {
     let root = temp_root("global-registration-existing-preflight");
     let registry_parent = temp_root("global-registration-existing-preflight-home");
     let registry = registry_parent.join("linked");
@@ -1387,8 +1394,6 @@ fn registration_failure_is_preflighted_before_existing_workspace_refresh() {
         .output()
         .unwrap();
     assert!(created.status.success());
-    let project_before = fs::read(root.join(".appsdk/project.json")).unwrap();
-    let lock_before = fs::read(root.join(".appsdk/sdk.lock")).unwrap();
     fs::remove_dir_all(&registry).unwrap();
 
     let real_registry = registry_parent.join("real");
@@ -1400,17 +1405,16 @@ fn registration_failure_is_preflighted_before_existing_workspace_refresh() {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(!initialized.status.success());
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
     assert!(String::from_utf8_lossy(&initialized.stderr)
-        .contains("GLOBAL_REGISTRY_SYMLINK:registry_root"));
-    assert_eq!(
-        fs::read(root.join(".appsdk/project.json")).unwrap(),
-        project_before
-    );
-    assert_eq!(
-        fs::read(root.join(".appsdk/sdk.lock")).unwrap(),
-        lock_before
-    );
+        .contains("GLOBAL_PROJECT_REGISTRATION_PENDING"));
+    assert!(root.join(".appsdk/project.json").is_file());
+    assert!(!real_registry.join("projects.jsonl").exists());
 
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(registry_parent).unwrap();
@@ -1808,6 +1812,64 @@ fn init_fresh_normalizes_sdk_owned_contract_fields_without_losing_project_fields
 }
 
 #[test]
+fn init_fresh_preserves_project_owned_governance_constraints() {
+    let root = temp_root("init-fresh-preserve-project-governance");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("preserve-project-governance".into());
+    project["governance"]["freeze_requirements"] = serde_json::json!([
+        "git_clean",
+        "source_commit_or_tag",
+        "library_hash",
+        "public_api_hash",
+        "review_pass",
+        "previous_active_immutable",
+        "project_owner_signoff"
+    ]);
+    project["governance"]["promotion_requires"] = serde_json::json!([
+        "experiment_evidence",
+        "architecture_review_pass",
+        "unique_owner",
+        "required_gates",
+        "project_integration_review"
+    ]);
+    project["governance"]["runtime_forbidden_roots"] =
+        serde_json::json!(["playground/**", "generated/**", "legacy-private/**"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    assert_eq!(
+        after["governance"]["runtime_forbidden_roots"],
+        serde_json::json!(["playground/**", "generated/**", "legacy-private/**"])
+    );
+    assert_eq!(
+        after["governance"]["freeze_requirements"],
+        project["governance"]["freeze_requirements"]
+    );
+    assert_eq!(
+        after["governance"]["promotion_requires"],
+        project["governance"]["promotion_requires"]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_fresh_requires_project_security_boundary_before_resetting_unknown_contract() {
     let root = temp_root("init-fresh-minimal-contract-required");
     let root_text = root.to_str().unwrap();
@@ -1962,10 +2024,12 @@ fn init_fresh_reset_epoch_skips_compiled_artifact_requirement_but_preserves_cont
     let result: Value = serde_json::from_slice(&verified.stdout).unwrap();
     assert_eq!(
         result["ok"], false,
-        "reset epoch must not claim delivery pass"
+        "unevaluated delivery must not be reported as ok"
     );
+    assert_eq!(result["command_ok"], true);
     assert_eq!(result["development_ready"], true);
     assert_eq!(result["delivery_verified"], false);
+    assert_eq!(result["delivery_assessed"], false);
     assert_eq!(result["baseline_status"], "required");
     assert_eq!(result["reason"], "baseline_required");
 
@@ -7701,6 +7765,48 @@ fn verify_rejects_tampered_installed_sdk_resource() {
     let result = run(&["verify", root_text]);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("SDK_RESOURCE_MISMATCH"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_distinguishes_assessed_delivery_from_unevaluated_development() {
+    let root = temp_root("verify-delivery-assessment");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    // Ordinary verify is a development probe: it may succeed without
+    // evaluating delivery, so it must not claim an ok/delivery result.
+    let ordinary = run(&["verify", root_text]);
+    assert!(
+        ordinary.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&ordinary.stdout),
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    let ordinary_json: Value = serde_json::from_slice(&ordinary.stdout).unwrap();
+    assert_eq!(ordinary_json["command_ok"], true);
+    assert_eq!(ordinary_json["ok"], false);
+    assert_eq!(ordinary_json["development_ready"], true);
+    assert_eq!(ordinary_json["delivery_assessed"], false);
+    assert_eq!(ordinary_json["delivery_verified"], false);
+    assert_eq!(ordinary_json["reason"], "delivery_not_evaluated");
+
+    // Admission actually runs the delivery checks. Reaching success must
+    // report delivery as assessed and verified rather than unevaluated.
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&admission.stdout),
+        String::from_utf8_lossy(&admission.stderr)
+    );
+    let admission_json: Value = serde_json::from_slice(&admission.stdout).unwrap();
+    assert_eq!(admission_json["command_ok"], true);
+    assert_eq!(admission_json["delivery_assessed"], true);
+    assert_eq!(admission_json["delivery_verified"], true);
+    assert_eq!(admission_json["ok"], true);
+    assert!(admission_json["reason"].is_null());
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -15069,9 +15175,9 @@ fn project_memory_index_query_review_and_compact_are_layered() {
     let inspected_json: Value = serde_json::from_slice(&inspected.stdout).unwrap();
     assert_eq!(inspected_json["ok"], true);
 
-    fs::create_dir_all(root.join(".agent-collab/runs/run-memory")).unwrap();
+    fs::create_dir_all(memory_home.join("collab/runs/run-memory")).unwrap();
     fs::write(
-        root.join(".agent-collab/runs/run-memory/notes.jsonl"),
+        memory_home.join("collab/runs/run-memory/notes.jsonl"),
         r#"{"record_type":"lesson","memory":{"id":"lesson-one","category":"lesson","content":"verified review ordering","tags":["review"]}}
 "#,
     )
@@ -15108,6 +15214,18 @@ fn project_memory_index_query_review_and_compact_are_layered() {
     );
     let lesson = run_memory(&root, &["get", "lesson-one"], &memory_home);
     let lesson_json: Value = serde_json::from_slice(&lesson.stdout).unwrap();
+    let expected_ref = format!(
+        "{}/runs/run-memory/notes.jsonl#1",
+        memory_home.join("collab").display()
+    );
+    assert!(
+        lesson_json["matches"][0]["source_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == &Value::String(expected_ref.clone())),
+        "source_refs must identify the configured COLLAB_STATE_DIR run notes: {lesson_json}"
+    );
     let tags = lesson_json["matches"][0]["tags"].as_array().unwrap();
     assert!(tags.iter().any(|tag| tag == "review"));
     assert!(tags.iter().any(|tag| tag == "ordering"));
@@ -15315,6 +15433,136 @@ fn project_memory_updates_follow_current_version_and_verify_source_drift() {
 }
 
 #[test]
+fn project_memory_ignores_empty_collab_state_dir() {
+    let root = temp_root("project-memory-empty-collab-state");
+    let memory_home = temp_root("project-memory-empty-collab-state-home");
+    let xdg_home = temp_root("project-memory-empty-collab-state-xdg");
+    let caller = temp_root("project-memory-empty-collab-state-caller");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    fs::create_dir_all(&caller).unwrap();
+    let run_dir = xdg_home.join("collab/runs/empty-env-run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(
+        run_dir.join("notes.jsonl"),
+        r#"{"event_id":"e1","node_id":"n1","step_id":"s1","status":"working"}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(memory_binary())
+        .args(["reentry", "--run", "empty-env-run"])
+        .current_dir(&caller)
+        .env("PROJECT_MEMORY_HOME", &memory_home)
+        .env("COLLAB_STATE_DIR", "")
+        .env("XDG_STATE_HOME", &xdg_home)
+        .env("HOME", &caller)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reentered: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reentered["run_id"], "empty-env-run");
+    assert_eq!(reentered["status"], "blocked");
+    assert_eq!(
+        reentered["notes"].as_str().unwrap(),
+        run_dir.join("notes.jsonl").to_str().unwrap()
+    );
+    assert!(!caller.join("runs").exists());
+    assert!(!root.join("runs").exists());
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+    fs::remove_dir_all(xdg_home).unwrap();
+    fs::remove_dir_all(caller).unwrap();
+}
+
+#[test]
+fn project_memory_detail_paths_are_injective_for_slash_ids() {
+    let root = temp_root("project-memory-slash-id-details");
+    let memory_home = temp_root("project-memory-slash-id-details-home");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+
+    for (id, text) in [("a/b", "slash id"), ("a--b", "dash id")] {
+        let created = run_memory(
+            &root,
+            &["entry", "--id", id, "--category", "lesson", "--text", text],
+            &memory_home,
+        );
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+
+    let slash = run_memory(&root, &["get", "a/b"], &memory_home);
+    assert!(slash.status.success());
+    let slash: Value = serde_json::from_slice(&slash.stdout).unwrap();
+    let slash_path = slash["matches"][0]["detail_path"].as_str().unwrap();
+    assert!(slash_path.ends_with("L3/a%2Fb.md"), "{slash_path}");
+    assert_eq!(
+        fs::read_to_string(root.join(slash_path))
+            .unwrap()
+            .contains("slash id"),
+        true
+    );
+
+    let dashes = run_memory(&root, &["get", "a--b"], &memory_home);
+    assert!(dashes.status.success());
+    let dashes: Value = serde_json::from_slice(&dashes.stdout).unwrap();
+    let dashes_path = dashes["matches"][0]["detail_path"].as_str().unwrap();
+    assert!(dashes_path.ends_with("L3/a--b.md"), "{dashes_path}");
+    assert_ne!(slash_path, dashes_path);
+    assert_eq!(
+        fs::read_to_string(root.join(dashes_path))
+            .unwrap()
+            .contains("dash id"),
+        true
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
+fn project_memory_imports_encoded_slash_id_detail() {
+    let root = temp_root("project-memory-encoded-slash-detail");
+    let memory_home = temp_root("project-memory-encoded-slash-detail-home");
+    fs::create_dir_all(root.join("memory/L3")).unwrap();
+    fs::create_dir_all(&memory_home).unwrap();
+    let detail = "<!-- project-memory:v1 {\"id\":\"a/b\",\"category\":\"lesson\"} -->\n\n# Encoded\n\nEncoded slash id\n<!-- project-memory:end -->\n";
+    fs::write(root.join("memory/L3/a--b.md"), detail).unwrap();
+
+    let rejected = run_memory(&root, &["index"], &memory_home);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("MEMORY_DETAIL_FILENAME_MISMATCH"));
+
+    fs::rename(
+        root.join("memory/L3/a--b.md"),
+        root.join("memory/L3/a%2Fb.md"),
+    )
+    .unwrap();
+    let imported = run_memory(&root, &["index"], &memory_home);
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let found = run_memory(&root, &["get", "a/b"], &memory_home);
+    assert!(found.status.success());
+    let found: Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert_eq!(found["matches"][0]["content"], "Encoded slash id");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(memory_home).unwrap();
+}
+
+#[test]
 fn project_memory_migration_and_reentry_are_resumable_and_source_preserving() {
     let root = temp_root("project-memory-migration");
     let memory_home = temp_root("project-memory-migration-home");
@@ -15371,9 +15619,9 @@ fn project_memory_migration_and_reentry_are_resumable_and_source_preserving() {
     let exported: Value = serde_json::from_slice(&exported.stdout).unwrap();
     assert_eq!(exported["project"]["entries"], 2);
 
-    fs::create_dir_all(root.join(".agent-collab/runs/reentry-run")).unwrap();
+    fs::create_dir_all(memory_home.join("collab/runs/reentry-run")).unwrap();
     fs::write(
-        root.join(".agent-collab/runs/reentry-run/notes.jsonl"),
+        memory_home.join("collab/runs/reentry-run/notes.jsonl"),
         r#"{"event_id":"e1","node_id":"path-node","step_id":"step-2","status":"working"}
 "#,
     )

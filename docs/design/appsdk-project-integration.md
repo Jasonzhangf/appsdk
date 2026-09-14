@@ -92,7 +92,7 @@ inspect AppSDK truth + every Collab initialization root
   -> verify one owner/one truth, then zero runtime state
 ```
 
-Do not directly merge `.agent-collab` directories or hand-edit task, claim,
+Do not directly merge Collab persistence directories or hand-edit task, claim,
 mailbox, identity, migration, hash, Active, or Protected records. A Collab-only
 object without an authorized owner receives a proposed disposition and mapping
 route; it is not automatically adopted or deleted. A conflict requires the

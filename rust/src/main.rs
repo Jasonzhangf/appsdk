@@ -13225,21 +13225,9 @@ fn prepare_project(workspace: &Path) {
 
 const COLLAB_INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn initialize_collab_peer() {
-    if env::var_os("TMUX_PANE").is_none() {
-        println!("collab peer bootstrap pending: no live tmux pane");
-        println!(
-            "collab-channel {}",
-            serde_json::json!({
-                "notification_channel":"none", "subscription_created":false,
-                "independent_work_allowed":true,
-                "next_action":"No push channel. Check subworker status (includes parent mailbox) yourself; use subworker snapshot explicitly for screen diagnostics. Do not wait for an automatic completion notification."
-            })
-        );
-        return;
-    }
+fn initialize_collab_peer(root: &Path) {
     let mut command = Command::new("collab");
-    command.arg("init");
+    command.arg("init").current_dir(root);
     let output = match run_goal_collab_command(command, COLLAB_INIT_TIMEOUT) {
         Ok(output) => output,
         Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT" => {
@@ -13261,8 +13249,41 @@ fn initialize_collab_peer() {
         return;
     }
     let result = String::from_utf8_lossy(&output.stdout);
-    if !result.trim().is_empty() {
-        println!("collab {}", result.trim());
+    let result = result.trim();
+    if result.is_empty() {
+        eprintln!(
+            "COLLAB_INIT_INVALID_RESPONSE:empty stdout; shared collaboration unavailable; independent work may continue"
+        );
+        return;
+    }
+    match serde_json::from_str::<Value>(result) {
+        Ok(value) => {
+            let transport = value.get("transport_selected").and_then(Value::as_object);
+            let valid_transport = transport.is_some_and(|transport| {
+                matches!(
+                    transport.get("kind").and_then(Value::as_str),
+                    Some("appserver" | "tmux")
+                )
+            });
+            if value.get("ok").and_then(Value::as_bool) != Some(true) || !valid_transport {
+                eprintln!(
+                    "COLLAB_INIT_INVALID_RESPONSE:{result}; shared collaboration unavailable; independent work may continue"
+                );
+                return;
+            }
+            println!(
+                "collab-channel {}",
+                serde_json::json!({
+                    "transport_selected": value["transport_selected"],
+                    "independent_work_allowed": true
+                })
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "COLLAB_INIT_INVALID_RESPONSE:{error}; shared collaboration unavailable; independent work may continue"
+            );
+        }
     }
 }
 
@@ -13338,7 +13359,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
             .unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
         try_register_global_project(root);
-        initialize_collab_peer();
+        initialize_collab_peer(root);
         if let Err(reason) = memory::initialize_project(root) {
             eprintln!("{}; optional project memory initialization skipped", reason);
         }
@@ -13371,7 +13392,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
     try_register_global_project(root);
-    initialize_collab_peer();
+    initialize_collab_peer(root);
     if let Err(reason) = memory::initialize_project(root) {
         eprintln!("{}; optional project memory initialization skipped", reason);
     }

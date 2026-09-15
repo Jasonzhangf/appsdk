@@ -3439,17 +3439,22 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert!(String::from_utf8_lossy(&first.stdout).contains("collab peer bootstrap pending"));
-    let notice = String::from_utf8_lossy(&first.stdout)
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("collab-channel ")
-                .map(|body| serde_json::from_str::<serde_json::Value>(body).unwrap())
-        })
-        .unwrap();
-    assert_eq!(notice["notification_channel"], "none");
-    assert_eq!(notice["subscription_created"], false);
-    assert_eq!(notice["independent_work_allowed"], true);
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    let init_output = format!("{stdout}\n{stderr}");
+    assert!(
+        init_output.contains("COLLAB_INIT_")
+            || init_output.contains("collab-channel")
+            || init_output.contains("collab "),
+        "init must report the server-owned Collab registration result: {init_output}"
+    );
+    if let Some(notice) = stdout.lines().find_map(|line| {
+        line.strip_prefix("collab-channel ")
+            .map(|body| serde_json::from_str::<serde_json::Value>(body).unwrap())
+    }) {
+        assert!(notice["transport_selected"].is_object());
+        assert_eq!(notice["independent_work_allowed"], true);
+    }
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.starts_with("# project rules\nnode_modules/\n"));
     assert_eq!(gitignore.matches("# BEGIN APPSDK MANAGED").count(), 1);
@@ -7268,7 +7273,7 @@ exit 73
     );
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '{\"ok\":true,\"worker_id\":\"test-peer\"}\\n'\n",
+        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"transport_selected\":{\"kind\":\"tmux\",\"pane\":\"%42\",\"capabilities\":[\"send_message\"],\"self_check\":\"test\"}}'\n",
     )
     .unwrap();
     let ready = Command::new(binary())
@@ -7280,7 +7285,43 @@ exit 73
         .output()
         .unwrap();
     assert!(ready.status.success());
-    assert!(String::from_utf8_lossy(&ready.stdout).contains("test-peer"));
+    assert!(
+        String::from_utf8_lossy(&ready.stdout).contains("\"transport_selected\""),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&ready.stdout),
+        String::from_utf8_lossy(&ready.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ready.stdout).contains("\"kind\":\"tmux\""));
+
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"worker_id\":\"test-peer\"}'\n",
+    )
+    .unwrap();
+    let invalid = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &fake_bin)
+        .env("TMUX_PANE", "%42")
+        .output()
+        .unwrap();
+    assert!(invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("COLLAB_INIT_INVALID_RESPONSE"));
+
+    fs::write(&fake_collab, "#!/bin/sh\nexit 0\n").unwrap();
+    let empty = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &fake_bin)
+        .env("TMUX_PANE", "%42")
+        .output()
+        .unwrap();
+    assert!(empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr)
+        .contains("COLLAB_INIT_INVALID_RESPONSE:empty stdout"));
+
     fs::remove_file(&fake_collab).unwrap();
     let unavailable = Command::new(binary())
         .args(["init", root.to_str().unwrap()])

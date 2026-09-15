@@ -104,7 +104,7 @@ const MASTER_CHARTER: &str = r#"你是本项目的 master。你的主要任务�
 const FLEET_RULES: &str = r#"Worker / subworker 处理规则（每次唤醒都适用）：
 
 1. Master 可以关闭 worker，包括它的 tmux session：`collab worker close <id> --reason "<why>" --kill-session`。关闭 managed subworker：`appsdk subworker close <id>`。
-2. Worker 或 subworker 不在线，允许关闭。需要产能时自己开 subworker，同时最多 5 个。默认按 `~/.appsdk/config.toml` 的 managed-child runtime 配置：cursor 开 cursor，codex/gcm 开 Codex。一个 runtime 起不来就切另一个一次，不要循环。
+2. Worker 或 subworker 不在线，允许关闭。需要产能时自己开 subworker，同时最多 5 个。Managed child 统一使用 Codex；profile 由 `~/.appsdk/config.toml` 决定。启动失败时按已配置 profile 切换一次，不要循环。
 3. 任务结束必须回收资源：清理 worktree，关闭为该任务开的 subworker。默认不清理、不关闭 worker。
 4. 不工作、不响应时，关闭前先 `appsdk subworker snapshot <id> --lines 40` 确认异常。处理不了可以关闭：默认关 subworker、保留 worker。只有 pane 确认已死、离线或 identity 丢失才关 worker。"#;
 

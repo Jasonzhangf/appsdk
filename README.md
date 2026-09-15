@@ -32,11 +32,11 @@ appsdk guide compile
 appsdk verify
 ```
 
-在 live tmux Agent 中，`appsdk init` 同时执行官方 `collab init`：幂等创建
-Collab 项目状态、启动单 daemon、注册当前 peer，并建立默认有限
-`direct-message` 订阅。无需再运行 `collab whoami` 或手工订阅普通消息。
-AppSDK 不选择 Collab 路径；Collab 继承同一环境，并以 tmux pane cwd 作为项目根。
-非 tmux 操作没有可注册 peer，AppSDK 只初始化治理并明确输出 Collab pending。
+`appsdk init` 在项目根目录执行官方 `collab init`。worker 只提交当前环境可观察到的
+App Server 和 tmux 能力候选；Collab 服务器自行完成端点与身份自检，按
+`appserver -> tmux` 优先级选择通道并在应答中返回 `transport_selected`。
+AppSDK 不自行选择通道，也不把本地缺少 `TMUX_PANE` 当成最终判决。服务器不可用、
+超时或没有可用通道时，AppSDK 明确输出 Collab pending/unavailable；独立开发继续。
 
 ```bash
 appsdk guide compile
@@ -102,7 +102,7 @@ fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` 
 与 `appsdk reset-governance --discard-legacy` 共用同一 transactional reset owner；
 旧 Active/Protected 若确实废弃，必须另行指定精确路径并授权清理。
 
-`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，新建或 relocated `appsdk init` 才允许执行。普通 `appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；在 live tmux Agent 中还通过同环境官方 `collab init` 完成 Collab/daemon/peer/default direct-message subscription 的一次性初始化。需要放弃旧治理 epoch 时，改用上面的显式 `--fresh --discard-legacy`，它不要求复制旧证据。
+`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，新建或 relocated `appsdk init` 才允许执行。普通 `appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；同时通过同环境官方 `collab init` 提交 App Server/tmux 能力候选，由服务器自检、选择并应答通道。需要放弃旧治理 epoch 时，改用上面的显式 `--fresh --discard-legacy`，它不要求复制旧证据。
 
 治理设计：
 

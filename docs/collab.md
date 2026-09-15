@@ -28,7 +28,7 @@ tokens, mixed runtime writes, and guessing pane identity are deprecated.
 ## Roles
 
 - Every registered identity is an equal `peer`; there is no inferred master
-  from first registration. Codex/Cursor root is not Collab master.
+  from first registration. A host agent root is not Collab master.
 - `collab init` and peer registration never create a master. A master exists
   only when a registered peer has a live tmux pane and was assigned by
   user-approved self-promotion or live-master delegation. A recorded identity
@@ -104,8 +104,7 @@ the current task. Query durable state before acting when the notice is relevant.
 or asynchronous-result notices. Never type peer messages with tmux. After the
 receiving Agent registers a finite subscription, the daemon may send one id,
 abbreviated subject, safe one-line original body preview, and final submit key
-as one submit. Cursor uses literal keys, then `C-m` after 250ms in a second
-tmux process; Codex uses `paste-buffer -p` plus `C-m` in one tmux queue. The direct-message lease is reusable until expiry;
+as one submit. Codex uses `paste-buffer -p` plus `C-m` in one tmux queue. The direct-message lease is reusable until expiry;
 resource, deadline, and async-result subscriptions remain one-shot.
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a

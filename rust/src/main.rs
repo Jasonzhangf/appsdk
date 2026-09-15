@@ -2246,6 +2246,16 @@ fn is_project_governance_path(path: &str) -> bool {
         || path == ".appsdk-prepare.json"
         || path == ".appsdk"
         || path.starts_with(".appsdk/")
+        || path == ".appsdk-control"
+        || path.starts_with(".appsdk-control/")
+        || path == ".agent-collab"
+        || path.starts_with(".agent-collab/")
+        || path == ".mcp.json"
+        || path == ".codex/config.toml"
+        || path == ".claude/settings.json"
+        || path == "docs/collab.md"
+        || path == "memory"
+        || path.starts_with("memory/")
 }
 
 fn has_valid_project_governance_contract(root: &Path) -> bool {

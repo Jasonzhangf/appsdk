@@ -16,11 +16,15 @@ tokens, mixed runtime writes, and guessing pane identity are deprecated.
 
 ## Runtime boundary
 
-- Every peer registration must come from a live tmux pane.
+- Every peer registration is admitted by the server after transport
+  self-check. App Server is preferred when available; tmux is optional and is
+  selected only when App Server cannot verify a live native route.
 - Registration creates or refreshes one reusable default `direct-message`
   lease with a bounded 600-second TTL; inspect its current status and expiry
   with `collab notify status`.
-- tmux is the only live notification channel and carries one bounded preview.
+- App Server delivery means the native queue accepted a bounded preview; it is
+  not execution, read, or reply. A tmux-selected transport carries one bounded
+  preview as the optional wake surface.
 - Server state, journal, and mailbox are durable truth; a failed wake cannot
   roll back state or fabricate success.
 - The runtime is part of the worker identity boundary, not a task preference.
@@ -30,9 +34,9 @@ tokens, mixed runtime writes, and guessing pane identity are deprecated.
 - Every registered identity is an equal `peer`; there is no inferred master
   from first registration. A host agent root is not Collab master.
 - `collab init` and peer registration never create a master. A master exists
-  only when a registered peer has a live tmux pane and was assigned by
+  only when a registered peer has a live transport and was assigned by
   user-approved self-promotion or live-master delegation. A recorded identity
-  with a dead pane is not a live master.
+  with a dead transport is not a live master.
 - If a live master exists, other peers cannot promote; only that master may
   `collab master delegate <peer>`. If no live master exists, a peer may
   `collab master promote --approval "<user text>"` itself after explicit user
@@ -101,14 +105,17 @@ delegation and interactive task recognition are intentionally deferred.
 On a notification, use its id and abbreviated subject to weigh urgency against
 the current task. Query durable state before acting when the notice is relevant.
 `collab sendmessage` requires `--subject` and accepts only explicit coordination
-or asynchronous-result notices. Never type peer messages with tmux. After the
-receiving Agent registers a finite subscription, the daemon may send one id,
+or asynchronous-result notices. Never type peer messages directly; the daemon
+sends through the selected transport. After the receiving Agent registers a
+finite subscription, the daemon may send one id,
 abbreviated subject, safe one-line original body preview, and final submit key
-as one submit. Codex uses `paste-buffer -p` plus `C-m` in one tmux queue. The direct-message lease is reusable until expiry;
-resource, deadline, and async-result subscriptions remain one-shot.
+as one submit through the server-selected transport. App Server uses
+`thread/queue/add`; a tmux-selected peer keeps `paste-buffer -p` plus `C-m` in
+one tmux queue. The direct-message lease is reusable until expiry; resource,
+deadline, and async-result subscriptions remain one-shot.
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a
-tmux pane disappears; mailbox state remains authoritative.
+transport is unavailable; mailbox state remains authoritative.
 
 ## Notifications and waits
 
@@ -116,6 +123,6 @@ There is no periodic continuation. Agent-owned subscriptions are exact-event,
 exact-subject, and finite. Direct-message delivery is serialized and reusable
 until expiry; other subscriptions are one-shot. No registration, absent,
 unknown, working, expired, cancelled, consumed, or exhausted message produces
-tmux input. Every wait stores waiter, blocking task owner, reason, deadline,
+transport input. Every wait stores waiter, blocking task owner, reason, deadline,
 resume events, and P2P escalation. Timeout changes state without unsolicited
 messages; resource release notifies only an exact active subscriber.

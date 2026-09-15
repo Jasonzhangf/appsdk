@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install git-bug
+        run: |
+          curl -fsSL -o /tmp/git-bug \
+            https://github.com/git-bug/git-bug/releases/download/v0.10.1/git-bug_linux_amd64
+          sudo install -m 0755 /tmp/git-bug /usr/local/bin/git-bug
+          git-bug version
       - run: find contracts -name '*.json' -print0 | xargs -0 -n1 jq empty
       - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"

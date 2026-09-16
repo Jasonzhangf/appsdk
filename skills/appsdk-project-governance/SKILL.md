@@ -203,6 +203,15 @@ appsdk guide status
 appsdk verify
 ```
 
+`appsdk prepare` is mandatory for a new root. It writes
+`.appsdk-prepare.json` as a draft, and `appsdk init` fails with
+`PREPARATION_NOT_CONFIRMED` until the preparation fields are user-confirmed:
+`status: "confirmed"`, `change_kind`, `project_root`, `boundary`, `questions`
+closed, `confirmed_by`, and `confirmed_at`. Do not confirm scope on the
+user's behalf and do not bypass prepare by editing `.appsdk/project.json`.
+Detailed fields and an example are in
+[bootstrap-migration.md](references/bootstrap-migration.md).
+
 In a live App Server or tmux runtime, `appsdk init` calls `collab init` once:
 Collab starts/reuses its daemon, picks the transport by server capability with
 App Server preferred, registers the current peer, and arms the default
@@ -212,6 +221,15 @@ AppSDK initialization still succeeds for independent development, reports
 Collab pending, and never fabricates a peer or notification channel. Then use
 `collab who/status/context`, `collab sendmessage`, `collab inbox`, and
 `collab recv` only through the server-selected transport.
+
+For the roles after initialization, see
+[bootstrap-migration.md](references/bootstrap-migration.md#master-and-ordinary-peer-bootstrap).
+Master initialization adds `collab master promote --approval "<user text>"`
+after the peer is live and the user explicitly approved the exact project and
+peer; ordinary peers only verify identity, liveness, transport, presence and
+task scope. Long-horizon goal scheduling is master-only and is verified with
+`appsdk goal status --json` plus one real fired/consumed deadline replay, not
+by command output alone.
 
 ## Quick start: replace old governance with current baseline
 

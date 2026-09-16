@@ -21,6 +21,51 @@ through the server-selected transport, and arms the default finite
 manual ordinary-message subscription afterward. Use `new` only for an empty
 destination.
 
+`appsdk prepare` is a hard gate. First invocation writes `.appsdk-prepare.json`
+with `status: "draft"`. `appsdk init` rejects an unconfirmed preparation with
+`PREPARATION_NOT_CONFIRMED`; it does not guess scope or boundaries. Rerunning
+`appsdk prepare` prints the existing record and does not overwrite it.
+
+Before `appsdk init`, the operator must explicitly confirm these fields in
+`.appsdk-prepare.json`:
+
+```json
+{
+  "schema_version": 1,
+  "preparation_id": "prepare-<slug>",
+  "status": "confirmed",
+  "objective": "One-sentence confirmed goal for AppSDK governance admission.",
+  "change_kind": "new_project",
+  "project_root": ".",
+  "legacy_roots": [],
+  "new_roots": [".appsdk/**", ".appsdk-control/**", "playground/**"],
+  "protected_roots": ["protected/**", ".git/**"],
+  "runtime_forbidden_roots": ["generated/**", ".agent-collab/**"],
+  "boundary": {
+    "allowed_paths": [".appsdk/**", "playground/**", "active/lib/**", "protected/**"],
+    "forbidden_paths": [".git/**", ".agent-collab/**", "dist/**"],
+    "payload_control_separation": "confirmed"
+  },
+  "acceptance_criteria": ["appsdk init completes", "appsdk verify passes"],
+  "non_goals": [],
+  "questions": [],
+  "confirmed_by": "Jason (explicit user approval)",
+  "confirmed_at": "2026-09-15T00:00:00Z"
+}
+```
+
+`change_kind` must be one of `new_project`, `module_refactor`,
+`project_refactor`, or `debug`. `project_root` is the relative AppSDK project
+root from the preparation file location; `.` means the same directory. All open
+questions must be answered or removed before `init`. Never confirm the record
+on behalf of the user, and never replace the preparation gate by editing
+`.appsdk/project.json` before initialization.
+
+For an existing project with prior `.appsdk/` or `.agent-collab/`, do not use
+this ordinary new-project path. Use
+[Existing project: remove old governance](#existing-project-remove-old-governance)
+and keep AppSDK and Collab reset/migration in separate transactions.
+
 AppSDK preserves the launching environment and does not pass a project path to
 Collab. `collab init` resolves project scope from the exact process cwd, not
 from tmux. Without a live registered App Server or tmux transport, AppSDK
@@ -30,6 +75,70 @@ registered; it never fabricates subscription state.
 Collab initialization errors are explicit warnings for AppSDK initialization.
 Automatic multi-worker registration and task/file coordination remain enabled;
 shared operations wait for reliable ownership while independent work continues.
+
+### Master and ordinary peer bootstrap
+
+For a project that will run multiple agents, initialize the AppSDK governance
+root first, then register the current peer and explicitly assign the role.
+App Server is preferred when a live App Server route exists; tmux is only an
+optional adapter.
+
+Master initialization, after user approval for the exact project and peer:
+
+```bash
+cd /abs/path/project
+appsdk prepare
+# confirm .appsdk-prepare.json exactly as above
+appsdk init .
+appsdk guide status
+appsdk verify
+collab context
+collab status --all
+collab who
+collab master promote --approval "<user approval text>"
+collab master status
+```
+
+Do not promote while a live master already exists. `appsdk init` alone never
+creates master authority. If `appsdk init` reports Collab pending or a failed
+registration, preserve the exact error; do not report Collab as available and
+do not start a second daemon.
+
+Ordinary peer initialization, after the project already has
+`.appsdk/project.json` and a live master or parent:
+
+```bash
+cd /abs/path/project
+appsdk init .
+collab context
+collab status --all
+collab who
+collab worker status <peer-id>
+collab notify status
+```
+
+The peer must observe its own identity, liveness, presence, transport and
+worker role. Do not run a second `collab init`, do not promote itself, do not
+register a long-horizon goal, and do not fabricate a worker role from
+`appsdk init` output.
+
+Long-horizon master scheduling is a separate, master-only step. Create the
+plan file first, then register and verify:
+
+```bash
+appsdk goal subscribe --goal docs/goals/<goal>-plan.md --interval 10m
+appsdk goal status --json
+appsdk longhorizon show --json
+```
+
+`appsdk goal status --json` must report `active: true`, `desired: subscribed`,
+`observed: subscribed`, `collab_subscribed: true`, a non-null
+`subscription_id`, and a null `error`. A successful command output is not
+proof that a timer fired. Run one short-interval live replay and record the
+armed subscription, fired deadline notification, and consumed result before
+declaring long-horizon scheduling verified. The current implementation is a
+one-shot deadline that must be explicitly rearmed with `appsdk goal subscribe`
+after it is consumed, expires, or Collab restarts.
 
 For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
 when none exists. It contains the Project Truth, Semantic Invariants,

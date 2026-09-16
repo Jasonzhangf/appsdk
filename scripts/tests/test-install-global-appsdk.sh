@@ -84,6 +84,9 @@ run_failed_build_test() {
   local test_root="$1"
   local fake_bin="$test_root/fake-cargo-bin"
   mkdir -p "$fake_bin" "$test_root/home"
+  mkdir -p "$test_root/home/.agents/skills/appsdk-project-governance"
+  printf '%s\n' 'preserve existing governance skill' \
+    > "$test_root/home/.agents/skills/appsdk-project-governance/SKILL.md"
   cp "$fixture" "$fake_bin/appsdk"
   local before
   before="$(shasum -a 256 "$fake_bin/appsdk")"
@@ -100,6 +103,15 @@ FAKE_CARGO
   fi
   [[ "$(shasum -a 256 "$fake_bin/appsdk")" == "$before" ]] || {
     echo 'failed build replaced the canonical binary' >&2
+    exit 1
+  }
+  [[ "$(<"$test_root/home/.agents/skills/appsdk-project-governance/SKILL.md")" == \
+    'preserve existing governance skill' ]] || {
+    echo 'failed build left the existing Skill absent' >&2
+    exit 1
+  }
+  [[ -z "$(find "$test_root/home/.agents/skills" -maxdepth 1 \( -name '.appsdk-skills.stage.*' -o -name '.appsdk-skills.previous.*' \) -print -quit)" ]] || {
+    echo 'failed build leaked staging state' >&2
     exit 1
   }
 }

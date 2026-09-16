@@ -48,6 +48,7 @@ skills_stage=''
 skills_previous=''
 skill_install_committed=false
 installed_skills=()
+stage_file=''
 
 cleanup_skill_install() {
   if [[ -n "$skills_stage" && ( -e "$skills_stage" || -L "$skills_stage" ) ]]; then
@@ -62,7 +63,7 @@ cleanup_skill_install() {
           rm -rf -- "$target"
         fi
         mv -- "$previous" "$target"
-      elif [[ -n "$installed_skills" ]]; then
+      elif ((${#installed_skills[@]} > 0)); then
         for installed in "${installed_skills[@]}"; do
           if [[ "$installed" == "$skill" ]]; then
             if [[ -e "$target" || -L "$target" ]]; then
@@ -78,7 +79,14 @@ cleanup_skill_install() {
     rm -rf -- "$skills_previous"
   fi
 }
-trap cleanup_skill_install EXIT
+
+cleanup_install() {
+  if [[ -n "$stage_file" && ( -e "$stage_file" || -L "$stage_file" ) ]]; then
+    rm -f -- "$stage_file"
+  fi
+  cleanup_skill_install
+}
+trap cleanup_install EXIT
 
 for skill in "${skills[@]}"; do
   source="$repo_root/skills/$skill"
@@ -128,12 +136,6 @@ fi
 
 mkdir -p "$cargo_bin_dir"
 stage_file="$(mktemp "$cargo_bin_dir/.appsdk-install.XXXXXX")"
-cleanup_stage() {
-  if [[ -e "$stage_file" || -L "$stage_file" ]]; then
-    rm -f -- "$stage_file"
-  fi
-}
-trap cleanup_stage EXIT
 
 cp "$release_bin" "$stage_file"
 chmod 0755 "$stage_file"
@@ -158,7 +160,6 @@ if [[ "$user_home/.local/bin/project-memory" != "$memory_bin" ]]; then
   ln -s "$memory_bin" "$stage_file"
   mv -f -- "$stage_file" "$user_home/.local/bin/project-memory"
 fi
-trap - EXIT
 
 remove_exact_copy() {
   local candidate="$1"

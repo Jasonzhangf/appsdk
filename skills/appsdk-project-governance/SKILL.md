@@ -549,6 +549,8 @@ declaring long-horizon scheduling verified.
 - State paths and component meaning for `~/.appsdk`, `.appsdk/`,
   `.appsdk-control/`, `~/.collab`, and `.agent-collab/`:
   [state-paths.md](references/state-paths.md).
+- Official AppSDK/Collab command scope so agents do not guess commands or paths:
+  [command-surface.md](references/command-surface.md).
 - Development/debug: [development-debug.md](references/development-debug.md).
 - Runtime review/delivery/freeze: [review-delivery.md](references/review-delivery.md).
 - Selected persistent planning: [process-control-harness.md](references/process-control-harness.md).

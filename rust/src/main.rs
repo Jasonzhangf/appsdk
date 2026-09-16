@@ -358,6 +358,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../skills/appsdk-project-governance/references/state-paths.md"),
     ),
     (
+        "skills/appsdk-project-governance/references/command-surface.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/command-surface.md"),
+    ),
+    (
         "skills/appsdk-migration/SKILL.md",
         "skills",
         include_str!("../../skills/appsdk-migration/SKILL.md"),

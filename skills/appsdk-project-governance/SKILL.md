@@ -163,6 +163,14 @@ report retained and removed classes separately and verify one current truth.
 A clean directory is not evidence of delivery, review, install, restart, or
 live communication.
 
+Old project-local `.appsdk/` and `.agent-collab/` directories are not the
+global truth. Do not manually delete them. The AppSDK reset route removes the
+AppSDK-owned `.appsdk/`/`.appsdk-control/` control plane; Collab migration or
+explicit retirement owns `.agent-collab/`. Global persistent data under
+`~/.appsdk` and `~/.collab` is a separate durable state; it is cleaned or
+retired through the official AppSDK/Collab lifecycle, not by deleting project
+directories.
+
 ## Working loop
 
 1. Read project AGENTS and affected code/contracts. Resolve owner, scope,

@@ -360,6 +360,19 @@ wants to start the current governance and coordination baseline instead of
 migrating old control state. The two roots have different owners and must be
 handled in separate transactions.
 
+Old directories are not removed by editing files or deleting them by hand:
+
+- `.appsdk/` and `.appsdk-control/` are AppSDK-owned control-plane state.
+  Remove them through the authorized reset route
+  (`appsdk init <project> --fresh --discard-legacy` or
+  `appsdk reset-governance <project> --discard-legacy`), never by `rm -rf`.
+- `.agent-collab/` is Collab-owned project-local durable state. It is migrated
+  or retired through the Collab owner (`collab migrate` or an explicit
+  retirement decision), never by hand deletion.
+- Global persistent data under `~/.appsdk` and `~/.collab` is host-wide truth,
+  not the same as a project directory. Do not delete global files to "clean up"
+  one project; update them only through the AppSDK/Collab lifecycle commands.
+
 ### 1. Inventory and freeze
 
 Run read-only inventory from the project root. Do not delete anything yet.

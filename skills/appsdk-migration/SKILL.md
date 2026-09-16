@@ -44,9 +44,10 @@ project-level preserve/reset choices, also read
   after compression, fork, pane replacement, or restart. Rebind the new live
   runtime through the official registration path; never copy tokens or make a
   session ID the durable identity.
-- User authorization is required before promoting a peer to `master`. A
-  Codex TUI can register and communicate only through a real live route. A
-  Desktop runtime must not register a goal subscription; only the authorized
+- User authorization is required before promoting a peer to `master`. A peer
+  can register and communicate only through a server-selected App Server or
+  tmux route that passed its capability self-check; App Server is preferred.
+  A Desktop runtime must not register a goal subscription; only the authorized
   master/TUI scheduler may do so.
 - The communication path and durable facts are different surfaces. A tmux or
   appserver notification is a bounded wake hint; the journal/mailbox is the
@@ -268,9 +269,10 @@ not rebind peers or send recovery messages until the owner resolves it.
 ## Identity rebind
 
 Rebind only the named live peers after the daemon and socket pass the restart
-gate. The current Codex TUI must be a real registered tmux runtime with a
-working bidirectional route. Use the official current-peer initialization or
-rebind operation once in that pane, then inspect:
+gate. The current peer must have a live App Server or tmux runtime whose
+capability self-check and server selection passed; App Server is preferred.
+Use the official current-peer initialization or rebind operation once in that
+runtime, then inspect:
 
 ```sh
 collab context
@@ -278,15 +280,17 @@ collab whoami
 collab status --all
 ```
 
-The evidence must bind the durable peer ID to the live runtime/pane, exact
-project cwd, appserver route (if present), role, parent, and capabilities. A
-screen preview, process name, pane number, or session ID alone is insufficient.
+The evidence must bind the durable peer ID to the live runtime, selected
+App Server or tmux target, exact project cwd, role, parent, and capabilities.
+A screen preview, process name, pane number, or session ID alone is
+insufficient.
 
-When a pane is replaced or a transcript is forked/compressed, preserve the
-durable peer identity only through the supported authenticated rebind. Do not
-reuse a stale pane, guess among panes, register a new master, copy identity
-tokens, or replay the old mailbox batch. A user-approved master assignment is
-the only basis for the `master` role; otherwise the peer remains a peer.
+When an App Server binding or tmux pane is replaced, or a transcript is
+forked/compressed, preserve the durable peer identity only through the
+supported authenticated rebind. Do not reuse a stale endpoint, guess among
+panes, register a new master, copy identity tokens, or replay the old mailbox
+batch. A user-approved master assignment is the only basis for the `master`
+role; otherwise the peer remains a peer.
 
 If any identity, scope, parent, or capability differs from the snapshot, stop
 before messaging. Record `identity_mismatch` and require an explicit
@@ -302,8 +306,8 @@ does not imply the next.
 2. **Durability:** journal, mailbox, tasks, workers, leases, and last durable
    IDs are continuous with the snapshot, apart from explicitly recorded
    migration events. Any unexplained count or ID loss fails the gate.
-3. **Identity:** the AppSDK directory's Codex TUI has a confirmed durable
-   identity, exact cwd/project scope, role, and live bidirectional route.
+3. **Identity:** each rebound peer has a confirmed durable identity, exact
+   cwd/project scope, role, and live bidirectional App Server or tmux route.
 4. **Communication:** send one unique migration marker to an authorized
    registered peer and require separate evidence for durable journal
    acceptance, notification delivery, peer consumption, and a reply. `sent`,
@@ -362,7 +366,7 @@ Write one append-only JSONL event for each phase transition and each failed
 gate. Use this shape; omit secrets and large payloads:
 
 ```json
-{"schema":"appsdk-migration/v1","run_id":"20260910T000000Z-example","at":"2026-09-10T00:00:00Z","phase":"inspect","operation":"collab migrate inspect","result":"pass","actor":{"peer_id":"peer-id","role":"master","runtime_id":"runtime-id","tmux_pane":"%2","cwd":"/absolute/project"},"source":{"head":"commit","tree":"tree","binary":"/absolute/bin","version":"0.1.6","sha256":"hex"},"evidence":{"paths":["/absolute/run-note.jsonl"],"counts":{"tasks":0,"workers":0,"mailbox":0},"receipts":["receipt-id"],"errors":[]},"retained":["active/","protected/"],"discarded":[],"next":"classify"}
+{"schema":"appsdk-migration/v1","run_id":"20260910T000000Z-example","at":"2026-09-10T00:00:00Z","phase":"inspect","operation":"collab migrate inspect","result":"pass","actor":{"peer_id":"peer-id","role":"master","runtime_id":"runtime-id","transport":{"kind":"appserver","target":"thread-id"},"cwd":"/absolute/project"},"source":{"head":"commit","tree":"tree","binary":"/absolute/bin","version":"0.1.6","sha256":"hex"},"evidence":{"paths":["/absolute/run-note.jsonl"],"counts":{"tasks":0,"workers":0,"mailbox":0},"receipts":["receipt-id"],"errors":[]},"retained":["active/","protected/"],"discarded":[],"next":"classify"}
 ```
 
 Required semantics:

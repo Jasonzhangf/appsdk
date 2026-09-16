@@ -15,8 +15,9 @@ Usage: scripts/install-global-appsdk.sh
 
 Builds the Rust release, atomically installs appsdk and project-memory beside
 the active cargo executable, removes exact legacy user-local AppSDK copies,
-and links the legacy Memory entry to its canonical executable. Updates the
-global project-memory Skill from the same release source.
+and links the legacy Memory entry to its canonical executable. Installs the
+AppSDK project-governance, migration, and project-memory Skills from the same
+release source.
 USAGE
   exit 0
 fi
@@ -156,10 +157,48 @@ if [[ "$user_home/.local/bin/project-memory" != "$memory_bin" ]]; then
   mv -f -- "$stage_file" "$user_home/.local/bin/project-memory"
 fi
 trap - EXIT
-mkdir -p "$user_home/.agents/skills/project-memory"
-stage_file="$(mktemp "$user_home/.agents/skills/project-memory/.skill-install.XXXXXX")"
-trap cleanup_stage EXIT
-cp "$repo_root/skills/project-memory/SKILL.md" "$stage_file"
-mv -f -- "$stage_file" "$user_home/.agents/skills/project-memory/SKILL.md"
-trap - EXIT
+
+install_skill_tree() {
+  local skill="$1"
+  local source="$repo_root/skills/$skill"
+  local target="$user_home/.agents/skills/$skill"
+  local stage
+  local previous
+
+  if [[ ! -s "$source/SKILL.md" ]]; then
+    echo "error: AppSDK Skill source is missing: $source/SKILL.md" >&2
+    exit 1
+  fi
+
+  mkdir -p "$user_home/.agents/skills"
+  stage="$(mktemp -d "$user_home/.agents/skills/.${skill}.stage.XXXXXX")"
+  cp -R "$source/." "$stage/"
+  if [[ ! -s "$stage/SKILL.md" ]]; then
+    echo "error: staged AppSDK Skill is invalid: $stage" >&2
+    rm -rf -- "$stage"
+    exit 1
+  fi
+  previous=''
+  if [[ -e "$target" || -L "$target" ]]; then
+    previous="$(mktemp -d "$user_home/.agents/skills/.${skill}.previous.XXXXXX")"
+    rmdir -- "$previous"
+    mv -- "$target" "$previous"
+  fi
+  if ! mv -- "$stage" "$target"; then
+    if [[ -n "$previous" && ( -e "$previous" || -L "$previous" ) ]]; then
+      mv -- "$previous" "$target"
+    fi
+    rm -rf -- "$stage"
+    echo "error: failed to install AppSDK Skill: $target" >&2
+    exit 1
+  fi
+  if [[ -n "$previous" && ( -e "$previous" || -L "$previous" ) ]]; then
+    rm -rf -- "$previous"
+  fi
+  printf 'Skill installed: %s\n' "$target"
+}
+
+install_skill_tree appsdk-project-governance
+install_skill_tree appsdk-migration
+install_skill_tree project-memory
 printf 'Memory installed: %s (legacy PATH entry links here)\n' "$memory_bin"

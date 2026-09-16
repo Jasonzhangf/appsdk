@@ -83,12 +83,14 @@ scripts/install-global-appsdk.sh
 
 It builds the release, atomically replaces the executable beside the active
 `cargo`, removes exact AppSDK-managed legacy copies, and checks that one
-managed `appsdk` remains. Run it from any directory; it resolves its own
-repository root. SHA-256 is diagnostic output only, not a fixed admission
-condition. Do not stop project development because a historical binary hash
-differs. If the version or command path is wrong, run the installer once and
-refresh the current shell cache (`rehash` in zsh or `hash -r` in bash); do not
-manually copy, rename, or leave `.local/lib/appsdk/<version>/appsdk` beside the
+managed `appsdk` remains. The same release source installs
+`appsdk-project-governance`, `appsdk-migration`, and `project-memory` under
+`~/.agents/skills/`. Run it from any directory; it resolves its own repository
+root. SHA-256 is diagnostic output only, not a fixed admission condition. Do
+not stop project development because a historical binary hash differs. If the
+version or command path is wrong, run the installer once and refresh the
+current shell cache (`rehash` in zsh or `hash -r` in bash); do not manually
+copy, rename, or leave `.local/lib/appsdk/<version>/appsdk` beside the
 canonical entry.
 
 An AppSDK binary install does not restart a daemon. Use the daemon's official

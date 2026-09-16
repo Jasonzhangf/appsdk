@@ -1,68 +1,68 @@
-# AppSDK + Collab Initialization
+# AppSDK + Collab: one query, one binding
 
-One command. Read its self-check line. Stop.
+Current client: Codex only. The binding is the Codex sessionID.
+
+## All state
+
+Run one command:
 
 ```sh
-cd /abs/path/project           # main tree, not a worktree
-appsdk init .                  # self-check IS the registration result
+collab context
 ```
 
-`appsdk init .` prints a single line with `worker_id`, `role`,
-`transport.kind`, `identity_valid`, `endpoint_live` and the
-`direct-message` subscription. That line is the truth. Do not run `collab
-who`, `collab context`, `whoami`, `routes.jsonl` grep, `pane` probing,
-`ps`, `find .agent-collab`, `appsdk present`, `appsdk context`, or any
-other exploratory command as part of initialization. Probing is a
-recovery action, not a setup action.
+`collab context` returns your Codex sessionID binding, role, identity,
+transport, liveness, current project state, and peers. That output is the
+truth. Stop after reading it. Do not run `collab who`, `collab status
+--all`, `whoami`, `routes.jsonl` grep, `pane` probing, `ps`, `find
+.agent-collab`, `appsdk present`, or any other exploratory command after
+it.
+
+## If unregistered
+
+`collab context` will tell you that you are not registered. Run the
+idempotent registration once, from the project main tree:
+
+```sh
+cd /abs/path/project
+appsdk init .
+```
+
+Then run `collab context` again. Do not run `appsdk init .` repeatedly;
+it is idempotent and returns the same initialization result every time.
 
 ## Master (after user approval for the exact project + peer)
 
 ```sh
 cd /abs/path/project
-appsdk init .                                          # self-check = registration
-collab master promote --approval "<user approval text>" # only after self-check OK
+collab context                  # verify sessionID binding and role
+appsdk init .                   # only if collab context says unregistered
+collab master promote --approval "<user approval text>"
 appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
-appsdk goal status --json                               # active/observed/collab_subscribed
+appsdk goal status --json       # active/observed/collab_subscribed
 ```
 
-Stop here. The four lines above are the entire master bootstrap. No
-`collab status --all`, no `routes.jsonl` checks, no `whoami`, no `ps`.
+Stop here. No `collab status --all`, no `routes.jsonl`, no `whoami`, no
+`ps`, no `.agent-collab` listing.
 
 ## Ordinary peer (project already has .appsdk/project.json and a live master)
 
 ```sh
 cd /abs/path/project
-appsdk init .                  # self-check = registration, role must be peer
+collab context
 ```
 
-Stop here. If the self-check reports `role=master`, stop and report the
+If `collab context` says unregistered, run `appsdk init .` once and then
+`collab context` again. If it reports `role=master`, stop and report the
 conflict to the master; do not promote yourself and do not start a second
 daemon.
 
-## Recovery (only when self-check reports an error)
+## Recover own binding
 
-If `appsdk init .` returns `error: cannot resolve tmux session for pane
-%<n>` or `RUNTIME_BINDING_REJECTED: pane ownership for %<n> is unknown`,
-the shell is not bound to the registered pane/thread. Run the same
-command from that pane/thread, or run `collab worker recover` inside a
-fresh live pane and re-bind the same `worker_id`. No file grepping,
-no `ps`, no `routes.jsonl` editing.
-
-If it returns `HOST_ROUTE_REPLAY_FAILED: canonical root <path>: No such
-file or directory`, run the documented stale route cleanup once:
+If `collab context` reports the wrong or missing binding:
 
 ```sh
-collab down
-cp ~/.collab/routes.jsonl ~/.collab/routes.jsonl.before-stale-cleanup-$(date +%Y%m%d-%H%M%S)
-grep -v '<missing root>' ~/.collab/routes.jsonl > ~/.collab/routes.jsonl.tmp
-mv ~/.collab/routes.jsonl.tmp ~/.collab/routes.jsonl
-collab up
-cd /abs/path/project && appsdk init .
+collab worker recover
 ```
 
-## Where registration must run
-
-Always from the project main tree. The daemon refuses worktree paths with
-`must run from the project main tree`. If you are in
-`playground/<slug>`, `cd` back to the canonical root registered in
-`~/.collab/routes.jsonl` before running `appsdk init .`.
+Then run `collab context` again. Do not edit `~/.collab`, do not grep
+`routes.jsonl`, do not touch `server.pid`, do not start a second daemon.

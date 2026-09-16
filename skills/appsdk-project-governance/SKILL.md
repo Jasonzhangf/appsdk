@@ -103,6 +103,14 @@ restart, and verify state machine belongs to the
 defines what a managed project may classify, preserve, and hand to that Skill;
 do not copy the migration state machine into this file or into a project.
 
+For an existing project that contains legacy `.appsdk/` or `.agent-collab/`,
+start with the exact operator path in
+[Existing project: remove old governance](references/bootstrap-migration.md#existing-project-remove-old-governance).
+The AppSDK reset and the Collab migration are separate owners and separate
+transactions. Never treat removal of `.appsdk/` as permission to delete or
+rebuild `.agent-collab/`, and never use the Collab migration as a substitute
+for an authorized AppSDK governance reset.
+
 Before choosing a route, record an inventory of every exact path and runtime
 object in the run note. At minimum include the AppSDK contract root and its
 records/maps, `.appsdk-control/`, declared generated roots, Active/Protected,

@@ -193,3 +193,132 @@ snapshot current source and task state
 
 Untouched legacy gaps are warnings unless safety, source ownership, evidence
 truth, or current delivery is affected.
+
+## Existing project: remove old governance
+
+Use this section when a real project root already contains `.appsdk/`,
+`.appsdk-control/`, or `.agent-collab/` from an older version and the operator
+wants to start the current governance and coordination baseline instead of
+migrating old control state. The two roots have different owners and must be
+handled in separate transactions.
+
+### 1. Inventory and freeze
+
+Run read-only inventory from the project root. Do not delete anything yet.
+
+```bash
+cd /abs/path/project
+git status --short --branch
+git worktree list
+find .appsdk .appsdk-control .agent-collab -maxdepth 3 -print 2>/dev/null
+collab migrate inspect
+collab status --all
+collab context
+```
+
+Record the exact project root, branch/HEAD, worktrees, `.appsdk/` and
+`.appsdk-control/` contents, generated roots, `active/`, `protected/`,
+`.agent-collab/` journal/mailbox/tasks/claims, daemon PID/socket, peer
+identities, routes, and migration blockers in the run note. A file name, old
+PID file, socket existence, or successful `collab status` is not sufficient
+proof of ownership.
+
+Stop new shared writes, dispatches, and task admission before either reset.
+Preserve every active worktree and task until its owner or an explicitly
+authorized migration decision resolves it.
+
+### 2. Collab migration or retirement
+
+`.agent-collab/` is owned by Collab. AppSDK reset does not remove it. If the
+project uses Collab v1 and the journal is replayable, use the authenticated
+migration transaction:
+
+```bash
+collab migrate inspect
+collab migrate plan
+collab migrate apply
+# install the reviewed Collab binary, then:
+collab down
+collab up
+collab worker recover
+collab migrate verify
+```
+
+`inspect` is read-only. `plan` does not freeze admission. `apply` freezes
+admission and persists the deterministic snapshot. `verify` resumes admission
+only after journal/mailbox/task/identity continuity passes. If the result is
+`reset_required`, `needs_operator`, `unknown`, or an owner/count mismatch, stop
+and resolve it through Collab's canonical owner; do not continue to the AppSDK
+reset as if the whole operation passed.
+
+There is no supported project-level command that deletes and recreates
+`.agent-collab/`. Never manually delete it, edit its JSON/JSONL, clear its
+mailbox, copy identity tokens, or start a second daemon. A project that has no
+valid Collab state to preserve still needs an explicit Collab retirement or
+fresh-registration decision from the Collab owner; AppSDK must not make that
+decision for it.
+
+### 3. AppSDK reset
+
+After the Collab side is either migrated/verified or explicitly retired by its
+owner, handle `.appsdk/` from a clean non-`main` owner worktree with no
+competing claim. For a project that must abandon the old governance epoch and
+start from the current SDK baseline, the preferred single entry is:
+
+```bash
+cd /abs/path/project
+git worktree add -b codex/governance-reset-<slug> \
+  playground/governance-reset-<slug> origin/main
+cd playground/governance-reset-<slug>
+appsdk init "$PWD" --fresh --discard-legacy
+appsdk guide init --task governance-reset --mode bootstrap --module <module-id>
+appsdk guide compile
+appsdk verify
+appsdk compile
+```
+
+`appsdk init --fresh --discard-legacy` requires an existing
+`.appsdk/project.json`, a clean non-`main`/`master` worktree, and the explicit
+discard confirmation. It uses the same transactional reset owner as
+`appsdk reset-governance --discard-legacy`, but combines reset with current
+contract rebuild. It removes the old AppSDK control plane, `.appsdk-control/`,
+and declared rebuildable generated roots; it preserves business source,
+runtime data, `active/`, and `protected/` by default. It must not remove
+`.agent-collab/`.
+
+If the operator explicitly chooses the lower-level AppSDK operation instead,
+run it in the same clean non-`main` worktree and then initialize:
+
+```bash
+appsdk reset-governance "$PWD" --discard-legacy
+appsdk init "$PWD"
+appsdk guide compile
+appsdk verify
+```
+
+Do not hand-edit `.appsdk/` JSON, reuse old PASS/hash/receipts, or delete
+`active/` or `protected/` as part of reset. Those are separate authorized
+cleanup decisions.
+
+If the old `.appsdk/project.json` is missing, malformed, unreadable, or the
+worktree is dirty, `--fresh --discard-legacy` must fail closed. Do not replace
+that check with manual deletion. Preserve the exact error and use the AppSDK
+migration owner to establish whether the project contract can be recovered;
+only an existing, valid contract can authorize a fresh reset. If no contract
+can be established, a new root must go through a separate confirmed
+preparation/init flow rather than claiming to reset the old project.
+
+### 4. Verify the new baseline
+
+The operation is complete only when all of the following are true:
+
+- Collab reports the exact migration/retirement result and has one verified
+  daemon/socket/identity state.
+- `appsdk verify` passes against the current project contract and the fresh
+  reset baseline.
+- The removed classes are limited to the authorized AppSDK control plane,
+  `.appsdk-control/`, and declared rebuildable generated roots.
+- Business source, runtime data, `active/`, `protected/`, and all retained
+  Collab evidence still exist.
+- The new reset record is current and does not claim delivery, review,
+  install, restart, or communication success.

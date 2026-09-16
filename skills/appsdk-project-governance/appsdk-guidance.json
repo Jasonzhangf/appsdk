@@ -28,9 +28,10 @@
       "nodes": [
         {"node_id": "prepare", "instruction": "Run prepare and confirm scope, roots, boundaries, and acceptance.", "owner": "project", "evidence": ["preparation-record"]},
         {"node_id": "initialize", "instruction": "Run idempotent initialization for the confirmed project root.", "owner": "project", "evidence": ["initialized-layout"]},
+        {"node_id": "bind_contract", "instruction": "Replace scaffold placeholders with real project_id/goal/module ownership/build/test gates, then grep for change-me/goal-change-me/app-core.", "owner": "project", "evidence": ["bound-contract", "placeholder-scan"]},
         {"node_id": "baseline_verify", "instruction": "Verify the initialized governance baseline.", "owner": "project", "evidence": ["verify-result"]}
       ],
-      "edges": [{"from": "prepare", "to": "initialize"}, {"from": "initialize", "to": "baseline_verify"}]
+      "edges": [{"from": "prepare", "to": "initialize"}, {"from": "initialize", "to": "bind_contract"}, {"from": "bind_contract", "to": "baseline_verify"}]
     },
     {
       "domain": "migration",

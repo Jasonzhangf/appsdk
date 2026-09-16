@@ -199,6 +199,7 @@ runtime exists. App Server is preferred; tmux is only an optional transport.
 cd /abs/path/project
 appsdk prepare
 appsdk init .
+appsdk guide compile
 appsdk guide status
 appsdk verify
 ```
@@ -211,6 +212,29 @@ closed, `confirmed_by`, and `confirmed_at`. Do not confirm scope on the
 user's behalf and do not bypass prepare by editing `.appsdk/project.json`.
 Detailed fields and an example are in
 [bootstrap-migration.md](references/bootstrap-migration.md).
+
+`appsdk init` is not a stop point. The initial scaffold is not an admitted
+contract: it creates `.appsdk/project.json` with placeholder `project_id:
+"change-me"`, `.appsdk/goal.json` with `goal_id: "goal-change-me"`, and a
+placeholder `app-core` module. After `appsdk init` completes, bind the real
+project contract before claiming readiness:
+
+- Edit `.appsdk/project.json` to the real `project_id` and real modules with
+  exact owned paths, source owners, build commands, test commands, and
+  dependency edges. Do not leave `app-core` as the only module in a real
+  project.
+- Edit `.appsdk/goal.json` to the confirmed objective and acceptance criteria
+  from `.appsdk-prepare.json`, set `status: "confirmed"`, and record
+  `confirmed_by` and `confirmed_at`.
+- Rerun `appsdk guide compile` and `appsdk verify`.
+- Grep the governance contract and fail or fix any remaining placeholder:
+  `rg -n "change-me|goal-change-me|app-core" .appsdk`.
+
+If a confirmed preparation does not contain enough module ownership/build/test
+information to bind the contract, do not stop at a guessed `app-core` scaffold.
+Return a concrete proposed contract and ask for the missing ownership/scope;
+init has not made the project governable until the placeholder contract is
+replaced.
 
 In a live App Server or tmux runtime, `appsdk init` calls `collab init` once:
 Collab starts/reuses its daemon, picks the transport by server capability with
@@ -424,6 +448,54 @@ appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
   2. Enforce AppSDK lifecycle governance across all subworker tasks.
   3. Report any upstream AppSDK framework issues via `appsdk bug new --upstream`.
   4. Conclude only when all goal DoD conditions pass.
+
+### Master orchestration contract
+
+For a project that will run multiple agents, the approved master owns resource
+allocation, worktree, merge, bug, and cleanup closure. Master does not write
+business diffs as its primary job; it compiles goals into non-overlapping task
+scopes, dispatches through Collab/AppServer, and drives verification.
+
+At each master wake:
+
+```bash
+appsdk longhorizon show --json
+collab who
+appsdk subworker status
+collab status --all
+```
+
+Then:
+
+1. Inspect open tasks and open bugs with `collab status --all` and
+   `appsdk bug list --status open --json`; dispatch only authorized in-scope
+   work with delivery and test conditions.
+2. When a worker reports a blocker with root cause and proposed fix, either
+   fix the dispatch/integration condition, re-dispatch, or auditable
+   force-close (`collab task close <id> --force --reason "<reason>"`). Do not
+   mark blocked and idle.
+3. After integration, record the main SHA, merged commit, build/install hash,
+   restart receipt, and live replay evidence separately. `review`, `merge`,
+   `install`, `restart`, and `live replay` are not one state.
+4. Clean only resources created by this task: own worktrees, temporary
+   artifacts, logs, forwards, and service processes after their owner closes
+   them. Preserve other peers' worktrees/processes/evidence.
+
+Long-horizon goal and timer initialization is master-only after the plan file
+exists and the user authorized the goal:
+
+```bash
+appsdk goal subscribe --goal docs/goals/<goal>-plan.md --interval 10m
+appsdk goal status --json
+appsdk longhorizon show --json
+```
+
+`appsdk goal status --json` must report `active: true`, `desired:
+subscribed`, `observed: subscribed`, `collab_subscribed: true`, a non-null
+`subscription_id`, and a null `error`. Command output is not proof that a
+timer fired; run one short-interval live replay and record the armed
+subscription, fired deadline notification, and consumed result before
+declaring long-horizon scheduling verified.
 
 ## Evidence and state ownership
 

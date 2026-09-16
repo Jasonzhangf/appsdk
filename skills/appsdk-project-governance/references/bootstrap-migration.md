@@ -7,6 +7,8 @@ requirements + acceptance
 -> appsdk prepare
 -> confirm project root/boundaries/non-goals
 -> appsdk init
+-> bind real project_id/goal/module ownership/build/test gates
+-> appsdk guide compile
 -> optional approved Guidance setup/compile
 -> appsdk verify
 -> clean owner worktree
@@ -61,6 +63,21 @@ questions must be answered or removed before `init`. Never confirm the record
 on behalf of the user, and never replace the preparation gate by editing
 `.appsdk/project.json` before initialization.
 
+`appsdk init` scaffolds a placeholder project contract. That scaffold is a
+template, not an admitted contract. Immediately after `appsdk init`, bind the
+real project truth into `.appsdk/project.json` and `.appsdk/goal.json`:
+
+- `project_id`: use the real identifier for the confirmed project root.
+- `modules`: replace the placeholder `app-core` module with the real modules or
+  component boundaries, including each module's owned paths, source owner,
+  build command, regression command, and dependencies.
+- `goal.json`: replace `goal-change-me` with the confirmed goal; copy
+  `objective` and `acceptance_criteria` from `.appsdk-prepare.json`, set
+  `status: "confirmed"`, and fill `confirmed_by` / `confirmed_at`.
+- Do not stop on `appsdk init` success alone; run
+  `rg -n "change-me|goal-change-me|app-core" .appsdk` and do not report a
+  project as governed until placeholders are gone.
+
 For an existing project with prior `.appsdk/` or `.agent-collab/`, do not use
 this ordinary new-project path. Use
 [Existing project: remove old governance](#existing-project-remove-old-governance)
@@ -90,6 +107,8 @@ cd /abs/path/project
 appsdk prepare
 # confirm .appsdk-prepare.json exactly as above
 appsdk init .
+rg -n "change-me|goal-change-me|app-core" .appsdk
+appsdk guide compile
 appsdk guide status
 appsdk verify
 collab context
@@ -110,6 +129,9 @@ Ordinary peer initialization, after the project already has
 ```bash
 cd /abs/path/project
 appsdk init .
+if rg -q "change-me|goal-change-me|app-core" .appsdk; then
+  echo "governance contract still has placeholders; report to master"
+fi
 collab context
 collab status --all
 collab who
@@ -121,6 +143,10 @@ The peer must observe its own identity, liveness, presence, transport and
 worker role. Do not run a second `collab init`, do not promote itself, do not
 register a long-horizon goal, and do not fabricate a worker role from
 `appsdk init` output.
+
+Master orchestration, lifecycle, long-horizon scheduling, and merge/install/
+cleanup closure steps are kept in the main Skill under
+`Long-Horizon Goal Subscription & Master Saturation` and the Collab Skill.
 
 Long-horizon master scheduling is a separate, master-only step. Create the
 plan file first, then register and verify:
@@ -139,6 +165,26 @@ armed subscription, fired deadline notification, and consumed result before
 declaring long-horizon scheduling verified. The current implementation is a
 one-shot deadline that must be explicitly rearmed with `appsdk goal subscribe`
 after it is consumed, expires, or Collab restarts.
+
+### Master lifecycle checklist
+
+After master promotion, the master owns the following closeout loop:
+
+1. Resource allocation: split goals by dependencies then unique write scope;
+   assign through `collab sendmessage`, `appsdk subagent start/send`, or
+   `collab subagent dispatch`.
+2. Recovery/reallocation: on worker blockers, get root cause + proposed fix,
+   then re-dispatch or force-close with an auditable reason. Do not idle on a
+   blocked task.
+3. Integration/merge: after worker evidence passes review, integrate on latest
+   main from a clean merge, record `origin/main` SHA and merge SHA, rebuild
+   artifacts when required, and report install/restart/live replay separately.
+4. Bug management: query `appsdk bug list --status open --json`, dispatch by
+   priority within authorized scope, and never use autonomous cleanup as a
+   reason to expand scope.
+5. Cleanup: close own tasks with `collab task close`, remove only worktrees,
+   temp artifacts, logs, forwards, and processes created by this round; do not
+   delete other peers' resources or evidence.
 
 For a new governance root, AppSDK installs a project-neutral root `AGENTS.md`
 when none exists. It contains the Project Truth, Semantic Invariants,

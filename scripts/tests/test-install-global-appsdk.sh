@@ -104,14 +104,57 @@ FAKE_CARGO
   }
 }
 
+run_missing_skill_source_test() {
+  local test_root="$1"
+  local fake_bin="$test_root/fake-cargo-bin"
+  local fake_repo="$test_root/repo"
+  mkdir -p "$fake_bin" "$test_root/home" "$fake_repo"
+  cp -R "$repo_root/scripts" "$fake_repo/scripts"
+  cp -R "$repo_root/skills" "$fake_repo/skills"
+  rm -f "$fake_repo/skills/appsdk-migration/SKILL.md"
+  mkdir -p "$fake_repo/rust/target/release"
+  cp "$fixture" "$fake_repo/rust/target/release/appsdk"
+  cp "$repo_root/rust/target/release/project-memory" "$fake_repo/rust/target/release/project-memory"
+  cp "$fixture" "$fake_bin/appsdk"
+  cp "$repo_root/rust/target/release/project-memory" "$fake_bin/project-memory"
+  local before
+  before="$(shasum -a 256 "$fake_bin/appsdk")"
+  mkdir -p "$test_root/home/.agents/skills/appsdk-project-governance"
+  printf '%s\n' 'preserve existing governance skill' \
+    > "$test_root/home/.agents/skills/appsdk-project-governance/SKILL.md"
+
+  if PATH="$fake_bin:/usr/bin:/bin" HOME="$test_root/home" \
+    bash "$fake_repo/scripts/install-global-appsdk.sh" >/dev/null 2>&1; then
+    echo 'missing skill source unexpectedly installed' >&2
+    exit 1
+  fi
+  [[ "$(shasum -a 256 "$fake_bin/appsdk")" == "$before" ]] || {
+    echo 'missing skill source replaced the canonical binary' >&2
+    exit 1
+  }
+  [[ "$(<"$test_root/home/.agents/skills/appsdk-project-governance/SKILL.md")" == \
+    'preserve existing governance skill' ]] || {
+    echo 'missing skill source replaced an existing Skill' >&2
+    exit 1
+  }
+  [[ -z "$(find "$test_root/home/.agents/skills" -maxdepth 1 -name '.appsdk-skills.*' -print -quit)" ]] || {
+    echo 'missing skill source leaked staging state' >&2
+    exit 1
+  }
+}
+
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/appsdk-install-test.XXXXXX")"
 failed_test_root=''
+missing_skill_test_root=''
 cleanup() {
   rm -rf -- "$test_root"
   [[ -z "$failed_test_root" ]] || rm -rf -- "$failed_test_root"
+  [[ -z "$missing_skill_test_root" ]] || rm -rf -- "$missing_skill_test_root"
 }
 trap cleanup EXIT
 run_install_test "$test_root"
 failed_test_root="$(mktemp -d "${TMPDIR:-/tmp}/appsdk-install-failure.XXXXXX")"
 run_failed_build_test "$failed_test_root"
+missing_skill_test_root="$(mktemp -d "${TMPDIR:-/tmp}/appsdk-install-missing-skill.XXXXXX")"
+run_missing_skill_source_test "$missing_skill_test_root"
 echo 'installer tests: PASS'

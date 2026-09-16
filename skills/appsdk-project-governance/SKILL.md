@@ -188,6 +188,55 @@ live communication.
 7. Deliver within authorization. Report test, review, merge, install, publish
    and resource cleanup as separate achieved states.
 
+## Quick start: new governed project with Collab
+
+For a new business project that also needs agent-to-agent Collab, do not invent
+project-local transport or old `.appsdk/` state. Run the AppSDK flow from the
+project root, then let `appsdk init` invoke official Collab once when a live
+runtime exists. App Server is preferred; tmux is only an optional transport.
+
+```bash
+cd /abs/path/project
+appsdk prepare
+appsdk init .
+appsdk guide status
+appsdk verify
+```
+
+In a live App Server or tmux runtime, `appsdk init` calls `collab init` once:
+Collab starts/reuses its daemon, picks the transport by server capability with
+App Server preferred, registers the current peer, and arms the default
+`direct-message` lease. `collab init` resolves the project scope from the exact
+process `cwd`, not from tmux. If no registered App Server or tmux route exists,
+AppSDK initialization still succeeds for independent development, reports
+Collab pending, and never fabricates a peer or notification channel. Then use
+`collab who/status/context`, `collab sendmessage`, `collab inbox`, and
+`collab recv` only through the server-selected transport.
+
+## Quick start: replace old governance with current baseline
+
+When a project already contains old `.appsdk/`, `.appsdk-control/`, or
+`.agent-collab/`, treat AppSDK and Collab as separate owners with separate
+transactions. First read
+[Existing project: remove old governance](references/bootstrap-migration.md#existing-project-remove-old-governance)
+and run the exact commands there. The invariant is:
+
+```text
+inventory both roots -> migrate/retire Collab first -> authorize AppSDK reset
+-> clean non-main owner worktree -> appsdk init <project> --fresh --discard-legacy
+-> appsdk guide compile -> appsdk verify
+```
+
+`appsdk init --fresh --discard-legacy` is the only init path that discards the
+named AppSDK legacy control plane. It requires an existing
+`.appsdk/project.json`, a clean non-`main`/`master` owner worktree, and explicit
+authorization. It removes old AppSDK control state and declared generated
+roots, refills missing current SDK fields, carries forward project-owned
+boundaries, and never deletes `.agent-collab/` or old Collab evidence. Collab
+state is removed or migrated through the `collab migrate` and daemon lifecycle
+owned by the Collab Skill. A fresh reset record proves reset only; it never
+imports old PASS, review, install, restart, delivery, or live communication.
+
 ## Conditional delivery gates
 
 Candidate, review, integration, publication and runtime replay are separate

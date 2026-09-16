@@ -39,6 +39,73 @@ release_bin="$repo_root/rust/target/release/appsdk"
 memory_release="$repo_root/rust/target/release/project-memory"
 memory_bin="$cargo_bin_dir/project-memory"
 
+# The Skills are part of the same release surface. Validate and stage them
+# before mutating any installed binary so a missing or invalid Skill cannot
+# leave a partially upgraded environment.
+skills=(appsdk-project-governance appsdk-migration project-memory)
+skills_root="$user_home/.agents/skills"
+skills_stage=''
+skills_previous=''
+skill_install_committed=false
+installed_skills=()
+
+cleanup_skill_install() {
+  if [[ -n "$skills_stage" && ( -e "$skills_stage" || -L "$skills_stage" ) ]]; then
+    rm -rf -- "$skills_stage"
+  fi
+  if [[ "$skill_install_committed" != true && -n "$skills_previous" ]]; then
+    for skill in "${skills[@]}"; do
+      local previous="$skills_previous/$skill"
+      local target="$skills_root/$skill"
+      if [[ -e "$previous" || -L "$previous" ]]; then
+        if [[ -e "$target" || -L "$target" ]]; then
+          rm -rf -- "$target"
+        fi
+        mv -- "$previous" "$target"
+      elif [[ -n "$installed_skills" ]]; then
+        for installed in "${installed_skills[@]}"; do
+          if [[ "$installed" == "$skill" ]]; then
+            if [[ -e "$target" || -L "$target" ]]; then
+              rm -rf -- "$target"
+            fi
+            break
+          fi
+        done
+      fi
+    done
+  fi
+  if [[ -n "$skills_previous" && ( -e "$skills_previous" || -L "$skills_previous" ) ]]; then
+    rm -rf -- "$skills_previous"
+  fi
+}
+trap cleanup_skill_install EXIT
+
+for skill in "${skills[@]}"; do
+  source="$repo_root/skills/$skill"
+  if [[ ! -s "$source/SKILL.md" ]]; then
+    echo "error: AppSDK Skill source is missing: $source/SKILL.md" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$skills_root"
+skills_stage="$(mktemp -d "$skills_root/.appsdk-skills.stage.XXXXXX")"
+for skill in "${skills[@]}"; do
+  cp -R "$repo_root/skills/$skill" "$skills_stage/$skill"
+  if [[ ! -s "$skills_stage/$skill/SKILL.md" ]]; then
+    echo "error: staged AppSDK Skill is invalid: $skills_stage/$skill" >&2
+    exit 1
+  fi
+done
+
+skills_previous="$(mktemp -d "$skills_root/.appsdk-skills.previous.XXXXXX")"
+for skill in "${skills[@]}"; do
+  target="$skills_root/$skill"
+  if [[ -e "$target" || -L "$target" ]]; then
+    mv -- "$target" "$skills_previous/$skill"
+  fi
+done
+
 echo "Building AppSDK release from $repo_root"
 cargo build --release --manifest-path "$repo_root/rust/Cargo.toml"
 
@@ -79,6 +146,18 @@ fi
 # mv within the cargo bin directory is the only replacement point. A failed
 # build, copy, chmod, or version check leaves the previous canonical binary.
 mv -f -- "$stage_file" "$canonical_bin"
+stage_file="$(mktemp "$cargo_bin_dir/.project-memory-install.XXXXXX")"
+cp "$memory_release" "$stage_file"
+chmod 0755 "$stage_file"
+"$stage_file" help >/dev/null
+mv -f -- "$stage_file" "$memory_bin"
+mkdir -p "$user_home/.local/bin"
+if [[ "$user_home/.local/bin/project-memory" != "$memory_bin" ]]; then
+  stage_file="$(mktemp "$user_home/.local/bin/.project-memory-link.XXXXXX")"
+  rm -f -- "$stage_file"
+  ln -s "$memory_bin" "$stage_file"
+  mv -f -- "$stage_file" "$user_home/.local/bin/project-memory"
+fi
 trap - EXIT
 
 remove_exact_copy() {
@@ -142,63 +221,17 @@ printf 'Installed: %s\nVersion: %s\nSHA-256 (diagnostic): %s\n' \
   "$canonical_bin" "$release_version" "$digest"
 printf '%s\n' 'Refresh the current shell command cache with: rehash (zsh) or hash -r (bash)'
 
-# One executable owner. Preserve the old PATH entry as a link, not another build.
-stage_file="$(mktemp "$cargo_bin_dir/.project-memory-install.XXXXXX")"
-trap cleanup_stage EXIT
-cp "$memory_release" "$stage_file"
-chmod 0755 "$stage_file"
-"$stage_file" help >/dev/null
-mv -f -- "$stage_file" "$memory_bin"
-mkdir -p "$user_home/.local/bin"
-if [[ "$user_home/.local/bin/project-memory" != "$memory_bin" ]]; then
-  stage_file="$(mktemp "$user_home/.local/bin/.project-memory-link.XXXXXX")"
-  rm -f -- "$stage_file"
-  ln -s "$memory_bin" "$stage_file"
-  mv -f -- "$stage_file" "$user_home/.local/bin/project-memory"
-fi
-trap - EXIT
-
-install_skill_tree() {
-  local skill="$1"
-  local source="$repo_root/skills/$skill"
-  local target="$user_home/.agents/skills/$skill"
-  local stage
-  local previous
-
-  if [[ ! -s "$source/SKILL.md" ]]; then
-    echo "error: AppSDK Skill source is missing: $source/SKILL.md" >&2
-    exit 1
-  fi
-
-  mkdir -p "$user_home/.agents/skills"
-  stage="$(mktemp -d "$user_home/.agents/skills/.${skill}.stage.XXXXXX")"
-  cp -R "$source/." "$stage/"
-  if [[ ! -s "$stage/SKILL.md" ]]; then
-    echo "error: staged AppSDK Skill is invalid: $stage" >&2
-    rm -rf -- "$stage"
-    exit 1
-  fi
-  previous=''
-  if [[ -e "$target" || -L "$target" ]]; then
-    previous="$(mktemp -d "$user_home/.agents/skills/.${skill}.previous.XXXXXX")"
-    rmdir -- "$previous"
-    mv -- "$target" "$previous"
-  fi
-  if ! mv -- "$stage" "$target"; then
-    if [[ -n "$previous" && ( -e "$previous" || -L "$previous" ) ]]; then
-      mv -- "$previous" "$target"
-    fi
-    rm -rf -- "$stage"
-    echo "error: failed to install AppSDK Skill: $target" >&2
-    exit 1
-  fi
-  if [[ -n "$previous" && ( -e "$previous" || -L "$previous" ) ]]; then
-    rm -rf -- "$previous"
-  fi
-  printf 'Skill installed: %s\n' "$target"
-}
-
-install_skill_tree appsdk-project-governance
-install_skill_tree appsdk-migration
-install_skill_tree project-memory
+for skill in "${skills[@]}"; do
+  mv -- "$skills_stage/$skill" "$skills_root/$skill"
+  installed_skills+=("$skill")
+done
+rmdir -- "$skills_stage"
+skills_stage=''
+skill_install_committed=true
+installed_skills=()
+rm -rf -- "$skills_previous"
+skills_previous=''
+for skill in "${skills[@]}"; do
+  printf 'Skill installed: %s\n' "$skills_root/$skill"
+done
 printf 'Memory installed: %s (legacy PATH entry links here)\n' "$memory_bin"

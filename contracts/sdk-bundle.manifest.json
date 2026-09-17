@@ -68,11 +68,15 @@
       "skills/appsdk-project-governance/agents/openai.yaml",
       "skills/appsdk-project-governance/appsdk-guidance.json",
       "skills/appsdk-project-governance/references/bootstrap-migration.md",
+      "skills/appsdk-project-governance/references/command-surface.md",
       "skills/appsdk-project-governance/references/contracts-and-failures.md",
       "skills/appsdk-project-governance/references/development-debug.md",
       "skills/appsdk-project-governance/references/goal-prompt.md",
+      "skills/appsdk-project-governance/references/init-prompts.md",
       "skills/appsdk-project-governance/references/process-control-harness.md",
       "skills/appsdk-project-governance/references/review-delivery.md",
+      "skills/appsdk-project-governance/references/state-paths.md",
+      "skills/appsdk-project-governance/references/subagents-config.md",
       "skills/appsdk-migration/SKILL.md",
       "skills/project-memory/SKILL.md"
     ]

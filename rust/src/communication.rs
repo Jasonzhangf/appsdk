@@ -10,7 +10,6 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -196,10 +195,6 @@ struct RuntimeRequest {
     project_root: String,
     #[serde(default)]
     capabilities: Vec<String>,
-    #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
-    tmux_session: Option<String>,
-    #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
-    tmux_pane: Option<String>,
     #[serde(rename = "processId", alias = "process_id")]
     process_id: u32,
 }
@@ -512,73 +507,6 @@ impl CommunicationAdapter for MailboxAdapter {
             state: "accepted".into(),
             target: Some(self.path.display().to_string()),
             evidence: json!({ "durable": true, "format": "jsonl", "batch": true }),
-        })
-    }
-}
-
-struct TmuxAdapter {
-    adapter_id: String,
-    runtime_id: String,
-    target: String,
-    execute: bool,
-}
-
-impl CommunicationAdapter for TmuxAdapter {
-    fn deliver(&self, message: &MessageRecord) -> CommResult<TransportReceipt> {
-        let preview = bounded_preview(message);
-        if self.execute {
-            let result = Command::new("tmux")
-                .args(["send-keys", "-t", &self.target, &preview, "Enter"])
-                .output()
-                .map_err(|error| CommError::new("tmux_delivery_failed", error.to_string()))?;
-            if !result.status.success() {
-                return Err(CommError::new(
-                    "tmux_delivery_failed",
-                    String::from_utf8_lossy(&result.stderr).trim().to_string(),
-                ));
-            }
-        }
-        Ok(TransportReceipt {
-            adapter_id: self.adapter_id.clone(),
-            kind: "tmux".into(),
-            state: if self.execute { "delivered" } else { "intent" }.into(),
-            target: Some(self.target.clone()),
-            evidence: json!({
-                "preview": preview,
-                "executed": self.execute,
-                "runtimeId": self.runtime_id
-            }),
-        })
-    }
-
-    fn emit_batch(&self, batch: &NotificationBatch) -> CommResult<TransportReceipt> {
-        let preview = format!(
-            "[appsdk] {} updates for {}",
-            batch.items.len(),
-            batch.recipient.key()
-        );
-        if self.execute {
-            let result = Command::new("tmux")
-                .args(["send-keys", "-t", &self.target, &preview, "Enter"])
-                .output()
-                .map_err(|error| CommError::new("tmux_delivery_failed", error.to_string()))?;
-            if !result.status.success() {
-                return Err(CommError::new(
-                    "tmux_delivery_failed",
-                    String::from_utf8_lossy(&result.stderr).trim().to_string(),
-                ));
-            }
-        }
-        Ok(TransportReceipt {
-            adapter_id: self.adapter_id.clone(),
-            kind: "tmux".into(),
-            state: if self.execute { "delivered" } else { "intent" }.into(),
-            target: Some(self.target.clone()),
-            evidence: json!({
-                "preview": preview,
-                "executed": self.execute,
-                "runtimeId": self.runtime_id
-            }),
         })
     }
 }
@@ -1152,8 +1080,6 @@ impl CommunicationStore {
             endpoint: request.endpoint,
             project_root: request.project_root,
             capabilities: request.capabilities,
-            tmux_session: request.tmux_session,
-            tmux_pane: request.tmux_pane,
             process_id: request.process_id,
         };
         let receipt = global_registry::register_runtime(&identity).map_err(|error| {
@@ -1599,19 +1525,13 @@ impl CommunicationStore {
 
     fn register_adapter(&mut self, request: AdapterRequest) -> CommResult<Value> {
         validate_non_empty(&request.adapter_id, "adapterId")?;
-        if !matches!(request.kind.as_str(), "mailbox" | "tmux" | "appserver") {
+        if !matches!(request.kind.as_str(), "mailbox" | "appserver") {
             return Err(CommError::new(
                 "invalid_adapter_kind",
                 format!(
-                    "adapter kind must be mailbox, tmux or appserver: {}",
+                    "adapter kind must be mailbox or appserver: {}",
                     request.kind
                 ),
-            ));
-        }
-        if request.kind == "tmux" && request.target.as_deref().unwrap_or("").trim().is_empty() {
-            return Err(CommError::new(
-                "tmux_target_required",
-                "tmux adapter requires target pane",
             ));
         }
         if request.kind == "appserver" && request.target.as_deref().unwrap_or("").trim().is_empty()
@@ -1624,7 +1544,7 @@ impl CommunicationStore {
         if request.kind != "mailbox" && request.recipient.is_none() {
             return Err(CommError::new(
                 "adapter_recipient_required",
-                "tmux and appserver adapters require a registered recipient address",
+                "appserver adapters require a registered recipient address",
             ));
         }
         if let Some(recipient) = request.recipient.as_ref() {
@@ -1633,16 +1553,8 @@ impl CommunicationStore {
                 let runtime = self.runtime_for_agent(&agent)?;
                 let target = request.target.as_deref().ok_or_else(|| {
                     CommError::new(
-                        if request.kind == "tmux" {
-                            "tmux_target_required"
-                        } else {
-                            "appserver_target_required"
-                        },
-                        if request.kind == "tmux" {
-                            "tmux adapter requires target pane"
-                        } else {
-                            "appserver adapter requires endpoint"
-                        },
+                        "appserver_target_required",
+                        "appserver adapter requires endpoint",
                     )
                 })?;
                 validate_adapter_runtime_target(&request.kind, target, &runtime, false)?;
@@ -5166,16 +5078,8 @@ impl CommunicationStore {
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| {
                     CommError::new(
-                        if record.kind == "tmux" {
-                            "tmux_target_required"
-                        } else {
-                            "appserver_target_required"
-                        },
-                        if record.kind == "tmux" {
-                            "tmux adapter requires target pane"
-                        } else {
-                            "appserver adapter requires endpoint"
-                        },
+                        "appserver_target_required",
+                        "appserver adapter requires endpoint",
                     )
                 })?;
             validate_adapter_runtime_target(&record.kind, target, &runtime, true)?;
@@ -5186,26 +5090,6 @@ impl CommunicationStore {
                 adapter_id: record.adapter_id.clone(),
                 path: self.mailbox_path.clone(),
             })),
-            "tmux" => {
-                let target = record
-                    .target
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| {
-                        CommError::new("tmux_target_required", "tmux adapter requires target pane")
-                    })?;
-                Ok(Box::new(TmuxAdapter {
-                    adapter_id: record.adapter_id.clone(),
-                    runtime_id: runtime
-                        .as_ref()
-                        .expect("tmux adapter runtime was validated")
-                        .identity
-                        .runtime_id
-                        .clone(),
-                    target,
-                    execute: record.execute,
-                }))
-            }
             "appserver" => {
                 let endpoint = record
                     .target
@@ -6225,8 +6109,9 @@ impl CommunicationStore {
                         "message delivery attempt target has no runtime identity",
                     )
                 })?;
-                let runtime = global_registry::runtime(runtime_id)
-                    .map_err(|error| CommError::new("event_data_invalid", error))?;
+                let runtime =
+                    global_registry::runtime_for_replay(runtime_id, &attempt.runtime_fingerprint)
+                        .map_err(|error| CommError::new("event_data_invalid", error))?;
                 let adapter = self.require_adapter(&message.adapter_id)?;
                 validate_message_delivery_attempt(
                     &attempt, &message, &target, &runtime, adapter, false,
@@ -6935,6 +6820,37 @@ pub fn run_cli(args: Vec<String>) -> CommResult<()> {
         println!("{}", serde_json::to_string_pretty(&capabilities()).unwrap());
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("reset-runtime-registry") {
+        let mut discard_legacy = false;
+        let mut approval = None;
+        let mut index = 1;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--discard-legacy" => discard_legacy = true,
+                "--approval" => {
+                    index += 1;
+                    approval = args.get(index).cloned();
+                }
+                value => {
+                    return Err(CommError::new(
+                        "usage",
+                        format!("unknown reset-runtime-registry option: {value}"),
+                    ))
+                }
+            }
+            index += 1;
+        }
+        let approval = approval.ok_or_else(|| {
+            CommError::new(
+                "usage",
+                "appsdk communication reset-runtime-registry --discard-legacy --approval <text>",
+            )
+        })?;
+        let receipt = global_registry::reset_runtime_registry(discard_legacy, &approval)
+            .map_err(|error| CommError::new("runtime_registry_reset_failed", error))?;
+        println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+        return Ok(());
+    }
     let root = args.first().ok_or_else(|| {
         CommError::new("usage", "appsdk communication <project> --json '<request>'")
     })?;
@@ -6997,7 +6913,7 @@ pub fn capabilities() -> Value {
             "scopeBinding": "runtimeId",
             "proof": "host-registration-receipt"
         },
-        "adapters": ["mailbox", "tmux", "appserver"],
+        "adapters": ["mailbox", "appserver"],
         "adapterBinding": "recipient-address",
         "completionEvidence": {
             "bug": ["fix", "verification", "merge"],
@@ -7225,40 +7141,6 @@ fn validate_adapter_runtime_target(
     stale: bool,
 ) -> CommResult<()> {
     match kind {
-        "tmux" => {
-            let session = runtime
-                .identity
-                .tmux_session
-                .as_deref()
-                .filter(|value| !value.trim().is_empty());
-            let pane = runtime
-                .identity
-                .tmux_pane
-                .as_deref()
-                .filter(|value| !value.trim().is_empty());
-            let (Some(session), Some(pane)) = (session, pane) else {
-                return Err(CommError::new(
-                    "tmux_runtime_target_required",
-                    format!(
-                        "recipient runtime {} has no registered tmux session and pane",
-                        runtime.identity.runtime_id
-                    ),
-                ));
-            };
-            let expected = format!("{session}:{pane}");
-            if target != expected {
-                return Err(CommError::new(
-                    if stale {
-                        "tmux_target_stale"
-                    } else {
-                        "tmux_target_mismatch"
-                    },
-                    format!(
-                        "tmux adapter target {target} does not match recipient runtime target {expected}"
-                    ),
-                ));
-            }
-        }
         "appserver" => {
             if target != runtime.identity.endpoint {
                 return Err(CommError::new(
@@ -7460,30 +7342,6 @@ fn validate_adapter_delivery_receipt(
                 ));
             }
         }
-        "tmux" => {
-            if object.get("executed").and_then(Value::as_bool) != Some(true) {
-                return Err(CommError::new(
-                    "delivery_evidence_invalid",
-                    "tmux delivery evidence must confirm an executed tmux send",
-                ));
-            }
-            if object
-                .get("preview")
-                .and_then(Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-            {
-                return Err(CommError::new(
-                    "delivery_evidence_invalid",
-                    "tmux delivery evidence must include the sent preview text",
-                ));
-            }
-            if object.get("runtimeId").and_then(Value::as_str) != Some(runtime_id) {
-                return Err(CommError::new(
-                    "delivery_evidence_invalid",
-                    "tmux delivery evidence runtimeId does not match delivery request",
-                ));
-            }
-        }
         "appserver" => {
             if object.get("hostMustExecute").and_then(Value::as_bool) != Some(true) {
                 return Err(CommError::new(
@@ -7595,7 +7453,7 @@ fn validate_replayed_delivery_evidence(
             "external delivery evidence runtimeId does not match message target",
         ));
     }
-    let runtime = global_registry::runtime(runtime_id)
+    let runtime = global_registry::runtime_for_replay(runtime_id, fingerprint)
         .map_err(|error| CommError::new("event_data_invalid", error))?;
     let known = global_registry::runtime_fingerprint_known(runtime_id, fingerprint)
         .map_err(|error| CommError::new("event_data_invalid", error))?;
@@ -8430,26 +8288,6 @@ fn validate_terminal_attempt(
             format!("{operation} references unknown attempt {attempt_id}"),
         )),
     }
-}
-
-fn bounded_preview(message: &MessageRecord) -> String {
-    let mut preview = format!(
-        "[appsdk][{}] {}",
-        format_priority(&message.priority),
-        message.title
-    );
-    if !message.body.trim().is_empty() {
-        preview.push_str(": ");
-        preview.push_str(message.body.trim());
-    }
-    preview
-        .chars()
-        .map(|character| match character {
-            '\n' | '\r' | '\t' => ' ',
-            other => other,
-        })
-        .take(240)
-        .collect()
 }
 
 fn format_priority(priority: &Priority) -> String {

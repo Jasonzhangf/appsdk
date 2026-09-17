@@ -367,7 +367,7 @@
       "required": ["adapterId", "kind", "state", "target", "evidence"],
       "properties": {
         "adapterId": {"type": "string", "minLength": 1},
-        "kind": {"enum": ["mailbox", "tmux", "appserver"]},
+        "kind": {"enum": ["mailbox", "appserver"]},
         "state": {"enum": ["accepted", "intent", "delivered", "unknown"]},
         "target": {"type": ["string", "null"]},
         "evidence": {"type": "object"}

@@ -1,5 +1,11 @@
 # AppSDK Long-Horizon Audit Remediation Plan
 
+> Historical-only audit plan from 2026-09-07. References below to tmux,
+> pane identity, or tmux replay describe the audited baseline and are not
+> current implementation or operational guidance. The current transport
+> contract is App Server only; see `docs/collab.md` and the installed
+> `collab` Skill.
+
 ## Source audit
 
 - Source: `/Users/fanzhang/Downloads/appsdk_long_horizon_audit_5a25998_2026-09-07.md`

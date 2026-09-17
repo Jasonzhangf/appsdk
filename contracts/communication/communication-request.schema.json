@@ -302,8 +302,6 @@
           "type": "array",
           "items": {"type": "string", "minLength": 1, "maxLength": 256}
         },
-        "tmuxSession": {"type": ["string", "null"], "minLength": 1},
-        "tmuxPane": {"type": ["string", "null"], "minLength": 1},
         "processId": {"type": "integer", "minimum": 1}
       },
       "additionalProperties": false
@@ -327,7 +325,7 @@
       "required": ["adapterId", "kind"],
       "properties": {
         "adapterId": {"type": "string", "minLength": 1},
-        "kind": {"enum": ["mailbox", "tmux", "appserver"]},
+        "kind": {"enum": ["mailbox", "appserver"]},
         "target": {"type": ["string", "null"]},
         "enabled": {"type": ["boolean", "null"]},
         "execute": {"type": ["boolean", "null"]},

@@ -60,7 +60,7 @@
       },
       "additionalProperties": false
     },
-    "adapters": {"const": ["mailbox", "tmux", "appserver"]},
+    "adapters": {"const": ["mailbox", "appserver"]},
     "adapterBinding": {"const": "recipient-address"},
     "completionEvidence": {
       "type": "object",

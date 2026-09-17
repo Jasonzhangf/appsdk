@@ -12,19 +12,18 @@ start it again. Never start a second daemon.
 Existing projects migrate through `collab migrate inspect`, `plan`, `apply`,
 controlled daemon upgrade/restart, identity rebind, and `verify`;
 deleting `~/.collab`, editing JSON state, clearing mailboxes, copying
-tokens, mixed runtime writes, and guessing pane identity are deprecated.
+tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 ## Runtime boundary
 
 - Every peer registration is admitted by the server after transport
-  self-check. App Server is preferred when available; tmux is optional and is
-  selected only when App Server cannot verify a live native route.
+  self-check. App Server is the only supported transport; a registration that
+  cannot verify a live native route fails explicitly.
 - Registration creates or refreshes one reusable default `direct-message`
   lease with a bounded 600-second TTL; inspect its current status and expiry
   with `collab notify status`.
 - App Server delivery means the native queue accepted a bounded preview; it is
-  not execution, read, or reply. A tmux-selected transport carries one bounded
-  preview as the optional wake surface.
+  not execution, read, or reply.
 - Server state, journal, and mailbox are durable truth; a failed wake cannot
   roll back state or fabricate success.
 - The runtime is part of the worker identity boundary, not a task preference.
@@ -110,8 +109,7 @@ sends through the selected transport. After the receiving Agent registers a
 finite subscription, the daemon may send one id,
 abbreviated subject, safe one-line original body preview, and final submit key
 as one submit through the server-selected transport. App Server uses
-`thread/queue/add`; a tmux-selected peer keeps `paste-buffer -p` plus `C-m` in
-one tmux queue. The direct-message lease is reusable until expiry; resource,
+`thread/queue/add`. The direct-message lease is reusable until expiry; resource,
 deadline, and async-result subscriptions remain one-shot.
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a

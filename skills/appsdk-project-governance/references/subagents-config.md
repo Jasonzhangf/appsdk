@@ -1,9 +1,8 @@
 # Persistent subworkers and shared policy
 
 This reference describes the persistent **subworker** policy. The `[subagent]`
-tables, `appsdk-subagent` MCP name, and the `-subagent-` tmux naming fragment
-are compatibility protocol tokens. They do not mean that Codex Desktop should
-use a native task/thread spawn command.
+tables and `appsdk-subagent` MCP name are compatibility protocol tokens. They
+do not mean that Codex Desktop should use a native task/thread spawn command.
 
 Only `~/.appsdk/config.toml` owns startup/notification/timer policy. Run
 `appsdk config` from the project cwd to validate and inspect effective values.
@@ -16,7 +15,7 @@ project's policy. Never copy Codex credentials or rewrite its profiles.
 enabled = true
 mode = "batch" # immediate or batch
 batch_window_seconds = 60
-transport = "tmux"
+transport = "appserver"
 submit_enter = true
 [notifications.events.deadline]
 mode = "immediate"
@@ -42,8 +41,6 @@ attempts_per_profile = 1
 expected_response = "OK"
 [subagent.startup]
 ready_timeout_seconds = 90
-[subagent.tmux]
-name_template = "{cwd_name}-subagent-{short_id}"
 # Optional:
 # [[projects]]
 # root = "/absolute/project/root"
@@ -58,7 +55,7 @@ notification generation, not task timeout safety checks. New subworkers read
 config at creation; existing daemons read policy at startup. Use controlled
 daemon restart after a policy change. Existing tasks/mailboxes remain intact.
 
-From a registered tmux parent:
+From a registered Codex App Server parent:
 
 ```text
 appsdk subworker start --id <unique-request-id>
@@ -100,30 +97,30 @@ and no process is respawned. Only an explicit parent/operator request may use
 `appsdk subworker rearm <id>`; never rearm automatically to bypass exhaustion.
 
 `status` returns observed state, task list, parent mailbox, keepalive counters
-and notification/ACK history. It never captures the screen. `snapshot` returns
-only the requested last 1..200 tmux lines and capture time, never sends a notice
-or interprets screen text as task/control truth. Snapshot may contain sensitive
-terminal output: request only when relevant, do not republish it by default.
+and notification/ACK history. `snapshot` is optional diagnostic output only;
+it never sends a notice or becomes task/control truth. Snapshot may contain
+sensitive output: request only when relevant, do not republish it by default.
 
-A non-tmux agent may use local project `list/status/snapshot` without registering
-a fake peer. Initialization and queries explicitly report `notification_channel:
-none`: no push channel exists for that observer. Check the mailbox in `status`
-yourself; do not wait for an automatic completion notification. This is not a
-quality gate or a reason to stop independent work. Mutating parent operations
-retain authenticated ownership checks.
+An agent without a live App Server native thread may use local project
+`list/status/snapshot` without registering a fake peer. Initialization and
+queries explicitly report `notification_channel: none`: no push channel exists
+for that observer. Check the mailbox in `status` yourself; do not wait for an
+automatic completion notification. This is not a quality gate or a reason to
+stop independent work. Mutating parent operations retain authenticated
+ownership checks.
 
 The child uses the injected `appsdk-subagent` MCP: `collab_init`, then
 `collab_subagent` with `action=ready, id=<id>`. The launcher forwards the live
-tmux binding automatically; do not ask the user to set environment variables.
-Use MCP, not sandboxed shell registration. Only its bound identity/pane may
-report ready. It accepts a dispatched task with `action=working`, manages its
+Codex App Server native-thread binding automatically; do not ask the user to
+set environment variables. Use MCP, not sandboxed shell registration. Only its
+bound identity may report ready. It accepts a dispatched task with `action=working`, manages its
 own task/worktree lifecycle, sends results to the parent, and calls `ready`
 when done. Repeated idle reports are no-ops. Remain idle, not an ACK/poll loop.
 Task progress stays in Collab task records; no second task queue exists here.
 
 Only the creating parent may send/close; a user-requested early close may
 interrupt work, but never deletes worktrees or marks tasks complete. Closing
-uses exact session/pane identity. It does not stop the project daemon.
+uses the exact registered peer identity. It does not stop the project daemon.
 Daemon restart replays records without automatically respawning or redispatching.
 If startup was interrupted, preserve the record/session and inspect status;
 do not reuse its ID to create another process.

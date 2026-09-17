@@ -180,8 +180,6 @@ fn register_scope_with_host(
                 "endpoint": format!("mock://{scope_id}"),
                 "projectRoot": bound_project_root,
                 "capabilities": ["send_message_to_thread"],
-                "tmuxSession": format!("appsdk-test-{scope_id}"),
-                "tmuxPane": "%1",
                 "processId": std::process::id()
             }
         }),
@@ -492,8 +490,6 @@ fn communication_runtime_identity_delivery_receipts_are_monotonic() {
                 "namespace": "codex_tui",
                 "endpoint": "mock://scope",
                 "projectRoot": project_root,
-                "tmuxSession": "tui-scope",
-                "tmuxPane": "%7",
                 "processId": std::process::id() + 1
             }
         }),
@@ -636,19 +632,20 @@ fn communication_record_delivery_uses_adapter_kind_receipt_contract() {
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
-    call(
+    let rejected = call_error(
         &root,
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-bound",
+                "adapterId": "legacy-tmux",
                 "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
+                "target": "legacy-pane",
                 "execute": false,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
+    assert!(rejected.contains("invalid_adapter_kind"), "{rejected}");
     call(
         &root,
         json!({
@@ -662,44 +659,71 @@ fn communication_record_delivery_uses_adapter_kind_receipt_contract() {
         }),
     );
 
-    let tmux = call(
+    let appserver_intent = call(
         &root,
         json!({
             "op": "send",
             "message": {
                 "from": { "scopeId": "scope", "sessionId": "worker" },
                 "to": { "scopeId": "scope", "sessionId": "master" },
-                "title": "tmux receipt",
+                "title": "appserver receipt",
                 "priority": "p1",
                 "body": "preview",
                 "deliveryMode": "direct",
-                "adapterId": "tmux-bound",
-                "messageId": "tmux-receipt"
+                "adapterId": "desktop-bound",
+                "messageId": "appserver-receipt-intent"
             }
         }),
     );
-    let tmux_message_id = tmux["message"]["messageId"].as_str().unwrap();
-    let tmux_attempt_id = tmux["deliveryAttempt"]["attemptId"].as_str().unwrap();
-    let tmux_nonce = tmux["deliveryAttempt"]["nonce"].as_str().unwrap();
-    let tmux_delivered = call(
+    let intent_message_id = appserver_intent["message"]["messageId"].as_str().unwrap();
+    let intent_attempt_id = appserver_intent["deliveryAttempt"]["attemptId"]
+        .as_str()
+        .unwrap();
+    let intent_nonce = appserver_intent["deliveryAttempt"]["nonce"]
+        .as_str()
+        .unwrap();
+    let intent_only = call_error(
         &root,
         json!({
             "op": "record_delivery",
             "delivery": {
-                "messageId": tmux_message_id,
-                "attemptId": tmux_attempt_id,
-                "nonce": tmux_nonce,
+                "messageId": intent_message_id,
+                "attemptId": intent_attempt_id,
+                "nonce": intent_nonce,
                 "state": "delivered",
                 "runtimeId": "runtime-scope",
                 "evidence": {
-                    "executed": true,
-                    "preview": "preview",
+                    "hostMustExecute": true,
+                    "capability": "send_message_to_thread",
                     "runtimeId": "runtime-scope"
                 }
             }
         }),
     );
-    assert_eq!(tmux_delivered["message"]["state"], "delivered");
+    assert!(
+        intent_only.contains("independent host execution evidence"),
+        "{intent_only}"
+    );
+    let intent_delivered = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": intent_message_id,
+                "attemptId": intent_attempt_id,
+                "nonce": intent_nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "hostMustExecute": true,
+                    "hostExecuted": true,
+                    "capability": "send_message_to_thread",
+                    "runtimeId": "runtime-scope"
+                }
+            }
+        }),
+    );
+    assert_eq!(intent_delivered["message"]["state"], "delivered");
 
     let appserver = call(
         &root,
@@ -2025,8 +2049,6 @@ fn discovery_registration_failure_replays_from_local_pending_intent() {
                 "endpoint": "mock://recovery",
                 "projectRoot": project_root,
                 "capabilities": ["send_message_to_thread"],
-                "tmuxSession": "appsdk-recovery",
-                "tmuxPane": "%1",
                 "processId": std::process::id()
             }
         }),
@@ -3539,20 +3561,6 @@ fn adapters_are_explicit_and_receipts_are_replayed() {
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
 
-    let registered = call(
-        &root,
-        json!({
-            "op": "register_adapter",
-            "adapter": {
-                "adapterId": "tmux-preview",
-                "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": false,
-                "recipient": { "scopeId": "scope", "sessionId": "master" }
-            }
-        }),
-    );
-    assert_eq!(registered["adapter"]["kind"], "tmux");
     let appserver = call(
         &root,
         json!({
@@ -3578,8 +3586,8 @@ fn adapters_are_explicit_and_receipts_are_replayed() {
                 "priority": "p1",
                 "body": "preview only",
                 "deliveryMode": "direct",
-                "adapterId": "tmux-preview",
-                "messageId": "message-tmux-preview"
+                "adapterId": "desktop-host",
+                "messageId": "message-appserver-preview"
             }
         }),
     );
@@ -3591,11 +3599,11 @@ fn adapters_are_explicit_and_receipts_are_replayed() {
         .as_array()
         .unwrap();
     assert_eq!(emitted.len(), 1);
-    assert_eq!(emitted[0]["transportReceipt"]["adapterId"], "tmux-preview");
+    assert_eq!(emitted[0]["transportReceipt"]["adapterId"], "desktop-host");
     assert_eq!(emitted[0]["transportReceipt"]["state"], "intent");
     assert_eq!(
-        emitted[0]["transportReceipt"]["evidence"]["executed"],
-        false
+        emitted[0]["transportReceipt"]["evidence"]["hostMustExecute"],
+        true
     );
 
     call(
@@ -3635,44 +3643,25 @@ fn adapter_failure_keeps_notification_pending_and_records_error() {
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
-    call(
+    let error = call_error(
         &root,
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-execute",
+                "adapterId": "legacy-rejected",
                 "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": true,
+                "target": "legacy-pane",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
-
-    let error = call_error(
-        &root,
-        json!({
-            "op": "send",
-            "message": {
-                "from": { "scopeId": "scope", "sessionId": "worker" },
-                "to": { "scopeId": "scope", "sessionId": "master" },
-                "title": "will fail",
-                "priority": "p1",
-                "body": "target does not exist",
-                "deliveryMode": "direct",
-                "adapterId": "tmux-execute",
-                "messageId": "message-tmux-failure"
-            }
-        }),
-    );
-    assert!(error.contains("tmux_delivery_failed"), "{error}");
+    assert!(error.contains("invalid_adapter_kind"), "{error}");
 
     let status = call(&root, json!({ "op": "status" }));
     let pending = status["notificationProjection"]["pending"]
         .as_array()
         .unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0]["lastError"]["code"], "tmux_delivery_failed");
+    assert!(pending.is_empty());
     assert!(status["notificationProjection"]["emitted"]
         .as_array()
         .unwrap()
@@ -3686,25 +3675,25 @@ fn direct_and_p0_failures_are_never_downgraded_to_idle_batch() {
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
-    call(
+    let rejected = call_error(
         &root,
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-execute",
+                "adapterId": "legacy-rejected",
                 "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": true,
+                "target": "legacy-pane",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
+    assert!(rejected.contains("invalid_adapter_kind"), "{rejected}");
 
     for (message_id, priority, delivery_mode) in [
         ("direct-failure", "p1", "direct"),
         ("p0-failure", "p0", "idle"),
     ] {
-        let error = call_error(
+        call(
             &root,
             json!({
                 "op": "send",
@@ -3713,15 +3702,13 @@ fn direct_and_p0_failures_are_never_downgraded_to_idle_batch() {
                     "to": { "scopeId": "scope", "sessionId": "master" },
                     "title": message_id,
                     "priority": priority,
-                    "body": "adapter failure must remain direct",
+                    "body": "delivery remains direct",
                     "deliveryMode": delivery_mode,
-                    "adapterId": "tmux-execute",
                     "messageId": message_id,
                     "createdAt": "2026-01-01T00:00:00Z"
                 }
             }),
         );
-        assert!(error.contains("tmux_delivery_failed"), "{error}");
     }
 
     let flush = Command::new(binary())
@@ -3761,6 +3748,13 @@ fn direct_and_p0_failures_are_never_downgraded_to_idle_batch() {
             .as_array()
             .unwrap()
             .len(),
+        0
+    );
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
     fs::remove_dir_all(root).unwrap();
@@ -3778,8 +3772,8 @@ fn disabled_adapter_fails_before_message_persistence() {
             "op": "register_adapter",
             "adapter": {
                 "adapterId": "disabled",
-                "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
+                "kind": "appserver",
+                "target": "mock://scope",
                 "enabled": false,
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
@@ -3822,17 +3816,16 @@ fn idle_flush_is_partitioned_by_adapter() {
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-preview",
-                "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": false,
+                "adapterId": "appserver-preview",
+                "kind": "appserver",
+                "target": "mock://scope",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
     for (message_id, adapter_id) in [
         ("mailbox-message", "mailbox"),
-        ("tmux-message", "tmux-preview"),
+        ("appserver-message", "appserver-preview"),
     ] {
         call(
             &root,
@@ -4266,21 +4259,21 @@ fn direct_delivery_failures_keep_each_message_retryable() {
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
-    call(
+    let rejected = call_error(
         &root,
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-execute",
+                "adapterId": "legacy-rejected",
                 "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": true,
+                "target": "legacy-pane",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
+    assert!(rejected.contains("invalid_adapter_kind"), "{rejected}");
     for (message_id, body) in [("direct-1", "first"), ("direct-2", "second")] {
-        let error = call_error(
+        call(
             &root,
             json!({
                 "op": "send",
@@ -4291,18 +4284,23 @@ fn direct_delivery_failures_keep_each_message_retryable() {
                     "priority": "p1",
                     "body": body,
                     "deliveryMode": "direct",
-                    "adapterId": "tmux-execute",
                     "messageId": message_id
                 }
             }),
         );
-        assert!(error.contains("tmux_delivery_failed"), "{error}");
     }
     let status = call(&root, json!({ "op": "status" }));
     let pending = status["notificationProjection"]["pending"]
         .as_array()
         .unwrap();
-    assert_eq!(pending.len(), 2);
+    assert!(pending.is_empty());
+    assert_eq!(
+        status["notificationProjection"]["emitted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -4394,19 +4392,19 @@ fn direct_retry_retries_known_failure_without_overwriting_identity() {
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
-    call(
+    let rejected = call_error(
         &root,
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-execute",
+                "adapterId": "legacy-rejected",
                 "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": true,
+                "target": "legacy-pane",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
+    assert!(rejected.contains("invalid_adapter_kind"), "{rejected}");
     let request = json!({
         "op": "send",
         "message": {
@@ -4416,23 +4414,19 @@ fn direct_retry_retries_known_failure_without_overwriting_identity() {
             "priority": "p1",
             "body": "known transport failure",
             "deliveryMode": "direct",
-            "adapterId": "tmux-execute",
             "messageId": "retry-direct"
         }
     });
-    let first = call_error(&root, request.clone());
-    assert!(first.contains("tmux_delivery_failed"), "{first}");
-    let second = call_error(&root, request);
-    assert!(second.contains("tmux_delivery_failed"), "{second}");
+    let first = call(&root, request.clone());
+    let second = call(&root, request);
+    assert_eq!(first["idempotent"], false);
+    assert_eq!(second["idempotent"], true);
 
     let status = call(&root, json!({ "op": "status" }));
-    assert_eq!(
-        status["notificationProjection"]["pending"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert!(status["notificationProjection"]["unknown"]
         .as_array()
         .unwrap()
@@ -4441,12 +4435,12 @@ fn direct_retry_retries_known_failure_without_overwriting_identity() {
     assert_eq!(
         raw.matches("\"kind\":\"notification.delivery_attempt\"")
             .count(),
-        2
+        1
     );
     assert_eq!(
         raw.matches("\"kind\":\"notification.delivery_failed\"")
             .count(),
-        2
+        0
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -5684,9 +5678,9 @@ fn adapter_binding_and_bug_loop_gates_are_enforced() {
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "master-pane",
-                "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
+                "adapterId": "master-appserver",
+                "kind": "appserver",
+                "target": "mock://scope",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
@@ -5701,7 +5695,7 @@ fn adapter_binding_and_bug_loop_gates_are_enforced() {
                 "title": "wrong target",
                 "priority": "p2",
                 "body": "must fail",
-                "adapterId": "master-pane"
+                "adapterId": "master-appserver"
             }
         }),
     );
@@ -6540,45 +6534,216 @@ fn tampered_agent_rebind_address_fails_closed_on_replay() {
 }
 
 #[test]
-fn tmux_adapter_rejects_runtime_target_mismatch_and_stale_pane() {
-    let root = temp_root("tmux-runtime-target");
+fn legacy_tmux_adapter_is_rejected_without_persisting_messages() {
+    let root = temp_root("legacy-tmux-rejected");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);
     register_agent(&root, "scope", "master", "master", "master", None);
     register_agent(&root, "scope", "worker", "worker", "peer", None);
 
-    let mismatch = call_error(
+    let rejected = call_error(
         &root,
         json!({
             "op": "register_adapter",
             "adapter": {
-                "adapterId": "tmux-mismatch",
+                "adapterId": "legacy-tmux",
                 "kind": "tmux",
-                "target": "appsdk-test-scope:%42",
-                "execute": false,
+                "target": "legacy-pane",
                 "recipient": { "scopeId": "scope", "sessionId": "master" }
             }
         }),
     );
-    assert!(mismatch.contains("tmux_target_mismatch"), "{mismatch}");
+    assert!(rejected.contains("invalid_adapter_kind"), "{rejected}");
+    let status = call(&root, json!({ "op": "status" }));
+    assert!(status["messages"].as_array().unwrap().is_empty());
+    assert!(status["notificationProjection"]["emitted"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
 
-    call(
-        &root,
-        json!({
-            "op": "register_adapter",
-            "adapter": {
-                "adapterId": "tmux-bound",
-                "kind": "tmux",
-                "target": "appsdk-test-scope:%1",
-                "execute": false,
-                "recipient": { "scopeId": "scope", "sessionId": "master" }
-            }
-        }),
+#[test]
+fn reset_runtime_registry_cli_archives_legacy_and_registers_v3_runtime() {
+    let root = temp_root("runtime-reset-cli");
+    let host = root.join(".appsdk-host");
+    fs::create_dir_all(&host).unwrap();
+    fs::write(
+        host.join("runtimes.jsonl"),
+        b"not-json legacy tmux bytes\n{\"tmuxSession\":\"old\"}\n",
+    )
+    .unwrap();
+    fs::write(host.join("projects.jsonl"), b"projects-sentinel\n").unwrap();
+    fs::write(
+        host.join("communication.jsonl"),
+        b"communication-sentinel\n",
+    )
+    .unwrap();
+
+    let no_discard = Command::new(binary())
+        .args([
+            "communication",
+            "reset-runtime-registry",
+            "--approval",
+            "approved",
+        ])
+        .env("APPSDK_HOME", &host)
+        .output()
+        .unwrap();
+    assert!(!no_discard.status.success());
+    assert!(
+        String::from_utf8_lossy(&no_discard.stderr)
+            .contains("GLOBAL_RUNTIME_REGISTRY_RESET_REQUIRES_DISCARD_LEGACY"),
+        "{}",
+        String::from_utf8_lossy(&no_discard.stderr)
+    );
+
+    let missing_approval = Command::new(binary())
+        .args([
+            "communication",
+            "reset-runtime-registry",
+            "--discard-legacy",
+        ])
+        .env("APPSDK_HOME", &host)
+        .output()
+        .unwrap();
+    assert!(!missing_approval.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_approval.stderr).contains("--approval"),
+        "{}",
+        String::from_utf8_lossy(&missing_approval.stderr)
+    );
+    assert_eq!(
+        fs::read(host.join("runtimes.jsonl")).unwrap(),
+        b"not-json legacy tmux bytes\n{\"tmuxSession\":\"old\"}\n"
+    );
+
+    let reset = Command::new(binary())
+        .args([
+            "communication",
+            "reset-runtime-registry",
+            "--discard-legacy",
+            "--approval",
+            "approved reset",
+        ])
+        .env("APPSDK_HOME", &host)
+        .output()
+        .unwrap();
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&reset.stdout).unwrap();
+    assert_eq!(receipt["idempotent"], false);
+    assert_eq!(receipt["delivery_verified"], false);
+    assert_eq!(fs::read(host.join("runtimes.jsonl")).unwrap(), b"");
+    assert_eq!(
+        fs::read(host.join("projects.jsonl")).unwrap(),
+        b"projects-sentinel\n"
+    );
+    assert_eq!(
+        fs::read(host.join("communication.jsonl")).unwrap(),
+        b"communication-sentinel\n"
+    );
+    let archive_path = receipt["archivePath"].as_str().unwrap();
+    assert_eq!(
+        fs::read(Path::new(archive_path).join("runtimes.jsonl")).unwrap(),
+        b"not-json legacy tmux bytes\n{\"tmuxSession\":\"old\"}\n"
     );
 
     let project_root = root.canonicalize().unwrap();
     let project_root = project_root.to_str().unwrap();
-    call(
+    call_with_host(
         &root,
+        &host,
+        json!({
+            "op": "register_runtime",
+            "runtime": {
+                "runtimeId": "runtime-after-reset",
+                "appserverId": "app",
+                "namespace": "codex_tui",
+                "endpoint": "mock://after-reset",
+                "projectRoot": project_root,
+                "capabilities": ["send_message_to_thread"],
+                "processId": std::process::id()
+            }
+        }),
+    );
+    let runtime = fs::read_to_string(host.join("runtimes.jsonl")).unwrap();
+    assert!(runtime.contains("runtime.registered"), "{runtime}");
+    assert!(!runtime.contains("tmuxSession"), "{runtime}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_runtime_registry_preserves_replay_of_retained_mailbox_attempt() {
+    let root = temp_root("runtime-reset-retained-mailbox");
+    let host = root.join(".appsdk-host");
+    fs::create_dir_all(&host).unwrap();
+    register_scope_with_host(&root, &host, "scope", "app", &["master", "worker"]);
+    register_agent_with_host(&root, &host, "scope", "master", "master", "master", None);
+    register_agent_with_host(&root, &host, "scope", "worker", "worker", "peer", None);
+
+    let sent = call_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master" },
+                "to": { "scopeId": "scope", "sessionId": "worker" },
+                "title": "survive runtime reset",
+                "priority": "p1",
+                "body": "retained mailbox must replay after the registry baseline reset"
+            }
+        }),
+    );
+    let message_id = sent["message"]["messageId"].as_str().unwrap();
+    let attempt_id = sent["deliveryAttempt"]["attemptId"].as_str().unwrap();
+    let nonce = sent["deliveryAttempt"]["nonce"].as_str().unwrap();
+    call_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": { "durable": true, "format": "jsonl", "receiptId": "pre-reset" }
+            }
+        }),
+    );
+
+    let reset = Command::new(binary())
+        .args([
+            "communication",
+            "reset-runtime-registry",
+            "--discard-legacy",
+            "--approval",
+            "approved reset",
+        ])
+        .env("APPSDK_HOME", &host)
+        .output()
+        .unwrap();
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let reset_receipt: Value = serde_json::from_slice(&reset.stdout).unwrap();
+    assert_eq!(reset_receipt["delivery_verified"], false);
+    assert!(reset_receipt["archivePath"].as_str().is_some());
+    assert!(reset_receipt["transactionId"].as_str().is_some());
+
+    let project_root = root.canonicalize().unwrap();
+    let project_root = project_root.to_str().unwrap();
+    call_with_host(
+        &root,
+        &host,
         json!({
             "op": "register_runtime",
             "runtime": {
@@ -6588,32 +6753,20 @@ fn tmux_adapter_rejects_runtime_target_mismatch_and_stale_pane() {
                 "endpoint": "mock://scope",
                 "projectRoot": project_root,
                 "capabilities": ["send_message_to_thread"],
-                "tmuxSession": "appsdk-test-scope",
-                "tmuxPane": "%2",
-                "processId": std::process::id()
+                "processId": std::process::id().saturating_add(1)
             }
         }),
     );
 
-    let stale = call_error(
-        &root,
-        json!({
-            "op": "send",
-            "message": {
-                "from": { "scopeId": "scope", "sessionId": "worker" },
-                "to": { "scopeId": "scope", "sessionId": "master" },
-                "title": "stale tmux target",
-                "priority": "p1",
-                "body": "must not send to the old pane",
-                "deliveryMode": "direct",
-                "adapterId": "tmux-bound",
-                "messageId": "stale-tmux-target"
-            }
-        }),
-    );
-    assert!(stale.contains("tmux_target_stale"), "{stale}");
-    let status = call(&root, json!({ "op": "status" }));
-    assert!(status["messages"].as_array().unwrap().is_empty());
+    let replayed = call_with_host(&root, &host, json!({ "op": "status" }));
+    let message = replayed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["messageId"] == message_id)
+        .unwrap();
+    assert_eq!(message["state"], "delivered");
+    assert_eq!(message["evidence"][1]["details"]["attemptId"], attempt_id);
     fs::remove_dir_all(root).unwrap();
 }
 

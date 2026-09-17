@@ -13,9 +13,9 @@ requirements + acceptance
 ```
 
 `init` is idempotent. It fills missing governance resources and preserves
-business files. In a live App Server or tmux Agent it also invokes official
+business files. In a live Codex App Server Agent it also invokes official
 `collab init` once; Collab starts/reuses its daemon, evaluates the available
-capability candidates with App Server preferred, registers the current peer
+App Server capability for the current Codex sessionID, registers the current peer
 through the server-selected transport, and arms the default finite
 `direct-message` subscription. Do not run `collab init`, `collab whoami`, or a
 manual ordinary-message subscription afterward. Use `new` only for an empty
@@ -67,10 +67,10 @@ this ordinary new-project path. Use
 and keep AppSDK and Collab reset/migration in separate transactions.
 
 AppSDK preserves the launching environment and does not pass a project path to
-Collab. `collab init` resolves project scope from the exact process cwd, not
-from tmux. Without a live registered App Server or tmux transport, AppSDK
-initializes governance and reports Collab pending because no peer can be
-registered; it never fabricates subscription state.
+Collab. `collab init` resolves project scope from the exact process cwd.
+Without a live registered App Server transport, AppSDK initializes governance
+and reports Collab pending because no peer can be registered; it never
+fabricates subscription state.
 
 Collab initialization errors are explicit warnings for AppSDK initialization.
 Automatic multi-worker registration and task/file coordination remain enabled;
@@ -80,8 +80,8 @@ shared operations wait for reliable ownership while independent work continues.
 
 For a project that will run multiple agents, initialize the AppSDK governance
 root first, then register the current peer and explicitly assign the role.
-App Server is preferred when a live App Server route exists; tmux is only an
-optional adapter.
+Registration and wake bind the current Codex sessionID to the live App Server
+native thread.
 
 Master initialization, after user approval for the exact project and peer:
 

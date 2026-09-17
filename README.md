@@ -32,11 +32,11 @@ appsdk guide compile
 appsdk verify
 ```
 
-`appsdk init` 在项目根目录执行官方 `collab init`。worker 只提交当前环境可观察到的
-App Server 和 tmux 能力候选；Collab 服务器自行完成端点与身份自检，按
-`appserver -> tmux` 优先级选择通道并在应答中返回 `transport_selected`。
-AppSDK 不自行选择通道，也不把本地缺少 `TMUX_PANE` 当成最终判决。服务器不可用、
-超时或没有可用通道时，AppSDK 明确输出 Collab pending/unavailable；独立开发继续。
+`appsdk init` 在项目根目录执行官方 `collab init`。worker 只提交当前 Codex
+sessionID 对应的 AppServer 能力候选；Collab 服务器自行完成端点与身份自检，
+选择 AppServer 通道并在应答中返回 `transport_selected`。AppSDK 不自行选择通道。
+服务器不可用、超时或没有可用 AppServer 通道时，AppSDK 明确输出 Collab
+pending/unavailable；独立开发继续。
 
 ```bash
 appsdk guide compile
@@ -102,7 +102,7 @@ fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` 
 与 `appsdk reset-governance --discard-legacy` 共用同一 transactional reset owner；
 旧 Active/Protected 若确实废弃，必须另行指定精确路径并授权清理。
 
-`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，新建或 relocated `appsdk init` 才允许执行。普通 `appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；同时通过同环境官方 `collab init` 提交 App Server/tmux 能力候选，由服务器自检、选择并应答通道。需要放弃旧治理 epoch 时，改用上面的显式 `--fresh --discard-legacy`，它不要求复制旧证据。
+`appsdk prepare` 先创建初始化需求模板。AI 读取模板并与用户确认 change kind、项目根、旧代码边界、新目录、Protected 路径和禁止修改路径；只有 preparation status 为 `confirmed` 时，新建或 relocated `appsdk init` 才允许执行。普通 `appsdk init` 用于已有工作区：通过可选的 `--project-root <relative-path>` 将新 AppSDK 项目放进可配置子目录，允许新旧代码共存。它幂等创建治理目录，补齐缺失的 `.appsdk/` 合同文件，并向新项目根目录的 `.gitignore` 追加一次受 SDK 管理的忽略区块；同时通过同环境官方 `collab init` 提交当前 Codex sessionID 的 AppServer 能力候选，由服务器自检、选择并应答通道。需要放弃旧治理 epoch 时，改用上面的显式 `--fresh --discard-legacy`，它不要求复制旧证据。
 
 治理设计：
 
@@ -123,14 +123,19 @@ fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` 
 
 内部通信接口：[`docs/design/apps-sdk-communication.md`](./docs/design/apps-sdk-communication.md)。
 `appsdk communication <project> --json '<request>'` 提供稳定的 `appsdk-comm/v1`
-控制面；`.appsdk-control/communication/mailbox.jsonl` 是可重放的事实记录。mailbox、
-tmux 和 appserver 是可替换的承载 adapter：mailbox 只负责持久化，tmux 只在显式
-允许执行时发送低干扰提示，appserver 返回宿主待执行意图。adapter receipt、通知
-批处理、master 唤醒和错误都写入同一份 JSONL；同一 mailbox 的命令使用独占锁，忙时
-显式返回 `communication_busy`；队列接受不等于宿主已执行。
+控制面；`.appsdk-control/communication/mailbox.jsonl` 是可重放的事实记录。mailbox
+和 appserver 是承载 adapter：mailbox 只负责持久化，appserver 返回宿主待执行意图。
+adapter receipt、通知批处理、master 唤醒和错误都写入同一份 JSONL；同一 mailbox
+的命令使用独占锁，忙时显式返回 `communication_busy`；队列接受不等于宿主已执行。
 宿主先用 `register_runtime` 在 `~/.appsdk/runtimes.jsonl` 登记稳定 runtime，再用
 `runtimeId` 注册 scope/agent；真实投递、执行、回复和消费通过 `record_delivery` 回写，
 AppSDK 会校验目标 runtime、拒绝身份冲突和状态回退。
+
+升级到 AppServer-only runtime 合同前，旧版 `~/.appsdk/runtimes.jsonl` 不迁移也不
+重放。显式受控入口是
+`appsdk communication reset-runtime-registry --discard-legacy --approval "<授权文本>"`；
+它只归档旧 runtime registry 并重建空基线，`delivery_verified` 为 false，且不改动
+`projects.jsonl` / `communication.jsonl`。
 
 `goal clarification` 未进入 `confirmed` 前，不允许创建正式 claim、写 Playground、修改 source 或生成 red test。`playground/` 是可变实验源代码；`active/lib/` 是不可变、当前有效的消费面，不是活跃源代码；`protected/` 保存冻结源代码、合同和历史版本；`generated/` 只保存编译物和索引。进入 review 前必须同时有开发白盒 PASS、部署后的公开入口黑盒 PASS，以及绑定候选 commit/tree、artifact、environment 和 entrypoint 的 PreReviewValidationRecord；`appsdk verify --review-admission` 是强制 admission 命令，宿主 CI/pre-commit 需要调用它才能物理阻断 Git commit。进入 Active 还必须有架构 review PASS、主线合并、编译产物和 required gates。锁定必须记录 Git clean、source commit/tag、library hash、public API hash、review PASS、旧 Active 不可变。
 

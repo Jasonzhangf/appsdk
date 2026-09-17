@@ -326,6 +326,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../skills/appsdk-project-governance/references/bootstrap-migration.md"),
     ),
     (
+        "skills/appsdk-project-governance/references/command-surface.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/command-surface.md"),
+    ),
+    (
         "skills/appsdk-project-governance/references/contracts-and-failures.md",
         "skills",
         include_str!("../../skills/appsdk-project-governance/references/contracts-and-failures.md"),
@@ -341,6 +346,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../skills/appsdk-project-governance/references/goal-prompt.md"),
     ),
     (
+        "skills/appsdk-project-governance/references/init-prompts.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/init-prompts.md"),
+    ),
+    (
         "skills/appsdk-project-governance/references/process-control-harness.md",
         "skills",
         include_str!(
@@ -351,6 +361,16 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "skills/appsdk-project-governance/references/review-delivery.md",
         "skills",
         include_str!("../../skills/appsdk-project-governance/references/review-delivery.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/state-paths.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/state-paths.md"),
+    ),
+    (
+        "skills/appsdk-project-governance/references/subagents-config.md",
+        "skills",
+        include_str!("../../skills/appsdk-project-governance/references/subagents-config.md"),
     ),
     (
         "skills/appsdk-migration/SKILL.md",
@@ -13272,7 +13292,7 @@ fn initialize_collab_peer(root: &Path) {
             let valid_transport = transport.is_some_and(|transport| {
                 matches!(
                     transport.get("kind").and_then(Value::as_str),
-                    Some("appserver" | "tmux")
+                    Some("appserver")
                 )
             });
             if value.get("ok").and_then(Value::as_bool) != Some(true) || !valid_transport {
@@ -15966,7 +15986,6 @@ fn reset_transaction_build_staging(
             transaction_dir.to_str().unwrap_or(""),
             transaction_id,
         ])
-        .env_remove("TMUX_PANE")
         .output()
         .map_err(|error| format!("GOVERNANCE_RESET_STAGING_BUILD_FAILED:{error}"))?;
     if !output.status.success() {
@@ -18121,25 +18140,21 @@ fn verified_goal_master(root: &Path) -> Result<String, String> {
     if master["endpoint_live"].as_bool() != Some(true) {
         return Err("GOAL_OWNER_MASTER_NOT_LIVE".into());
     }
-    let master_pane = master["pane"]
-        .as_str()
-        .filter(|pane| !pane.trim().is_empty())
-        .ok_or_else(|| "GOAL_OWNER_MASTER_PANE_MISSING".to_string())?;
-    let context_pane = context["identity"]["pane"]
-        .as_str()
-        .filter(|pane| !pane.trim().is_empty())
-        .ok_or_else(|| "GOAL_OWNER_CONTEXT_PANE_MISSING".to_string())?;
     if master_owner != owner {
         return Err(format!(
             "GOAL_OWNER_IDENTITY_MISMATCH:context={} master={}",
             owner, master_owner
         ));
     }
-    if master_pane != context_pane {
-        return Err(format!(
-            "GOAL_OWNER_PANE_MISMATCH:context={} master={}",
-            context_pane, master_pane
-        ));
+    let context_transport = &context["identity"]["transport"];
+    if context_transport["kind"].as_str() != Some("appserver")
+        || context_transport["thread_id"]
+            .as_str()
+            .map_or(true, |thread| thread.trim().is_empty())
+        || context["liveness"]["live"].as_bool() != Some(true)
+        || context["liveness"]["transport_kind"].as_str() != Some("appserver")
+    {
+        return Err("GOAL_OWNER_CONTEXT_TRANSPORT_NOT_LIVE".into());
     }
     match worker["suspected_offline"].as_bool() {
         Some(false) => {}
@@ -18553,7 +18568,8 @@ fn longhorizon_show(root: &Path, format_json: bool) {
     let blocked_tasks: Vec<&Value> = tasks.iter().filter(|t| is_blocked(t)).collect();
     let active_tasks: Vec<&Value> = tasks.iter().filter(|t| !is_blocked(t)).collect();
 
-    // Spare capacity means a live pane holding no task. A worker whose pane is
+    // Spare capacity means a live App Server route holding no task. A worker
+    // whose route is
     // lost still owns its task, so it is an intervention item, not capacity.
     let is_idle = |worker: &Value| {
         worker["active_task"].is_null()
@@ -18735,7 +18751,7 @@ fn longhorizon_show(root: &Path, format_json: bool) {
             println!("回到 parent 分配的 assignment；完成后向 parent/master 返回证据，不进入全局 backlog。");
         }
         ExecutionRole::Unknown => {
-            println!("身份未验证；先运行 `collab context` 确认当前 pane/peer，恢复绑定后再做正常任务动作。");
+            println!("身份未验证；先运行 `collab context` 确认当前 session/peer，恢复绑定后再做正常任务动作。");
             println!("当前会话不获得 master 权力，不派单、不关闭其他 peer。");
         }
     }

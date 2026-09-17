@@ -24,9 +24,10 @@ integrity gates; do not turn every available command into a mandatory phase.
 - AppSDK communication control: `appsdk::communication` owns the stable `appsdk-comm/v1`
   request/event/capabilities contracts and the replayed notification/Loop projections.
   Keep `.appsdk-control/communication/mailbox.jsonl` local and ignored; host integrations
-  select a registered adapter (mailbox, tmux, or appserver) instead of copying transport
-  logic into a project. tmux/appserver adapters must bind their target to a registered
- recipient. Detailed route, batching, wakeup, receipt, and Bug/Loop gate semantics live in
+  select a registered adapter (`mailbox` or `appserver`) instead of copying transport
+  logic into a project. An App Server adapter must bind its target to a registered
+  recipient and declare `send_message_to_thread`. Detailed route, batching, wakeup,
+  receipt, and Bug/Loop gate semantics live in
  [`docs/design/apps-sdk-communication.md`](../../docs/design/apps-sdk-communication.md).
 
 Run project commands from project cwd. An explicit optional project path is for
@@ -193,7 +194,8 @@ live communication.
 For a new business project that also needs agent-to-agent Collab, do not invent
 project-local transport or old `.appsdk/` state. Run the AppSDK flow from the
 project root, then let `appsdk init` invoke official Collab once when a live
-runtime exists. App Server is preferred; tmux is only an optional transport.
+Codex App Server sessionID binding exists. App Server is the only supported
+Collab transport.
 
 ```bash
 cd /abs/path/project
@@ -212,13 +214,13 @@ user's behalf and do not bypass prepare by editing `.appsdk/project.json`.
 Detailed fields and an example are in
 [bootstrap-migration.md](references/bootstrap-migration.md).
 
-In a live App Server or tmux runtime, `appsdk init` calls `collab init` once:
-Collab starts/reuses its daemon, picks the transport by server capability with
-App Server preferred, registers the current peer, and arms the default
+In a live Codex App Server runtime, `appsdk init` calls `collab init` once:
+Collab starts/reuses its daemon, selects the App Server transport by server
+capability, registers the current peer, and arms the default
 `direct-message` lease. `collab init` resolves the project scope from the exact
-process `cwd`, not from tmux. If no registered App Server or tmux route exists,
-AppSDK initialization still succeeds for independent development, reports
-Collab pending, and never fabricates a peer or notification channel. Then use
+process `cwd`. If no registered App Server route exists, AppSDK initialization
+still succeeds for independent development, reports Collab pending, and never
+fabricates a peer or notification channel. Then use
 `collab who/status/context`, `collab sendmessage`, `collab inbox`, and
 `collab recv` only through the server-selected transport.
 
@@ -300,10 +302,10 @@ rules does not require running initialization or changing setup.
 
 Collab is a coordination adapter, not a quality-admission prerequisite. The
 AppSDK source repository and a managed consumer project keep separate owners;
-initializing one never grants authority over the other. A missing tmux peer,
-daemon, mailbox or native task route leaves independent AppSDK work runnable;
-only an operation that explicitly needs shared ownership or communication
-waits, with the exact Collab error preserved.
+initializing one never grants authority over the other. A missing App Server
+peer, daemon, mailbox or native task route leaves independent AppSDK work
+runnable; only an operation that explicitly needs shared ownership or
+communication waits, with the exact Collab error preserved.
 
 When managed child coordination is selected, use the canonical **subworker**
 term and the `appsdk subworker` compatibility entry documented in the
@@ -382,7 +384,7 @@ records before doing work.
   rerunning external commands.
 
 This staged reuse is part of AppSDK quality governance and has no dependency on
-Collab, tmux, Codex TUI, Desktop, or a particular agent runtime.
+Collab, Codex TUI, Desktop, or a particular agent runtime.
 
 ## Long-Horizon Goal Subscription & Master Saturation
 

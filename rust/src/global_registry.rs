@@ -17,12 +17,14 @@ use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const REGISTRY_DIR: &str = ".appsdk";
 const REGISTRY_FILE: &str = "projects.jsonl";
 const REGISTRY_LOCK: &str = "projects.jsonl.lock";
 const RUNTIME_FILE: &str = "runtimes.jsonl";
 const RUNTIME_LOCK: &str = "runtimes.jsonl.lock";
+const RUNTIME_RESET_MARKER: &str = ".runtimes.reset.transaction.json";
 const COMMUNICATION_FILE: &str = "communication.jsonl";
 const COMMUNICATION_LOCK: &str = "communication.jsonl.lock";
 const REGISTRY_SCHEMA_VERSION: u64 = 1;
@@ -147,10 +149,6 @@ pub struct RuntimeIdentity {
     pub project_root: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    #[serde(default, rename = "tmuxSession", alias = "tmux_session")]
-    pub tmux_session: Option<String>,
-    #[serde(default, rename = "tmuxPane", alias = "tmux_pane")]
-    pub tmux_pane: Option<String>,
     #[serde(rename = "processId", alias = "process_id")]
     pub process_id: u32,
 }
@@ -174,6 +172,30 @@ pub struct RuntimeReceipt {
     pub runtime_id: String,
     pub fingerprint: String,
     pub idempotent: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeRegistryResetReceipt {
+    pub registry_root: PathBuf,
+    pub registry_path: PathBuf,
+    #[serde(rename = "archivePath", skip_serializing_if = "Option::is_none")]
+    pub archive_path: Option<PathBuf>,
+    #[serde(rename = "transactionId", skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+    pub archived_bytes: u64,
+    pub idempotent: bool,
+    pub delivery_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeResetTransaction {
+    schema_version: u64,
+    transaction_id: String,
+    phase: String,
+    archive_path: PathBuf,
+    archived_bytes: u64,
+    sha256: String,
+    created_at: String,
 }
 
 /// Stable address used by the host-wide communication discovery index.
@@ -253,45 +275,8 @@ fn project_id(project_root: &Path) -> String {
 }
 
 fn runtime_fingerprint(identity: &RuntimeIdentity) -> String {
-    // Capability-less records predate the capability field.  Keep their
-    // original digest so an existing registry remains replayable.  Once a
-    // capability is declared, use the versioned length-prefixed encoding;
-    // capability bytes are allowed to contain any UTF-8 content, including a
-    // NUL byte, without changing their boundaries.
-    if !identity.capabilities.is_empty() {
-        return runtime_fingerprint_with_capabilities(identity);
-    }
-
-    runtime_fingerprint_legacy(identity)
-}
-
-fn runtime_fingerprint_legacy(identity: &RuntimeIdentity) -> String {
     let mut digest = Sha256::new();
-    digest.update(identity.runtime_id.as_bytes());
-    digest.update([0]);
-    digest.update(identity.appserver_id.as_bytes());
-    digest.update([0]);
-    digest.update(identity.namespace.as_bytes());
-    digest.update([0]);
-    digest.update(identity.endpoint.as_bytes());
-    digest.update([0]);
-    digest.update(identity.project_root.as_bytes());
-    digest.update([0]);
-    if let Some(value) = identity.tmux_session.as_deref() {
-        digest.update(value.as_bytes());
-    }
-    digest.update([0]);
-    if let Some(value) = identity.tmux_pane.as_deref() {
-        digest.update(value.as_bytes());
-    }
-    digest.update([0]);
-    digest.update(identity.process_id.to_string().as_bytes());
-    format!("runtime-{:x}", digest.finalize())
-}
-
-fn runtime_fingerprint_with_capabilities(identity: &RuntimeIdentity) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"appsdk-runtime-fingerprint-v2");
+    digest.update(b"appsdk-runtime-fingerprint-v3-appserver-only");
     update_length_prefixed(&mut digest, identity.runtime_id.as_bytes());
     update_length_prefixed(&mut digest, identity.appserver_id.as_bytes());
     update_length_prefixed(&mut digest, identity.namespace.as_bytes());
@@ -301,8 +286,6 @@ fn runtime_fingerprint_with_capabilities(identity: &RuntimeIdentity) -> String {
     for capability in &identity.capabilities {
         update_length_prefixed(&mut digest, capability.as_bytes());
     }
-    update_optional_length_prefixed(&mut digest, identity.tmux_session.as_deref());
-    update_optional_length_prefixed(&mut digest, identity.tmux_pane.as_deref());
     digest.update(identity.process_id.to_be_bytes());
     format!("runtime-{:x}", digest.finalize())
 }
@@ -310,16 +293,6 @@ fn runtime_fingerprint_with_capabilities(identity: &RuntimeIdentity) -> String {
 fn update_length_prefixed(digest: &mut Sha256, value: &[u8]) {
     digest.update((value.len() as u64).to_be_bytes());
     digest.update(value);
-}
-
-fn update_optional_length_prefixed(digest: &mut Sha256, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            digest.update([1]);
-            update_length_prefixed(digest, value.as_bytes());
-        }
-        None => digest.update([0]),
-    }
 }
 
 fn validate_runtime_identity(identity: &RuntimeIdentity) -> Result<(), String> {
@@ -358,15 +331,6 @@ fn validate_runtime_identity(identity: &RuntimeIdentity) -> Result<(), String> {
         }
         if capability.chars().count() > 256 {
             return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:capability_too_long".into());
-        }
-    }
-    match (&identity.tmux_session, &identity.tmux_pane) {
-        (Some(session), Some(pane)) if !session.trim().is_empty() && !pane.trim().is_empty() => {}
-        (None, None) => {}
-        _ => {
-            return Err(
-                "GLOBAL_RUNTIME_IDENTITY_INVALID:tmux_session_and_pane_must_be_paired".into(),
-            )
         }
     }
     Ok(())
@@ -673,6 +637,188 @@ fn read_runtime_records(path: &Path) -> Result<Vec<RuntimeRecord>, String> {
     Ok(records)
 }
 
+fn sync_directory(path: &Path, error_code: &str) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("{error_code}:{error}"))
+}
+
+fn write_synced_json(path: &Path, value: &impl Serialize, error_code: &str) -> Result<(), String> {
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|error| format!("{error_code}:{error}"))?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("{error_code}:{error}"))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("{error_code}:{error}"))
+}
+
+fn read_runtime_reset_transaction(
+    marker_path: &Path,
+) -> Result<Option<RuntimeResetTransaction>, String> {
+    let bytes = match fs::read(marker_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("GLOBAL_RUNTIME_RESET_MARKER_READ_FAILED:{error}")),
+    };
+    let transaction: RuntimeResetTransaction = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("GLOBAL_RUNTIME_RESET_MARKER_INVALID:{error}"))?;
+    if transaction.schema_version != 1
+        || transaction.transaction_id.trim().is_empty()
+        || !matches!(transaction.phase.as_str(), "archived" | "committed")
+        || !transaction.archive_path.is_absolute()
+        || transaction.sha256.len() != 64
+    {
+        return Err("GLOBAL_RUNTIME_RESET_MARKER_INVALID:unsupported transaction".into());
+    }
+    Ok(Some(transaction))
+}
+
+fn replace_runtime_reset_transaction(
+    marker_path: &Path,
+    transaction: &RuntimeResetTransaction,
+    registry_root: &Path,
+) -> Result<(), String> {
+    let staged = registry_root.join(format!(
+        ".runtimes.reset.marker.{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    write_synced_json(
+        &staged,
+        transaction,
+        "GLOBAL_RUNTIME_RESET_MARKER_WRITE_FAILED",
+    )?;
+    fs::rename(&staged, marker_path).map_err(|error| {
+        let _ = fs::remove_file(&staged);
+        format!("GLOBAL_RUNTIME_RESET_MARKER_COMMIT_FAILED:{error}")
+    })?;
+    sync_directory(registry_root, "GLOBAL_RUNTIME_RESET_MARKER_SYNC_FAILED")
+}
+
+fn validate_runtime_reset_archive(
+    transaction: &RuntimeResetTransaction,
+) -> Result<PathBuf, String> {
+    ensure_no_symlink(&transaction.archive_path, "runtime_reset_archive")?;
+    let archived_registry = transaction.archive_path.join(RUNTIME_FILE);
+    ensure_no_symlink(&archived_registry, "runtime_reset_archive_registry")?;
+    let bytes = fs::read(&archived_registry)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(&bytes);
+    let observed = format!("{:x}", digest.finalize());
+    if bytes.len() as u64 != transaction.archived_bytes || observed != transaction.sha256 {
+        return Err("GLOBAL_RUNTIME_ARCHIVE_DIGEST_MISMATCH".into());
+    }
+    Ok(archived_registry)
+}
+
+fn read_archived_runtime_records(path: &Path) -> Result<Vec<RuntimeRecord>, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
+    let mut records = Vec::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record: RuntimeRecord = serde_json::from_slice(line).map_err(|error| {
+            format!("GLOBAL_RUNTIME_ARCHIVE_INVALID_LINE:{}:{error}", index + 1)
+        })?;
+        if record.schema_version != REGISTRY_SCHEMA_VERSION
+            || !matches!(
+                record.event.as_str(),
+                "runtime.registered" | "runtime.refreshed"
+            )
+            || record.identity.runtime_id.trim().is_empty()
+            || record.fingerprint.trim().is_empty()
+            || record.source.trim().is_empty()
+        {
+            return Err(format!(
+                "GLOBAL_RUNTIME_ARCHIVE_INVALID_LINE:{}:unsupported runtime record",
+                index + 1
+            ));
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn verified_archived_runtime_records(
+    archive_path: &Path,
+) -> Result<Option<Vec<RuntimeRecord>>, String> {
+    ensure_no_symlink(archive_path, "runtime_archive_directory")?;
+    let manifest_path = archive_path.join("manifest.json");
+    ensure_no_symlink(&manifest_path, "runtime_archive_manifest")?;
+    let manifest_bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}")),
+    };
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_MANIFEST_INVALID:{error}"))?;
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || manifest.get("operation").and_then(Value::as_str) != Some("reset_runtime_registry")
+        || manifest.get("delivery_verified").and_then(Value::as_bool) != Some(false)
+    {
+        return Err("GLOBAL_RUNTIME_ARCHIVE_MANIFEST_INVALID:unsupported archive".into());
+    }
+    let expected_bytes = manifest
+        .get("archived_bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "GLOBAL_RUNTIME_ARCHIVE_MANIFEST_INVALID:archived_bytes".to_string())?;
+    let expected_digest = manifest
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|value| value.len() == 64)
+        .ok_or_else(|| "GLOBAL_RUNTIME_ARCHIVE_MANIFEST_INVALID:sha256".to_string())?;
+    let archived_registry = archive_path.join(RUNTIME_FILE);
+    ensure_no_symlink(&archived_registry, "runtime_archive_registry")?;
+    let bytes = fs::read(&archived_registry)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(&bytes);
+    let observed_digest = format!("{:x}", digest.finalize());
+    if bytes.len() as u64 != expected_bytes || observed_digest != expected_digest {
+        return Err("GLOBAL_RUNTIME_ARCHIVE_DIGEST_MISMATCH".into());
+    }
+    Ok(Some(read_archived_runtime_records(&archived_registry)?))
+}
+
+fn archived_runtime_records(registry_root: &Path) -> Result<Vec<RuntimeRecord>, String> {
+    let archive_root = registry_root.join("archives").join("runtimes");
+    if !archive_root.exists() {
+        return Ok(Vec::new());
+    }
+    ensure_no_symlink(&archive_root, "runtime_archive_directory")?;
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&archive_root)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?
+    {
+        let entry = entry.map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        // Archives are audit/provenance inputs, not the active registry.
+        // Legacy or incomplete archives must not make the current baseline
+        // unreadable; a mailbox that actually depends on an archive will fail
+        // explicitly when its fingerprint cannot be resolved.
+        if let Ok(Some(archived)) = verified_archived_runtime_records(&entry.path()) {
+            records.extend(archived);
+        }
+    }
+    Ok(records)
+}
+
 /// Register a host runtime in the canonical `~/.appsdk` registry.
 pub fn register_runtime(identity: &RuntimeIdentity) -> Result<RuntimeReceipt, String> {
     let root = registry_root()?;
@@ -688,8 +834,10 @@ pub fn register_runtime_at(
     let registry_root = ensure_registry_root(registry_root)?;
     let path = registry_root.join(RUNTIME_FILE);
     let lock_path = registry_root.join(RUNTIME_LOCK);
+    let marker_path = registry_root.join(RUNTIME_RESET_MARKER);
     ensure_no_symlink(&path, "runtime_registry_file")?;
     ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    ensure_no_symlink(&marker_path, "runtime_reset_marker")?;
     let _lock = lock_registry(&lock_path).map_err(|error| {
         if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
             format!(
@@ -774,21 +922,31 @@ pub fn runtime(runtime_id: &str) -> Result<RuntimeRecord, String> {
 }
 
 /// Check a receipt fingerprint against any durable observation of the runtime.
-/// A refresh may change volatile process/pane fields, so a receipt produced by
+/// A refresh may change volatile runtime fields, so a receipt produced by
 /// an earlier observation must remain replayable after the runtime is refreshed.
 pub fn runtime_fingerprint_known(runtime_id: &str, fingerprint: &str) -> Result<bool, String> {
+    let root = registry_root()?;
+    runtime_fingerprint_known_at(runtime_id, fingerprint, &root)
+}
+
+fn runtime_fingerprint_known_at(
+    runtime_id: &str,
+    fingerprint: &str,
+    registry_root: &Path,
+) -> Result<bool, String> {
     if runtime_id.trim().is_empty() {
         return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:runtime_id:empty".into());
     }
     if fingerprint.trim().is_empty() {
         return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:fingerprint:empty".into());
     }
-    let root = registry_root()?;
-    let registry_root = ensure_registry_root(&root)?;
+    let registry_root = ensure_registry_root(registry_root)?;
     let path = registry_root.join(RUNTIME_FILE);
     let lock_path = registry_root.join(RUNTIME_LOCK);
+    let marker_path = registry_root.join(RUNTIME_RESET_MARKER);
     ensure_no_symlink(&path, "runtime_registry_file")?;
     ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    ensure_no_symlink(&marker_path, "runtime_reset_marker")?;
     let _lock = lock_registry(&lock_path).map_err(|error| {
         if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
             format!(
@@ -799,10 +957,39 @@ pub fn runtime_fingerprint_known(runtime_id: &str, fingerprint: &str) -> Result<
             error
         }
     })?;
-    let records = read_runtime_records(&path)?;
+    let mut records = archived_runtime_records(&registry_root)?;
+    records.extend(read_runtime_records(&path)?);
     Ok(records.iter().any(|record| {
         record.identity.runtime_id == runtime_id && record.fingerprint == fingerprint
     }))
+}
+
+fn commit_empty_runtime_registry(registry_root: &Path, path: &Path) -> Result<(), String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let staged = registry_root.join(format!(
+        ".runtimes.jsonl.reset.{}.{}",
+        std::process::id(),
+        nonce
+    ));
+    let staged_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staged)
+        .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_RESET_STAGE_FAILED:{error}"))?;
+    staged_file
+        .sync_all()
+        .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_RESET_STAGE_FAILED:{error}"))?;
+    drop(staged_file);
+    if let Err(error) = fs::rename(&staged, path) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!(
+            "GLOBAL_RUNTIME_REGISTRY_RESET_COMMIT_FAILED:{error}"
+        ));
+    }
+    sync_directory(registry_root, "GLOBAL_RUNTIME_REGISTRY_RESET_SYNC_FAILED")
 }
 
 pub fn runtime_at(runtime_id: &str, registry_root: &Path) -> Result<RuntimeRecord, String> {
@@ -812,8 +999,10 @@ pub fn runtime_at(runtime_id: &str, registry_root: &Path) -> Result<RuntimeRecor
     let registry_root = ensure_registry_root(registry_root)?;
     let path = registry_root.join(RUNTIME_FILE);
     let lock_path = registry_root.join(RUNTIME_LOCK);
+    let marker_path = registry_root.join(RUNTIME_RESET_MARKER);
     ensure_no_symlink(&path, "runtime_registry_file")?;
     ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    ensure_no_symlink(&marker_path, "runtime_reset_marker")?;
     let _lock = lock_registry(&lock_path).map_err(|error| {
         if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
             format!(
@@ -830,6 +1019,270 @@ pub fn runtime_at(runtime_id: &str, registry_root: &Path) -> Result<RuntimeRecor
         .rev()
         .find(|record| record.identity.runtime_id == runtime_id)
         .ok_or_else(|| format!("GLOBAL_RUNTIME_NOT_FOUND:{runtime_id}"))
+}
+
+/// Resolve a runtime observation for replay of already-persisted delivery
+/// facts. The live registry remains the only source for new routing and
+/// registration; verified reset archives are read-only provenance for retained
+/// mailboxes.
+pub fn runtime_for_replay(runtime_id: &str, fingerprint: &str) -> Result<RuntimeRecord, String> {
+    let root = registry_root()?;
+    runtime_for_replay_at(runtime_id, fingerprint, &root)
+}
+
+fn runtime_for_replay_at(
+    runtime_id: &str,
+    fingerprint: &str,
+    registry_root: &Path,
+) -> Result<RuntimeRecord, String> {
+    if runtime_id.trim().is_empty() {
+        return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:runtime_id:empty".into());
+    }
+    if fingerprint.trim().is_empty() {
+        return Err("GLOBAL_RUNTIME_IDENTITY_INVALID:fingerprint:empty".into());
+    }
+    let registry_root = ensure_registry_root(registry_root)?;
+    let path = registry_root.join(RUNTIME_FILE);
+    let lock_path = registry_root.join(RUNTIME_LOCK);
+    ensure_no_symlink(&path, "runtime_registry_file")?;
+    ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    let _lock = lock_registry(&lock_path).map_err(|error| {
+        if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_BUSY:{}",
+                &error["GLOBAL_REGISTRY_BUSY:".len()..]
+            )
+        } else {
+            error
+        }
+    })?;
+    let mut records = archived_runtime_records(&registry_root)?;
+    records.extend(read_runtime_records(&path)?);
+    records
+        .into_iter()
+        .rev()
+        .find(|record| {
+            record.identity.runtime_id == runtime_id && record.fingerprint == fingerprint
+        })
+        .ok_or_else(|| format!("GLOBAL_RUNTIME_NOT_FOUND:{runtime_id}:{fingerprint}"))
+}
+
+/// Retire the legacy runtime registry without importing any historical record.
+///
+/// The reset is intentionally not a migration: the existing bytes are archived
+/// for audit, then the canonical registry is atomically replaced with an empty
+/// current baseline. The caller must explicitly authorize discarding the
+/// legacy control plane.
+pub fn reset_runtime_registry_at(
+    registry_root: &Path,
+    discard_legacy: bool,
+    approval: &str,
+) -> Result<RuntimeRegistryResetReceipt, String> {
+    if !discard_legacy {
+        return Err("GLOBAL_RUNTIME_REGISTRY_RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION".into());
+    }
+    if approval.trim().is_empty() {
+        return Err("GLOBAL_RUNTIME_REGISTRY_RESET_APPROVAL_REQUIRED".into());
+    }
+
+    let registry_root = ensure_registry_root(registry_root)?;
+    let path = registry_root.join(RUNTIME_FILE);
+    let lock_path = registry_root.join(RUNTIME_LOCK);
+    let marker_path = registry_root.join(RUNTIME_RESET_MARKER);
+    ensure_no_symlink(&path, "runtime_registry_file")?;
+    ensure_no_symlink(&lock_path, "runtime_registry_lock")?;
+    ensure_no_symlink(&marker_path, "runtime_reset_marker")?;
+    let _lock = lock_registry(&lock_path).map_err(|error| {
+        if error.starts_with("GLOBAL_REGISTRY_BUSY:") {
+            format!(
+                "GLOBAL_RUNTIME_REGISTRY_BUSY:{}",
+                &error["GLOBAL_REGISTRY_BUSY:".len()..]
+            )
+        } else {
+            error
+        }
+    })?;
+
+    let mut resume_transaction = None;
+    if let Some(transaction) = read_runtime_reset_transaction(&marker_path)? {
+        let archived_registry = validate_runtime_reset_archive(&transaction)?;
+        let live = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(format!("GLOBAL_RUNTIME_REGISTRY_READ_FAILED:{error}"));
+            }
+        };
+        if live.is_empty() {
+            let mut committed = transaction;
+            if committed.phase != "committed" {
+                committed.phase = "committed".into();
+                replace_runtime_reset_transaction(&marker_path, &committed, &registry_root)?;
+            }
+            return Ok(RuntimeRegistryResetReceipt {
+                registry_root,
+                registry_path: path,
+                archive_path: Some(committed.archive_path),
+                transaction_id: Some(committed.transaction_id),
+                archived_bytes: committed.archived_bytes,
+                idempotent: true,
+                delivery_verified: false,
+            });
+        }
+        if transaction.phase == "archived" {
+            let archived = fs::read(&archived_registry)
+                .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_READ_FAILED:{error}"))?;
+            if live != archived {
+                return Err(
+                    "GLOBAL_RUNTIME_RESET_MARKER_INVALID:live registry does not match archived baseline"
+                        .into(),
+                );
+            }
+            resume_transaction = Some(transaction);
+        }
+    }
+
+    let original = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("GLOBAL_RUNTIME_REGISTRY_READ_FAILED:{error}")),
+    };
+    if let Some(mut transaction) = resume_transaction {
+        commit_empty_runtime_registry(&registry_root, &path)?;
+        transaction.phase = "committed".into();
+        replace_runtime_reset_transaction(&marker_path, &transaction, &registry_root)?;
+        return Ok(RuntimeRegistryResetReceipt {
+            registry_root,
+            registry_path: path,
+            archive_path: Some(transaction.archive_path),
+            transaction_id: Some(transaction.transaction_id),
+            archived_bytes: transaction.archived_bytes,
+            idempotent: true,
+            delivery_verified: false,
+        });
+    }
+    if original.is_empty() {
+        if !path.exists() {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&path)
+                .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_OPEN_FAILED:{error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("GLOBAL_RUNTIME_REGISTRY_WRITE_FAILED:{error}"))?;
+        }
+        return Ok(RuntimeRegistryResetReceipt {
+            registry_root,
+            registry_path: path,
+            archive_path: None,
+            transaction_id: None,
+            archived_bytes: 0,
+            idempotent: true,
+            delivery_verified: false,
+        });
+    }
+
+    let archive_root = registry_root.join("archives").join("runtimes");
+    ensure_no_symlink(&registry_root.join("archives"), "runtime_archive_root")?;
+    ensure_no_symlink(&archive_root, "runtime_archive_directory")?;
+    fs::create_dir_all(&archive_root)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_CREATE_FAILED:{error}"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let archive_path = archive_root.join(format!(
+        "{}-{}-{nonce}",
+        Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
+        std::process::id()
+    ));
+    fs::create_dir(&archive_path)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_CREATE_FAILED:{error}"))?;
+
+    let archived_registry = archive_path.join(RUNTIME_FILE);
+    let lock_snapshot = archive_path.join("runtimes.jsonl.lock.snapshot");
+    let manifest_path = archive_path.join("manifest.json");
+    let lock_bytes = fs::read(&lock_path)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_LOCK_READ_FAILED:{error}"))?;
+    fs::write(&archived_registry, &original)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_WRITE_FAILED:{error}"))?;
+    fs::write(&lock_snapshot, &lock_bytes)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_WRITE_FAILED:{error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(&original);
+    let transaction_id = format!(
+        "{}-{}-{nonce}",
+        Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
+        std::process::id()
+    );
+    let digest = format!("{:x}", digest.finalize());
+    let transaction = RuntimeResetTransaction {
+        schema_version: 1,
+        transaction_id: transaction_id.clone(),
+        phase: "archived".into(),
+        archive_path: archive_path.clone(),
+        archived_bytes: original.len() as u64,
+        sha256: digest.clone(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "operation": "reset_runtime_registry",
+        "mode": "discard_legacy_control_plane",
+        "transaction_id": transaction_id,
+        "phase": "archived",
+        "approval": approval,
+        "registry_root": registry_root,
+        "registry_path": path,
+        "archived_bytes": original.len(),
+        "sha256": digest,
+        "lock_snapshot": lock_snapshot,
+        "created_at": Utc::now().to_rfc3339(),
+        "delivery_verified": false
+    });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_SERIALIZE_FAILED:{error}"))?;
+    fs::write(&manifest_path, manifest_bytes)
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_WRITE_FAILED:{error}"))?;
+    for archive_file in [&archived_registry, &lock_snapshot, &manifest_path] {
+        File::open(archive_file)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_SYNC_FAILED:{error}"))?;
+    }
+    File::open(&archive_path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("GLOBAL_RUNTIME_ARCHIVE_SYNC_FAILED:{error}"))?;
+    sync_directory(&archive_root, "GLOBAL_RUNTIME_ARCHIVE_SYNC_FAILED")?;
+    sync_directory(
+        &registry_root.join("archives"),
+        "GLOBAL_RUNTIME_ARCHIVE_SYNC_FAILED",
+    )?;
+    sync_directory(&registry_root, "GLOBAL_RUNTIME_ARCHIVE_SYNC_FAILED")?;
+    replace_runtime_reset_transaction(&marker_path, &transaction, &registry_root)?;
+
+    commit_empty_runtime_registry(&registry_root, &path)?;
+
+    let mut committed = transaction;
+    committed.phase = "committed".into();
+    replace_runtime_reset_transaction(&marker_path, &committed, &registry_root)?;
+
+    Ok(RuntimeRegistryResetReceipt {
+        registry_root,
+        registry_path: path,
+        archive_path: Some(committed.archive_path),
+        transaction_id: Some(committed.transaction_id),
+        archived_bytes: original.len() as u64,
+        idempotent: false,
+        delivery_verified: false,
+    })
+}
+
+pub fn reset_runtime_registry(
+    discard_legacy: bool,
+    approval: &str,
+) -> Result<RuntimeRegistryResetReceipt, String> {
+    let root = registry_root()?;
+    reset_runtime_registry_at(&root, discard_legacy, approval)
 }
 
 fn communication_address_key(scope_id: &str, session_id: &str) -> String {
@@ -1894,8 +2347,6 @@ mod tests {
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
             capabilities: vec![],
-            tmux_session: Some("tui-a".into()),
-            tmux_pane: Some("%42".into()),
             process_id: std::process::id(),
         };
         let first = register_runtime_at(&identity, &registry).unwrap();
@@ -1935,15 +2386,11 @@ mod tests {
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
             capabilities: vec![],
-            tmux_session: None,
-            tmux_pane: None,
             process_id: std::process::id(),
         };
         register_runtime_at(&identity, &root).unwrap();
 
         let mut refreshed = identity.clone();
-        refreshed.tmux_session = Some("desktop-a".into());
-        refreshed.tmux_pane = Some("%7".into());
         refreshed.process_id = std::process::id().saturating_add(1);
         let receipt = register_runtime_at(&refreshed, &root).unwrap();
         assert!(!receipt.idempotent);
@@ -1972,8 +2419,6 @@ mod tests {
             endpoint: "unix:///tmp/server-a.sock".into(),
             project_root: "/workspace/app".into(),
             capabilities: vec!["alpha\0beta".into(), "gamma".into()],
-            tmux_session: None,
-            tmux_pane: None,
             process_id: std::process::id(),
         };
         let mut second = first.clone();
@@ -2033,12 +2478,124 @@ mod tests {
             endpoint: "mock://server-a".into(),
             project_root: "/workspace/app".into(),
             capabilities: vec![],
-            tmux_session: None,
-            tmux_pane: None,
             process_id: std::process::id(),
         };
         let error = register_runtime_at(&identity, &root).unwrap_err();
         assert!(error.starts_with("GLOBAL_RUNTIME_REGISTRY_INVALID_LINE:1:"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_registry_reset_is_idempotent_and_creates_missing_baseline() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-registry-reset-missing-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let registry = root.join("host");
+
+        let first = reset_runtime_registry_at(&registry, true, "approved reset").unwrap();
+        assert!(first.idempotent);
+        assert!(first.archive_path.is_none());
+        assert!(!first.delivery_verified);
+        assert_eq!(fs::read(registry.join(RUNTIME_FILE)).unwrap(), b"");
+
+        let second = reset_runtime_registry_at(&registry, true, "approved reset").unwrap();
+        assert!(second.idempotent);
+        assert!(second.archive_path.is_none());
+        assert!(!second.delivery_verified);
+        assert_eq!(fs::read(registry.join(RUNTIME_FILE)).unwrap(), b"");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_registry_reset_archives_legacy_bytes_without_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-registry-reset-archive-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let registry = root.join("host");
+        fs::create_dir_all(&registry).unwrap();
+        let legacy = b"not-json legacy tmux bytes\n{\"tmuxSession\":\"old\"}\n";
+        fs::write(registry.join(RUNTIME_FILE), legacy).unwrap();
+
+        let receipt = reset_runtime_registry_at(&registry, true, "approved reset").unwrap();
+        let archive = receipt.archive_path.expect("archive path");
+        assert!(!receipt.idempotent);
+        assert!(!receipt.delivery_verified);
+        assert_eq!(receipt.archived_bytes, legacy.len() as u64);
+        assert_eq!(fs::read(registry.join(RUNTIME_FILE)).unwrap(), b"");
+        assert_eq!(fs::read(archive.join(RUNTIME_FILE)).unwrap(), legacy);
+        assert!(archive.join("runtimes.jsonl.lock.snapshot").is_file());
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(archive.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["operation"], "reset_runtime_registry");
+        assert_eq!(manifest["delivery_verified"], false);
+        assert_eq!(manifest["archived_bytes"], legacy.len());
+        assert_eq!(manifest["sha256"].as_str().map(str::len), Some(64));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_registry_reset_resumes_archived_transaction_without_losing_archive_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-registry-reset-resume-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let registry = root.join("host");
+        fs::create_dir_all(&registry).unwrap();
+        let original = b"runtime-original\n";
+        fs::write(registry.join(RUNTIME_FILE), original).unwrap();
+
+        let first = reset_runtime_registry_at(&registry, true, "approved reset").unwrap();
+        let archive_path = first.archive_path.clone().expect("archive path");
+        let transaction_id = first.transaction_id.clone().expect("transaction id");
+
+        let marker_path = registry.join(RUNTIME_RESET_MARKER);
+        let mut marker: RuntimeResetTransaction =
+            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+        marker.phase = "archived".into();
+        fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
+        fs::write(registry.join(RUNTIME_FILE), original).unwrap();
+
+        let resumed = reset_runtime_registry_at(&registry, true, "approved reset").unwrap();
+        assert!(resumed.idempotent);
+        assert_eq!(resumed.archive_path, Some(archive_path.clone()));
+        assert_eq!(resumed.transaction_id, Some(transaction_id.clone()));
+        assert_eq!(fs::read(registry.join(RUNTIME_FILE)).unwrap(), b"");
+
+        let retried = reset_runtime_registry_at(&registry, true, "approved reset").unwrap();
+        assert!(retried.idempotent);
+        assert_eq!(retried.archive_path, Some(archive_path));
+        assert_eq!(retried.transaction_id, Some(transaction_id));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_registry_reset_requires_explicit_discard_and_approval() {
+        let root = std::env::temp_dir().join(format!(
+            "appsdk-runtime-registry-reset-confirm-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let registry = root.join("host");
+        fs::create_dir_all(&registry).unwrap();
+        fs::write(registry.join(RUNTIME_FILE), b"legacy\n").unwrap();
+
+        let missing_discard =
+            reset_runtime_registry_at(&registry, false, "approved reset").unwrap_err();
+        assert_eq!(
+            missing_discard,
+            "GLOBAL_RUNTIME_REGISTRY_RESET_REQUIRES_DISCARD_LEGACY_CONFIRMATION"
+        );
+        let missing_approval = reset_runtime_registry_at(&registry, true, "  ").unwrap_err();
+        assert_eq!(
+            missing_approval,
+            "GLOBAL_RUNTIME_REGISTRY_RESET_APPROVAL_REQUIRED"
+        );
+        assert_eq!(fs::read(registry.join(RUNTIME_FILE)).unwrap(), b"legacy\n");
         fs::remove_dir_all(root).ok();
     }
 }

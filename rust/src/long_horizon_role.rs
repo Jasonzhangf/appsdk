@@ -105,21 +105,14 @@ fn collab_master_matches_context(
     if master_peer != peer {
         return Ok(Some(false));
     }
-    let master_pane = match master["pane"]
-        .as_str()
-        .filter(|pane| !pane.trim().is_empty())
+    let context_transport = &context["identity"]["transport"];
+    if context_transport["kind"].as_str() != Some("appserver")
+        || context_transport["thread_id"]
+            .as_str()
+            .map_or(true, |thread| thread.trim().is_empty())
+        || context["liveness"]["live"].as_bool() != Some(true)
+        || context["liveness"]["transport_kind"].as_str() != Some("appserver")
     {
-        Some(pane) => pane,
-        None => return Ok(None),
-    };
-    let context_pane = match context["identity"]["pane"]
-        .as_str()
-        .filter(|pane| !pane.trim().is_empty())
-    {
-        Some(pane) => pane,
-        None => return Ok(None),
-    };
-    if master_pane != context_pane {
         return Ok(None);
     }
     Ok(Some(true))

@@ -19,12 +19,28 @@ assert_file_absent() {
   }
 }
 
+assert_file_present() {
+  [[ -e "$1" || -L "$1" ]] || {
+    echo "expected present: $1" >&2
+    exit 1
+  }
+}
+
 run_install_test() {
   local test_root="$1"
   local fake_bin="$test_root/fake-cargo-bin"
-  mkdir -p "$fake_bin" "$test_root/home/.local/bin" "$test_root/home/.local/lib/appsdk/0.1.6"
+  mkdir -p \
+    "$fake_bin" \
+    "$test_root/home/.local/bin" \
+    "$test_root/home/.local/lib/appsdk/0.1.6" \
+    "$test_root/home/.local/share/appsdk/0.1.6" \
+    "$test_root/home/.local/share/appsdk/not-appsdk"
   cp "$fixture" "$test_root/fixture"
   printf '%s\n' 'keep this unrelated file' > "$test_root/home/.local/lib/appsdk/0.1.6/keep.txt"
+  cp "$repo_root/contracts/sdk-bundle.manifest.json" \
+    "$test_root/home/.local/share/appsdk/0.1.6/sdk-bundle.manifest.json"
+  printf '%s\n' 'keep this unrelated bundle file' \
+    > "$test_root/home/.local/share/appsdk/not-appsdk/keep.txt"
 
   cat > "$fake_bin/cargo" <<'FAKE_CARGO'
 #!/usr/bin/env bash
@@ -66,8 +82,14 @@ FAKE_CARGO
   }
   assert_file_absent "$test_root/home/.local/bin/appsdk"
   assert_file_absent "$test_root/home/.local/lib/appsdk/0.1.6/appsdk"
+  assert_file_present "$test_root/home/.local/share/appsdk/0.1.6"
   [[ "$(<"$test_root/home/.local/lib/appsdk/0.1.6/keep.txt")" == 'keep this unrelated file' ]] || {
     echo 'unrelated file was changed' >&2
+    exit 1
+  }
+  [[ "$(<"$test_root/home/.local/share/appsdk/not-appsdk/keep.txt")" == \
+    'keep this unrelated bundle file' ]] || {
+    echo 'unrelated bundle directory was changed' >&2
     exit 1
   }
 

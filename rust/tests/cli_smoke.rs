@@ -7200,7 +7200,6 @@ if [ "$1" != "init" ]; then
 fi
 {
   printf 'cwd=%s\n' "$PWD"
-  printf 'pane=%s\n' "$TMUX_PANE"
   printf 'probe=%s\n' "$APPSDK_COLLAB_ENV_PROBE"
   printf 'args=%s\n' "$*"
 } >> "$APPSDK_COLLAB_PROBE"
@@ -7221,7 +7220,6 @@ exit 73
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", search_path)
-        .env("TMUX_PANE", "%42")
         .env("APPSDK_COLLAB_ENV_PROBE", "same-environment")
         .env("APPSDK_COLLAB_PROBE", &probe)
         .output()
@@ -7249,7 +7247,6 @@ exit 73
             )
             .unwrap(),
         )
-        .env("TMUX_PANE", "%42")
         .env("APPSDK_COLLAB_ENV_PROBE", "same-environment")
         .env("APPSDK_COLLAB_PROBE", &probe)
         .output()
@@ -7261,7 +7258,6 @@ exit 73
     );
     let invocation = fs::read_to_string(&probe).unwrap();
     assert_eq!(invocation.matches("args=init\n").count(), 2);
-    assert!(invocation.contains("pane=%42\n"));
     assert!(invocation.contains("probe=same-environment\n"));
     let child_cwd = invocation
         .lines()
@@ -7273,7 +7269,7 @@ exit 73
     );
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"transport_selected\":{\"kind\":\"tmux\",\"pane\":\"%42\",\"capabilities\":[\"send_message\"],\"self_check\":\"test\"}}'\n",
+        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"transport_selected\":{\"kind\":\"appserver\",\"target\":\"thread-1\",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}'\n",
     )
     .unwrap();
     let ready = Command::new(binary())
@@ -7281,7 +7277,6 @@ exit 73
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
-        .env("TMUX_PANE", "%42")
         .output()
         .unwrap();
     assert!(ready.status.success());
@@ -7291,7 +7286,7 @@ exit 73
         String::from_utf8_lossy(&ready.stdout),
         String::from_utf8_lossy(&ready.stderr)
     );
-    assert!(String::from_utf8_lossy(&ready.stdout).contains("\"kind\":\"tmux\""));
+    assert!(String::from_utf8_lossy(&ready.stdout).contains("\"kind\":\"appserver\""));
 
     fs::write(
         &fake_collab,
@@ -7303,7 +7298,6 @@ exit 73
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
-        .env("TMUX_PANE", "%42")
         .output()
         .unwrap();
     assert!(invalid.status.success());
@@ -7315,7 +7309,6 @@ exit 73
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
-        .env("TMUX_PANE", "%42")
         .output()
         .unwrap();
     assert!(empty.status.success());
@@ -7328,7 +7321,6 @@ exit 73
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
-        .env("TMUX_PANE", "%42")
         .output()
         .unwrap();
     assert!(unavailable.status.success());
@@ -7360,7 +7352,6 @@ fn init_bounds_hanging_collab_bootstrap_without_faking_success() {
         .current_dir(&root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
-        .env("TMUX_PANE", "%42")
         .env("APPSDK_COLLAB_PROBE", &probe)
         .output()
         .unwrap();
@@ -17239,10 +17230,10 @@ case "$1 $2" in
     printf '%s\n' '{"workers":[{"id":"master-peer","active_task":null,"endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"waiting"}],"tasks":[],"subagents":[]}'
     ;;
   "master status")
-    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}'
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"},"tasks":[],"inbox":{"unread":0}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"},"tasks":[],"inbox":{"unread":0}}'
     ;;
   *)
     exit 64
@@ -17310,7 +17301,7 @@ esac
     assert!(text.contains("最多 5 个"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab worker close"));
-    assert!(text.contains("appsdk subworker snapshot"));
+    assert!(text.contains("appsdk subworker status"));
 
     // Goal objective is read out of the markdown, past the frontmatter.
     assert!(text.contains("# Ship It"));
@@ -17354,10 +17345,10 @@ case "$1 $2" in
     printf '%s\n' '{"workers":[{"id":"worker-peer","role":"peer","active_task":"task-1","endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"working"}],"tasks":[{"id":"task-1","status":"working","owner":"worker-peer","next_step":"run tests"}],"subagents":[]}'
     ;;
   "master status")
-    printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true,"pane":"%42"}}'
+    printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"worker-peer"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'
+    printf '%s\n' '{"identity":{"worker_id":"worker-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-worker-peer"}},"liveness":{"live":true,"transport_kind":"appserver"},"tasks":[{"id":"task-1"}],"inbox":{"unread":0}}'
     ;;
   *)
     exit 64
@@ -17448,13 +17439,18 @@ case "$1 $2" in
     ;;
   "master status")
     case "${ROLE_CASE:-master}" in
-      master) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true,"pane":"%42"}}' ;;
-      mismatch) printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true,"pane":"%42"}}' ;;
-      pane-mismatch) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true,"pane":"%43"}}' ;;
+      master) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
+      mismatch) printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true}}' ;;
+      transport-missing) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
       *) exit 44 ;;
     esac
     ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","pane":"%42"}}' ;;
+  "context ")
+    case "${ROLE_CASE:-master}" in
+      transport-missing) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+      *) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+    esac
+    ;;
   *) exit 64 ;;
 esac
 "#,
@@ -17478,7 +17474,7 @@ esac
         ("subagent", "managed-subagent"),
         ("missing", "unknown"),
         ("mismatch", "worker"),
-        ("pane-mismatch", "unknown"),
+        ("transport-missing", "unknown"),
     ] {
         let result = run(case_name);
         assert!(
@@ -17511,8 +17507,8 @@ case "$1 $2" in
       offline) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":true}],"tasks":[],"subagents":[]}' ;;
     esac
     ;;
-  "master status") printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true,"pane":"%42"}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","pane":"%42"}}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
   *) exit 64 ;;
 esac
 "#,
@@ -17693,10 +17689,10 @@ case "$1 $2" in
     printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}'
     ;;
   "master status")
-    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}'
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
     ;;
   "notify unsubscribe")
     if [ "${RECONCILE_CANCEL:-}" = "1" ]; then
@@ -17945,10 +17941,10 @@ case "$1 $2" in
     esac
     ;;
   "master status")
-    printf '%s\n' "{\"master\":{\"worker_id\":\"${MASTER_WORKER:-master-peer}\",\"endpoint_live\":${MASTER_LIVE:-true},\"pane\":\"${MASTER_PANE:-%42}\"}}"
+    printf '%s\n' "{\"master\":{\"worker_id\":\"${MASTER_WORKER:-master-peer}\",\"endpoint_live\":${MASTER_LIVE:-true}}}"
     ;;
   "context ")
-    printf '%s\n' "{\"identity\":{\"worker_id\":\"master-peer\",\"pane\":\"${CONTEXT_PANE:-%42}\"}}"
+    printf '%s\n' "{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"${CONTEXT_TRANSPORT_KIND:-appserver}\",\"thread_id\":\"${CONTEXT_THREAD_ID:-thread-master-peer}\"}},\"liveness\":{\"live\":${CONTEXT_LIVE:-true},\"transport_kind\":\"appserver\"}}"
     ;;
   "notify status") printf '%s\n' '{"subscriptions":[]}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"owner-gate-sub"}' ;;
@@ -17978,9 +17974,10 @@ esac
         String::from_utf8_lossy(&identity_mismatch.stderr).contains("GOAL_OWNER_IDENTITY_MISMATCH")
     );
 
-    let pane_mismatch = run(&[("MASTER_PANE", "%43")]);
-    assert_eq!(pane_mismatch.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&pane_mismatch.stderr).contains("GOAL_OWNER_PANE_MISMATCH"));
+    let transport_missing = run(&[("CONTEXT_TRANSPORT_KIND", "mailbox")]);
+    assert_eq!(transport_missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&transport_missing.stderr)
+        .contains("GOAL_OWNER_CONTEXT_TRANSPORT_NOT_LIVE"));
 
     let offline_master = run(&[("MASTER_LIVE", "false")]);
     assert_eq!(offline_master.status.code(), Some(1));
@@ -18018,8 +18015,8 @@ case "$1 $2" in
       *) printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
     esac
     ;;
-  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"missing-fields-sub"}' ;;
   *) exit 64 ;;
 esac
@@ -18079,8 +18076,8 @@ case "$1 $2" in
     ) &
     wait
     ;;
-  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"large-output-sub"}' ;;
   *) exit 64 ;;
 esac
@@ -18134,8 +18131,8 @@ fn goal_subscribe_allows_slow_collab_write_within_write_budget() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
-  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
   "notify subscribe")
     /bin/sleep 20
     printf '%s\n' '{"subscription_id":"slow-subscribe-write"}'
@@ -18188,7 +18185,7 @@ fn goal_subscribe_failure_does_not_report_active() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true,\"pane\":\"%42\"}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"pane\":\"%42\"}}' ;;\n  *) printf '%s\\n' 'daemon stopped' >&2; exit 44 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"appserver\",\"thread_id\":\"thread-master-peer\"}},\"liveness\":{\"live\":true,\"transport_kind\":\"appserver\"}}' ;;\n  *) printf '%s\\n' 'daemon stopped' >&2; exit 44 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -18252,10 +18249,10 @@ case "$1 $2" in
     printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}'
     ;;
   "master status")
-    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}'
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
     ;;
   *)
     exit 64
@@ -18333,10 +18330,10 @@ case "$1 $2" in
     printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}'
     ;;
   "master status")
-    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}'
+    printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
     ;;
   "notify unsubscribe")
     printf '%s\n' 'unsubscribe failed' >&2
@@ -18402,8 +18399,8 @@ fn goal_lifecycle_reconciles_legacy_subject_and_exposes_one_shot_recovery() {
         r#"#!/bin/sh
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
-  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true,"pane":"%42"}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","pane":"%42"}}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"sub-periodic"}' ;;
   "notify status")
     if [ "${STATUS_EXPIRED:-}" = "1" ]; then
@@ -18683,7 +18680,7 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     fs::write(
         &fake_collab,
         format!(
-            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"master status\") printf '%s\\n' '{{\"master\":{{\"worker_id\":\"master-peer\",\"endpoint_live\":true,\"pane\":\"%42\"}}}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\",\"pane\":\"%42\"}}}}' ;;\n  *) touch '{}' ; printf '%s\\n' '{{\"subscription_id\":\"orphan\"}}' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"master status\") printf '%s\\n' '{{\"master\":{{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{{\"kind\":\"appserver\",\"thread_id\":\"thread-master-peer\"}}}},\"liveness\":{{\"live\":true,\"transport_kind\":\"appserver\"}}}}' ;;\n  *) touch '{}' ; printf '%s\\n' '{{\"subscription_id\":\"orphan\"}}' ;;\nesac\n",
             marker.display()
         ),
     )
@@ -18818,7 +18815,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true,\"pane\":\"%42\"}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"pane\":\"%42\"}}' ;;\n  \"notify subscribe\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"appserver\",\"thread_id\":\"thread-master-peer\"}},\"liveness\":{\"live\":true,\"transport_kind\":\"appserver\"}}' ;;\n  \"notify subscribe\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();

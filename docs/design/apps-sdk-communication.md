@@ -10,7 +10,7 @@ AppSDK 自己拥有 `appsdk-comm/v1` 的通信协议、身份与 scope、路由�
 
 运行时身份由 AppSDK 的 host registry 单独持有：`~/.appsdk/runtimes.jsonl` 是
 append-only 的 `runtime.registered` 事实，记录稳定 `runtimeId`、App Server endpoint、
-namespace、项目 cwd、宿主声明的 capability、可选 tmux session/pane、进程和 fingerprint。
+namespace、项目 cwd、宿主声明的 capability、进程和 fingerprint。
 会话压缩或 fork 只改变 conversation/session；宿主继续使用同一个 `runtimeId`，不能复制旧
 session token。`send_message_to_thread` 是 appserver adapter 的必要 capability；没有该
 声明的 runtime 仍可注册，但不能绑定或接收该 adapter 的发送。
@@ -19,25 +19,20 @@ session token。`send_message_to_thread` 是 appserver adapter 的必要 capabil
 `runtimeId`；缺失或不匹配在写入项目 mailbox 前失败。runtime registry 与项目事实分离，
 但所有权仍属于 AppSDK，默认根目录始终是 `~/.appsdk`。
 
-`mailbox`、`tmux` 和 `appserver` 是同一个通信抽象的承载 adapter，不是三套协议或
-三份事实：
+`mailbox` 和 `appserver` 是同一个通信抽象的承载 adapter，不是两套协议或两份事实：
 
 - `mailbox` 是内置的持久化 adapter。通信事件追加到项目下
   `.appsdk-control/communication/mailbox.jsonl`；adapter 返回 `accepted` 只表示
   AppSDK 已持久化，不表示收件人已读取。
-- `tmux` 只承载有界的唤醒或摘要。adapter 必须绑定收件地址；`execute=false` 只
-  生成 `intent`，只有显式 `execute=true` 才允许调用 `tmux send-keys`，并在命令
-  成功后返回 `delivered`。
 - `appserver` 只向绑定的 endpoint 返回 `intent`，receipt 带
   `hostMustExecute=true`。宿主没有回报执行证据前，状态不能升级为
   `delivered`、`executed` 或 `read`。
 
-`tmux` 和 `appserver` adapter 都绑定收件人的当前 runtime。tmux target 使用唯一的
-`<tmuxSession>:<tmuxPane>` 格式，必须与 `~/.appsdk/runtimes.jsonl` 的最新记录完全相同；
-appserver target 必须等于最新 runtime endpoint，并且该 runtime 必须声明
+appserver adapter 绑定收件人的当前 runtime。target 必须等于最新 runtime endpoint，
+并且该 runtime 必须声明
 `send_message_to_thread`。`register_adapter` 在写入 `adapter.registered` 前执行一次校验，
 每次真实发送或 idle flush 前再读取 registry 校验一次。runtime refresh 后旧 target 返回
-`tmux_target_stale` 或 `appserver_target_stale`，capability 被撤回返回
+`appserver_target_stale`，capability 被撤回返回
 `appserver_capability_missing`；这些失败发生在 `message.created` 之前，不产生假消息或假
 delivery 事实。
 
@@ -53,9 +48,9 @@ JSONL。请求必须带消息 ID、目标 `runtimeId`、状态和非空证据；
 绑定的 runtime，并只接受 `delivered -> executed -> replied -> read -> consumed` 的单调
 推进。重复的相同 receipt 幂等，伪造 runtime、状态回退或未知证据明确失败。这样
 `accepted`、adapter `intent`、真实投递、目标执行和消费各自有独立事实，不能用 mailbox
-存在或 tmux 屏幕文本代替后续状态。
+存在或宿主预览代替后续状态。
 
-本模块不启动第二个 daemon，不读取外部 Collab、mailbox CLI 或 tmux 状态，不把宿主
+本模块不启动第二个 daemon，不读取外部 Collab、mailbox CLI 或旧终端状态，不把宿主
 的 session、模型名或 endpoint 推断成角色。adapter 失败必须保留原始错误和事实，
 不能用 fallback 伪造成功。
 

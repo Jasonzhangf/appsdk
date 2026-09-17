@@ -7269,9 +7269,14 @@ exit 73
     );
     fs::write(
         &fake_collab,
-        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"transport_selected\":{\"kind\":\"appserver\",\"target\":\"thread-1\",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}'\n",
+        "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"runtime\":{\"runtimeId\":\"runtime-appserver-thread-1\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"PLACEHOLDER_ROOT\",\"capabilities\":[\"session_status\",\"read_thread\",\"send_message_to_thread\",\"wait_reply\"],\"processId\":4242},\"transport_selected\":{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-1\",\"capabilities\":[\"session_status\",\"read_thread\",\"send_message_to_thread\",\"wait_reply\"],\"self_check\":\"test\"}}'\n",
     )
     .unwrap();
+    let fake_collab_text = fs::read_to_string(&fake_collab).unwrap().replace(
+        "PLACEHOLDER_ROOT",
+        root.canonicalize().unwrap().to_str().unwrap(),
+    );
+    fs::write(&fake_collab, fake_collab_text).unwrap();
     let ready = Command::new(binary())
         .args(["init", root.to_str().unwrap()])
         .current_dir(&root)
@@ -7287,6 +7292,171 @@ exit 73
         String::from_utf8_lossy(&ready.stderr)
     );
     assert!(String::from_utf8_lossy(&ready.stdout).contains("\"kind\":\"appserver\""));
+    let registry = test_global_registry_root_for_project(&root).join("runtimes.jsonl");
+    let runtime = fs::read_to_string(registry).unwrap();
+    assert!(runtime.contains("runtime.registered"), "{runtime}");
+    assert!(runtime.contains("runtime-appserver-thread-1"), "{runtime}");
+    assert!(String::from_utf8_lossy(&ready.stdout).contains("\"thread_id\":\"thread-1\""));
+    assert!(!runtime.contains("tmuxSession"), "{runtime}");
+    assert!(!runtime.contains("pane"), "{runtime}");
+    assert!(!runtime.contains("TMax"), "{runtime}");
+
+    let mismatched_root = temp_root("init-collab-root-mismatch");
+    fs::create_dir_all(&mismatched_root).unwrap();
+    confirm_preparation(&mismatched_root, ".", "project_refactor");
+    let mismatched_collab = mismatched_root.join("fake-bin");
+    fs::create_dir_all(&mismatched_collab).unwrap();
+    let mismatched_binary = mismatched_collab.join("collab");
+    fs::write(
+        &mismatched_binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-wrong-root\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"send_message_to_thread\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-wrong-root\",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}}}'\n",
+            root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&mismatched_binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let mismatched = Command::new(binary())
+        .args(["init", mismatched_root.to_str().unwrap()])
+        .current_dir(&mismatched_root)
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_project(&mismatched_root),
+        )
+        .env("PATH", &mismatched_collab)
+        .output()
+        .unwrap();
+    assert!(mismatched.status.success());
+    assert!(
+        String::from_utf8_lossy(&mismatched.stderr).contains("COLLAB_INIT_RUNTIME_ROOT_MISMATCH"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&mismatched.stdout),
+        String::from_utf8_lossy(&mismatched.stderr)
+    );
+    assert!(!test_global_registry_root_for_project(&mismatched_root)
+        .join("runtimes.jsonl")
+        .exists());
+
+    fs::write(
+        &mismatched_binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-transport-mismatch\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/runtime.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"send_message_to_thread\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/transport.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-transport-mismatch\",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}}}'\n",
+            mismatched_root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    let mismatched_transport = Command::new(binary())
+        .args(["init", mismatched_root.to_str().unwrap()])
+        .current_dir(&mismatched_root)
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_project(&mismatched_root),
+        )
+        .env("PATH", &mismatched_collab)
+        .output()
+        .unwrap();
+    assert!(mismatched_transport.status.success());
+    assert!(
+        String::from_utf8_lossy(&mismatched_transport.stderr)
+            .contains("COLLAB_INIT_TRANSPORT_RUNTIME_MISMATCH"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&mismatched_transport.stdout),
+        String::from_utf8_lossy(&mismatched_transport.stderr)
+    );
+    assert!(!test_global_registry_root_for_project(&mismatched_root)
+        .join("runtimes.jsonl")
+        .exists());
+
+    fs::write(
+        &mismatched_binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-capability-missing\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"read_thread\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-capability-missing\",\"capabilities\":[\"read_thread\"],\"self_check\":\"test\"}}}}'\n",
+            mismatched_root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    let missing_capability = Command::new(binary())
+        .args(["init", mismatched_root.to_str().unwrap()])
+        .current_dir(&mismatched_root)
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_project(&mismatched_root),
+        )
+        .env("PATH", &mismatched_collab)
+        .output()
+        .unwrap();
+    assert!(missing_capability.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_capability.stderr)
+            .contains("COLLAB_INIT_APPSERVER_CAPABILITY_MISSING"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&missing_capability.stdout),
+        String::from_utf8_lossy(&missing_capability.stderr)
+    );
+    assert!(!test_global_registry_root_for_project(&mismatched_root)
+        .join("runtimes.jsonl")
+        .exists());
+
+    fs::write(
+        &mismatched_binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-thread-missing\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"send_message_to_thread\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}}}'\n",
+            mismatched_root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    let missing_thread = Command::new(binary())
+        .args(["init", mismatched_root.to_str().unwrap()])
+        .current_dir(&mismatched_root)
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_project(&mismatched_root),
+        )
+        .env("PATH", &mismatched_collab)
+        .output()
+        .unwrap();
+    assert!(missing_thread.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_thread.stderr)
+            .contains("COLLAB_INIT_APPSERVER_THREAD_MISSING"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&missing_thread.stdout),
+        String::from_utf8_lossy(&missing_thread.stderr)
+    );
+    assert!(!test_global_registry_root_for_project(&mismatched_root)
+        .join("runtimes.jsonl")
+        .exists());
+
+    fs::write(
+        &mismatched_binary,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-thread-empty\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"send_message_to_thread\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"   \",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}}}'\n",
+            mismatched_root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    let empty_thread = Command::new(binary())
+        .args(["init", mismatched_root.to_str().unwrap()])
+        .current_dir(&mismatched_root)
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_project(&mismatched_root),
+        )
+        .env("PATH", &mismatched_collab)
+        .output()
+        .unwrap();
+    assert!(empty_thread.status.success());
+    assert!(
+        String::from_utf8_lossy(&empty_thread.stderr)
+            .contains("COLLAB_INIT_APPSERVER_THREAD_MISSING"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&empty_thread.stdout),
+        String::from_utf8_lossy(&empty_thread.stderr)
+    );
+    assert!(!test_global_registry_root_for_project(&mismatched_root)
+        .join("runtimes.jsonl")
+        .exists());
+    fs::remove_dir_all(mismatched_root).unwrap();
 
     fs::write(
         &fake_collab,

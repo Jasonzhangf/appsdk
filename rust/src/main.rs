@@ -13301,9 +13301,104 @@ fn initialize_collab_peer(root: &Path) {
                 );
                 return;
             }
+            let runtime = match value.get("runtime") {
+                Some(runtime) => match serde_json::from_value::<global_registry::RuntimeIdentity>(
+                    runtime.clone(),
+                ) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        eprintln!(
+                            "COLLAB_INIT_RUNTIME_INVALID:{error}; shared collaboration unavailable; independent work may continue"
+                        );
+                        return;
+                    }
+                },
+                None => {
+                    eprintln!(
+                        "COLLAB_INIT_RUNTIME_MISSING; shared collaboration unavailable; independent work may continue"
+                    );
+                    return;
+                }
+            };
+            let canonical_root = match fs::canonicalize(root) {
+                Ok(root) => root,
+                Err(error) => {
+                    eprintln!(
+                        "COLLAB_INIT_RUNTIME_ROOT_INVALID:{error}; shared collaboration unavailable; independent work may continue"
+                    );
+                    return;
+                }
+            };
+            let canonical_root_text = canonical_root.to_string_lossy();
+            if runtime.project_root != canonical_root_text {
+                eprintln!(
+                    "COLLAB_INIT_RUNTIME_ROOT_MISMATCH:expected={canonical_root_text};observed={}; shared collaboration unavailable; independent work may continue",
+                    runtime.project_root
+                );
+                return;
+            }
+            let transport = &value["transport_selected"];
+            let transport_endpoint = transport.get("endpoint").and_then(Value::as_str);
+            let transport_namespace = transport.get("namespace").and_then(Value::as_str);
+            let transport_thread_id = transport
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .filter(|thread_id| !thread_id.trim().is_empty());
+            if transport_thread_id.is_none() {
+                eprintln!(
+                    "COLLAB_INIT_APPSERVER_THREAD_MISSING; shared collaboration unavailable; independent work may continue"
+                );
+                return;
+            }
+            if transport_endpoint != Some(runtime.endpoint.as_str())
+                || transport_namespace != Some(runtime.namespace.as_str())
+            {
+                eprintln!(
+                    "COLLAB_INIT_TRANSPORT_RUNTIME_MISMATCH:runtime_endpoint={};runtime_namespace={};transport_endpoint={};transport_namespace={}; shared collaboration unavailable; independent work may continue",
+                    runtime.endpoint,
+                    runtime.namespace,
+                    transport_endpoint.unwrap_or("<missing>"),
+                    transport_namespace.unwrap_or("<missing>")
+                );
+                return;
+            }
+            let transport_capabilities = transport
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .map(|capabilities| {
+                    capabilities
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            let runtime_capabilities = runtime
+                .capabilities
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if !transport_capabilities.contains("send_message_to_thread")
+                || !runtime_capabilities.contains("send_message_to_thread")
+            {
+                eprintln!(
+                    "COLLAB_INIT_APPSERVER_CAPABILITY_MISSING:send_message_to_thread; shared collaboration unavailable; independent work may continue"
+                );
+                return;
+            }
+            let receipt = match global_registry::register_runtime(&runtime) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    eprintln!(
+                        "COLLAB_RUNTIME_REGISTRATION_FAILED:{error}; shared collaboration unavailable; independent work may continue"
+                    );
+                    return;
+                }
+            };
             println!(
                 "collab-channel {}",
                 serde_json::json!({
+                    "runtime": runtime,
+                    "runtime_receipt": receipt,
                     "transport_selected": value["transport_selected"],
                     "independent_work_allowed": true
                 })

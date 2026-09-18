@@ -16,8 +16,10 @@ Global truth:
 ```
 
 Project-local `.appsdk/`, `.appsdk-control/`, and `.agent-collab/` are not the
-global truth. They are old or project-scoped control state and are handled only
-through the AppSDK reset or Collab migration owner. Do not inspect or edit them
+global truth. `.appsdk/` is the committed project contract/maps/records;
+`.appsdk-control/` is ignored local run/cache state; `.agent-collab/` is
+Collab-owned project reducer/journal/mailbox state. Handle them only through
+the AppSDK reset or Collab migration/reset owner. Do not inspect or edit them
 to decide whether the peer is registered.
 
 ## All state
@@ -52,8 +54,13 @@ it is idempotent and returns the same initialization result every time.
 ```sh
 cd /abs/path/project
 collab context                  # verify sessionID binding and role
-appsdk init .                   # only if collab context says unregistered
+# only if collab context says unregistered:
+appsdk init .
+collab context
+# only when no live master exists and the user approved this exact peer:
 collab master promote --approval "<user approval text>"
+collab context
+# only after the plan exists and long-horizon work is approved:
 appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
 appsdk goal status --json       # active/observed/collab_subscribed
 ```
@@ -111,6 +118,11 @@ layer, and whether the same path fails from a clean project. The upstream bug
 is a report and evidence record; it is not proof that the local delivery
 passed.
 
+`--upstream` is the explicit git-bug upstream route. The report must use the
+actual symptom, reproduction, expected/observed result, version/commit,
+and relevant logs; do not turn it into a local project bug or a fallback
+workaround.
+
 ## Ordinary peer (project already has .appsdk/project.json and a live master)
 
 ```sh
@@ -122,6 +134,22 @@ If `collab context` says unregistered, run `appsdk init .` once and then
 `collab context` again. If it reports `role=master`, stop and report the
 conflict to the master; do not promote yourself and do not start a second
 daemon.
+
+For an explicitly authorized clean epoch, the reset owners are separate:
+
+```sh
+# AppSDK-owned project control plane, from a clean non-main owner worktree
+appsdk init <project> --fresh --discard-legacy
+
+# Collab-owned project control plane, during a controlled maintenance window
+collab down
+collab reset --discard-legacy --approval "<user authorization>"
+collab up
+collab init
+```
+
+Neither reset removes the other owner's state or proves delivery, review,
+install, restart, or live communication.
 
 ## Recover own binding
 

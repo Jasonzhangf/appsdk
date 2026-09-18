@@ -78,6 +78,11 @@ appsdk reset-governance --discard-legacy
                                -> AppSDK control-plane reset
 appsdk init --fresh --discard-legacy
                                -> preferred single transaction for old AppSDK control plane
+collab down
+collab reset --discard-legacy --approval "<user text>"
+collab up
+collab init
+                               -> Collab-owned project control-plane reset
 ```
 
 For old `.appsdk/` state, do not delete it manually. Use the authorized reset
@@ -86,16 +91,17 @@ route after the Collab side is migrated or retired. `appsdk init --fresh
 current baseline; it does not delete `.agent-collab/` or global truth.
 
 When the user explicitly asks to start fresh instead of migrating legacy
-state, require the prior control plane to be removed first:
+state, keep the owners separate:
 
-1. Have the prior AppSDK/Collab version remove or retire its project-local
-   `.appsdk/`, `.appsdk-control/`, and `.agent-collab/` state.
-2. Back up and prune stale host routes only through the documented
-   route-cleanup path, then verify the global daemon with `collab up` and
-   `collab status --all`.
-3. Initialize from the current global baseline with `appsdk init --fresh
-   --discard-legacy`, bind the real project contract, then `appsdk guide
-   compile` and `appsdk verify`.
+1. Use `collab migrate` when the project journal is replayable; otherwise use
+   the explicitly authorized `collab reset --discard-legacy` sequence above
+   for Collab-owned state. Do not manually remove `.agent-collab/`.
+2. From a clean non-`main` owner worktree, use `appsdk init --fresh
+   --discard-legacy` for `.appsdk/` and `.appsdk-control/`. Do not manually
+   remove either AppSDK-owned root.
+3. Initialize and bind the current project contract, then run `appsdk guide
+   compile` and `appsdk verify`. A reset proves only reset; it does not prove
+   delivery, review, install, restart, or communication.
 
 ## Registration verification
 
@@ -128,11 +134,9 @@ collab context
 ```
 
 `collab context` is the registration truth: current Codex sessionID binding,
-role, identity, App Server transport, liveness, and peers. Use
-`collab status --all` only when context explicitly asks for a diagnostic
-follow-up; do not inspect journal, mailbox, `routes.jsonl`, or `~/.collab`
-paths to prove registration. Missing or failed identity prevents claiming
-registration.
+role, identity, App Server transport, liveness, and peers. Do not inspect
+journal, mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration.
+Missing or failed identity prevents claiming registration.
 
 See [`init-prompts.md`](init-prompts.md) for copy/paste master and peer
 initialization prompts.

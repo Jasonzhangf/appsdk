@@ -111,22 +111,20 @@ state, keep the owners separate:
 
 ## Registration verification
 
-### Where registration must run
+### Where registration and identity queries run
 
 `appsdk init` / `collab init` registers the **canonical project root** — the
-main checkout of the project, not a worktree. If you are inside a worktree:
+main checkout of the project, not a worktree. Run those initialization
+commands only from the canonical root. A worktree does not need a second
+registration: run `collab context` directly there. Global Collab state
+resolves the current Codex sessionID/App Server thread to the canonical route
+and reports the inherited peer, liveness, tasks, and peers.
 
-1. `cd` back to the canonical project root.
-2. Re-run `appsdk init .` / `collab init` from that directory.
-
-Do not grep `routes.jsonl` or inspect `~/.collab` to verify the route; the
-CLI rejects a worktree path if registration belongs elsewhere.
-
-A worktree may still own its own scoped writes, task, or claim. The same Codex
-sessionID/thread remains the same peer in that worktree; do not register a new
-peer, promote yourself to master, or create a second project route. If the
-worktree needs separate routing, stop and escalate to the registered master;
-never bypass the main-tree check by hand-editing `routes.jsonl`.
+Use `collab master status` as the authoritative live-master query. `collab
+who` only lists registered peers and has no top-level `master` field. Never
+infer "no master" from a missing worktree-local `.agent-collab/` or from
+`collab who` output. Do not register the worktree as a new peer, promote
+yourself, create a second route, or edit `routes.jsonl`.
 
 After `collab init`, do not stop at command success. Verify with the one
 authoritative query first:
@@ -136,14 +134,14 @@ collab context
 ```
 
 `collab context` is the registration truth: current Codex sessionID binding,
-role, identity, App Server transport, liveness, and peers. Do not inspect
-journal, mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration.
-Missing or failed identity prevents claiming registration.
+role, identity, App Server transport, liveness, tasks, and peers. `collab
+master status` is the separate live-master truth. Do not inspect journal,
+mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration. Missing
+or failed identity prevents claiming registration.
 
 If `collab context` fails with `PROJECT_SCOPE_UNKNOWN`, preserve the exact
-error and stop. If you have independently established that the caller is in a
-Git worktree, return to its canonical project root and run `collab context`
-there. Do not infer worktree scope from the error code alone. If the registered
+error and stop. Do not infer worktree scope from the error code alone, and do
+not silently switch to a guessed parent or another project. If the registered
 route exists but its App Server thread is stale, run `collab worker recover`
 from the canonical root once, then `collab context`; do not re-register the
 worktree or start a daemon.

@@ -41,9 +41,10 @@ project main checkout. A Git worktree contains tracked `.appsdk/` files but
 does not inherit ignored `.agent-collab/` or `.appsdk-control/` state. The
 separate authorized AppSDK `--fresh --discard-legacy` reset may run from its
 clean non-main owner worktree as specified below. Inside a worktree, the same
-Codex sessionID/thread remains the same peer; return to the canonical root for
-`collab context` or recovery. Never register the worktree as a second peer,
-promote yourself, or create a second route.
+Codex sessionID/thread remains the same peer. Run `collab context` directly
+there; it resolves the canonical project root from global Collab state and
+reports the inherited peer, liveness, tasks, and peers. Never register the
+worktree as a second peer, promote yourself, or create a second route.
 
 ## If unregistered
 
@@ -63,6 +64,7 @@ it is idempotent and returns the same initialization result every time.
 ```sh
 cd /abs/path/project
 collab context                  # verify sessionID binding and role
+collab master status            # authoritative live-master query
 # only if collab context says unregistered:
 appsdk init .
 collab context
@@ -145,6 +147,13 @@ If `collab context` says unregistered, run `appsdk init .` once and then
 `collab context` again. If it reports `role=master`, stop and report the
 conflict to the master; do not promote yourself and do not start a second
 daemon.
+
+Use `collab master status` for the live master. `collab who` only lists
+registered peers and does not contain a top-level `master` field. A worktree
+normally has no local `.agent-collab/`; that does not mean the peer is
+unregistered or that no master exists. If route resolution fails, preserve
+the exact error and report it; do not infer "no master" and do not promote
+yourself from the worktree.
 
 For an explicitly authorized clean epoch, the reset owners are separate. The
 AppSDK line is a reset/reinitialize operation, not ordinary initialization:

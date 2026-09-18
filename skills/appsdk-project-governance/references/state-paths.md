@@ -140,11 +140,13 @@ role, identity, App Server transport, liveness, and peers. Do not inspect
 journal, mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration.
 Missing or failed identity prevents claiming registration.
 
-If `collab context` fails with `PROJECT_SCOPE_UNKNOWN`, the worktree has no
-registered canonical route. Return to the canonical root and run
-`collab context` there. If the registered route exists but its App Server
-thread is stale, run `collab worker recover` from the canonical root once,
-then `collab context`; do not re-register the worktree or start a daemon.
+If `collab context` fails with `PROJECT_SCOPE_UNKNOWN`, preserve the exact
+error and stop. If you have independently established that the caller is in a
+Git worktree, return to its canonical project root and run `collab context`
+there. Do not infer worktree scope from the error code alone. If the registered
+route exists but its App Server thread is stale, run `collab worker recover`
+from the canonical root once, then `collab context`; do not re-register the
+worktree or start a daemon.
 
 See [`init-prompts.md`](init-prompts.md) for copy/paste master and peer
 initialization prompts.

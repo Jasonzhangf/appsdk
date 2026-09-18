@@ -120,10 +120,14 @@ registration: run `collab context` directly there. Global Collab state
 resolves the current Codex sessionID/App Server thread to the canonical route
 and reports the inherited peer, liveness, tasks, and peers.
 
-Use `collab master status` as the authoritative live-master query. `collab
-who` only lists registered peers and has no top-level `master` field. Never
-infer "no master" from a missing worktree-local `.agent-collab/` or from
-`collab who` output. Do not register the worktree as a new peer, promote
+Use `collab master status` as the authoritative live-master query. A live
+master exists iff the returned `master` is an object with
+`endpoint_live=true`. `master: null` means no live master is recorded; a
+`master` object with `endpoint_live=false` is a recorded-but-dead identity and
+is not a live master. `collab who` only lists registered peers and has no
+top-level `master` field. Never infer "no master" from a missing
+worktree-local `.agent-collab/`, a failed `collab context`, a `token mismatch`,
+or `collab who` output. Do not register the worktree as a new peer, promote
 yourself, create a second route, or edit `routes.jsonl`.
 
 After `collab init`, do not stop at command success. Verify with the one
@@ -139,12 +143,16 @@ master status` is the separate live-master truth. Do not inspect journal,
 mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration. Missing
 or failed identity prevents claiming registration.
 
-If `collab context` fails with `PROJECT_SCOPE_UNKNOWN`, preserve the exact
-error and stop. Do not infer worktree scope from the error code alone, and do
-not silently switch to a guessed parent or another project. If the registered
-route exists but its App Server thread is stale, run `collab worker recover`
-from the canonical root once, then `collab context`; do not re-register the
-worktree or start a daemon.
+If `collab context` fails with `PROJECT_SCOPE_UNKNOWN` or `token mismatch`,
+preserve the exact error and stop registration repair. Do not infer worktree
+scope from the error code alone, do not silently switch to a guessed parent or
+another project, and do not copy or edit identity/token state. Check `collab
+master status` separately. If `endpoint_live=true`, report the exact context
+error to that live master. If no live master exists, report it to the
+explicitly authorized migration/reset owner or the user. Do not re-register
+the worktree, start a daemon, reset the project, or promote a peer. Use the
+migration/reset owner only when that owner explicitly decides the
+project-local control plane is unrecoverable.
 
 See [`init-prompts.md`](init-prompts.md) for copy/paste master and peer
 initialization prompts.

@@ -148,12 +148,20 @@ If `collab context` says unregistered, run `appsdk init .` once and then
 conflict to the master; do not promote yourself and do not start a second
 daemon.
 
-Use `collab master status` for the live master. `collab who` only lists
+Use `collab master status` for the live master. A live master exists iff the
+returned `master` is an object with `endpoint_live=true`. `master: null` means
+no live master is recorded; a `master` object with `endpoint_live=false` is a
+recorded-but-dead identity and is not a live master. `collab who` only lists
 registered peers and does not contain a top-level `master` field. A worktree
 normally has no local `.agent-collab/`; that does not mean the peer is
-unregistered or that no master exists. If route resolution fails, preserve
-the exact error and report it; do not infer "no master" and do not promote
-yourself from the worktree.
+unregistered or that no master exists. A failed `collab context`, including
+`token mismatch`, is a registration problem, not evidence of no master. If it
+fails, preserve the exact error and query `collab master status` separately:
+report the registration error to the live master only when `endpoint_live=true`;
+when no live master exists, report it to the explicitly authorized
+migration/reset owner or the user and stop registration repair. Do not infer
+"no master", copy/edit identity state, reset, or promote yourself from the
+worktree.
 
 For an explicitly authorized clean epoch, the reset owners are separate. The
 AppSDK line is a reset/reinitialize operation, not ordinary initialization:
@@ -174,7 +182,7 @@ install, restart, or live communication.
 
 ## Recover own binding
 
-If `collab context` reports the wrong or missing binding:
+If `collab context` reports a missing binding with no token mismatch:
 
 ```sh
 collab worker recover
@@ -183,6 +191,15 @@ collab worker recover
 Then run `collab context` again. Do not edit `~/.collab`, do not grep
 `routes.jsonl`, do not touch `server.pid`, do not inspect terminal environment
 paths, do not start a second daemon.
+
+If recovery returns `token mismatch`, stop. That error means the global
+identity token does not own the project reducer's registered worker; it is not
+repairable by copying the token or editing identity files. Preserve the exact
+error and query `collab master status` separately. Report the registration
+problem to the live master only when `endpoint_live=true`; otherwise report it
+to the explicitly authorized migration/reset owner or the user and stop
+registration repair. Use the migration/reset owner only when that owner
+explicitly decides the project-local control plane is unrecoverable.
 
 If recovery reports `DAEMON_UNAVAILABLE` or a stale route, use the controlled
 lifecycle first:

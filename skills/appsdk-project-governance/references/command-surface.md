@@ -28,7 +28,9 @@ appsdk longhorizon show --json         read long-horizon role/task state
 appsdk bug list -q <kw> --json         query bug backlog
 appsdk bug new -t <title> -m <body> -l <labels>
                                        create a bug record
+appsdk bug list ... --upstream         inspect upstream AppSDK defects
 appsdk bug new --upstream ...          report an AppSDK defect upstream
+appsdk bug show ... --upstream         read an upstream AppSDK defect
 appsdk bug show <id> --json            read a bug record
 appsdk bug close <id> -m <solution> --receipt-id <receipt>
                                        close a bug with solution evidence
@@ -49,7 +51,7 @@ project-memory reentry [project] --run <run-id>
 
 ```text
 collab init                            register this peer once through AppSDK or standalone
-collab context                         read current peer/role contract
+collab context                         read current peer state and authority
 collab sendmessage --to <peer> --subject <topic> "<body>"
                                        send one durable ordinary message
 collab recv                            consume delivered notifications

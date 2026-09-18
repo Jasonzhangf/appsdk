@@ -872,6 +872,55 @@ fn init_fresh_starts_a_new_governance_epoch_without_legacy_witnesses() {
 }
 
 #[test]
+fn init_fresh_does_not_initialize_collab_peer() {
+    let root = temp_root("init-fresh-collab-side-effect");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+
+    let fake_bin = temp_root("init-fresh-collab-fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        "#!/bin/sh\nprintf 'invoked\\n' >> \"$APPSDK_COLLAB_PROBE\"\nexit 73\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    let probe = fake_bin.join("collab-init-probe.txt");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let search_path = std::env::join_paths(
+        std::iter::once(fake_bin.clone()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .unwrap();
+
+    let initialized = Command::new(binary())
+        .args(["init", root_text, "--fresh", "--discard-legacy"])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", search_path)
+        .env("APPSDK_COLLAB_PROBE", &probe)
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(
+        !probe.exists(),
+        "fresh governance reset must not invoke Collab initialization"
+    );
+    assert!(
+        !root.join(".agent-collab").exists(),
+        "fresh governance reset must not create project-local Collab state"
+    );
+    fs::remove_dir_all(fake_bin).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_fresh_resets_frozen_lifecycle_evidence_while_preserving_contract() {
     let root = temp_root("init-fresh-frozen-lifecycle-evidence");
     let root_text = root.to_str().unwrap();

@@ -13577,7 +13577,6 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
             .unwrap_or_else(|error| fail(error));
         assert_fresh_project_contract_targets(root);
         try_register_global_project(root);
-        initialize_collab_peer(root);
         if let Err(reason) = memory::initialize_project(root) {
             eprintln!("{}; optional project memory initialization skipped", reason);
         }

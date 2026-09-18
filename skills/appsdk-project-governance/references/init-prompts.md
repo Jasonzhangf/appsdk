@@ -30,8 +30,9 @@ Run one command:
 collab context
 ```
 
-`collab context` returns your Codex sessionID binding, role, identity,
-transport, liveness, current project state, and peers. That output is the
+`collab context` returns identity, liveness, tasks, inbox, `next_actions`,
+master/authority state, and truth. The active `role_brief` is not a context
+field; it is returned only by the registration receipt. That output is the
 truth. Stop after reading it. Do not inspect local environment/control paths
 or run any other exploratory command after it. Registration and wake use the
 internal Codex App Server native thread.
@@ -43,21 +44,24 @@ separate authorized AppSDK `--fresh --discard-legacy` reset may run from its
 clean non-main owner worktree as specified below. Inside a worktree, the same
 Codex sessionID/thread remains the same peer. Run `collab context` directly
 there; it resolves the canonical project root from global Collab state and
-reports the inherited peer, liveness, tasks, and peers. Never register the
-worktree as a second peer, promote yourself, or create a second route.
+reports the inherited identity, liveness, tasks, inbox, `next_actions`, and
+master/authority state. Never register the worktree as a second peer, promote
+yourself, or create a second route.
 
 ## If unregistered
 
-`collab context` will tell you that you are not registered. Run the
-idempotent registration once, from the project main tree:
+An unregistered project may fail `collab context` instead of returning an
+`unregistered` field. Run the idempotent registration once from the project
+main tree, then use `collab context` only to verify the resulting identity:
 
 ```sh
 cd /abs/path/project
 appsdk init .
 ```
 
-Then run `collab context` again. Do not run `appsdk init .` repeatedly;
-it is idempotent and returns the same initialization result every time.
+Then run `collab context` to verify the registration. Do not run
+`appsdk init .` repeatedly; it is idempotent and returns the same
+initialization result every time.
 
 ## Master (after user approval for the exact project + peer)
 
@@ -65,7 +69,7 @@ it is idempotent and returns the same initialization result every time.
 cd /abs/path/project
 collab context                  # verify sessionID binding and role
 collab master status            # authoritative live-master query
-# only if collab context says unregistered:
+# if the project is unregistered:
 appsdk init .
 collab context
 # only when no live master exists and the user approved this exact peer:
@@ -78,8 +82,9 @@ appsdk goal status --json       # active/observed/collab_subscribed
 
 The master then owns orchestration:
 
-1. Query `collab context` once. It must show the Codex sessionID binding,
-   `role=master`, App Server transport, liveness, project state, and peers.
+1. Query `collab context` once. It must show the identity, liveness, tasks,
+   inbox, `next_actions`, and master/authority state; verify the registration
+   receipt separately for `role_brief`.
 2. Split the confirmed goal by dependency and unique write scope. Dispatch
    through `collab subagent dispatch` or `appsdk subagent send`; every
    assignment needs done-iff, artifacts, forbidden paths, exact tests, and
@@ -121,9 +126,9 @@ When a project hits a defect in AppSDK itself, do not patch around it or hide
 it in project-local state:
 
 ```sh
-appsdk bug list -q "<symptom>" --json
+appsdk bug list -q "<symptom>" --json --upstream
 appsdk bug new --upstream -t "[SDK Bug] <symptom>" -m "<reproduction, expected, observed, version, commit, logs>" -l "P0,appsdk"
-appsdk bug show <id> --json
+appsdk bug show <id> --json --upstream
 ```
 
 Include the source commit, binary version/hash, exact command, first failing
@@ -143,9 +148,9 @@ cd /abs/path/project
 collab context
 ```
 
-If `collab context` says unregistered, run `appsdk init .` once and then
-`collab context` again. If it reports `role=master`, stop and report the
-conflict to the master; do not promote yourself and do not start a second
+If the project is unregistered, run `appsdk init .` once and then `collab
+context` to verify the binding. If it reports `role=master`, stop and report
+the conflict to the master; do not promote yourself and do not start a second
 daemon.
 
 Use `collab master status` for the live master. A live master exists iff the

@@ -108,7 +108,7 @@ Ordinary peer initialization, after the project already has
 ```bash
 cd /abs/path/project
 collab context
-# only if collab context says unregistered:
+# if the project is unregistered:
 appsdk init .
 collab context
 ```

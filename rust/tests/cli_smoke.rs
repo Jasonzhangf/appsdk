@@ -1028,11 +1028,11 @@ fn init_fresh_migrates_supported_legacy_sdk_pin_and_preserves_project_contract()
 
     let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
     let mut expected = project;
-    expected["sdk"]["version"] = Value::String("0.1.6".into());
+    expected["sdk"]["version"] = Value::String("0.1.7".into());
     assert_eq!(after, expected);
     let lock: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
-    assert_eq!(lock["version"], "0.1.6");
+    assert_eq!(lock["version"], "0.1.7");
     let reset: Value = serde_json::from_str(
         &fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
     )
@@ -1090,7 +1090,7 @@ fn init_fresh_rebuilds_any_legacy_sdk_pin_without_legacy_migration_records() {
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
         assert_eq!(after["project_id"], project_id);
-        assert_eq!(after["sdk"]["version"], "0.1.6");
+        assert_eq!(after["sdk"]["version"], "0.1.7");
         assert_eq!(after["modules"][0]["module_id"], "legacy-module");
         assert_eq!(after["modules"][0]["source_owner"], "legacy-module");
         assert!(!root.join(".appsdk/migrations/0.1.5-to-0.1.6").exists());
@@ -1140,7 +1140,7 @@ fn project_creation_and_initialization_persist_host_registration() {
         first_receipt["project_root"],
         root.canonicalize().unwrap().to_str().unwrap()
     );
-    assert_eq!(first_receipt["sdk_version"], "0.1.6");
+    assert_eq!(first_receipt["sdk_version"], "0.1.7");
     assert_eq!(first_receipt["idempotent"], false);
 
     let initialized = Command::new(binary())
@@ -1768,7 +1768,7 @@ fn init_fresh_normalizes_sdk_owned_contract_fields_without_losing_project_fields
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
         assert_eq!(after["sdk"]["name"], "appsdk");
-        assert_eq!(after["sdk"]["version"], "0.1.6");
+        assert_eq!(after["sdk"]["version"], "0.1.7");
         assert_eq!(
             after["sdk"]["bundle_manifest"],
             ".appsdk/contracts/sdk-bundle.manifest.json"
@@ -3058,7 +3058,7 @@ fn init_upgrades_legacy_placeholder_lock_without_pin_lock() {
     assert!(run(&["new", root_text]).status.success());
     fs::write(
         root.join(".appsdk/sdk.lock"),
-        r#"{"sdk":"appsdk","version":"0.1.6","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.7","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     )
     .unwrap();
@@ -4637,11 +4637,13 @@ fn lifecycle_chain_new_candidate_preserves_pass_bytes_and_reuses_current() {
                 "experiment_id":"experiment-2","new_active_version":"active-v2","previous_active_version":null,
                 "compatibility_level":"compatible","evidence_ids":["candidate-evidence-1"],
                 "required_gate_results":[
+                    {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
                     {"gate_id":"contract_valid","result":"pass","producer":"test"},
                     {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
                     {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
                     {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
                     {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                    {"gate_id":"artifact_hash","result":"pass","producer":"test"},
                     {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
                 ],"change_set_id":"change-2","root_cause":"root cause","design_id":"design-1",
                 "change_reason_comment":"reason","playground_cleanup_record_id":"cleanup-1","artifact_hash":artifact_hash
@@ -4940,11 +4942,13 @@ fn lifecycle_chain_replaces_stale_promotion_pass() {
                 "compatibility_level": "compatible",
                 "evidence_ids": ["candidate-evidence-1"],
                 "required_gate_results": [
+                    {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
                     {"gate_id":"contract_valid","result":"pass","producer":"test"},
                     {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
                     {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
                     {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
                     {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                    {"gate_id":"artifact_hash","result":"pass","producer":"test"},
                     {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
                 ],
                 "change_set_id": "change-2",
@@ -5269,11 +5273,13 @@ fn lifecycle_chain_reenters_non_pass_downstream_stages_and_preserves_attempt_his
                 "compatibility_level": "compatible",
                 "evidence_ids": ["candidate-evidence-1"],
                 "required_gate_results": [
+                    {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
                     {"gate_id":"contract_valid","result":"pass","producer":"test"},
                     {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
                     {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
                     {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
                     {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                    {"gate_id":"artifact_hash","result":"pass","producer":"test"},
                     {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
                 ],
                 "change_set_id": "change-2",
@@ -5621,12 +5627,14 @@ fn lifecycle_chain_promotion_rejects_merge_graph_mismatch_before_writing_record(
             "compatibility_level": "compatible",
             "evidence_ids": ["candidate-evidence-1"],
             "required_gate_results": [
+                {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
                 {"gate_id":"contract_valid","result":"pass","producer":"test"},
                 {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
                 {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
                 {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"},
                 {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"forged"},
-                {"gate_id":"mainline_merge_identity","result":"pass","producer":"forged"}
+                {"gate_id":"mainline_merge_identity","result":"pass","producer":"forged"},
+                {"gate_id":"artifact_hash","result":"pass","producer":"test"}
             ],
             "change_set_id": "change-2",
             "root_cause": "root cause",
@@ -5674,11 +5682,13 @@ fn lifecycle_chain_promotion_writes_bound_record_for_project_module() {
             "compatibility_level": "compatible",
             "evidence_ids": ["candidate-evidence-1"],
             "required_gate_results": [
+                {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
                 {"gate_id":"contract_valid","result":"pass","producer":"test"},
                 {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
                 {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
                 {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
                 {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                {"gate_id":"artifact_hash","result":"pass","producer":"test"},
                 {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
             ],
             "change_set_id": "change-2",
@@ -5750,11 +5760,13 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
             "compatibility_level": "compatible",
             "evidence_ids": ["candidate-evidence-1"],
             "required_gate_results": [
+                {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
                 {"gate_id":"contract_valid","result":"pass","producer":"test"},
                 {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
                 {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
                 {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
                 {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                {"gate_id":"artifact_hash","result":"pass","producer":"test"},
                 {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
             ],
             "collaboration_record_id": "collaboration-1",
@@ -7750,7 +7762,7 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         intake_json["standard_template"]["path"],
         ".appsdk/templates/minimal/AGENTS.md"
     );
-    assert_eq!(intake_json["standard_template"]["version"], "0.1.6");
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.7");
     assert_eq!(
         intake_json["standard_template"]["digest"],
         file_digest(&reference)
@@ -8839,10 +8851,25 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
         ),
     ] {
         fs::write(migration_root.join("maps").join(name), content).unwrap();
+        let target_digest = digest(match name {
+            "resource-map.json" => {
+                include_str!("../../contracts/migrations/0.1.6/governance-maps/resource-map.json")
+            }
+            "function-map.json" => {
+                include_str!("../../contracts/migrations/0.1.6/governance-maps/function-map.json")
+            }
+            "mainline-call-map.json" => include_str!(
+                "../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"
+            ),
+            "verification-map.json" => include_str!(
+                "../../contracts/migrations/0.1.6/governance-maps/verification-map.json"
+            ),
+            _ => unreachable!(),
+        });
         maps.push(serde_json::json!({
             "name": name,
             "source_digest": digest(content),
-            "target_digest": format!("sha256:{}", "3".repeat(64)),
+            "target_digest": target_digest,
             "snapshot_path": format!(".appsdk/migrations/0.1.5-to-0.1.6/maps/{}", name)
         }));
     }
@@ -8865,7 +8892,7 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
 
     let lock_path = root.join(".appsdk/sdk.lock");
     let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
-    lock["version"] = Value::String("0.1.6".into());
+    lock["version"] = Value::String("0.1.7".into());
     lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
     lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
     fs::write(
@@ -9171,7 +9198,7 @@ fn pin_lock_preserves_historical_custom_maps_with_bundle_witness() {
     ]);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains("SDK_MIGRATION_TARGET_MAP_MISMATCH:resource-map.json"));
+        .contains("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:resource-map.json"));
     assert_eq!(fs::read_to_string(&record_path).unwrap(), historical_record);
     fs::remove_dir_all(root).unwrap();
 }
@@ -9184,11 +9211,11 @@ fn pin_lock_rejects_custom_map_record_from_bundle_reconciliation() {
     let (original_record, _) = install_previous_bundle_migration_record(&root);
     let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
     let mut record: Value = serde_json::from_str(&original_record).unwrap();
-    record["maps"][0]["canonical_source_digest"] = Value::String(digest(include_str!(
-        "../../contracts/migrations/0.1.5/governance-maps/resource-map.json"
+    record["maps"][3]["canonical_source_digest"] = Value::String(digest(include_str!(
+        "../../contracts/migrations/0.1.5/governance-maps/verification-map.json"
     )));
-    record["maps"][0]["canonical_target_digest"] = Value::String(digest(include_str!(
-        "../../contracts/maps/resource-map.json"
+    record["maps"][3]["canonical_target_digest"] = Value::String(digest(include_str!(
+        "../../contracts/maps/verification-map.json"
     )));
     fs::write(
         &record_path,
@@ -9203,8 +9230,7 @@ fn pin_lock_rejects_custom_map_record_from_bundle_reconciliation() {
         binary().to_str().unwrap(),
     ]);
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr)
-        .contains("SDK_MIGRATION_TARGET_MAP_MISMATCH:resource-map.json"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -9304,7 +9330,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     ]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr)
-        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.6"));
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.7"));
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
 
     project["sdk"]["version"] = Value::String("0.1.5".into());
@@ -9343,8 +9369,8 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
         serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
     let migrated_lock: Value =
         serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
-    assert_eq!(migrated_project["sdk"]["version"], "0.1.6");
-    assert_eq!(migrated_lock["version"], "0.1.6");
+    assert_eq!(migrated_project["sdk"]["version"], "0.1.7");
+    assert_eq!(migrated_lock["version"], "0.1.7");
     assert!(run(&["verify", root_text]).status.success());
 
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
@@ -11413,7 +11439,7 @@ fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.6", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.7", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},
@@ -19190,4 +19216,39 @@ exit 44
     assert!(!String::from_utf8_lossy(&failed.stdout).contains("\"ok\":true"));
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn canonical_function_map_required_gates_resolve_exactly_once() {
+    let maps_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../contracts/maps");
+    let function_map: Value =
+        serde_json::from_slice(&fs::read(maps_root.join("function-map.json")).unwrap()).unwrap();
+    let verification_map: Value =
+        serde_json::from_slice(&fs::read(maps_root.join("verification-map.json")).unwrap())
+            .unwrap();
+
+    let gate_ids = verification_map["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|gate| gate["gate_id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    let unique_gate_ids = gate_ids.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        gate_ids.len(),
+        unique_gate_ids.len(),
+        "canonical verification-map contains duplicate gate_id values"
+    );
+
+    for function in function_map["functions"].as_array().unwrap() {
+        let function_id = function["function_id"].as_str().unwrap();
+        for gate_id in function["required_gates"].as_array().unwrap() {
+            let gate_id = gate_id.as_str().unwrap();
+            assert_eq!(
+                gate_ids.iter().filter(|candidate| candidate.as_str() == gate_id).count(),
+                1,
+                "function {function_id} requires gate {gate_id}, but it does not resolve exactly once"
+            );
+        }
+    }
 }

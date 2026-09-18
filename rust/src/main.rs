@@ -28,8 +28,11 @@ mod communication;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SDK_MAP_MIGRATION_MANIFEST: &str =
+const SDK_MAP_MIGRATION_0_1_5_TO_0_1_6: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
+const SDK_MAP_MIGRATION_0_1_6_TO_0_1_7: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.7.json");
+const SDK_MAP_MIGRATION_STEPS: [&str; 2] = ["0.1.5-to-0.1.6", "0.1.6-to-0.1.7"];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
     include_str!("../../contracts/transitions/zone-transition.manifest.json");
@@ -111,6 +114,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
     ),
     (
+        "contracts/migrations/sdk-0.1.6-to-0.1.7.json",
+        "contracts",
+        include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.7.json"),
+    ),
+    (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
@@ -129,6 +137,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/0.1.5/governance-maps/verification-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.5/governance-maps/verification-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.6/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.6/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.6/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.6/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.6/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.6/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
     ),
     (
         "contracts/transitions/zone-transition.manifest.json",
@@ -394,35 +422,53 @@ fn canonical_governance_map(name: &str) -> &'static str {
     }
 }
 
-fn historical_governance_map(name: &str) -> &'static str {
-    match name {
-        "resource-map.json" => {
+fn historical_governance_map(version: &str, name: &str) -> &'static str {
+    match (version, name) {
+        ("0.1.5", "resource-map.json") => {
             include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json")
         }
-        "function-map.json" => {
+        ("0.1.5", "function-map.json") => {
             include_str!("../../contracts/migrations/0.1.5/governance-maps/function-map.json")
         }
-        "mainline-call-map.json" => {
+        ("0.1.5", "mainline-call-map.json") => {
             include_str!("../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json")
         }
-        "verification-map.json" => {
+        ("0.1.5", "verification-map.json") => {
             include_str!("../../contracts/migrations/0.1.5/governance-maps/verification-map.json")
+        }
+        ("0.1.6", "resource-map.json") => {
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/resource-map.json")
+        }
+        ("0.1.6", "function-map.json") => {
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/function-map.json")
+        }
+        ("0.1.6", "mainline-call-map.json") => {
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json")
+        }
+        ("0.1.6", "verification-map.json") => {
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json")
         }
         _ => fail("UNKNOWN_GOVERNANCE_MAP"),
     }
 }
 
-fn sdk_map_migration_manifest() -> Value {
-    let manifest: Value = serde_json::from_str(SDK_MAP_MIGRATION_MANIFEST)
+fn sdk_map_migration_manifest(step: &str) -> Value {
+    let (manifest_text, source_version, target_version) = match step {
+        "0.1.5-to-0.1.6" => (SDK_MAP_MIGRATION_0_1_5_TO_0_1_6, "0.1.5", "0.1.6"),
+        "0.1.6-to-0.1.7" => (SDK_MAP_MIGRATION_0_1_6_TO_0_1_7, "0.1.6", "0.1.7"),
+        _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
+    };
+    let manifest: Value = serde_json::from_str(manifest_text)
         .unwrap_or_else(|_| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"));
+    let migration_id = format!("appsdk-{step}");
+    let snapshot_root = format!(".appsdk/migrations/{step}/maps");
+    let record_path = format!(".appsdk/migrations/{step}/record.json");
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
-        || manifest.get("migration_id").and_then(Value::as_str) != Some("appsdk-0.1.5-to-0.1.6")
-        || manifest.get("source_version").and_then(Value::as_str) != Some("0.1.5")
-        || manifest.get("target_version").and_then(Value::as_str) != Some("0.1.6")
-        || manifest.get("snapshot_root").and_then(Value::as_str)
-            != Some(".appsdk/migrations/0.1.5-to-0.1.6/maps")
-        || manifest.get("record_path").and_then(Value::as_str)
-            != Some(".appsdk/migrations/0.1.5-to-0.1.6/record.json")
+        || manifest.get("migration_id").and_then(Value::as_str) != Some(migration_id.as_str())
+        || manifest.get("source_version").and_then(Value::as_str) != Some(source_version)
+        || manifest.get("target_version").and_then(Value::as_str) != Some(target_version)
+        || manifest.get("snapshot_root").and_then(Value::as_str) != Some(snapshot_root.as_str())
+        || manifest.get("record_path").and_then(Value::as_str) != Some(record_path.as_str())
     {
         fail("INVALID_SDK_MAP_MIGRATION_MANIFEST");
     }
@@ -439,9 +485,18 @@ fn sdk_map_migration_manifest() -> Value {
             .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
             .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"));
         if entry.get("source_digest").and_then(Value::as_str)
-            != Some(digest_bytes(historical_governance_map(name).as_bytes()).as_str())
+            != Some(
+                digest_bytes(historical_governance_map(source_version, name).as_bytes()).as_str(),
+            )
             || entry.get("target_digest").and_then(Value::as_str)
-                != Some(digest_bytes(canonical_governance_map(name).as_bytes()).as_str())
+                != Some(
+                    digest_bytes(if target_version == SDK_VERSION {
+                        canonical_governance_map(name).as_bytes()
+                    } else {
+                        historical_governance_map(target_version, name).as_bytes()
+                    })
+                    .as_str(),
+                )
         {
             fail(format!(
                 "SDK_MAP_MIGRATION_MANIFEST_DIGEST_MISMATCH:{}",
@@ -535,7 +590,7 @@ fn assert_bundle_manifest() {
         .unwrap_or_else(|_| fail("INVALID_SDK_BUNDLE_MANIFEST"));
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
         || manifest.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || manifest.get("version").and_then(Value::as_str) != Some("0.1.6")
+        || manifest.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
         || manifest.get("runtime_entrypoint").and_then(Value::as_str) != Some("rust-binary")
     {
         fail("INVALID_SDK_BUNDLE_MANIFEST");
@@ -572,7 +627,7 @@ fn install_bundle_resources(root: &Path) {
     let record = serde_json::json!({
         "schema_version": 1,
         "sdk": "appsdk",
-        "version": "0.1.6",
+        "version": SDK_VERSION,
         "bundle_digest": sdk_bundle_digest(),
         "manifest_digest": digest_bytes(SDK_BUNDLE_MANIFEST.as_bytes()),
         "resources": installed
@@ -3999,7 +4054,7 @@ fn assert_project_contract(root: &Path, project: &Value) {
         .pointer("/sdk/version")
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/sdk/version"));
-    if sdk_version != "0.1.6" {
+    if sdk_version != SDK_VERSION {
         fail(format!(
             "PROJECT_SDK_VERSION_PIN_MISMATCH:{}:required_binary=appsdk-{}",
             sdk_version, sdk_version
@@ -9985,9 +10040,49 @@ fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, revi
         .get("stage")
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("INVALID_MODULE_CONTRACT"));
-    let migration =
-        assert_sdk_migration_record(root).unwrap_or_else(|| fail("ARCHITECTURE_REVIEW_MAP_STALE"));
     let review_id = record_str(review, "/review_id", review_name);
+    let migration = SDK_MAP_MIGRATION_STEPS
+        .iter()
+        .rev()
+        .find_map(|step| {
+            if !sdk_map_migration_root(root, step)
+                .join("record.json")
+                .is_file()
+            {
+                return None;
+            }
+            let migration =
+                assert_sdk_migration_record(root, step, sdk_map_migration_checks_live_target(step))
+                    .unwrap_or_else(|| fail("ARCHITECTURE_REVIEW_MAP_STALE"));
+            let retained_review = |key: &str| {
+                migration
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .is_some_and(|reviews| {
+                        reviews.iter().any(|entry| {
+                            entry.get("module_id").and_then(Value::as_str) == Some(module_id)
+                                && entry.get("review_id").and_then(Value::as_str) == Some(review_id)
+                        })
+                    })
+            };
+            if !retained_review("frozen_reviews") && !retained_review("legacy_reconciled_reviews") {
+                return None;
+            }
+            let map_bindings_match = bindings.iter().all(|(map, path)| {
+                let expected = record_str(review, path, review_name);
+                let migration_entry = migration
+                    .get("maps")
+                    .and_then(Value::as_array)
+                    .and_then(|maps| {
+                        maps.iter()
+                            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(*map))
+                    })
+                    .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+                expected == record_str(migration_entry, "/source_digest", "sdk-map-migration")
+            });
+            map_bindings_match.then_some(migration)
+        })
+        .unwrap_or_else(|| fail("ARCHITECTURE_REVIEW_MAP_STALE"));
     let retained_review = |key: &str| {
         migration
             .get(key)
@@ -10004,20 +10099,6 @@ fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, revi
         || (!matches!(stage, "frozen" | "retired") && !retained_review("legacy_reconciled_reviews"))
     {
         fail("ARCHITECTURE_REVIEW_MAP_STALE");
-    }
-    for (map, path) in bindings {
-        let expected = record_str(review, path, review_name);
-        let migration_entry = migration
-            .get("maps")
-            .and_then(Value::as_array)
-            .and_then(|maps| {
-                maps.iter()
-                    .find(|entry| entry.get("name").and_then(Value::as_str) == Some(map))
-            })
-            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-        if expected != record_str(migration_entry, "/source_digest", "sdk-map-migration") {
-            fail("ARCHITECTURE_REVIEW_MAP_STALE");
-        }
     }
 }
 
@@ -12068,7 +12149,7 @@ fn assert_sdk_resources(root: &Path, required: bool, allow_reset_resource_gaps: 
     .unwrap_or_else(|_| fail("INVALID_SDK_RESOURCES"));
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
         || record.get("sdk").and_then(Value::as_str) != Some("appsdk")
-        || record.get("version").and_then(Value::as_str) != Some("0.1.6")
+        || record.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
     {
         fail("INVALID_SDK_RESOURCES");
     }
@@ -12303,12 +12384,14 @@ fn reset_governance_record_mode(root: &Path) -> Option<String> {
 
 fn verify_sdk_migration_record(root: &Path, admission: bool) {
     if !admission && reset_governance_record_mode(root).is_some() {
-        let migration_root = sdk_map_migration_root(root);
-        if fs::symlink_metadata(&migration_root).is_ok() {
-            eprintln!(
-                "warning: SDK migration history ignored after authorized governance reset ({})",
-                migration_root.display()
-            );
+        for step in SDK_MAP_MIGRATION_STEPS {
+            let migration_root = sdk_map_migration_root(root, step);
+            if fs::symlink_metadata(&migration_root).is_ok() {
+                eprintln!(
+                    "warning: SDK migration history ignored after authorized governance reset ({})",
+                    migration_root.display()
+                );
+            }
         }
         return;
     }
@@ -12319,29 +12402,39 @@ fn verify_sdk_migration_record(root: &Path, admission: bool) {
         // active, but do not turn an historical bundle mismatch into a
         // development blocker.  Once the lock points at this Bundle, the
         // strict migration validator below remains authoritative.
-        let migration_root = sdk_map_migration_root(root);
-        if fs::symlink_metadata(&migration_root).is_ok() {
-            assert_no_symlink_components(root, &migration_root, "sdk_migration");
-            let lock_path = root.join(".appsdk/sdk.lock");
-            let lock_bundle = fs::read_to_string(&lock_path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .and_then(|lock| {
-                    lock.get("bundle_digest")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                });
-            let current_bundle = sdk_bundle_digest();
-            if lock_bundle.as_deref() != Some(current_bundle.as_str()) {
-                eprintln!(
-                    "warning: legacy SDK migration history retained for ordinary development ({})",
-                    migration_root.display()
-                );
-                return;
+        for step in SDK_MAP_MIGRATION_STEPS {
+            let migration_root = sdk_map_migration_root(root, step);
+            if fs::symlink_metadata(&migration_root).is_ok() {
+                assert_no_symlink_components(root, &migration_root, "sdk_migration");
+                let lock_path = root.join(".appsdk/sdk.lock");
+                let lock_bundle = fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .and_then(|lock| {
+                        lock.get("bundle_digest")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                let current_bundle = sdk_bundle_digest();
+                if lock_bundle.as_deref() != Some(current_bundle.as_str()) {
+                    eprintln!(
+                        "warning: legacy SDK migration history retained for ordinary development ({})",
+                        migration_root.display()
+                    );
+                    return;
+                }
             }
         }
     }
-    let _ = assert_sdk_migration_record(root);
+    for step in SDK_MAP_MIGRATION_STEPS {
+        if sdk_map_migration_root(root, step)
+            .join("record.json")
+            .is_file()
+        {
+            let _ =
+                assert_sdk_migration_record(root, step, sdk_map_migration_checks_live_target(step));
+        }
+    }
 }
 
 fn verify_internal(
@@ -12868,7 +12961,7 @@ fn write_project_agent_contract(root: &Path) {
 
 fn write_current_sdk_lock(root: &Path) {
     let project = read_project(root);
-    if project.pointer("/sdk/version").and_then(Value::as_str) != Some("0.1.6") {
+    if project.pointer("/sdk/version").and_then(Value::as_str) != Some(SDK_VERSION) {
         return;
     }
     let target = root.join(".appsdk/sdk.lock");
@@ -12883,7 +12976,7 @@ fn write_current_sdk_lock(root: &Path) {
         let value =
             serde_json::from_str::<Value>(&text).unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
         if value.get("sdk").and_then(Value::as_str) != Some("appsdk")
-            || value.get("version").and_then(Value::as_str) != Some("0.1.6")
+            || value.get("version").and_then(Value::as_str) != Some(SDK_VERSION)
             || value.get("contract_schema") != project.get("schema_version")
         {
             fail("INVALID_SDK_LOCK");
@@ -12895,7 +12988,7 @@ fn write_current_sdk_lock(root: &Path) {
     let current_bundle_digest = sdk_bundle_digest();
     let mut lock = serde_json::Map::new();
     lock.insert("sdk".into(), Value::String("appsdk".into()));
-    lock.insert("version".into(), Value::String("0.1.6".into()));
+    lock.insert("version".into(), Value::String(SDK_VERSION.into()));
     lock.insert(
         "bundle_digest".into(),
         Value::String(current_bundle_digest.clone()),
@@ -12933,7 +13026,7 @@ fn write_current_sdk_lock(root: &Path) {
                 && value != current_bundle_digest
         };
         // Keep the historical migration witness if the lock already records one.
-        // Overwriting it with the immediate bundle severs the 0.1.5->0.1.6
+        // Overwriting it with the immediate bundle severs the historical
         // witness chain and makes admission reject the lock.
         let existing_bundle = existing.get("bundle_digest").and_then(Value::as_str);
         let previous_bundle = existing
@@ -12979,7 +13072,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.6", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.7", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
@@ -13801,10 +13894,8 @@ fn rebuild_fresh_project_contract(project: &Value, scaffold: &Value) -> Value {
     rebuilt
 }
 
-fn sdk_map_migration_root(root: &Path) -> PathBuf {
-    root.join(".appsdk")
-        .join("migrations")
-        .join("0.1.5-to-0.1.6")
+fn sdk_map_migration_root(root: &Path, step: &str) -> PathBuf {
+    root.join(".appsdk").join("migrations").join(step)
 }
 
 fn sdk_map_migration_entry<'a>(manifest: &'a Value, name: &str) -> &'a Value {
@@ -13856,8 +13947,87 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
     None
 }
 
-fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
-    let migration_root = sdk_map_migration_root(root);
+fn sdk_map_migration_manifest_versions(manifest: &Value) -> (&str, &str) {
+    (
+        manifest
+            .get("source_version")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST")),
+        manifest
+            .get("target_version")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST")),
+    )
+}
+
+fn sdk_map_migration_target_content(manifest: &Value, name: &str) -> &'static str {
+    let (_, target_version) = sdk_map_migration_manifest_versions(manifest);
+    if target_version == SDK_VERSION {
+        canonical_governance_map(name)
+    } else {
+        historical_governance_map(target_version, name)
+    }
+}
+
+fn sdk_map_migration_checks_live_target(step: &str) -> bool {
+    let manifest = sdk_map_migration_manifest(step);
+    let (_, target_version) = sdk_map_migration_manifest_versions(&manifest);
+    target_version == SDK_VERSION
+}
+
+fn sdk_historical_review_map_binding(
+    root: &Path,
+    module_id: &str,
+    review: &Value,
+    review_name: &str,
+) -> bool {
+    let bindings = [
+        ("resource-map.json", "resource_map_hash"),
+        ("function-map.json", "function_map_hash"),
+        ("mainline-call-map.json", "mainline_call_map_hash"),
+        ("verification-map.json", "verification_map_hash"),
+    ];
+    let review_id = record_str(review, "/review_id", review_name);
+    SDK_MAP_MIGRATION_STEPS
+        .iter()
+        .filter(|step| !sdk_map_migration_checks_live_target(step))
+        .any(|step| {
+            if !sdk_map_migration_root(root, step)
+                .join("record.json")
+                .is_file()
+            {
+                return false;
+            }
+            let migration = assert_sdk_migration_record(root, step, false)
+                .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+            let retained = ["frozen_reviews", "legacy_reconciled_reviews"]
+                .iter()
+                .any(|key| {
+                    migration
+                        .get(*key)
+                        .and_then(Value::as_array)
+                        .is_some_and(|reviews| {
+                            reviews.iter().any(|entry| {
+                                entry.get("module_id").and_then(Value::as_str) == Some(module_id)
+                                    && entry.get("review_id").and_then(Value::as_str)
+                                        == Some(review_id)
+                            })
+                        })
+                });
+            if !retained {
+                return false;
+            }
+            let manifest = sdk_map_migration_manifest(step);
+            bindings.iter().all(|(name, field)| {
+                let entry = sdk_map_migration_entry(&manifest, name);
+                record_str(review, &format!("/{field}"), review_name)
+                    == record_str(entry, "/source_digest", "sdk-map-migration")
+            })
+        })
+}
+
+fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool) -> Option<Value> {
+    let migration_root = sdk_map_migration_root(root, step);
     let record_path = migration_root.join("record.json");
     if !record_path.exists() {
         if migration_root.exists() {
@@ -13870,10 +14040,13 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         &fs::read_to_string(&record_path).unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
     )
     .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+    let manifest = sdk_map_migration_manifest(step);
+    let (source_version, target_version) = sdk_map_migration_manifest_versions(&manifest);
     if record.get("schema_version").and_then(Value::as_u64) != Some(1)
-        || record.get("migration_id").and_then(Value::as_str) != Some("appsdk-0.1.5-to-0.1.6")
-        || record.get("source_version").and_then(Value::as_str) != Some("0.1.5")
-        || record.get("target_version").and_then(Value::as_str) != Some("0.1.6")
+        || record.get("migration_id").and_then(Value::as_str)
+            != manifest.get("migration_id").and_then(Value::as_str)
+        || record.get("source_version").and_then(Value::as_str) != Some(source_version)
+        || record.get("target_version").and_then(Value::as_str) != Some(target_version)
         || record
             .get("bundle_digest")
             .and_then(Value::as_str)
@@ -13884,7 +14057,6 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
     {
         fail("INVALID_SDK_MIGRATION_RECORD");
     }
-    let manifest = sdk_map_migration_manifest();
     let maps = record
         .get("maps")
         .and_then(Value::as_array)
@@ -13892,36 +14064,19 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
     if maps.len() != GOVERNANCE_MAP_NAMES.len() {
         fail("INVALID_SDK_MIGRATION_RECORD");
     }
-    let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
     for name in GOVERNANCE_MAP_NAMES {
         let declared = sdk_map_migration_entry(&manifest, name);
         let entry = maps
             .iter()
             .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
             .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
-        let expected_snapshot = format!(".appsdk/migrations/0.1.5-to-0.1.6/maps/{}", name);
-        let canonical_source = entry
+        let expected_snapshot = format!(".appsdk/migrations/{step}/maps/{}", name);
+        if entry
             .get("canonical_source_digest")
-            .unwrap_or_else(|| entry.get("source_digest").unwrap());
-        let canonical_target = entry
-            .get("canonical_target_digest")
-            .unwrap_or_else(|| entry.get("target_digest").unwrap());
-        if (Some(canonical_source) != declared.get("source_digest")
-            && entry
-                .get("canonical_source_digest")
-                .is_some_and(|value| !value.is_null()))
-            || (Some(canonical_target) != declared.get("target_digest")
-                && entry
-                    .get("canonical_target_digest")
-                    .is_some_and(|value| !value.is_null())
-                // A witnessed upgrade preserves the historical canonical target.
-                // Snapshot and live custom-map bytes remain checked below.
-                && !(bundle_transition
-                    && canonical_target.as_str().is_some_and(|digest| {
-                        digest.strip_prefix("sha256:").is_some_and(|hex| {
-                            hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        })
-                    })))
+            .is_some_and(|value| !value.is_null() && Some(value) != declared.get("source_digest"))
+            || entry.get("canonical_target_digest").is_some_and(|value| {
+                !value.is_null() && Some(value) != declared.get("target_digest")
+            })
             || entry.get("snapshot_path").and_then(Value::as_str)
                 != Some(expected_snapshot.as_str())
         {
@@ -13934,19 +14089,11 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
         {
             fail(format!("SDK_MIGRATION_SNAPSHOT_MISMATCH:{}", name));
         }
-        let live_digest = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
-        let target_digest = record_str(entry, "/target_digest", "sdk-migration-map");
-        let current_target = record_str(declared, "/target_digest", "sdk-map-migration");
-        let current_target_is_authorized = bundle_transition
-            && entry
-                .get("canonical_source_digest")
-                .is_none_or(Value::is_null)
-            && entry
-                .get("canonical_target_digest")
-                .is_none_or(Value::is_null)
-            && live_digest == current_target;
-        if live_digest != target_digest && !current_target_is_authorized {
-            fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
+        if check_live_target {
+            let live_digest = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+            if live_digest != record_str(entry, "/target_digest", "sdk-migration-map") {
+                fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
+            }
         }
     }
     let reviews = record
@@ -13985,8 +14132,8 @@ fn assert_sdk_migration_record(root: &Path) -> Option<Value> {
     Some(record)
 }
 
-fn install_current_governance_maps(root: &Path, force: bool) {
-    let record_path = sdk_map_migration_root(root).join("record.json");
+fn install_governance_maps(root: &Path, step: &str, force: bool) {
+    let record_path = sdk_map_migration_root(root, step).join("record.json");
     if !force && record_path.is_file() {
         let record: Value = serde_json::from_str(
             &fs::read_to_string(&record_path)
@@ -14000,12 +14147,12 @@ fn install_current_governance_maps(root: &Path, force: bool) {
             return;
         }
     }
-    let manifest = sdk_map_migration_manifest();
+    let manifest = sdk_map_migration_manifest(step);
     for name in GOVERNANCE_MAP_NAMES {
         let target = root.join(".appsdk/maps").join(name);
         atomic_write_bytes(
             &target,
-            canonical_governance_map(name).as_bytes(),
+            sdk_map_migration_target_content(&manifest, name).as_bytes(),
             "SDK_MAP_MIGRATION_WRITE_FAILED",
         );
         if file_sha256(&target, "governance_map")
@@ -14020,15 +14167,20 @@ fn install_current_governance_maps(root: &Path, force: bool) {
     }
 }
 
-fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) {
-    let migration_root = sdk_map_migration_root(root);
+fn migrate_governance_maps(root: &Path, project: &Value, step: &str) {
+    let migration_root = sdk_map_migration_root(root, step);
     if migration_root.join("record.json").is_file() {
+        let manifest = sdk_map_migration_manifest(step);
+        let (_, target_version) = sdk_map_migration_manifest_versions(&manifest);
+        if target_version != SDK_VERSION {
+            let _ = assert_sdk_migration_record(root, step, false);
+            return;
+        }
         let record: Value = serde_json::from_str(
             &fs::read_to_string(migration_root.join("record.json"))
                 .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
         )
         .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
-        let manifest = sdk_map_migration_manifest();
         let source_maps = GOVERNANCE_MAP_NAMES.iter().all(|name| {
             file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
                 == record_str(
@@ -14127,16 +14279,25 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
                 }
             }
         }
-        install_current_governance_maps(root, source_maps);
-        assert_sdk_migration_record(root);
+        install_governance_maps(root, step, source_maps);
+        let _ = assert_sdk_migration_record(root, step, true);
         return;
     }
-    let manifest = sdk_map_migration_manifest();
+    let manifest = sdk_map_migration_manifest(step);
+    let (source_version, target_version) = sdk_map_migration_manifest_versions(&manifest);
     let canonical_source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
         file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
             == record_str(
                 sdk_map_migration_entry(&manifest, name),
                 "/source_digest",
+                "sdk-map-migration",
+            )
+    });
+    let current_target_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+        file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+            == record_str(
+                sdk_map_migration_entry(&manifest, name),
+                "/target_digest",
                 "sdk-map-migration",
             )
     });
@@ -14147,8 +14308,109 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
         }
         let _ = file_sha256(&live, "governance_map");
     }
-    if project_version == "0.1.6" && !canonical_source_matches {
-        return;
+    if project.pointer("/sdk/version").and_then(Value::as_str) == Some(target_version)
+        && !canonical_source_matches
+    {
+        let historical_custom_maps = SDK_MAP_MIGRATION_STEPS
+            .iter()
+            .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
+            .any(|prior_step| {
+                if !sdk_map_migration_root(root, prior_step)
+                    .join("record.json")
+                    .is_file()
+                {
+                    return false;
+                }
+                let prior_record = assert_sdk_migration_record(root, prior_step, false)
+                    .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+                let has_custom_binding = prior_record
+                    .get("maps")
+                    .and_then(Value::as_array)
+                    .is_some_and(|maps| {
+                        maps.iter().any(|entry| {
+                            entry
+                                .get("canonical_source_digest")
+                                .is_some_and(Value::is_string)
+                                || entry
+                                    .get("canonical_target_digest")
+                                    .is_some_and(Value::is_string)
+                        })
+                    });
+                has_custom_binding
+                    && GOVERNANCE_MAP_NAMES.iter().all(|name| {
+                        let entry = prior_record
+                            .get("maps")
+                            .and_then(Value::as_array)
+                            .and_then(|maps| {
+                                maps.iter().find(|entry| {
+                                    entry.get("name").and_then(Value::as_str) == Some(name)
+                                })
+                            })
+                            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+                        let live =
+                            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
+                        live == record_str(entry, "/source_digest", "sdk-migration-map")
+                            || live == record_str(entry, "/target_digest", "sdk-migration-map")
+                    })
+            });
+        let prior_bundle_transition_required = SDK_MAP_MIGRATION_STEPS
+            .iter()
+            .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
+            .any(|prior_step| {
+                let record_path = sdk_map_migration_root(root, prior_step).join("record.json");
+                if !record_path.is_file() {
+                    return false;
+                }
+                let prior_record: Value = serde_json::from_str(
+                    &fs::read_to_string(&record_path)
+                        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+                )
+                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+                prior_record
+                    .get("bundle_digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| digest != sdk_bundle_digest())
+            });
+        let prior_witness = SDK_MAP_MIGRATION_STEPS
+            .iter()
+            .filter(|prior_step| !sdk_map_migration_checks_live_target(prior_step))
+            .any(|prior_step| {
+                let record_path = sdk_map_migration_root(root, prior_step).join("record.json");
+                if !record_path.is_file() {
+                    return false;
+                }
+                let prior_record: Value = serde_json::from_str(
+                    &fs::read_to_string(&record_path)
+                        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+                )
+                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+                migration_bundle_transition_digest(root, &prior_record).is_some()
+            });
+        if current_target_matches {
+            if prior_bundle_transition_required && !prior_witness {
+                fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
+            }
+            return;
+        }
+        if historical_custom_maps {
+            if prior_bundle_transition_required && !prior_witness {
+                fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
+            }
+            return;
+        }
+        let detail = GOVERNANCE_MAP_NAMES
+            .iter()
+            .find(|name| {
+                file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                    != record_str(
+                        sdk_map_migration_entry(&manifest, name),
+                        "/target_digest",
+                        "sdk-map-migration",
+                    )
+            })
+            .copied()
+            .unwrap_or("mixed");
+        fail(format!("SDK_MIGRATION_LIVE_MAP_UNRECONCILED:{detail}"));
     }
 
     let mut frozen_reviews = Vec::new();
@@ -14184,6 +14446,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
             let field = record_str(entry, "/review_hash_field", "sdk-map-migration");
             let review_hash = record_str(&review, &format!("/{}", field), &review_name);
             if canonical_source_matches
+                && !sdk_historical_review_map_binding(root, module_id, &review, &review_name)
                 && review_hash != record_str(entry, "/source_digest", "sdk-map-migration")
             {
                 fail(format!(
@@ -14202,7 +14465,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
 
     let migrations = root.join(".appsdk/migrations");
     fs::create_dir_all(&migrations).unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
-    let staging = migrations.join(".0.1.5-to-0.1.6.staging");
+    let staging = migrations.join(format!(".{step}.staging"));
     if staging.exists() {
         assert_no_symlink_components(root, &staging, "sdk_map_migration_staging");
         fs::remove_dir_all(&staging)
@@ -14227,19 +14490,16 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
             "target_digest": if canonical_source_matches { entry["target_digest"].clone() } else { Value::String(project_map_hash) },
             "canonical_source_digest": if canonical_source_matches { Value::Null } else { entry["source_digest"].clone() },
             "canonical_target_digest": if canonical_source_matches { Value::Null } else { entry["target_digest"].clone() },
-            "snapshot_path": format!(
-                ".appsdk/migrations/0.1.5-to-0.1.6/maps/{}",
-                name
-            )
+            "snapshot_path": format!(".appsdk/migrations/{step}/maps/{}", name)
         }));
     }
     atomic_write_json(
         &staging.join("record.json"),
         &serde_json::json!({
             "schema_version": 1,
-            "migration_id": "appsdk-0.1.5-to-0.1.6",
-            "source_version": "0.1.5",
-            "target_version": "0.1.6",
+            "migration_id": format!("appsdk-{step}"),
+            "source_version": source_version,
+            "target_version": target_version,
             "bundle_digest": sdk_bundle_digest(),
             "maps": map_records,
             "frozen_reviews": frozen_reviews,
@@ -14253,8 +14513,8 @@ fn migrate_governance_maps(root: &Path, project: &Value, project_version: &str) 
     }
     fs::rename(&staging, &migration_root)
         .unwrap_or_else(|_| fail("SDK_MAP_MIGRATION_WRITE_FAILED"));
-    install_current_governance_maps(root, false);
-    let _ = assert_sdk_migration_record(root);
+    install_governance_maps(root, step, false);
+    let _ = assert_sdk_migration_record(root, step, true);
     assert_governance_maps(root);
 }
 
@@ -16562,15 +16822,19 @@ fn pin_lock(root: &Path, binary: &Path) {
     assert_mutation_worktree(root);
     assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control");
     let mut project = read_project(root);
-    let project_version = required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT");
-    if !matches!(project_version, "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6") {
+    let project_version =
+        required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT").to_string();
+    if !matches!(
+        project_version.as_str(),
+        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
+    ) {
         fail(format!(
-            "UNSUPPORTED_SDK_MIGRATION:{}:0.1.6",
-            project_version
+            "UNSUPPORTED_SDK_MIGRATION:{}:{}",
+            project_version, SDK_VERSION
         ));
     }
     let previous_bundle_digest = {
-        let record_path = sdk_map_migration_root(root).join("record.json");
+        let record_path = sdk_map_migration_root(root, "0.1.5-to-0.1.6").join("record.json");
         if !record_path.is_file() {
             None
         } else {
@@ -16594,19 +16858,29 @@ fn pin_lock(root: &Path, binary: &Path) {
         fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
     }
     reconcile_authoring_bundle_manifest(root);
-    if matches!(project_version, "0.1.3" | "0.1.4") {
-        write_legacy_migration_step(root, project_version);
+    if matches!(project_version.as_str(), "0.1.3" | "0.1.4") {
+        write_legacy_migration_step(root, &project_version);
         project["sdk"]["version"] = Value::String("0.1.5".into());
         write_project(root, &project);
     }
+    if matches!(project_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
+        let migrated_project = read_project(root);
+        migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6");
+        project = migrated_project;
+        project["sdk"]["version"] = Value::String("0.1.6".into());
+        write_project(root, &project);
+    } else {
+        let current_project = read_project(root);
+        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6");
+    }
     let migrated_project = read_project(root);
-    migrate_governance_maps(root, &migrated_project, "0.1.5");
+    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.7");
     install_current_record_contracts(root);
     project = migrated_project;
-    project["sdk"]["version"] = Value::String("0.1.6".into());
+    project["sdk"]["version"] = Value::String(SDK_VERSION.into());
     let mut lock = serde_json::Map::new();
     lock.insert("sdk".into(), Value::String("appsdk".into()));
-    lock.insert("version".into(), Value::String("0.1.6".into()));
+    lock.insert("version".into(), Value::String(SDK_VERSION.into()));
     lock.insert("digest".into(), Value::String(digest.clone()));
     lock.insert("compiler_digest".into(), Value::String(digest));
     lock.insert("bundle_digest".into(), Value::String(sdk_bundle_digest()));
@@ -20010,7 +20284,7 @@ fn main() {
     }
     let mut args = argv.into_iter().peekable();
     match args.next().as_deref() {
-        Some("version") => println!("appsdk 0.1.6 (rust)"),
+        Some("version") => println!("appsdk {SDK_VERSION} (rust)"),
         Some("verify-sdk-source-registry") => {
             assert_sdk_source_registry(Path::new(&args.next().unwrap_or_else(|| ".".into())))
         }

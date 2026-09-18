@@ -1,11 +1,6 @@
 ---
 name: appsdk-migration
-description: >
-  Migrate an existing AppSDK and Collab installation to one reviewed version,
-  preserving business and protected state while safely resetting an explicitly
-  authorized legacy control plane. Use for version upgrades, daemon
-  migrations, identity rebinding, and authorized legacy resets; do not use for
-  ordinary feature development or unapproved deletion.
+description: "Migrate an existing AppSDK and Collab installation to one reviewed version, preserving business and protected state while safely resetting an explicitly authorized legacy control plane. Use for version upgrades, daemon migrations, identity rebinding, and authorized legacy resets; do not use for ordinary feature development or unapproved deletion."
 ---
 
 # AppSDK migration

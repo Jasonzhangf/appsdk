@@ -67,10 +67,11 @@ Usage:
 - `.agent-collab/` is Collab-owned project registration/reducer input. It is
   not the peer, route, mailbox, task, or liveness truth. AppSDK reset must not
   delete it; Collab migration/retirement owns it.
-- A Git worktree does not inherit `.appsdk/` or `.agent-collab/` from its main
-  checkout. The registered peer identity is inherited from the global Collab
-  state by the current Codex sessionID/App Server thread; do not create a
-  second project registration from a worktree.
+- A Git worktree contains tracked `.appsdk/` files from its main checkout, but
+  does not inherit ignored `.agent-collab/` or `.appsdk-control/` state. The
+  registered peer identity is inherited from the global Collab state by the
+  current Codex sessionID/App Server thread; do not create a second project
+  registration from a worktree.
 
 ## Lifecycle commands and meaning
 

@@ -37,10 +37,11 @@ or run any other exploratory command after it. Registration and wake use the
 internal Codex App Server native thread.
 
 Initialization runs only in the canonical project main checkout. A Git
-worktree does not inherit `.agent-collab/` or the local governance contract.
-Inside a worktree, the same Codex sessionID/thread remains the same peer;
-return to the canonical root for `collab context` or recovery. Never register
-the worktree as a second peer, promote yourself, or create a second route.
+worktree contains tracked `.appsdk/` files but does not inherit ignored
+`.agent-collab/` or `.appsdk-control/` state. Inside a worktree, the same Codex
+sessionID/thread remains the same peer; return to the canonical root for
+`collab context` or recovery. Never register the worktree as a second peer,
+promote yourself, or create a second route.
 
 ## If unregistered
 
@@ -87,8 +88,10 @@ The master then owns orchestration:
 5. Remove only resources created by this round. Preserve other peers'
    worktrees, processes, and evidence.
 
-Stop setup here. No `collab status --all`, no `routes.jsonl`, no `whoami`, no
-`ps`, no `.agent-collab` listing.
+Stop normal setup here. No `collab status --all`, no `routes.jsonl`, no
+`whoami`, no `ps`, no `.agent-collab` listing. The explicit stale-daemon
+recovery procedure below is the only exception: it may run `collab status
+--all` to diagnose the unavailable host daemon.
 
 ## Long-horizon master initialization and timer proof
 

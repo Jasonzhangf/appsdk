@@ -16,8 +16,10 @@ Global truth:
 ```
 
 Project-local `.appsdk/`, `.appsdk-control/`, and `.agent-collab/` are not the
-global truth. They are old or project-scoped control state and are handled only
-through the AppSDK reset or Collab migration owner. Do not inspect or edit them
+global truth. `.appsdk/` is the committed project contract/maps/records;
+`.appsdk-control/` is ignored local run/cache state; `.agent-collab/` is the
+project registration/reducer input. Handle them only through
+the AppSDK reset or Collab migration/reset owner. Do not inspect or edit them
 to decide whether the peer is registered.
 
 ## All state
@@ -33,6 +35,16 @@ transport, liveness, current project state, and peers. That output is the
 truth. Stop after reading it. Do not inspect local environment/control paths
 or run any other exploratory command after it. Registration and wake use the
 internal Codex App Server native thread.
+
+Ordinary initialization and Collab registration run only in the canonical
+project main checkout. A Git worktree contains tracked `.appsdk/` files but
+does not inherit ignored `.agent-collab/` or `.appsdk-control/` state. The
+separate authorized AppSDK `--fresh --discard-legacy` reset may run from its
+clean non-main owner worktree as specified below. Inside a worktree, the same
+Codex sessionID/thread remains the same peer. Run `collab context` directly
+there; it resolves the canonical project root from global Collab state and
+reports the inherited peer, liveness, tasks, and peers. Never register the
+worktree as a second peer, promote yourself, or create a second route.
 
 ## If unregistered
 
@@ -52,8 +64,14 @@ it is idempotent and returns the same initialization result every time.
 ```sh
 cd /abs/path/project
 collab context                  # verify sessionID binding and role
-appsdk init .                   # only if collab context says unregistered
+collab master status            # authoritative live-master query
+# only if collab context says unregistered:
+appsdk init .
+collab context
+# only when no live master exists and the user approved this exact peer:
 collab master promote --approval "<user approval text>"
+collab context
+# only after the plan exists and long-horizon work is approved:
 appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
 appsdk goal status --json       # active/observed/collab_subscribed
 ```
@@ -74,8 +92,10 @@ The master then owns orchestration:
 5. Remove only resources created by this round. Preserve other peers'
    worktrees, processes, and evidence.
 
-Stop setup here. No `collab status --all`, no `routes.jsonl`, no `whoami`, no
-`ps`, no `.agent-collab` listing.
+Stop normal setup here. No `collab status --all`, no `routes.jsonl`, no
+`whoami`, no `ps`, no `.agent-collab` listing. The explicit stale-daemon
+recovery procedure below is the only exception: it may run `collab status
+--all` to diagnose the unavailable host daemon.
 
 ## Long-horizon master initialization and timer proof
 
@@ -111,6 +131,11 @@ layer, and whether the same path fails from a clean project. The upstream bug
 is a report and evidence record; it is not proof that the local delivery
 passed.
 
+`--upstream` is the explicit git-bug upstream route. The report must use the
+actual symptom, reproduction, expected/observed result, version/commit,
+and relevant logs; do not turn it into a local project bug or a fallback
+workaround.
+
 ## Ordinary peer (project already has .appsdk/project.json and a live master)
 
 ```sh
@@ -122,6 +147,30 @@ If `collab context` says unregistered, run `appsdk init .` once and then
 `collab context` again. If it reports `role=master`, stop and report the
 conflict to the master; do not promote yourself and do not start a second
 daemon.
+
+Use `collab master status` for the live master. `collab who` only lists
+registered peers and does not contain a top-level `master` field. A worktree
+normally has no local `.agent-collab/`; that does not mean the peer is
+unregistered or that no master exists. If route resolution fails, preserve
+the exact error and report it; do not infer "no master" and do not promote
+yourself from the worktree.
+
+For an explicitly authorized clean epoch, the reset owners are separate. The
+AppSDK line is a reset/reinitialize operation, not ordinary initialization:
+
+```sh
+# AppSDK-owned project control plane, from a clean non-main owner worktree
+appsdk init <project> --fresh --discard-legacy
+
+# Collab-owned project control plane, during a controlled maintenance window
+collab down
+collab reset --discard-legacy --approval "<user authorization>"
+collab up
+collab init
+```
+
+Neither reset removes the other owner's state or proves delivery, review,
+install, restart, or live communication.
 
 ## Recover own binding
 
@@ -147,3 +196,23 @@ collab context
 If `collab up` reports `HOST_ROUTE_REPLAY_FAILED` for a named missing root,
 preserve the exact output and follow the installed Collab migration reference.
 Never delete the route file or project state by hand.
+
+## Stale daemon, socket, or lock
+
+`~/.collab/server.sock`, `server.pid`, and `daemon.lock` are host-owned runtime
+objects. A stale socket/PID after a crash is not permission to remove them by
+hand. Diagnose in this order from the canonical project root:
+
+```sh
+collab context
+collab status --all
+collab up
+collab context
+```
+
+If `collab context` reports an unavailable daemon, use `collab up` once and
+preserve its exact output. If `collab up` reports a stale lock, a second
+writer, or an unknown PID, stop and report the exact error plus the canonical
+project root; the Collab owner must repair the global daemon. Never use
+`pkill`, `killall`, `kill $(...)`, delete `daemon.lock`, unlink `server.sock`,
+or start a project-local daemon as a workaround.

@@ -52,7 +52,7 @@ For a governed project root:
   local runtime state
 
 <project>/.agent-collab/
-  Collab project-local durable state
+  project registration/reducer input
 ```
 
 Usage:
@@ -64,8 +64,14 @@ Usage:
 - `.appsdk-control/` is local runtime state and is not committed truth. It is
   removed or reset through AppSDK reset/init, not by hand-deleting arbitrary
   files.
-- `.agent-collab/` is Collab-owned project-local durable state. AppSDK reset
-  must not delete it; Collab migration/retirement owns it.
+- `.agent-collab/` is Collab-owned project registration/reducer input. It is
+  not the peer, route, mailbox, task, or liveness truth. AppSDK reset must not
+  delete it; Collab migration/retirement owns it.
+- A Git worktree contains tracked `.appsdk/` files from its main checkout, but
+  does not inherit ignored `.agent-collab/` or `.appsdk-control/` state. The
+  registered peer identity is inherited from the global Collab state by the
+  current Codex sessionID/App Server thread; do not create a second project
+  registration from a worktree.
 
 ## Lifecycle commands and meaning
 
@@ -78,6 +84,11 @@ appsdk reset-governance --discard-legacy
                                -> AppSDK control-plane reset
 appsdk init --fresh --discard-legacy
                                -> preferred single transaction for old AppSDK control plane
+collab down
+collab reset --discard-legacy --approval "<user text>"
+collab up
+collab init
+                               -> Collab-owned project control-plane reset
 ```
 
 For old `.appsdk/` state, do not delete it manually. Use the authorized reset
@@ -86,39 +97,34 @@ route after the Collab side is migrated or retired. `appsdk init --fresh
 current baseline; it does not delete `.agent-collab/` or global truth.
 
 When the user explicitly asks to start fresh instead of migrating legacy
-state, require the prior control plane to be removed first:
+state, keep the owners separate:
 
-1. Have the prior AppSDK/Collab version remove or retire its project-local
-   `.appsdk/`, `.appsdk-control/`, and `.agent-collab/` state.
-2. Back up and prune stale host routes only through the documented
-   route-cleanup path, then verify the global daemon with `collab up` and
-   `collab status --all`.
-3. Initialize from the current global baseline with `appsdk init --fresh
-   --discard-legacy`, bind the real project contract, then `appsdk guide
-   compile` and `appsdk verify`.
+1. Use `collab migrate` when the project journal is replayable; otherwise use
+   the explicitly authorized `collab reset --discard-legacy` sequence above
+   for Collab-owned state. Do not manually remove `.agent-collab/`.
+2. From a clean non-`main` owner worktree, use `appsdk init --fresh
+   --discard-legacy` for `.appsdk/` and `.appsdk-control/`. Do not manually
+   remove either AppSDK-owned root.
+3. Initialize and bind the current project contract, then run `appsdk guide
+   compile` and `appsdk verify`. A reset proves only reset; it does not prove
+   delivery, review, install, restart, or communication.
 
 ## Registration verification
 
-### Where registration must run
+### Where registration and identity queries run
 
 `appsdk init` / `collab init` registers the **canonical project root** — the
-main checkout of the project, not a worktree. The daemon rejects any init
-attempt that runs from a `playground/<slug>` or any other worktree with
-`collab init must run from the project main tree, not a ./playground
-worktree`. If you are inside a worktree:
+main checkout of the project, not a worktree. Run those initialization
+commands only from the canonical root. A worktree does not need a second
+registration: run `collab context` directly there. Global Collab state
+resolves the current Codex sessionID/App Server thread to the canonical route
+and reports the inherited peer, liveness, tasks, and peers.
 
-1. `cd` back to the canonical project root.
-2. Re-run `appsdk init .` / `collab init` from that directory.
-
-Do not grep `routes.jsonl` or inspect `~/.collab` to verify the route; the
-CLI rejects a worktree path if registration belongs elsewhere.
-
-A worktree may still own its own scoped writes, task, or claim, but it
-cannot register a new project route and it must never overwrite
-`.agent-collab/` from inside the worktree. If a worktree needs its own
-route, register a separate project root that explicitly names the
-worktree path; do not bypass the main-tree check by hand-editing
-`routes.jsonl`.
+Use `collab master status` as the authoritative live-master query. `collab
+who` only lists registered peers and has no top-level `master` field. Never
+infer "no master" from a missing worktree-local `.agent-collab/` or from
+`collab who` output. Do not register the worktree as a new peer, promote
+yourself, create a second route, or edit `routes.jsonl`.
 
 After `collab init`, do not stop at command success. Verify with the one
 authoritative query first:
@@ -128,11 +134,17 @@ collab context
 ```
 
 `collab context` is the registration truth: current Codex sessionID binding,
-role, identity, App Server transport, liveness, and peers. Use
-`collab status --all` only when context explicitly asks for a diagnostic
-follow-up; do not inspect journal, mailbox, `routes.jsonl`, or `~/.collab`
-paths to prove registration. Missing or failed identity prevents claiming
-registration.
+role, identity, App Server transport, liveness, tasks, and peers. `collab
+master status` is the separate live-master truth. Do not inspect journal,
+mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration. Missing
+or failed identity prevents claiming registration.
+
+If `collab context` fails with `PROJECT_SCOPE_UNKNOWN`, preserve the exact
+error and stop. Do not infer worktree scope from the error code alone, and do
+not silently switch to a guessed parent or another project. If the registered
+route exists but its App Server thread is stale, run `collab worker recover`
+from the canonical root once, then `collab context`; do not re-register the
+worktree or start a daemon.
 
 See [`init-prompts.md`](init-prompts.md) for copy/paste master and peer
 initialization prompts.

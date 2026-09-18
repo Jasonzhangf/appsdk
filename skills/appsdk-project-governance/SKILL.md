@@ -63,9 +63,12 @@ The current client is Codex only. A peer is bound to the Codex sessionID
 through the live App Server thread; the global Collab store is the identity,
 route, mailbox, task, and liveness truth. Tracked `.appsdk/` files are present
 in a Git worktree because they are committed, but ignored `.agent-collab/` and
-`.appsdk-control/` state is not inherited. Inside a worktree the same Codex
-sessionID/thread remains the same peer; return to the canonical project main
-checkout for initialization, route recovery, or master promotion. Never
+`.appsdk-control/` state is not inherited. Ordinary project initialization and
+Collab registration run from the canonical project main checkout. An
+authorized AppSDK `--fresh --discard-legacy` reset is a separate operation and
+may run from its clean non-main owner worktree as specified below. Inside a
+worktree the same Codex sessionID/thread remains the same peer; return to the
+canonical project main checkout for route recovery or master promotion. Never
 register the worktree as a second peer or promote yourself from a worktree.
 
 ## SDK source repository and managed project boundary
@@ -79,11 +82,12 @@ This Skill is used in two different contexts and must not blur them:
   checkout is not implicitly a managed consumer project; it does not make
   initialization impossible. If the user explicitly chooses to govern this
   SDK workspace with AppSDK, run `appsdk prepare` and confirm the preparation,
-  then run `appsdk init` from a clean non-`main` owner worktree. The normal
-  initialization path creates a project contract that the owner must review
-  and bind to the SDK source modules; it does not infer or overwrite those
-  modules. A `playground/<slug>` worktree used to develop the SDK remains an
-  SDK source worktree unless that explicit project registration is made. Its
+  then run ordinary `appsdk init` from the canonical project main checkout.
+  The normal initialization path creates a project contract that the owner
+  must review and bind to the SDK source modules; it does not infer or
+  overwrite those modules. A `playground/<slug>` worktree used to develop the
+  SDK remains an SDK source worktree unless that explicit project registration
+  is made. Its
   source, Git history, and release gates remain SDK-owned. Never run
   `appsdk init` or `appsdk reset-governance` merely to manufacture a contract,
   and never use fresh reset without the existing contract and explicit

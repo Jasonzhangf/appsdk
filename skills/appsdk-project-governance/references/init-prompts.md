@@ -36,10 +36,12 @@ truth. Stop after reading it. Do not inspect local environment/control paths
 or run any other exploratory command after it. Registration and wake use the
 internal Codex App Server native thread.
 
-Initialization runs only in the canonical project main checkout. A Git
-worktree contains tracked `.appsdk/` files but does not inherit ignored
-`.agent-collab/` or `.appsdk-control/` state. Inside a worktree, the same Codex
-sessionID/thread remains the same peer; return to the canonical root for
+Ordinary initialization and Collab registration run only in the canonical
+project main checkout. A Git worktree contains tracked `.appsdk/` files but
+does not inherit ignored `.agent-collab/` or `.appsdk-control/` state. The
+separate authorized AppSDK `--fresh --discard-legacy` reset may run from its
+clean non-main owner worktree as specified below. Inside a worktree, the same
+Codex sessionID/thread remains the same peer; return to the canonical root for
 `collab context` or recovery. Never register the worktree as a second peer,
 promote yourself, or create a second route.
 
@@ -144,7 +146,8 @@ If `collab context` says unregistered, run `appsdk init .` once and then
 conflict to the master; do not promote yourself and do not start a second
 daemon.
 
-For an explicitly authorized clean epoch, the reset owners are separate:
+For an explicitly authorized clean epoch, the reset owners are separate. The
+AppSDK line is a reset/reinitialize operation, not ordinary initialization:
 
 ```sh
 # AppSDK-owned project control plane, from a clean non-main owner worktree

@@ -81,7 +81,11 @@ collab worker recover                  rebind/recover worker identity after rest
 ```
 
 The commands below are diagnostic-only. They are not initialization steps and
-must not be chained after `collab context`:
+must not be chained after `collab context` during normal setup. The explicit
+stale-daemon recovery procedure in
+[`init-prompts.md`](init-prompts.md#stale-daemon-socket-or-lock) is the only
+exception: there, preserve the exact failure, then use `collab status --all`
+before the controlled `collab up` and final `collab context`.
 
 ```text
 collab status --all                    server summary and worker/task state

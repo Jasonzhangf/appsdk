@@ -52,7 +52,7 @@ For a governed project root:
   local runtime state
 
 <project>/.agent-collab/
-  Collab project-local durable state
+  project registration/reducer input
 ```
 
 Usage:
@@ -64,8 +64,13 @@ Usage:
 - `.appsdk-control/` is local runtime state and is not committed truth. It is
   removed or reset through AppSDK reset/init, not by hand-deleting arbitrary
   files.
-- `.agent-collab/` is Collab-owned project-local durable state. AppSDK reset
-  must not delete it; Collab migration/retirement owns it.
+- `.agent-collab/` is Collab-owned project registration/reducer input. It is
+  not the peer, route, mailbox, task, or liveness truth. AppSDK reset must not
+  delete it; Collab migration/retirement owns it.
+- A Git worktree does not inherit `.appsdk/` or `.agent-collab/` from its main
+  checkout. The registered peer identity is inherited from the global Collab
+  state by the current Codex sessionID/App Server thread; do not create a
+  second project registration from a worktree.
 
 ## Lifecycle commands and meaning
 
@@ -108,10 +113,7 @@ state, keep the owners separate:
 ### Where registration must run
 
 `appsdk init` / `collab init` registers the **canonical project root** — the
-main checkout of the project, not a worktree. The daemon rejects any init
-attempt that runs from a `playground/<slug>` or any other worktree with
-`collab init must run from the project main tree, not a ./playground
-worktree`. If you are inside a worktree:
+main checkout of the project, not a worktree. If you are inside a worktree:
 
 1. `cd` back to the canonical project root.
 2. Re-run `appsdk init .` / `collab init` from that directory.
@@ -119,12 +121,11 @@ worktree`. If you are inside a worktree:
 Do not grep `routes.jsonl` or inspect `~/.collab` to verify the route; the
 CLI rejects a worktree path if registration belongs elsewhere.
 
-A worktree may still own its own scoped writes, task, or claim, but it
-cannot register a new project route and it must never overwrite
-`.agent-collab/` from inside the worktree. If a worktree needs its own
-route, register a separate project root that explicitly names the
-worktree path; do not bypass the main-tree check by hand-editing
-`routes.jsonl`.
+A worktree may still own its own scoped writes, task, or claim. The same Codex
+sessionID/thread remains the same peer in that worktree; do not register a new
+peer, promote yourself to master, or create a second project route. If the
+worktree needs separate routing, stop and escalate to the registered master;
+never bypass the main-tree check by hand-editing `routes.jsonl`.
 
 After `collab init`, do not stop at command success. Verify with the one
 authoritative query first:
@@ -137,6 +138,12 @@ collab context
 role, identity, App Server transport, liveness, and peers. Do not inspect
 journal, mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration.
 Missing or failed identity prevents claiming registration.
+
+If `collab context` fails with `PROJECT_SCOPE_UNKNOWN`, the worktree has no
+registered canonical route. Return to the canonical root and run
+`collab context` there. If the registered route exists but its App Server
+thread is stale, run `collab worker recover` from the canonical root once,
+then `collab context`; do not re-register the worktree or start a daemon.
 
 See [`init-prompts.md`](init-prompts.md) for copy/paste master and peer
 initialization prompts.

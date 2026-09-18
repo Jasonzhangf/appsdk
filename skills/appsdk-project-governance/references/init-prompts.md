@@ -17,8 +17,8 @@ Global truth:
 
 Project-local `.appsdk/`, `.appsdk-control/`, and `.agent-collab/` are not the
 global truth. `.appsdk/` is the committed project contract/maps/records;
-`.appsdk-control/` is ignored local run/cache state; `.agent-collab/` is
-Collab-owned project reducer/journal/mailbox state. Handle them only through
+`.appsdk-control/` is ignored local run/cache state; `.agent-collab/` is the
+project registration/reducer input. Handle them only through
 the AppSDK reset or Collab migration/reset owner. Do not inspect or edit them
 to decide whether the peer is registered.
 
@@ -35,6 +35,12 @@ transport, liveness, current project state, and peers. That output is the
 truth. Stop after reading it. Do not inspect local environment/control paths
 or run any other exploratory command after it. Registration and wake use the
 internal Codex App Server native thread.
+
+Initialization runs only in the canonical project main checkout. A Git
+worktree does not inherit `.agent-collab/` or the local governance contract.
+Inside a worktree, the same Codex sessionID/thread remains the same peer;
+return to the canonical root for `collab context` or recovery. Never register
+the worktree as a second peer, promote yourself, or create a second route.
 
 ## If unregistered
 
@@ -175,3 +181,23 @@ collab context
 If `collab up` reports `HOST_ROUTE_REPLAY_FAILED` for a named missing root,
 preserve the exact output and follow the installed Collab migration reference.
 Never delete the route file or project state by hand.
+
+## Stale daemon, socket, or lock
+
+`~/.collab/server.sock`, `server.pid`, and `daemon.lock` are host-owned runtime
+objects. A stale socket/PID after a crash is not permission to remove them by
+hand. Diagnose in this order from the canonical project root:
+
+```sh
+collab context
+collab status --all
+collab up
+collab context
+```
+
+If `collab context` reports an unavailable daemon, use `collab up` once and
+preserve its exact output. If `collab up` reports a stale lock, a second
+writer, or an unknown PID, stop and report the exact error plus the canonical
+project root; the Collab owner must repair the global daemon. Never use
+`pkill`, `killall`, `kill $(...)`, delete `daemon.lock`, unlink `server.sock`,
+or start a project-local daemon as a workaround.

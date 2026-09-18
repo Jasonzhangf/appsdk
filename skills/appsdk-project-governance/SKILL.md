@@ -49,7 +49,7 @@ Project-local state has a different scope and owner:
 ```text
 <project>/.appsdk/          AppSDK project contract, maps, records and lock
 <project>/.appsdk-control/  AppSDK-owned local run/cache state
-<project>/.agent-collab/    Collab-owned project reducer/journal/mailbox state
+<project>/.agent-collab/    Collab-owned project registration/reducer input
 ```
 
 None of the project-local paths is the global truth, and none is proof that the
@@ -58,6 +58,14 @@ through `collab context`; retire project-local state only through the owner's
 canonical reset/migration command. Do not inspect or edit `~/.appsdk`,
 `~/.collab`, `.appsdk-control/`, or `.agent-collab/` to reconstruct control
 state.
+
+The current client is Codex only. A peer is bound to the Codex sessionID
+through the live App Server thread; the global Collab store is the identity,
+route, mailbox, task, and liveness truth. A Git worktree does not inherit
+`.agent-collab/` or the local governance contract. Inside a worktree the same
+Codex sessionID/thread remains the same peer; return to the canonical project
+main checkout for initialization, route recovery, or master promotion. Never
+register the worktree as a second peer or promote yourself from a worktree.
 
 ## SDK source repository and managed project boundary
 

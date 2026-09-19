@@ -9091,6 +9091,33 @@ fn install_current_governance_maps(root: &Path) {
     }
 }
 
+#[test]
+fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
+    let map: Value =
+        serde_json::from_str(include_str!("../../contracts/maps/resource-map.json")).unwrap();
+    let resources = map["resources"].as_array().unwrap();
+    let truth_store = |resource_id: &str| {
+        resources
+            .iter()
+            .find(|resource| resource["resource_id"] == resource_id)
+            .and_then(|resource| resource["truth_store"].as_str())
+            .unwrap()
+    };
+
+    assert_eq!(
+        truth_store("sdk_bundle"),
+        "AppSDK 0.1.7 embedded Bundle manifest/resources"
+    );
+    assert_eq!(
+        truth_store("historical_governance_maps"),
+        ".appsdk/migrations/<source>-to-<target>/maps/**"
+    );
+    assert_eq!(
+        truth_store("sdk_migration_record"),
+        ".appsdk/migrations/<source>-to-<target>/record.json"
+    );
+}
+
 fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
     fs::create_dir_all(migration_root.join("maps")).unwrap();

@@ -12,7 +12,7 @@
       "source": "contracts/migrations/0.1.6/governance-maps/resource-map.json",
       "source_digest": "sha256:6cbb62a74955e7d15d8337b55b3f450c0c4e956d951bf5ce1bf506bd1f1b0166",
       "target": "contracts/maps/resource-map.json",
-      "target_digest": "sha256:2e0043594586d14ba7c49c8dc11825fae406494f92aa23025255c30a18375574"
+      "target_digest": "sha256:ea8a98bc2644c56fd36e668193630fd5f62dc8d5c4e2a020f7e1fef782e19deb"
     },
     {
       "name": "function-map.json",

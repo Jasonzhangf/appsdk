@@ -4798,12 +4798,7 @@ impl CommunicationStore {
     }
 
     fn message_notification_key(&self, message: &MessageRecord) -> String {
-        structured_key(&[
-            &message.from.key(),
-            &message.to.key(),
-            &message.adapter_id,
-            message.coalesce_key.as_deref().unwrap_or("notification"),
-        ])
+        message_notification_key_for(message)
     }
 
     fn wakeup_delivery_in_flight(&self, wakeup: &WakeupRecord) -> CommResult<bool> {
@@ -5911,21 +5906,286 @@ impl CommunicationStore {
             .agent_tombstones
             .insert(from_key.clone(), rebound.tombstone.clone());
 
+        self.migrate_rebound_references(&rebound.from.address(), &rebound.to.address())?;
+
         if rebound.from.role == "master" {
             if let Some(scope) = self.projection.scopes.get_mut(&rebound.from.scope_id) {
                 scope.master_session_id = Some(rebound.to.session_id.clone());
             }
-            if let Some(mut accumulator) = self.projection.master_wake.remove(&from_key) {
-                accumulator.address = rebound.to.address();
-                self.projection
-                    .master_wake
-                    .insert(to_key.clone(), accumulator);
-            }
-            if let Some(mut wakeup) = self.projection.wakeup.remove(&from_key) {
-                wakeup.address = rebound.to.address();
-                self.projection.wakeup.insert(to_key, wakeup);
+        }
+        Ok(())
+    }
+
+    fn migrate_rebound_references(&mut self, from: &Address, to: &Address) -> CommResult<()> {
+        for agent in self.projection.agents.values_mut() {
+            if agent.parent.as_ref() == Some(from) {
+                agent.parent = Some(to.clone());
             }
         }
+
+        for adapter in self.projection.adapters.values_mut() {
+            if adapter.recipient.as_ref() == Some(from) {
+                adapter.recipient = Some(to.clone());
+            }
+        }
+
+        let old_messages = self.projection.messages.clone();
+        let mut message_id_updates = BTreeMap::new();
+        let mut conversation_id_updates = BTreeMap::new();
+        let old_master_wake = self.projection.master_wake.clone();
+        let mut migrated_master_wake = BTreeMap::new();
+        for old_accumulator in old_master_wake.values() {
+            let mut new_accumulator = old_accumulator.clone();
+            if new_accumulator.address == *from {
+                new_accumulator.address = to.clone();
+            }
+            new_accumulator.signals = migrate_wake_signal_map(&old_accumulator.signals, from, to)?;
+            new_accumulator.consumed_signals =
+                migrate_wake_signal_map(&old_accumulator.consumed_signals, from, to)?;
+            for old_signal in old_accumulator
+                .signals
+                .values()
+                .chain(old_accumulator.consumed_signals.values())
+            {
+                let new_signal = migrate_wake_signal(old_signal, from, to);
+                let (old_message_id, old_conversation_id) =
+                    master_wake_direct_message_identity(&old_accumulator.address, old_signal);
+                let (new_message_id, new_conversation_id) =
+                    master_wake_direct_message_identity(&new_accumulator.address, &new_signal);
+                insert_identity_update(
+                    &mut message_id_updates,
+                    old_message_id,
+                    new_message_id,
+                    "master wake message",
+                )?;
+                insert_identity_update(
+                    &mut conversation_id_updates,
+                    old_conversation_id,
+                    new_conversation_id,
+                    "master wake conversation",
+                )?;
+            }
+            if old_accumulator.address != new_accumulator.address {
+                for reminder in 1..=DEFAULT_MASTER_REMINDER_LIMIT {
+                    let (old_message_id, old_conversation_id) =
+                        master_wake_message_identity(old_accumulator, reminder);
+                    let (new_message_id, new_conversation_id) =
+                        master_wake_message_identity(&new_accumulator, reminder);
+                    insert_identity_update(
+                        &mut message_id_updates,
+                        old_message_id,
+                        new_message_id,
+                        "master wake briefing message",
+                    )?;
+                    insert_identity_update(
+                        &mut conversation_id_updates,
+                        old_conversation_id,
+                        new_conversation_id,
+                        "master wake briefing conversation",
+                    )?;
+                }
+            }
+            migrated_master_wake.insert(new_accumulator.address.key(), new_accumulator);
+        }
+
+        let old_wakeup = self.projection.wakeup.clone();
+        let mut migrated_wakeup = BTreeMap::new();
+        for old_record in old_wakeup.values() {
+            let mut new_record = old_record.clone();
+            if new_record.address == *from {
+                new_record.address = to.clone();
+                for reminder in 1..=DEFAULT_MASTER_REMINDER_LIMIT {
+                    let (old_message_id, old_conversation_id) =
+                        wakeup_message_identity(old_record, reminder)?;
+                    let (new_message_id, new_conversation_id) =
+                        wakeup_message_identity(&new_record, reminder)?;
+                    insert_identity_update(
+                        &mut message_id_updates,
+                        old_message_id,
+                        new_message_id,
+                        "wakeup message",
+                    )?;
+                    insert_identity_update(
+                        &mut conversation_id_updates,
+                        old_conversation_id,
+                        new_conversation_id,
+                        "wakeup conversation",
+                    )?;
+                }
+            }
+            migrated_wakeup.insert(new_record.address.key(), new_record);
+        }
+
+        for message in old_messages.values() {
+            if message.from == *from
+                && message.coalesce_key.as_deref() == Some(worker_idle_coalesce_key(from).as_str())
+            {
+                let new_message_id = worker_idle_message_id_for_address(to, &message.created_at);
+                insert_identity_update(
+                    &mut message_id_updates,
+                    message.message_id.clone(),
+                    new_message_id,
+                    "worker idle message",
+                )?;
+            }
+        }
+
+        let messages = std::mem::take(&mut self.projection.messages);
+        for (old_key, mut message) in messages {
+            let old_message = old_messages.get(&old_key).ok_or_else(|| {
+                CommError::new(
+                    "event_data_invalid",
+                    format!("message projection is missing its old record: {old_key}"),
+                )
+            })?;
+            if message.from == *from {
+                message.from = to.clone();
+            }
+            if message.to == *from {
+                message.to = to.clone();
+            }
+            if message.coalesce_key.as_deref() == Some(worker_idle_coalesce_key(from).as_str())
+                && message.from == *to
+            {
+                message.coalesce_key = Some(worker_idle_coalesce_key(to));
+            }
+            if let Some(new_message_id) = message_id_updates.get(&old_key) {
+                message.message_id = new_message_id.clone();
+            }
+            if let Some(new_conversation_id) = conversation_id_updates.get(&message.conversation_id)
+            {
+                message.conversation_id = new_conversation_id.clone();
+            }
+            let new_key = message.message_id.clone();
+            if self.projection.messages.insert(new_key, message).is_some() {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    "agent rebound creates duplicate message projection keys",
+                ));
+            }
+            if old_message.message_id != old_key
+                && old_message.message_id
+                    != message_id_updates
+                        .get(&old_key)
+                        .cloned()
+                        .unwrap_or(old_key.clone())
+            {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    "message projection key does not match message identity",
+                ));
+            }
+        }
+
+        let delivery_attempts = std::mem::take(&mut self.projection.message_delivery_attempts);
+        for (old_key, mut attempt) in delivery_attempts {
+            let new_key = message_id_updates.get(&old_key).cloned().unwrap_or(old_key);
+            attempt.message_id = new_key.clone();
+            if self
+                .projection
+                .message_delivery_attempts
+                .insert(new_key, attempt)
+                .is_some()
+            {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    "agent rebound creates duplicate message delivery attempts",
+                ));
+            }
+        }
+
+        for bug in self.projection.bugs.values_mut() {
+            if bug.reporter == *from {
+                bug.reporter = to.clone();
+            }
+        }
+        for loop_record in self.projection.loops.values_mut() {
+            if loop_record.owner == *from {
+                loop_record.owner = to.clone();
+            }
+        }
+        for batch in &mut self.projection.batches {
+            if batch.recipient == *from {
+                batch.recipient = to.clone();
+            }
+            for item in &mut batch.items {
+                if let Some(new_message_id) = message_id_updates.get(&item.message_id) {
+                    item.message_id = new_message_id.clone();
+                }
+            }
+        }
+
+        let mut notification_key_updates = BTreeMap::new();
+        let notifications = std::mem::take(&mut self.projection.notifications);
+        for (key, mut notification) in notifications {
+            let old_message = old_messages.get(&notification.message_id);
+            let old_notification_key = old_message.map(message_notification_key_for);
+            if let Some(new_message_id) = message_id_updates.get(&notification.message_id) {
+                notification.message_id = new_message_id.clone();
+            }
+            if notification.recipient == *from {
+                notification.recipient = to.clone();
+            }
+            if notification.coalesce_key.as_deref() == Some(worker_idle_coalesce_key(from).as_str())
+                && notification.recipient == *to
+            {
+                notification.coalesce_key = Some(worker_idle_coalesce_key(to));
+            }
+            let new_key = if old_notification_key.as_deref() == Some(key.as_str()) {
+                let message = self
+                    .projection
+                    .messages
+                    .get(&notification.message_id)
+                    .ok_or_else(|| {
+                        CommError::new(
+                            "event_data_invalid",
+                            format!(
+                                "notification message disappeared during rebind: {}",
+                                notification.message_id
+                            ),
+                        )
+                    })?;
+                let new_key = message_notification_key_for(message);
+                insert_identity_update(
+                    &mut notification_key_updates,
+                    key.clone(),
+                    new_key.clone(),
+                    "notification",
+                )?;
+                new_key
+            } else {
+                key
+            };
+            if self
+                .projection
+                .notifications
+                .insert(new_key, notification)
+                .is_some()
+            {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    "agent rebound creates duplicate notification projection keys",
+                ));
+            }
+        }
+
+        let completed_attempts = std::mem::take(&mut self.projection.completed_attempts);
+        for (key, attempt_id) in completed_attempts {
+            let key = notification_key_updates.get(&key).cloned().unwrap_or(key);
+            if self
+                .projection
+                .completed_attempts
+                .insert(key, attempt_id)
+                .is_some()
+            {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    "agent rebound creates duplicate completed notification attempts",
+                ));
+            }
+        }
+        self.projection.master_wake = migrated_master_wake;
+        self.projection.wakeup = migrated_wakeup;
         Ok(())
     }
 
@@ -7584,7 +7844,11 @@ fn worker_idle_message(
 }
 
 fn worker_idle_message_id(current: &AgentRecord, transition_at: &str) -> String {
-    let address_key = current.address().key();
+    worker_idle_message_id_for_address(&current.address(), transition_at)
+}
+
+fn worker_idle_message_id_for_address(address: &Address, transition_at: &str) -> String {
+    let address_key = address.key();
     format!(
         "worker-idle:{}",
         structured_key(&[&address_key, transition_at])
@@ -7597,6 +7861,60 @@ fn worker_idle_signal_key(address: &Address) -> String {
 
 fn worker_idle_coalesce_key(address: &Address) -> String {
     format!("idle:{}", address.key())
+}
+
+fn migrate_wake_signal(
+    signal: &MasterWakeSignal,
+    from: &Address,
+    to: &Address,
+) -> MasterWakeSignal {
+    let mut migrated = signal.clone();
+    if migrated.source.as_ref() == Some(from) {
+        migrated.source = Some(to.clone());
+        if migrated.kind == "worker_idle" {
+            migrated.key = worker_idle_signal_key(to);
+            migrated.signal_id = worker_idle_message_id_for_address(to, &migrated.observed_at);
+        }
+    }
+    migrated
+}
+
+fn migrate_wake_signal_map(
+    signals: &BTreeMap<String, MasterWakeSignal>,
+    from: &Address,
+    to: &Address,
+) -> CommResult<BTreeMap<String, MasterWakeSignal>> {
+    let mut migrated = BTreeMap::new();
+    for signal in signals.values() {
+        let signal = migrate_wake_signal(signal, from, to);
+        if migrated.insert(signal.key.clone(), signal).is_some() {
+            return Err(CommError::new(
+                "event_data_invalid",
+                "agent rebound creates duplicate master wake signal keys",
+            ));
+        }
+    }
+    Ok(migrated)
+}
+
+fn insert_identity_update(
+    updates: &mut BTreeMap<String, String>,
+    from: String,
+    to: String,
+    kind: &str,
+) -> CommResult<()> {
+    if from == to {
+        return Ok(());
+    }
+    if let Some(existing) = updates.insert(from.clone(), to.clone()) {
+        if existing != to {
+            return Err(CommError::new(
+                "event_data_invalid",
+                format!("agent rebound creates conflicting {kind} identity mappings: {from}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn master_wake_covers_notification(
@@ -8102,6 +8420,15 @@ fn bug_loop_matches(loop_record: &LoopRecord, owner: &Address) -> bool {
         && loop_record.gate == "project verification and review"
         && loop_record.state == "persist bug evidence and next action"
         && loop_record.stop == "resolved, merged, and reporter notified"
+}
+
+fn message_notification_key_for(message: &MessageRecord) -> String {
+    structured_key(&[
+        &message.from.key(),
+        &message.to.key(),
+        &message.adapter_id,
+        message.coalesce_key.as_deref().unwrap_or("notification"),
+    ])
 }
 
 fn wakeup_message_identity(

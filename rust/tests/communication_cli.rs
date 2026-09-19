@@ -6451,6 +6451,192 @@ fn agent_rebind_preserves_existing_subagent_parent_ancestry() {
 }
 
 #[test]
+fn agent_rebind_migrates_all_active_dag_references() {
+    let root = temp_root("agent-rebind-dag");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new", "peer-old", "peer-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    register_agent(&root, "scope", "peer-old", "peer", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "register_adapter",
+            "adapter": {
+                "adapterId": "peer-appserver",
+                "kind": "appserver",
+                "target": "mock://scope",
+                "recipient": { "scopeId": "scope", "sessionId": "peer-old" }
+            }
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "create_loop",
+            "loop": {
+                "loopId": "rebind-loop",
+                "kind": "task",
+                "owner": { "scopeId": "scope", "sessionId": "master-old" },
+                "trigger": "event",
+                "work": "work",
+                "gate": "tests",
+                "state": "persist",
+                "stop": "done"
+            }
+        }),
+    );
+    let sent = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "peer-old" },
+                "title": "rebind message",
+                "priority": "p2",
+                "body": "recover this message after the session changes",
+                "messageId": "rebind-message",
+                "coalesceKey": "rebind"
+            }
+        }),
+    );
+    assert_eq!(sent["idempotent"], false);
+    call(
+        &root,
+        json!({
+            "op": "report_bug",
+            "bug": {
+                "bugId": "rebind-bug",
+                "scopeId": "scope",
+                "title": "rebind bug",
+                "priority": "p1",
+                "description": "reporter must survive a session rebind",
+                "reporter": { "scopeId": "scope", "sessionId": "peer-old" }
+            }
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2999-01-01T00:00:00.000Z"
+        }),
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "peer-old" },
+                "to": { "scopeId": "scope", "sessionId": "peer-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    let advanced = call(
+        &root,
+        json!({
+            "op": "advance_loop",
+            "loopId": "rebind-loop",
+            "complete": false
+        }),
+    );
+    assert_eq!(advanced["loop"]["owner"]["sessionId"], "master-new");
+
+    let recovered = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-new" },
+                "to": { "scopeId": "scope", "sessionId": "peer-new" },
+                "title": "rebind message",
+                "priority": "p2",
+                "body": "recover this message after the session changes",
+                "messageId": "rebind-message",
+                "coalesceKey": "rebind"
+            }
+        }),
+    );
+    assert_eq!(recovered["idempotent"], true);
+    assert_eq!(recovered["message"]["from"]["sessionId"], "master-new");
+    assert_eq!(recovered["message"]["to"]["sessionId"], "peer-new");
+
+    let adapter_send = call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-new" },
+                "to": { "scopeId": "scope", "sessionId": "peer-new" },
+                "title": "adapter rebind",
+                "priority": "p1",
+                "body": "adapter recipient follows the peer",
+                "adapterId": "peer-appserver",
+                "deliveryMode": "direct"
+            }
+        }),
+    );
+    assert_eq!(adapter_send["message"]["to"]["sessionId"], "peer-new");
+
+    let closed = call(
+        &root,
+        json!({
+            "op": "update_bug",
+            "bugId": "rebind-bug",
+            "status": "closed",
+            "actor": { "scopeId": "scope", "sessionId": "master-new" },
+            "evidence": { "fix": "commit", "verification": "tests", "merge": "main" }
+        }),
+    );
+    assert_eq!(closed["bug"]["reporter"]["sessionId"], "peer-new");
+
+    let status = call(&root, json!({ "op": "status" }));
+    let adapter = status["adapters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|adapter| adapter["adapterId"] == "peer-appserver")
+        .unwrap();
+    assert_eq!(adapter["recipient"]["sessionId"], "peer-new");
+    let notifications: Vec<&Value> = ["pending", "emitted", "unknown"]
+        .into_iter()
+        .flat_map(|state| status["notificationProjection"][state].as_array().unwrap())
+        .collect();
+    assert!(notifications
+        .iter()
+        .all(|notification| { notification["recipient"]["sessionId"] != "peer-old" }));
+    assert!(notifications.iter().any(|notification| {
+        notification["issueId"] == "rebind-bug"
+            && notification["recipient"]["sessionId"] == "peer-new"
+    }));
+    assert!(status["notificationProjection"]["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|batch| batch["recipient"]["sessionId"] != "peer-old"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn tampered_agent_rebind_event_fails_closed_on_replay() {
     let root = temp_root("agent-rebind-tamper");
     register_scope(

@@ -472,6 +472,8 @@ fn sdk_map_migration_manifest(step: &str) -> Value {
         || manifest.get("migration_id").and_then(Value::as_str) != Some(migration_id.as_str())
         || manifest.get("source_version").and_then(Value::as_str) != Some(source_version)
         || manifest.get("target_version").and_then(Value::as_str) != Some(target_version)
+        || manifest.get("materialization").and_then(Value::as_str)
+            != Some("pin_lock_when_migrating")
         || manifest.get("snapshot_root").and_then(Value::as_str) != Some(snapshot_root.as_str())
         || manifest.get("record_path").and_then(Value::as_str) != Some(record_path.as_str())
     {

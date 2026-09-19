@@ -9110,12 +9110,19 @@ fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
     );
     assert_eq!(
         truth_store("historical_governance_maps"),
-        ".appsdk/migrations/<source>-to-<target>/maps/**"
+        ".appsdk/migrations/<source>-to-<target>/maps/** when materialized by pin-lock; absent after fresh reset"
     );
     assert_eq!(
         truth_store("sdk_migration_record"),
-        ".appsdk/migrations/<source>-to-<target>/record.json"
+        ".appsdk/migrations/<source>-to-<target>/record.json when materialized by pin-lock; absent after fresh reset"
     );
+    for text in [
+        include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
+        include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.7.json"),
+    ] {
+        let descriptor: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(descriptor["materialization"], "pin_lock_when_migrating");
+    }
 }
 
 fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {

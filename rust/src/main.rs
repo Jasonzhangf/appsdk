@@ -472,6 +472,8 @@ fn sdk_map_migration_manifest(step: &str) -> Value {
         || manifest.get("migration_id").and_then(Value::as_str) != Some(migration_id.as_str())
         || manifest.get("source_version").and_then(Value::as_str) != Some(source_version)
         || manifest.get("target_version").and_then(Value::as_str) != Some(target_version)
+        || manifest.get("materialization").and_then(Value::as_str)
+            != Some("pin_lock_when_migrating")
         || manifest.get("snapshot_root").and_then(Value::as_str) != Some(snapshot_root.as_str())
         || manifest.get("record_path").and_then(Value::as_str) != Some(record_path.as_str())
     {
@@ -14169,6 +14171,121 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
         bytes.push(b'\n');
         bytes
     };
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    assert_no_symlink_components(root, &registry_path, "reset_module_registry");
+    if !fs::symlink_metadata(&registry_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_RESET_MODULE_REGISTRY_INVALID");
+    }
+    let registry: Value = serde_json::from_str(
+        &fs::read_to_string(&registry_path)
+            .unwrap_or_else(|_| fail("GOVERNANCE_RESET_MODULE_REGISTRY_MISSING")),
+    )
+    .unwrap_or_else(|_| fail("GOVERNANCE_RESET_MODULE_REGISTRY_INVALID"));
+    if registry.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        fail("GOVERNANCE_RESET_MODULE_REGISTRY_INVALID");
+    }
+    let registry_modules = registry
+        .get("modules")
+        .and_then(Value::as_array)
+        .filter(|modules| !modules.is_empty())
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_MODULE_REGISTRY_INVALID"));
+    let project_modules = staging_project
+        .get("modules")
+        .and_then(Value::as_array)
+        .filter(|modules| !modules.is_empty())
+        .unwrap_or_else(|| fail("GOVERNANCE_RESET_CONTRACT_REQUIRED:modules"));
+    let mut staging_registry = registry.clone();
+    let mut staging_modules = Vec::with_capacity(project_modules.len());
+    for module in project_modules {
+        let module_id = module
+            .get("module_id")
+            .and_then(Value::as_str)
+            .filter(|module_id| !module_id.is_empty())
+            .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/modules"));
+        let matches: Vec<&Value> = registry_modules
+            .iter()
+            .filter(|registered| {
+                registered.get("module_id").and_then(Value::as_str) == Some(module_id)
+            })
+            .collect();
+        if matches.len() > 1 {
+            fail(format!(
+                "GOVERNANCE_RESET_MODULE_REGISTRY_DUPLICATE:{module_id}"
+            ));
+        }
+        let owner = module
+            .get("source_owner")
+            .and_then(Value::as_str)
+            .filter(|owner| !owner.is_empty())
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "GOVERNANCE_RESET_MODULE_REGISTRY_OWNER:{module_id}"
+                ))
+            });
+        let owned_paths = module
+            .get("owned_paths")
+            .and_then(Value::as_array)
+            .filter(|paths| !paths.is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                fail(format!(
+                    "GOVERNANCE_RESET_MODULE_REGISTRY_PATHS:{module_id}"
+                ))
+            });
+        let default_forbidden_paths = matches
+            .first()
+            .and_then(|registered| registered.get("forbidden_paths"))
+            .and_then(Value::as_array)
+            .or_else(|| {
+                registry_modules
+                    .first()
+                    .and_then(|registered| registered.get("forbidden_paths"))
+                    .and_then(Value::as_array)
+            });
+        let forbidden_paths: Vec<Value> = default_forbidden_paths
+            .into_iter()
+            .flatten()
+            .cloned()
+            .filter(|forbidden| {
+                let Some(forbidden) = forbidden.as_str() else {
+                    return true;
+                };
+                !owned_paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|owned| registry_path_matches(forbidden, owned))
+            })
+            .collect();
+        let verification_gates = matches
+            .first()
+            .and_then(|registered| registered.get("verification_gates"))
+            .and_then(Value::as_array)
+            .filter(|gates| !gates.is_empty())
+            .cloned()
+            .or_else(|| {
+                module
+                    .pointer("/regression/suite_id")
+                    .and_then(Value::as_str)
+                    .filter(|suite_id| !suite_id.is_empty())
+                    .map(|suite_id| vec![Value::String(suite_id.to_string())])
+            })
+            .unwrap_or_default();
+        let mut staging_module = matches
+            .first()
+            .map(|registered| (*registered).clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        staging_module["module_id"] = Value::String(module_id.to_string());
+        staging_module["status"] = Value::String("active".into());
+        staging_module["owner"] = Value::String(owner.to_string());
+        staging_module["owned_paths"] = Value::Array(owned_paths);
+        staging_module["forbidden_paths"] = Value::Array(forbidden_paths);
+        staging_module["verification_gates"] = Value::Array(verification_gates);
+        staging_modules.push(staging_module);
+    }
+    staging_registry["modules"] = Value::Array(staging_modules);
     // Fresh init resets the control-plane records and rebuildable projections.
     // The current scaffold is the reset baseline for SDK-owned fields; the
     // existing project contract contributes only project-owned identity,
@@ -14179,6 +14296,12 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
         transaction_dir,
         &staging_root.join(".appsdk/project.json"),
         &staging_project_bytes,
+    )
+    .unwrap_or_else(|error| fail(error));
+    reset_transaction_write_json(
+        transaction_dir,
+        &staging_root.join(".appsdk/maps/module-registry.json"),
+        &staging_registry,
     )
     .unwrap_or_else(|error| fail(error));
     // Validate against the freshly built SDK resources so stale legacy

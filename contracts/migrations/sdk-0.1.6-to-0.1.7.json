@@ -3,6 +3,7 @@
   "migration_id": "appsdk-0.1.6-to-0.1.7",
   "source_version": "0.1.6",
   "target_version": "0.1.7",
+  "materialization": "pin_lock_when_migrating",
   "snapshot_root": ".appsdk/migrations/0.1.6-to-0.1.7/maps",
   "record_path": ".appsdk/migrations/0.1.6-to-0.1.7/record.json",
   "maps": [
@@ -12,7 +13,7 @@
       "source": "contracts/migrations/0.1.6/governance-maps/resource-map.json",
       "source_digest": "sha256:6cbb62a74955e7d15d8337b55b3f450c0c4e956d951bf5ce1bf506bd1f1b0166",
       "target": "contracts/maps/resource-map.json",
-      "target_digest": "sha256:2e0043594586d14ba7c49c8dc11825fae406494f92aa23025255c30a18375574"
+      "target_digest": "sha256:d3084c359d7ea147caba7e45020a0d3f8c1b7ecdff50642d62f2ff17f864717b"
     },
     {
       "name": "function-map.json",

@@ -1919,6 +1919,222 @@ fn init_fresh_preserves_project_owned_governance_constraints() {
 }
 
 #[test]
+fn init_fresh_preserves_project_module_registry_ownership() {
+    let root = temp_root("init-fresh-preserve-module-registry");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["project_id"] = Value::String("preserve-module-registry".into());
+    project["modules"][0]["module_id"] = Value::String("relay-service".into());
+    project["modules"][0]["source_owner"] = Value::String("relay-service".into());
+    project["modules"][0]["owned_paths"] =
+        serde_json::json!(["services/relay/src/**", "protected/source/**"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    fs::write(
+        &registry_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "modules": [{
+                "module_id": "relay-service",
+                "status": "contract_bound",
+                "owner": "relay-service",
+                "owned_paths": ["services/relay/src/**", "protocol/relay/**"],
+                "forbidden_paths": ["active/lib/**", "protected/**", "generated/**"],
+                "verification_gates": ["relay-tls-wss"],
+                "entry_symbols": ["relay::serve"],
+                "symbol_owners": {"serve": "relay::serve"}
+            }]
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let registry: Value =
+        serde_json::from_str(&fs::read_to_string(&registry_path).unwrap()).unwrap();
+    let modules = registry["modules"].as_array().unwrap();
+    assert_eq!(modules.len(), 1);
+    assert_eq!(modules[0]["module_id"], "relay-service");
+    assert_eq!(modules[0]["owner"], "relay-service");
+    assert_eq!(
+        modules[0]["owned_paths"],
+        serde_json::json!(["services/relay/src/**", "protected/source/**"])
+    );
+    let owned = modules[0]["owned_paths"].as_array().unwrap();
+    let forbidden = modules[0]["forbidden_paths"].as_array().unwrap();
+    assert!(
+        owned.iter().all(|path| !forbidden.contains(path)),
+        "owned paths must not be forbidden: {registry}"
+    );
+    assert!(
+        !forbidden.iter().any(|path| path == "protected/**"),
+        "project-owned protected path must not remain forbidden: {registry}"
+    );
+    assert!(
+        forbidden.iter().any(|path| path == "generated/**"),
+        "unrelated default forbidden path must remain: {registry}"
+    );
+    assert_eq!(
+        modules[0]["verification_gates"],
+        serde_json::json!(["relay-tls-wss"])
+    );
+    assert_eq!(
+        modules[0]["entry_symbols"],
+        serde_json::json!(["relay::serve"])
+    );
+    assert_eq!(
+        modules[0]["symbol_owners"],
+        serde_json::json!({"serve": "relay::serve"})
+    );
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_derives_missing_registry_modules_from_project_contract() {
+    let root = temp_root("init-fresh-derive-module-registry");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["modules"][0]["module_id"] = Value::String("relay-service".into());
+    project["modules"][0]["source_owner"] = Value::String("relay-service".into());
+    project["modules"][0]["owned_paths"] =
+        serde_json::json!(["services/relay/src/**", "protected/source/**"]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    init_git(&root);
+
+    let initialized = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(
+        initialized.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let registry: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".appsdk/maps/module-registry.json")).unwrap(),
+    )
+    .unwrap();
+    let modules = registry["modules"].as_array().unwrap();
+    assert_eq!(modules.len(), 1);
+    assert_eq!(modules[0]["module_id"], "relay-service");
+    assert_eq!(modules[0]["owner"], "relay-service");
+    assert_eq!(modules[0]["status"], "active");
+    assert_eq!(
+        modules[0]["owned_paths"],
+        serde_json::json!(["services/relay/src/**", "protected/source/**"])
+    );
+    let forbidden = modules[0]["forbidden_paths"].as_array().unwrap();
+    assert!(!forbidden.iter().any(|path| path == "protected/**"));
+    assert!(
+        !modules
+            .iter()
+            .any(|module| module["module_id"] == "app-core"),
+        "stale registry module must not survive fresh init: {registry}"
+    );
+    assert!(run(&["verify", root_text]).status.success());
+    let producer_input = root.join("producer-input.json");
+    fs::write(&producer_input, "{}\n").unwrap();
+    let producer = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "relay-service",
+        "--input",
+        producer_input.to_str().unwrap(),
+    ]);
+    let producer_stderr = String::from_utf8_lossy(&producer.stderr);
+    assert!(!producer.status.success());
+    assert!(
+        producer_stderr.contains("GOAL_NOT_CONFIRMED:received"),
+        "{producer_stderr}"
+    );
+    assert!(
+        !producer_stderr.contains("LIFECYCLE_PRODUCER_MODULE_BINDING"),
+        "{producer_stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_fresh_rejects_symlinked_module_registry_without_publishing_metadata() {
+    let root = temp_root("init-fresh-symlinked-module-registry");
+    let outside = temp_root("init-fresh-symlinked-module-registry-target");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    let outside_registry = outside.join("module-registry.json");
+    let external_registry = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "modules": [{
+            "module_id": "external-owner",
+            "status": "active",
+            "owner": "external-owner",
+            "owned_paths": ["external/**"],
+            "forbidden_paths": []
+        }]
+    }))
+    .unwrap()
+        + "\n";
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(&outside_registry, &external_registry).unwrap();
+    fs::remove_file(&registry_path).unwrap();
+    symlink(&outside_registry, &registry_path).unwrap();
+
+    let project_path = root.join(".appsdk/project.json");
+    let project_before = fs::read_to_string(&project_path).unwrap();
+    init_git(&root);
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("GOVERNANCE_PATH_SYMLINK:reset_module_registry"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(fs::read_to_string(&project_path).unwrap(), project_before);
+    assert!(registry_path.is_symlink());
+    assert_eq!(
+        fs::read_to_string(&outside_registry).unwrap(),
+        external_registry
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    fs::remove_file(&registry_path).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
 fn init_fresh_requires_project_security_boundary_before_resetting_unknown_contract() {
     let root = temp_root("init-fresh-minimal-contract-required");
     let root_text = root.to_str().unwrap();
@@ -9088,6 +9304,40 @@ fn install_current_governance_maps(root: &Path) {
         ),
     ] {
         fs::write(root.join(".appsdk/maps").join(name), content).unwrap();
+    }
+}
+
+#[test]
+fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
+    let map: Value =
+        serde_json::from_str(include_str!("../../contracts/maps/resource-map.json")).unwrap();
+    let resources = map["resources"].as_array().unwrap();
+    let truth_store = |resource_id: &str| {
+        resources
+            .iter()
+            .find(|resource| resource["resource_id"] == resource_id)
+            .and_then(|resource| resource["truth_store"].as_str())
+            .unwrap()
+    };
+
+    assert_eq!(
+        truth_store("sdk_bundle"),
+        "AppSDK 0.1.7 embedded Bundle manifest/resources"
+    );
+    assert_eq!(
+        truth_store("historical_governance_maps"),
+        ".appsdk/migrations/<source>-to-<target>/maps/** when materialized by pin-lock; absent after fresh reset"
+    );
+    assert_eq!(
+        truth_store("sdk_migration_record"),
+        ".appsdk/migrations/<source>-to-<target>/record.json when materialized by pin-lock; absent after fresh reset"
+    );
+    for text in [
+        include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
+        include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.7.json"),
+    ] {
+        let descriptor: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(descriptor["materialization"], "pin_lock_when_migrating");
     }
 }
 

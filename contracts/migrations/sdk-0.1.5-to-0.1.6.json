@@ -3,6 +3,7 @@
   "migration_id": "appsdk-0.1.5-to-0.1.6",
   "source_version": "0.1.5",
   "target_version": "0.1.6",
+  "materialization": "pin_lock_when_migrating",
   "snapshot_root": ".appsdk/migrations/0.1.5-to-0.1.6/maps",
   "record_path": ".appsdk/migrations/0.1.5-to-0.1.6/record.json",
   "maps": [

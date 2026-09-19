@@ -6,6 +6,7 @@ pub(crate) fn generate_long_horizon_master_prompt(goal_path: &Path, interval_str
 
 **长程任务目标文档**: `{}`
 **本地重唤醒意图**: 每 `{}` 检查一次；每次 Collab deadline 都是单次触发，不自动续期
+**执行边界**: `/goal` 和实现文档都不得声明 token、时间、上下文或轮次预算；只以目标文档中的完成条件和证据判断是否结束。
 
 RUN: `appsdk longhorizon show`
 THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待用户输入。
@@ -200,6 +201,8 @@ mod tests {
         assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
         assert!(prompt.contains("appsdk bug intake --input <json>"));
+        assert!(prompt.contains("不得声明 token、时间、上下文或轮次预算"));
+        assert!(!prompt.contains("token_budget"));
         assert_eq!(ExecutionRole::Master.fleet_rules(), POLICY.fleet_rules());
         assert!(ExecutionRole::Worker.fleet_rules().is_empty());
         assert_ne!(

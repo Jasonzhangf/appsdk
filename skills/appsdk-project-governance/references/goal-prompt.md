@@ -11,6 +11,11 @@ For a requested prompt, clarify material unknowns:
 5. Wait for confirmation when scope, risk, permission, or irreversible behavior is unclear.
 6. Write `docs/goals/<feature-name>-plan.md` before emitting the prompt.
 
+Never put a token, time, context, or turn budget in the plan or `/goal` prompt.
+Do not emit fields such as `token_budget`, budget seconds, context limits, or
+round limits. Completion is determined only by the plan's acceptance criteria
+and evidence.
+
 For an MVP→M1 migration or closeout, the plan is the single implementation
 source and must additionally bind:
 
@@ -50,6 +55,7 @@ docs/goals/<feature-name>-plan.md
 - 先查项目合同、owner、scope 和真源。
 - 只在允许路径修改；禁止 fallback、silent strip、旁路和无关改动。
 - 目标未 confirmed/admitted 时停止实现。
+- 不声明 token、时间、上下文或轮次预算；按完成条件和证据收口。
 
 验证：
 - 运行定向测试、build/compile、verify 和要求的 review gate。

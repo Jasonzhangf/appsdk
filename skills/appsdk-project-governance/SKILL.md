@@ -536,10 +536,14 @@ appsdk goal subscribe --goal docs/goals/<feature>-plan.md --interval 10m
 The master's primary responsibilities are task decomposition, resource
 allocation and recovery, worker saturation, blocker ownership, independent
 review routing, merge/integration, bug management, final acceptance, and
-cleanup. Implementation remains with the task owner; the master keeps
-architecture, integration and critical repair only. Every assignment must
-state done-iff, allowed and forbidden paths, worktree/branch, exact test
-commands, expected result, and evidence location.
+cleanup. The master owns the P0/P1 queue and dirty `main`: triage and dispatch
+the highest-priority open bugs, resolve or explicitly contain `main` dirt
+before integration, and do not leave either queue waiting for a worker to
+volunteer. The master does not write ordinary product code; implementation
+belongs to the task owner. The master keeps architecture, integration and
+critical repair only. Every assignment must state done-iff, allowed and
+forbidden paths, worktree/branch, exact test commands, expected result, and
+evidence location.
 
 ## Evidence and state ownership
 

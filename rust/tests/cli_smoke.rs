@@ -2082,6 +2082,59 @@ fn init_fresh_derives_missing_registry_modules_from_project_contract() {
 }
 
 #[test]
+fn init_fresh_rejects_symlinked_module_registry_without_publishing_metadata() {
+    let root = temp_root("init-fresh-symlinked-module-registry");
+    let outside = temp_root("init-fresh-symlinked-module-registry-target");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let registry_path = root.join(".appsdk/maps/module-registry.json");
+    let outside_registry = outside.join("module-registry.json");
+    let external_registry = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "modules": [{
+            "module_id": "external-owner",
+            "status": "active",
+            "owner": "external-owner",
+            "owned_paths": ["external/**"],
+            "forbidden_paths": []
+        }]
+    }))
+    .unwrap()
+        + "\n";
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(&outside_registry, &external_registry).unwrap();
+    fs::remove_file(&registry_path).unwrap();
+    symlink(&outside_registry, &registry_path).unwrap();
+
+    let project_path = root.join(".appsdk/project.json");
+    let project_before = fs::read_to_string(&project_path).unwrap();
+    init_git(&root);
+
+    let rejected = run(&["init", root_text, "--fresh", "--discard-legacy"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("GOVERNANCE_PATH_SYMLINK:reset_module_registry"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(fs::read_to_string(&project_path).unwrap(), project_before);
+    assert!(registry_path.is_symlink());
+    assert_eq!(
+        fs::read_to_string(&outside_registry).unwrap(),
+        external_registry
+    );
+    assert!(!root
+        .join(".appsdk/records/reset-governance-record.json")
+        .exists());
+    fs::remove_file(&registry_path).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
 fn init_fresh_requires_project_security_boundary_before_resetting_unknown_contract() {
     let root = temp_root("init-fresh-minimal-contract-required");
     let root_text = root.to_str().unwrap();

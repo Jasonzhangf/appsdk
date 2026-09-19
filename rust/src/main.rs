@@ -14172,6 +14172,13 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
         bytes
     };
     let registry_path = root.join(".appsdk/maps/module-registry.json");
+    assert_no_symlink_components(root, &registry_path, "reset_module_registry");
+    if !fs::symlink_metadata(&registry_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_RESET_MODULE_REGISTRY_INVALID");
+    }
     let registry: Value = serde_json::from_str(
         &fs::read_to_string(&registry_path)
             .unwrap_or_else(|_| fail("GOVERNANCE_RESET_MODULE_REGISTRY_MISSING")),

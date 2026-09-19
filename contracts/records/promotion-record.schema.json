@@ -18,6 +18,7 @@
     "merge_queue_record_id": {"type": "string"},
     "integration_record_id": {"type": "string"},
     "mainline_receipt_record_id": {"type": "string"},
+    "collab_live_closure_record_id": {"type": "string"},
     "base_commit": {"type": "string"},
     "candidate_commit": {"type": "string"},
     "merged_commit": {"type": "string"},

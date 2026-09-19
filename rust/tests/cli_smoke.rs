@@ -2034,7 +2034,7 @@ fn init_fresh_derives_missing_registry_modules_from_project_contract() {
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0]["module_id"], "relay-service");
     assert_eq!(modules[0]["owner"], "relay-service");
-    assert_eq!(modules[0]["status"], "source_implemented");
+    assert_eq!(modules[0]["status"], "active");
     assert_eq!(
         modules[0]["owned_paths"],
         serde_json::json!(["services/relay/src/**", "protected/source/**"])
@@ -2048,6 +2048,26 @@ fn init_fresh_derives_missing_registry_modules_from_project_contract() {
         "stale registry module must not survive fresh init: {registry}"
     );
     assert!(run(&["verify", root_text]).status.success());
+    let producer_input = root.join("producer-input.json");
+    fs::write(&producer_input, "{}\n").unwrap();
+    let producer = run(&[
+        "produce-lifecycle-records",
+        root_text,
+        "--module",
+        "relay-service",
+        "--input",
+        producer_input.to_str().unwrap(),
+    ]);
+    let producer_stderr = String::from_utf8_lossy(&producer.stderr);
+    assert!(!producer.status.success());
+    assert!(
+        producer_stderr.contains("GOAL_NOT_CONFIRMED:received"),
+        "{producer_stderr}"
+    );
+    assert!(
+        !producer_stderr.contains("LIFECYCLE_PRODUCER_MODULE_BINDING"),
+        "{producer_stderr}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

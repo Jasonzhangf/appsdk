@@ -14266,13 +14266,9 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
                     .map(|suite_id| vec![Value::String(suite_id.to_string())])
             })
             .unwrap_or_default();
-        let status = module
-            .get("stage")
-            .cloned()
-            .unwrap_or_else(|| Value::String("contract_bound".into()));
         staging_modules.push(serde_json::json!({
             "module_id": module_id,
-            "status": status,
+            "status": "active",
             "owner": owner,
             "owned_paths": owned_paths,
             "forbidden_paths": forbidden_paths,

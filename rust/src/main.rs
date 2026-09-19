@@ -14266,14 +14266,17 @@ fn reset_staging_scaffold(root: &Path, transaction_dir: &Path, transaction_id: &
                     .map(|suite_id| vec![Value::String(suite_id.to_string())])
             })
             .unwrap_or_default();
-        staging_modules.push(serde_json::json!({
-            "module_id": module_id,
-            "status": "active",
-            "owner": owner,
-            "owned_paths": owned_paths,
-            "forbidden_paths": forbidden_paths,
-            "verification_gates": verification_gates
-        }));
+        let mut staging_module = matches
+            .first()
+            .map(|registered| (*registered).clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        staging_module["module_id"] = Value::String(module_id.to_string());
+        staging_module["status"] = Value::String("active".into());
+        staging_module["owner"] = Value::String(owner.to_string());
+        staging_module["owned_paths"] = Value::Array(owned_paths);
+        staging_module["forbidden_paths"] = Value::Array(forbidden_paths);
+        staging_module["verification_gates"] = Value::Array(verification_gates);
+        staging_modules.push(staging_module);
     }
     staging_registry["modules"] = Value::Array(staging_modules);
     // Fresh init resets the control-plane records and rebuildable projections.

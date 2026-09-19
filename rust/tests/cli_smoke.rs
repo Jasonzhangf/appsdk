@@ -1949,7 +1949,9 @@ fn init_fresh_preserves_project_module_registry_ownership() {
                 "owner": "relay-service",
                 "owned_paths": ["services/relay/src/**", "protocol/relay/**"],
                 "forbidden_paths": ["active/lib/**", "protected/**", "generated/**"],
-                "verification_gates": ["relay-tls-wss"]
+                "verification_gates": ["relay-tls-wss"],
+                "entry_symbols": ["relay::serve"],
+                "symbol_owners": {"serve": "relay::serve"}
             }]
         }))
         .unwrap()
@@ -1993,6 +1995,14 @@ fn init_fresh_preserves_project_module_registry_ownership() {
     assert_eq!(
         modules[0]["verification_gates"],
         serde_json::json!(["relay-tls-wss"])
+    );
+    assert_eq!(
+        modules[0]["entry_symbols"],
+        serde_json::json!(["relay::serve"])
+    );
+    assert_eq!(
+        modules[0]["symbol_owners"],
+        serde_json::json!({"serve": "relay::serve"})
     );
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();

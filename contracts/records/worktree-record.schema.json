@@ -39,8 +39,19 @@
       "properties": {
         "query_executed": {"const": true},
         "query": {"type": "string", "minLength": 1},
-        "mode": {"enum": ["new_confirmed", "reopened", "historical_legacy"]},
-        "reopened_from_issue_id": {"type": ["string", "null"]}
+        "mode": {"enum": ["new_confirmed", "reused", "reopened", "reopened_same_record", "historical_legacy"]},
+        "reopened_from_issue_id": {"type": ["string", "null"]},
+        "matched_issue_id": {"type": ["string", "null"]},
+        "matched_title": {"type": ["string", "null"]},
+        "matched_classification": {"type": ["string", "null"]},
+        "query_result": {
+          "type": "object",
+          "required": ["records", "query_result_hash"],
+          "properties": {
+            "records": {"type": "array"},
+            "query_result_hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+          }
+        }
       }
     },
     "bug_triage_query_binding": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},

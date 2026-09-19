@@ -413,47 +413,37 @@ AppSDK governance. Desktop does not register or subscribe a long-horizon goal.
 
 ## Universal Bug Tracking & Defect Governance
 
-Defects and cross-round blockers are tracked through `appsdk bug` backed by
-`git-bug`. A feature request uses a confirmed goal/plan unless investigation
-finds a defect that needs the bug lifecycle.
+Execution-bound user inputs, requirements, problems, defects, and features use
+one development intake backed by the existing `git-bug` store:
 
-### 1. Requirements Triage & Kanban Management
-- **Master Role**:
-  - Receives user inputs / feature requests / bug reports.
-  - Queries existing issues first: `appsdk bug list -q "<keyword>" -l "<label>" --json`.
-  - If an existing related issue is found, **reopen** it and append details.
-  - If new, creates a new issue:
-    ```bash
-    appsdk bug new -t "<title>" -m "<requirements & reproduction>" -l "<priority>,<module>"
-    ```
-  - Prioritizes backlog using labels (e.g. `p0`, `p1`, `p2`) and dispatches workers based on highest priority issues within scope.
-- **Worker / Subworker Role**:
-  - Receives assigned issue and inspects its history: `appsdk bug show <id> --json`.
-  - Verifies and reproduces the defect/feature in an isolated worktree.
-  - Reports discoveries or new bugs to the bug system immediately; **does not auto-fix unrelated discoveries** to stay focused on the primary objective.
-  - **Blocker Handling & Block Criteria**:
-    - Task status can be marked as `blocked` (`collab task block <id>`) only with a concrete cause, responsible owner, unblock condition, and recovery trigger. Genuine external dependencies, resource ownership, missing credentials/approval, and cross-owner decisions may be valid waits; difficulty alone is not.
-    - AppSDK framework defects remain an upstream bug path (`appsdk bug new --upstream -t "[SDK Bug] ..." -l "P0,cli"`), but non-framework failures must first be investigated and solved in scope. If a cross-owner decision is required, report a concrete proposal to Master; Master must take over, reassign, or auditable-force-close in the same cycle.
-    - If encountering a valid AppSDK blocker and a live Master exists: report immediately to Master with root cause and proposed fix (`collab sendmessage --to <master> --subject blocker "..."`).
-    - If blocked by AppSDK and no live Master exists: file an upstream SDK bug, resolve or work around, and resume the task.
+```bash
+appsdk bug intake --input <intake.json>
+```
 
-### 2. Multi-Criteria Filtering
-- Master and workers filter issues to reduce noise:
-  - By status: `appsdk bug list --status <open|closed>`
-  - By label: `appsdk bug list -l <labels>`
-  - By participant/author: `appsdk bug list -p <user> -a <author>`
-  - By keyword query: `appsdk bug list -q <query>`
-  - By sort & direction: `appsdk bug list -b <creation|edit> -d <asc|desc>`
+The JSON declares `execution_bound: true`, classification `bug` or `feature`,
+title, original input, scope, owner, optional parent, acceptance, status,
+evidence links, and a dedup query. Intake queries first, reuses an exact
+match, appends changed intake details, reopens a closed match, or creates one record.
+It returns the authoritative `issue_id`. Read-only conversation uses no intake
+and `execution_bound: false` is rejected.
 
-### 3. Lifecycle Evidence Enforcement
-- **Architecture Gate**: `WorktreeRecord` must declare `bug_triage` (`query_executed: true`, a query containing the issue ID, `mode`, `reopened_from_issue_id`) verifying that existing issues were triaged before creating new work.
-- **Promotion / Closure Gate**: Closing a bug or promoting a candidate requires solution documentation in `git-bug`:
-  ```bash
-  appsdk bug close <bug_id> -m "Solution: <root cause & resolution>" --receipt-id <receipt_id>
-  ```
-- **Legacy Compatibility**: Tasks with empty, `none`, or `legacy-*` `issue_id` are exempt from retroactive bug tracking enforcement.
+Master, peer/worker, and subworker prompts use this same contract. Bind the
+returned ID through worktree, implementation, tests, review, merge, and
+closure. Without an ID, do not claim governed completion. Do not add another
+issue database, scheduler, daemon, or task truth.
 
-### 4. Stage gates: re-entry and reuse
+`WorktreeRecord` retains `bug_triage` and its query binding for non-legacy IDs.
+Closing or promotion still requires canonical solution evidence:
+
+```bash
+appsdk bug close <id> -m "Solution: <root cause and resolution>" --receipt-id <receipt>
+```
+
+Legacy empty, `none`, and `legacy-*` IDs remain exempt from retroactive intake.
+AppSDK framework defects retain the explicit `--upstream` route. Blocked tasks
+still require cause, owner, unblock condition, and recovery trigger.
+
+### Stage gates: re-entry and reuse
 
 Treat each lifecycle phase as its own persisted gate. The phase projection is
 bound to the candidate/tree, module scope, dependencies, artifact and

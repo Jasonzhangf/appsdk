@@ -23,9 +23,7 @@ THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待
 {}
 
 ## 4. 全生命周期治理与 AppSDK 规范
-- **系统需求、任务与 Bug 统一纳管**：长程任务中拆解的所有子需求、阶段任务与发现的缺陷，全部统一录入缺陷跟踪系统：
-  `appsdk bug new -t "<标题>" -m "<规格与验收条件>" -l "<优先级>,<模块>"`
-- **优先查重再建档**：派单或立项前运行 `appsdk bug list -q "<关键词>" --json`。已有相关 issue 优先追加或重新激活，避免碎片化重复建档。
+{}
 - **严格把关质量门禁**：验收 worker 产物时，必须检查完整生命周期证据链（独立 clean worktree、红测复现、预审验证、架构审查 PASS、无修改源有效性验证、Mainline 凭证）。
 - **上报 AppSDK 框架异常**：若执行过程中遇到 AppSDK 工具链、verify 规则或治理阻断，严禁在业务仓库内 hack 规避，必须执行：
   `appsdk bug new --upstream -t "[SDK Bug] <简述>" -m "<复现与现场>" -l "P0,cli"`
@@ -45,6 +43,7 @@ THEN: 派发、解阻塞、或用证据收口。不要 ACK 完事，不要等待
         POLICY.master_charter().trim(),
         POLICY.fleet_rules().trim(),
         POLICY.notification_rules().trim(),
+        DEVELOPMENT_INTAKE_CONTRACT.trim(),
     )
 }
 
@@ -134,6 +133,10 @@ const SUBAGENT_CHARTER: &str = r#"你是 managed subworker。你的职责是执�
 3. 发现新事项上报，不自动修复范围外问题。
 4. 没有任务时不要进入全局 backlog；回报 parent 并等待确认。"#;
 
+const DEVELOPMENT_INTAKE_CONTRACT: &str = r#"- 执行前 intake：所有执行型用户输入、需求或问题必须先运行 `appsdk bug intake --input <json>`，由同一 git-bug 真源查重后复用/重开或创建 bug/feature。
+- Intake 保留 original_input、classification、scope、owner/parent、acceptance、status、evidence_links。实现、测试、review、merge、closure 全部绑定返回的 issue_id；无 ID 不得声称 governed completion。
+- 只读问答不进入 development intake；不得另建 issue 数据库、scheduler、daemon 或 task truth。"#;
+
 const UNKNOWN_CHARTER: &str = r#"身份未验证。当前不能获得 master、独立 worker 或 managed subworker 的任何执行能力。
 
 1. 先确认自己是哪个已注册 App Server peer：`collab context`。
@@ -167,13 +170,14 @@ impl ExecutionRole {
         }
     }
 
-    pub(crate) fn charter(self) -> &'static str {
-        match self {
+    pub(crate) fn charter(self) -> String {
+        let role = match self {
             Self::Master => POLICY.master_charter(),
             Self::Worker => POLICY.worker_charter(),
             Self::ManagedSubagent => POLICY.managed_subagent_charter(),
-            Self::Unknown => POLICY.unknown_charter(),
-        }
+            Self::Unknown => return POLICY.unknown_charter().to_string(),
+        };
+        format!("{}\n\n{}", role.trim(), DEVELOPMENT_INTAKE_CONTRACT.trim())
     }
 
     pub(crate) fn fleet_rules(self) -> &'static str {
@@ -195,11 +199,22 @@ mod tests {
         assert!(prompt.contains("你是本项目的 master"));
         assert!(prompt.contains("Worker / subworker 处理规则"));
         assert!(prompt.contains("通知处理准则"));
+        assert!(prompt.contains("appsdk bug intake --input <json>"));
         assert_eq!(ExecutionRole::Master.fleet_rules(), POLICY.fleet_rules());
         assert!(ExecutionRole::Worker.fleet_rules().is_empty());
         assert_ne!(
             ExecutionRole::Master.charter(),
             ExecutionRole::Worker.charter()
         );
+        for role in [
+            ExecutionRole::Master,
+            ExecutionRole::Worker,
+            ExecutionRole::ManagedSubagent,
+        ] {
+            assert!(role.charter().contains(DEVELOPMENT_INTAKE_CONTRACT.trim()));
+        }
+        assert!(!ExecutionRole::Unknown
+            .charter()
+            .contains("appsdk bug intake"));
     }
 }

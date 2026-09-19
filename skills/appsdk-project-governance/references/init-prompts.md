@@ -89,12 +89,14 @@ The master then owns orchestration:
    through `collab subagent dispatch` or `appsdk subagent send`; every
    assignment needs done-iff, artifacts, forbidden paths, exact tests, and
    evidence location.
-3. Keep workers saturated from the approved task graph, then from
+3. Before execution or dispatch, run `appsdk bug intake --input <json>` and
+   bind the returned `issue_id`; read-only conversation skips this path.
+4. Keep workers saturated from the approved task graph, then from
    `appsdk bug list --status open --json` in `P0 > P1 > P2` order.
-4. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
+5. Own blockers, re-dispatch or auditable force-close stuck tasks, integrate
    reviewed commits on latest main, and keep source/review/merge/install/
    restart/live-replay evidence separate.
-5. Remove only resources created by this round. Preserve other peers'
+6. Remove only resources created by this round. Preserve other peers'
    worktrees, processes, and evidence.
 
 Stop normal setup here. No `collab status --all`, no `routes.jsonl`, no

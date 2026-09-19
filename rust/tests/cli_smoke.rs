@@ -224,33 +224,62 @@ fn init_git(root: &PathBuf) {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args(args)
         .env("APPSDK_HOME", test_global_registry_root_for_args(args))
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap()
+        .env_remove("TMUX_PANE");
+    if let Some(root) = args
+        .iter()
+        .skip(1)
+        .map(Path::new)
+        .find(|path| path.is_absolute())
+    {
+        apply_test_git_bug_fixture(&mut command, root);
+    } else {
+        command.env_remove("GIT_BUG_BIN");
+    }
+    command.output().unwrap()
 }
 
 fn run_in(root: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args(args)
         .current_dir(root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(root))
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap()
+        .env_remove("TMUX_PANE");
+    apply_test_git_bug_fixture(&mut command, root);
+    command.output().unwrap()
 }
 
 fn run_bug_in(root: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args(args)
         .current_dir(root)
         .env("APPSDK_ROOT", root)
         .env("APPSDK_HOME", test_global_registry_root_for_project(root))
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap()
+        .env_remove("TMUX_PANE");
+    apply_test_git_bug_fixture(&mut command, root);
+    command.output().unwrap()
+}
+
+fn test_git_bug_fixture_for_root(root: &Path) -> Option<PathBuf> {
+    let candidate = root.with_extension("fake-git-bug").join("git-bug");
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn apply_test_git_bug_fixture(command: &mut Command, root: &Path) {
+    if let Some(path) = test_git_bug_fixture_for_root(root) {
+        command.env("GIT_BUG_BIN", path);
+    } else {
+        command.env_remove("GIT_BUG_BIN");
+    }
 }
 
 fn run_memory(root: &Path, args: &[&str], home: &Path) -> std::process::Output {
@@ -5839,7 +5868,8 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
     )
     .unwrap();
 
-    let first = Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args([
             "produce-lifecycle-chain",
             root_text,
@@ -5862,9 +5892,9 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
                 env::var("PATH").unwrap()
             ),
         )
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap();
+        .env_remove("TMUX_PANE");
+    apply_test_git_bug_fixture(&mut command, &root);
+    let first = command.output().unwrap();
     assert!(
         first.status.success(),
         "stdout={} stderr={}",
@@ -5888,7 +5918,8 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
     }
     assert_eq!(persisted["bug_closure_verified"], true);
 
-    let second = Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args([
             "produce-lifecycle-chain",
             root_text,
@@ -5911,9 +5942,9 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
                 env::var("PATH").unwrap()
             ),
         )
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap();
+        .env_remove("TMUX_PANE");
+    apply_test_git_bug_fixture(&mut command, &root);
+    let second = command.output().unwrap();
     assert!(
         second.status.success(),
         "stdout={} stderr={}",
@@ -6004,6 +6035,7 @@ fn run_parallel_promotion(
     command
         .env("APPSDK_HOME", test_global_registry_root_for_project(root))
         .env_remove("TMUX_PANE");
+    apply_test_git_bug_fixture(&mut command, root);
     if let Some(prefix) = path_prefix {
         command.env(
             "PATH",
@@ -10105,10 +10137,7 @@ fn write_records(
     include_freeze: bool,
     issue_id: &str,
 ) {
-    let fake_git_bug = install_authoritative_bug_fixture(root, issue_id);
-    unsafe {
-        env::set_var("GIT_BUG_BIN", &fake_git_bug);
-    }
+    install_authoritative_bug_fixture(root, issue_id);
     let records = root.join(".appsdk/records");
     fs::create_dir_all(&records).unwrap();
     let evidence_dir = records.join("evidence").join(module_id);

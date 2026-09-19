@@ -25,6 +25,7 @@ appsdk goal subscribe --goal <file.md> --interval <interval>
                                        master-only long-horizon registration
 appsdk goal status --json              verify goal subscription state
 appsdk longhorizon show --json         read long-horizon role/task state
+appsdk bug intake --input <json>       deduplicate/classify execution work and return issue_id
 appsdk bug list -q <kw> --json         query bug backlog
 appsdk bug new -t <title> -m <body> -l <labels>
                                        create a bug record

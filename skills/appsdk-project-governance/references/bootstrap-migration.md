@@ -116,7 +116,8 @@ collab context
 The peer must observe its own identity, liveness, presence, transport and
 worker role. Do not run a second `collab init`, do not promote itself, do not
 register a long-horizon goal, and do not fabricate a worker role from
-`appsdk init` output.
+`appsdk init` output. Execution work requires the same `appsdk bug intake`
+contract and returned `issue_id`; read-only conversation does not.
 
 Long-horizon master scheduling is a separate, master-only step. Create the
 plan file first, then register and verify:

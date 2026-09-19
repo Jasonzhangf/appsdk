@@ -117,6 +117,9 @@ bound identity may report ready. It accepts a dispatched task with `action=worki
 own task/worktree lifecycle, sends results to the parent, and calls `ready`
 when done. Repeated idle reports are no-ops. Remain idle, not an ACK/poll loop.
 Task progress stays in Collab task records; no second task queue exists here.
+Before assigned execution, use the same `appsdk bug intake --input <json>`
+contract or the parent's returned `issue_id`; no ID means no governed
+completion claim. Read-only conversation stays outside intake.
 
 Only the creating parent may send/close; a user-requested early close may
 interrupt work, but never deletes worktrees or marks tasks complete. Closing

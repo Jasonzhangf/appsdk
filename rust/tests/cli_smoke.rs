@@ -12330,6 +12330,18 @@ fn worktree_schema_requires_triage_only_for_non_legacy_issue_ids() {
     assert!(then_required
         .iter()
         .any(|value| value == "bug_triage_query_binding"));
+    let triage = &properties["bug_triage"]["properties"];
+    let modes = triage["mode"]["enum"].as_array().unwrap();
+    for mode in ["new_confirmed", "reused", "reopened_same_record"] {
+        assert!(
+            modes.iter().any(|value| value == mode),
+            "missing canonical triage mode: {mode}"
+        );
+    }
+    assert_eq!(
+        triage["matched_issue_id"]["type"],
+        serde_json::json!(["string", "null"])
+    );
 }
 
 #[test]
@@ -17054,6 +17066,498 @@ fn bug_command_lifecycle() {
     let closed_json: Value = serde_json::from_slice(&closed_list.stdout).unwrap();
     assert_eq!(closed_json.as_array().unwrap().len(), 1);
     assert_eq!(closed_json[0]["status"], "closed");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bug_intake_deduplicates_execution_work_and_rejects_read_only_conversation() {
+    let root = temp_root("bug-intake");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("README.md"), "# Intake Test\n").unwrap();
+    init_git(&root);
+
+    let input = root.join("intake.json");
+    fs::write(
+        &input,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "execution_bound": true,
+            "classification": "feature",
+            "title": "Add governed development intake",
+            "original_input": "Implement governed intake before execution.",
+            "scope": ["rust/src/main.rs", "rust/tests/cli_smoke.rs"],
+            "owner": "appsdk::intake",
+            "parent_id": "feature-3655c02",
+            "acceptance": ["deduplicate before create", "bind lifecycle evidence"],
+            "status": "received",
+            "evidence_links": ["feature://3655c02"],
+            "dedup_query": "governed development intake"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let created = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", input.to_str().unwrap()],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created_json: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created_json["classification"], "feature");
+    assert_eq!(created_json["deduplicated"], false);
+    assert_eq!(created_json["created"], true);
+    assert_eq!(created_json["governed_completion_requires_issue_id"], true);
+    let issue_id = created_json["issue_id"].as_str().unwrap();
+    assert!(!issue_id.is_empty());
+    assert_eq!(created_json["bug_triage"]["query_executed"], true);
+    assert_eq!(created_json["bug_triage"]["mode"], "new_confirmed");
+    assert_eq!(
+        created_json["bug_triage"]["query"],
+        "git-bug bug \"governed development intake\" -f json"
+    );
+    let created_query_result = &created_json["bug_triage"]["query_result"];
+    assert_eq!(
+        created_query_result["query_result_hash"],
+        digest(&canonical(&created_query_result["records"]))
+    );
+    assert_eq!(created_query_result["records"], serde_json::json!([]));
+    assert_eq!(created_json["bug_triage"]["matched_issue_id"], Value::Null);
+    assert_eq!(
+        created_json["bug_triage"]["reopened_from_issue_id"],
+        Value::Null
+    );
+    assert_eq!(
+        created_json["bug_triage_query_binding"],
+        digest(&canonical(&serde_json::json!({
+            "issue_id": issue_id,
+            "query": "git-bug bug \"governed development intake\" -f json",
+            "mode": "new_confirmed",
+            "reopened_from_issue_id": null,
+            "matched_issue_id": null,
+            "matched_title": null,
+            "matched_classification": null,
+            "query_result": {
+                "records": [],
+                "query_result_hash": digest(&canonical(&serde_json::json!([])))
+            }
+        })))
+    );
+
+    let shown = run_bug_in(&root, &["bug", "show", issue_id, "--json"]);
+    assert!(shown.status.success());
+    let shown_json: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let body = shown_json["comments"][0]["message"].as_str().unwrap();
+    assert!(body.contains("\"parent_id\": \"feature-3655c02\""));
+    assert!(body.contains("\"evidence_links\": ["));
+    assert!(body.contains("### Original Input\nImplement governed intake before execution."));
+    assert!(body.contains("Classification: feature"));
+    assert!(body.contains("Scope:\n- rust/src/main.rs\n- rust/tests/cli_smoke.rs"));
+    assert!(body.contains("Owner: appsdk::intake"));
+    assert!(body.contains("Parent: feature-3655c02"));
+    assert!(body.contains("Acceptance:\n- deduplicate before create\n- bind lifecycle evidence"));
+    assert!(body.contains("Status: received"));
+    assert!(body.contains("Evidence links:\n- feature://3655c02"));
+
+    let fake_bin = root.with_extension("readback-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_git_bug = fake_bin.join("git-bug");
+    fs::write(
+        &fake_git_bug,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "user -f")
+    printf '%s\n' '[{"id":"test-user"}]'
+    exit 0
+    ;;
+  "bug new")
+    printf '%s\n' 'deadbeefdeadbeef'
+    exit 0
+    ;;
+  "bug label")
+    exit 0
+    ;;
+  "bug show")
+    printf '%s\n' '{"human_id":"deadbeefdeadbeef","status":"open","title":"different title","labels":["classification:feature"]}'
+    exit 0
+    ;;
+  *)
+    if [ "$1" = "bug" ]; then
+      printf '%s\n' '[]'
+      exit 0
+    fi
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git_bug, fs::Permissions::from_mode(0o755)).unwrap();
+    let forged_readback = Command::new(binary())
+        .args(["bug", "intake", "--input", input.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_ROOT", &root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("GIT_BUG_BIN", &fake_git_bug)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!forged_readback.status.success());
+    assert!(forged_readback.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&forged_readback.stderr)
+            .contains("BUG_INTAKE_CREATE_TITLE_MISMATCH"),
+        "{}",
+        String::from_utf8_lossy(&forged_readback.stderr)
+    );
+
+    let reused = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", input.to_str().unwrap()],
+    );
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    let reused_json: Value = serde_json::from_slice(&reused.stdout).unwrap();
+    assert_eq!(reused_json["issue_id"], issue_id);
+    assert_eq!(reused_json["deduplicated"], true);
+    assert_eq!(reused_json["created"], false);
+    assert_eq!(reused_json["appended"], false);
+    assert_eq!(reused_json["bug_triage"]["mode"], "reused");
+    assert_eq!(reused_json["bug_triage"]["matched_issue_id"], issue_id);
+    assert_eq!(
+        reused_json["bug_triage"]["matched_title"],
+        "Add governed development intake"
+    );
+    assert_eq!(
+        reused_json["bug_triage"]["matched_classification"],
+        "feature"
+    );
+    let reused_query_result = &reused_json["bug_triage"]["query_result"];
+    assert_eq!(
+        reused_query_result["query_result_hash"],
+        digest(&canonical(&reused_query_result["records"]))
+    );
+    assert_eq!(
+        reused_query_result["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| record["human_id"] == issue_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        reused_json["bug_triage"]["reopened_from_issue_id"],
+        Value::Null
+    );
+    assert_eq!(
+        reused_json["bug_triage_query_binding"],
+        digest(&canonical(&serde_json::json!({
+            "issue_id": issue_id,
+            "query": "git-bug bug \"governed development intake\" -f json",
+            "mode": "reused",
+            "reopened_from_issue_id": null,
+            "matched_issue_id": issue_id,
+            "matched_title": "Add governed development intake",
+            "matched_classification": "feature",
+            "query_result": reused_query_result
+        })))
+    );
+
+    let shown_after_reuse = run_bug_in(&root, &["bug", "show", issue_id, "--json"]);
+    assert!(shown_after_reuse.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&shown_after_reuse.stdout).unwrap()["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let list = run_bug_in(&root, &["bug", "list", "--json"]);
+    assert!(list.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&list.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let closed = run_bug_in(
+        &root,
+        &[
+            "bug",
+            "close",
+            issue_id,
+            "-m",
+            "Temporary closure for intake reopen coverage",
+        ],
+    );
+    assert!(closed.status.success());
+    let reopened = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", input.to_str().unwrap()],
+    );
+    assert!(
+        reopened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reopened.stderr)
+    );
+    let reopened_json: Value = serde_json::from_slice(&reopened.stdout).unwrap();
+    assert_eq!(reopened_json["issue_id"], issue_id);
+    assert_eq!(reopened_json["deduplicated"], true);
+    assert_eq!(reopened_json["reopened"], true);
+    assert_eq!(reopened_json["appended"], false);
+    assert_eq!(reopened_json["bug_triage"]["mode"], "reopened_same_record");
+    assert_eq!(reopened_json["bug_triage"]["matched_issue_id"], issue_id);
+    assert_eq!(
+        reopened_json["bug_triage"]["matched_title"],
+        "Add governed development intake"
+    );
+    assert_eq!(
+        reopened_json["bug_triage"]["matched_classification"],
+        "feature"
+    );
+    assert_eq!(
+        reopened_json["bug_triage"]["reopened_from_issue_id"],
+        issue_id
+    );
+    assert_eq!(
+        reopened_json["bug_triage_query_binding"],
+        digest(&canonical(&serde_json::json!({
+            "issue_id": issue_id,
+            "query": "git-bug bug \"governed development intake\" -f json",
+            "mode": "reopened_same_record",
+            "reopened_from_issue_id": issue_id,
+            "matched_issue_id": issue_id,
+            "matched_title": "Add governed development intake",
+            "matched_classification": "feature",
+            "query_result": reopened_json["bug_triage"]["query_result"]
+        })))
+    );
+    let reopened_record = run_bug_in(&root, &["bug", "show", issue_id, "--json"]);
+    assert!(reopened_record.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reopened_record.stdout).unwrap()["status"],
+        "open"
+    );
+
+    let invalid_classification = root.join("invalid-classification.json");
+    let mut invalid: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    invalid["classification"] = Value::String("question".into());
+    fs::write(
+        &invalid_classification,
+        serde_json::to_string_pretty(&invalid).unwrap() + "\n",
+    )
+    .unwrap();
+    let invalid_result = run_bug_in(
+        &root,
+        &[
+            "bug",
+            "intake",
+            "--input",
+            invalid_classification.to_str().unwrap(),
+        ],
+    );
+    assert!(!invalid_result.status.success());
+    assert!(String::from_utf8_lossy(&invalid_result.stderr)
+        .contains("BUG_INTAKE_CLASSIFICATION_INVALID"));
+
+    let read_only = root.join("read-only.json");
+    fs::write(
+        &read_only,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "execution_bound": false,
+            "classification": "feature",
+            "title": "Explain current behavior",
+            "original_input": "How does intake work?",
+            "scope": [],
+            "owner": "appsdk::intake",
+            "parent_id": null,
+            "acceptance": [],
+            "status": "received",
+            "evidence_links": [],
+            "dedup_query": "explain current behavior"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let rejected = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", read_only.to_str().unwrap()],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("DEVELOPMENT_INTAKE_READ_ONLY_CONVERSATION"));
+
+    let after = run_bug_in(&root, &["bug", "list", "--json"]);
+    assert!(after.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&after.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let legacy_title = "Legacy unlabeled intake issue";
+    let legacy_created = run_bug_in(
+        &root,
+        &[
+            "bug",
+            "new",
+            "-t",
+            legacy_title,
+            "-m",
+            "Created before classification labels.",
+        ],
+    );
+    assert!(legacy_created.status.success());
+    let legacy_id = serde_json::from_slice::<Value>(&legacy_created.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let legacy_input = root.join("legacy-intake.json");
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    legacy["classification"] = Value::String("bug".into());
+    legacy["title"] = Value::String(legacy_title.into());
+    legacy["original_input"] = Value::String("Reuse the existing legacy issue.".into());
+    legacy["dedup_query"] = Value::String("Legacy unlabeled intake issue".into());
+    fs::write(
+        &legacy_input,
+        serde_json::to_string_pretty(&legacy).unwrap() + "\n",
+    )
+    .unwrap();
+    let migrated = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", legacy_input.to_str().unwrap()],
+    );
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let migrated_json: Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    assert_eq!(migrated_json["issue_id"], legacy_id);
+    assert_eq!(migrated_json["deduplicated"], true);
+    assert_eq!(migrated_json["created"], false);
+    assert_eq!(migrated_json["bug_triage"]["mode"], "reused");
+    assert_eq!(migrated_json["bug_triage"]["matched_issue_id"], legacy_id);
+    assert_eq!(migrated_json["bug_triage"]["matched_title"], legacy_title);
+    assert_eq!(migrated_json["bug_triage"]["matched_classification"], "bug");
+    let migrated_record = run_bug_in(&root, &["bug", "show", legacy_id.as_str(), "--json"]);
+    assert!(migrated_record.status.success());
+    let migrated_record_json: Value = serde_json::from_slice(&migrated_record.stdout).unwrap();
+    assert!(migrated_record_json["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|label| label == "classification:bug"));
+    assert_eq!(
+        migrated_record_json["comments"].as_array().unwrap().len(),
+        2
+    );
+    let migrated_again = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", legacy_input.to_str().unwrap()],
+    );
+    assert!(migrated_again.status.success());
+    let migrated_record_again = run_bug_in(&root, &["bug", "show", legacy_id.as_str(), "--json"]);
+    assert!(migrated_record_again.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&migrated_record_again.stdout).unwrap()["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let conflict_title = "Classification conflict remains isolated";
+    let conflicting = run_bug_in(
+        &root,
+        &[
+            "bug",
+            "new",
+            "-t",
+            conflict_title,
+            "-m",
+            "Existing bug classification.",
+            "-l",
+            "classification:bug",
+        ],
+    );
+    assert!(conflicting.status.success());
+    let conflicting_id = serde_json::from_slice::<Value>(&conflicting.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let conflict_input = root.join("classification-conflict.json");
+    let mut conflict: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+    conflict["title"] = Value::String(conflict_title.into());
+    conflict["dedup_query"] = Value::String("Classification conflict remains isolated".into());
+    fs::write(
+        &conflict_input,
+        serde_json::to_string_pretty(&conflict).unwrap() + "\n",
+    )
+    .unwrap();
+    let isolated = run_bug_in(
+        &root,
+        &["bug", "intake", "--input", conflict_input.to_str().unwrap()],
+    );
+    assert!(isolated.status.success());
+    let isolated_json: Value = serde_json::from_slice(&isolated.stdout).unwrap();
+    assert_eq!(isolated_json["created"], true);
+    assert_ne!(isolated_json["issue_id"], conflicting_id);
+
+    let function_map: Value =
+        serde_json::from_str(include_str!("../../contracts/maps/function-map.json")).unwrap();
+    let mainline_map: Value =
+        serde_json::from_str(include_str!("../../contracts/maps/mainline-call-map.json")).unwrap();
+    let symbols = function_map["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|function| function["function_id"] == "development_intake")
+        .unwrap()["entry_symbols"]
+        .as_array()
+        .unwrap();
+    let chain = mainline_map["chains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|chain| chain["chain_id"] == "development-intake-v1")
+        .unwrap();
+    assert_eq!(chain["entry_symbol"], "bug_intake");
+    assert_eq!(chain["terminal_symbol"], "bug_intake_triage");
+    for edge in mainline_map["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["chain_id"] == "development-intake-v1")
+    {
+        for field in ["caller", "callee"] {
+            let symbol = edge[field].as_str().unwrap();
+            assert!(
+                symbols.iter().any(|candidate| candidate == symbol),
+                "unresolved development-intake symbol: {symbol}"
+            );
+            assert!(
+                include_str!("../src/main.rs").contains(&format!("fn {symbol}(")),
+                "development-intake symbol missing from rust/src/main.rs: {symbol}"
+            );
+        }
+    }
 
     fs::remove_dir_all(root).unwrap();
 }

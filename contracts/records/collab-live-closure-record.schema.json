@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/records/collab-live-closure-record.schema.json",
+  "type": "object",
+  "required": ["closure_id", "issue_id", "module_id", "fix_candidate_id", "artifact_hash", "scope_hash", "source_commit", "environment_id", "entrypoint", "collab_identity", "route_receipt", "evidence_ids", "path_receipts", "created_at"],
+  "properties": {
+    "closure_id": {"type": "string"},
+    "issue_id": {"type": "string"},
+    "module_id": {"type": "string"},
+    "fix_candidate_id": {"type": "string"},
+    "artifact_hash": {"type": "string"},
+    "scope_hash": {"type": "string"},
+    "source_commit": {"type": "string"},
+    "environment_id": {"type": "string"},
+    "entrypoint": {"type": "string"},
+    "collab_identity": {
+      "type": "object",
+      "required": ["worker_id", "binding_id", "native_thread_id", "app_scope_id", "project_scope_id"],
+      "properties": {
+        "worker_id": {"type": "string"},
+        "binding_id": {"type": "string"},
+        "native_thread_id": {"type": "string"},
+        "app_scope_id": {"type": "string"},
+        "project_scope_id": {"type": "string"}
+      }
+    },
+    "route_receipt": {
+      "type": "object",
+      "required": ["daemon_live", "endpoint_generation", "route_scope", "storage_root", "resolved_at", "source"],
+      "properties": {
+        "daemon_live": {"const": true},
+        "endpoint_generation": {"type": "integer", "minimum": 1},
+        "route_scope": {
+          "type": "object",
+          "required": ["project_scope", "app_scope_id"],
+          "properties": {
+            "project_scope": {"type": "string"},
+            "app_scope_id": {"type": "string"}
+          }
+        },
+        "storage_root": {"type": "string"},
+        "resolved_at": {"type": "string"},
+        "source": {"const": "collab_cli"}
+      }
+    },
+    "evidence_ids": {
+      "type": "object",
+      "required": ["peer_to_peer", "peer_to_master", "master_to_peer", "master_to_master", "daemon_to_peer", "daemon_to_master", "restart_replay"],
+      "additionalProperties": false,
+      "properties": {
+        "peer_to_peer": {"type": "string"},
+        "peer_to_master": {"type": "string"},
+        "master_to_peer": {"type": "string"},
+        "master_to_master": {"type": "string"},
+        "daemon_to_peer": {"type": "string"},
+        "daemon_to_master": {"type": "string"},
+        "restart_replay": {"type": "string"}
+      }
+    },
+    "path_receipts": {
+      "type": "object",
+      "required": ["peer_to_peer", "peer_to_master", "master_to_peer", "master_to_master", "daemon_to_peer", "daemon_to_master", "restart_replay"],
+      "additionalProperties": false,
+      "properties": {
+        "peer_to_peer": {"$ref": "#/$defs/path_receipt"},
+        "peer_to_master": {"$ref": "#/$defs/path_receipt"},
+        "master_to_peer": {"$ref": "#/$defs/path_receipt"},
+        "master_to_master": {"$ref": "#/$defs/path_receipt"},
+        "daemon_to_peer": {"$ref": "#/$defs/path_receipt"},
+        "daemon_to_master": {"$ref": "#/$defs/path_receipt"},
+        "restart_replay": {"$ref": "#/$defs/path_receipt"}
+      }
+    },
+    "created_at": {"type": "string"}
+  },
+  "$defs": {
+    "path_receipt": {
+      "type": "object",
+      "required": ["evidence_id", "message_id", "challenge", "sender", "receiver", "source_commit", "artifact_hash", "environment_id", "entrypoint", "endpoint_generation", "observed_at"],
+      "properties": {
+        "evidence_id": {"type": "string"},
+        "message_id": {"type": "string"},
+        "challenge": {"type": "string"},
+        "sender": {"enum": ["peer", "master", "daemon"]},
+        "receiver": {"enum": ["peer", "master"]},
+        "source_commit": {"type": "string"},
+        "artifact_hash": {"type": "string"},
+        "environment_id": {"type": "string"},
+        "entrypoint": {"type": "string"},
+        "endpoint_generation": {"type": "integer", "minimum": 1},
+        "observed_at": {"type": "string"}
+      }
+    }
+  }
+}

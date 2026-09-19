@@ -5790,6 +5790,8 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
     let records = root.join(".appsdk/records");
     fs::remove_file(records.join("promotion-record-app-core.json")).unwrap();
     let integration_commit = git_test_value(&root, &["rev-parse", "refs/heads/test-mainline"]);
+    install_fixture_collab_cli(&root, &artifact_hash, &integration_commit);
+    write_collab_live_closure_fixture(&root, "app-core", &artifact_hash, &integration_commit);
     let candidate_evidence = records.join("evidence/app-core/candidate-evidence-1.json");
     let mut candidate_evidence_value: Value =
         serde_json::from_str(&fs::read_to_string(&candidate_evidence).unwrap()).unwrap();
@@ -5822,6 +5824,7 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
             "merge_queue_record_id": "queue-1",
             "integration_record_id": "integration-1",
             "mainline_receipt_record_id": "receipt-1",
+            "collab_live_closure_record_id": "fixture-not-live",
             "change_set_id": "change-2",
             "root_cause": "root cause",
             "design_id": "design-1",
@@ -5836,16 +5839,32 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
     )
     .unwrap();
 
-    let first = run(&[
-        "produce-lifecycle-chain",
-        root_text,
-        "--module",
-        "app-core",
-        "--phase",
-        "promotion",
-        "--input",
-        input.to_str().unwrap(),
-    ]);
+    let first = Command::new(binary())
+        .args([
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "promotion",
+            "--input",
+            input.to_str().unwrap(),
+        ])
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_args(&[root_text]),
+        )
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("fixture-bin").display(),
+                env::var("PATH").unwrap()
+            ),
+        )
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(
         first.status.success(),
         "stdout={} stderr={}",
@@ -5863,21 +5882,38 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
         "merge_queue_record_id",
         "integration_record_id",
         "mainline_receipt_record_id",
+        "collab_live_closure_record_id",
     ] {
         assert_eq!(persisted[field], input_value["promotion"][field]);
     }
     assert_eq!(persisted["bug_closure_verified"], true);
 
-    let second = run(&[
-        "produce-lifecycle-chain",
-        root_text,
-        "--module",
-        "app-core",
-        "--phase",
-        "promotion",
-        "--input",
-        input.to_str().unwrap(),
-    ]);
+    let second = Command::new(binary())
+        .args([
+            "produce-lifecycle-chain",
+            root_text,
+            "--module",
+            "app-core",
+            "--phase",
+            "promotion",
+            "--input",
+            input.to_str().unwrap(),
+        ])
+        .env(
+            "APPSDK_HOME",
+            test_global_registry_root_for_args(&[root_text]),
+        )
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                root.join("fixture-bin").display(),
+                env::var("PATH").unwrap()
+            ),
+        )
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
     assert!(
         second.status.success(),
         "stdout={} stderr={}",
@@ -5888,6 +5924,186 @@ fn lifecycle_chain_promotion_supports_parallel_first_create_and_reuse() {
         serde_json::from_slice::<Value>(&second.stdout).unwrap()["reused"],
         true
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn prepare_parallel_promotion_fixture(name: &str) -> (PathBuf, PathBuf, Value) {
+    let root = temp_root(name);
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    enable_parallel_development(&root);
+    write_parallel_records(&root, "app-core", &artifact_hash, false);
+    let records = root.join(".appsdk/records");
+    fs::remove_file(records.join("promotion-record-app-core.json")).unwrap();
+    let integration_commit = git_test_value(&root, &["rev-parse", "refs/heads/test-mainline"]);
+    install_fixture_collab_cli(&root, &artifact_hash, &integration_commit);
+    write_collab_live_closure_fixture(&root, "app-core", &artifact_hash, &integration_commit);
+    let candidate_evidence = records.join("evidence/app-core/candidate-evidence-1.json");
+    let mut candidate_evidence_value: Value =
+        serde_json::from_str(&fs::read_to_string(&candidate_evidence).unwrap()).unwrap();
+    candidate_evidence_value["source_commit"] = Value::String(integration_commit);
+    fs::write(
+        &candidate_evidence,
+        serde_json::to_string_pretty(&candidate_evidence_value).unwrap() + "\n",
+    )
+    .unwrap();
+    let input = serde_json::json!({
+        "promotion": {
+            "experiment_id": "experiment-1",
+            "new_active_version": "active-v2",
+            "previous_active_version": null,
+            "compatibility_level": "compatible",
+            "evidence_ids": ["candidate-evidence-1"],
+            "required_gate_results": [
+                {"gate_id":"goal_confirmed","result":"pass","producer":"test"},
+                {"gate_id":"contract_valid","result":"pass","producer":"test"},
+                {"gate_id":"sdk_lock_integrity","result":"pass","producer":"test"},
+                {"gate_id":"remote_main_receipt","result":"pass","producer":"test"},
+                {"gate_id":"mainline_merge_identity","result":"pass","producer":"test"},
+                {"gate_id":"fix_lifecycle_graph","result":"pass","producer":"test"},
+                {"gate_id":"artifact_hash","result":"pass","producer":"test"},
+                {"gate_id":"lifecycle_chain_record_producer","result":"pass","producer":"test"}
+            ],
+            "collaboration_record_id": "collaboration-1",
+            "merge_queue_record_id": "queue-1",
+            "integration_record_id": "integration-1",
+            "mainline_receipt_record_id": "receipt-1",
+            "collab_live_closure_record_id": "fixture-not-live",
+            "change_set_id": "change-2",
+            "root_cause": "root cause",
+            "design_id": "design-1",
+            "change_reason_comment": "reason",
+            "playground_cleanup_record_id": "cleanup-1",
+            "artifact_hash": artifact_hash
+        }
+    });
+    let input_path = root.join("promotion-input.json");
+    fs::write(
+        &input_path,
+        serde_json::to_string_pretty(&input).unwrap() + "\n",
+    )
+    .unwrap();
+    (root, input_path, input)
+}
+
+fn run_parallel_promotion(
+    root: &Path,
+    input: &Path,
+    path_prefix: Option<&Path>,
+) -> std::process::Output {
+    let mut command = Command::new(binary());
+    command.args([
+        "produce-lifecycle-chain",
+        root.to_str().unwrap(),
+        "--module",
+        "app-core",
+        "--phase",
+        "promotion",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    command
+        .env("APPSDK_HOME", test_global_registry_root_for_project(root))
+        .env_remove("TMUX_PANE");
+    if let Some(prefix) = path_prefix {
+        command.env(
+            "PATH",
+            format!("{}:{}", prefix.display(), env::var("PATH").unwrap()),
+        );
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn lifecycle_chain_parallel_promotion_rejects_missing_collab_live_closure_path() {
+    let (root, input, _) = prepare_parallel_promotion_fixture("collab-live-closure-missing-path");
+    let closure_path = root.join(".appsdk/records/collab-live-closure-fixture-not-live.json");
+    let mut closure: Value =
+        serde_json::from_str(&fs::read_to_string(&closure_path).unwrap()).unwrap();
+    closure["path_receipts"]
+        .as_object_mut()
+        .unwrap()
+        .remove("restart_replay");
+    fs::write(
+        &closure_path,
+        serde_json::to_string_pretty(&closure).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&root.join("fixture-bin")));
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("COLLAB_LIVE_CLOSURE_MATRIX_MISSING"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_parallel_promotion_rejects_reused_collab_live_evidence() {
+    let (root, input, _) = prepare_parallel_promotion_fixture("collab-live-closure-reused");
+    let closure_path = root.join(".appsdk/records/collab-live-closure-fixture-not-live.json");
+    let mut closure: Value =
+        serde_json::from_str(&fs::read_to_string(&closure_path).unwrap()).unwrap();
+    let peer_to_peer = closure["evidence_ids"]["peer_to_peer"].clone();
+    closure["evidence_ids"]["restart_replay"] = peer_to_peer.clone();
+    closure["path_receipts"]["restart_replay"]["evidence_id"] = peer_to_peer;
+    fs::write(
+        &closure_path,
+        serde_json::to_string_pretty(&closure).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&root.join("fixture-bin")));
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("COLLAB_LIVE_CLOSURE_EVIDENCE_REUSED:restart_replay"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_parallel_promotion_rejects_source_only_collab_evidence() {
+    let (root, input, _) = prepare_parallel_promotion_fixture("collab-live-closure-source-only");
+    let evidence_path = root.join(".appsdk/records/evidence/app-core/collab-peer-to-peer.json");
+    let mut evidence: Value =
+        serde_json::from_str(&fs::read_to_string(&evidence_path).unwrap()).unwrap();
+    evidence["phase"] = Value::String("fix_candidate".into());
+    evidence["kind"] = Value::String("build".into());
+    fs::write(
+        &evidence_path,
+        serde_json::to_string_pretty(&evidence).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&root.join("fixture-bin")));
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("COLLAB_LIVE_CLOSURE_EVIDENCE_MISMATCH:peer_to_peer"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_parallel_promotion_preserves_route_unavailable_error() {
+    let (root, input, _) =
+        prepare_parallel_promotion_fixture("collab-live-closure-route-unavailable");
+    let unavailable_bin = root.join("unavailable-bin");
+    fs::create_dir_all(&unavailable_bin).unwrap();
+    let collab = unavailable_bin.join("collab");
+    fs::write(
+        &collab,
+        "#!/bin/sh\nprintf '%s\\n' 'DAEMON_UNKNOWN: cannot reach collab daemon' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&collab, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&unavailable_bin));
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("DAEMON_UNKNOWN"), "stderr={}", stderr);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -10211,6 +10427,174 @@ fn enable_parallel_development(root: &Path) {
         serde_json::to_string_pretty(&project).unwrap() + "\n",
     )
     .unwrap();
+}
+
+fn install_fixture_collab_cli(root: &Path, artifact_hash: &str, source_commit: &str) {
+    let bin = root.join("fixture-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let collab = bin.join("collab");
+    let script = r#"#!/bin/sh
+source_commit="__SOURCE_COMMIT__"
+artifact_hash="__ARTIFACT_HASH__"
+case "$1 $2" in
+  "context ")
+    printf '%s\n' '{"registered":true,"project_root":"fixture-project","liveness":{"live":true,"presence":"present","transport_kind":"appserver"},"identity":{"worker_id":"fixture-worker","kind":"peer","transport":{"kind":"appserver","thread_id":"fixture-thread"}}}'
+    ;;
+  "route resolve")
+    printf '%s\n' '{"app_scope_id":"fixture-app","project_scope":"fixture-project","canonical_root":"fixture-project","storage_root":"fixture-storage","agent_id":"fixture-worker","binding_id":"fixture-binding","endpoint_generation":1,"native_thread_id":"fixture-thread"}'
+    ;;
+  "msg collab-"*)
+    case "$2" in
+      "collab-peer-to-peer") sender="peer"; receiver="peer"; path="peer_to_peer" ;;
+      "collab-peer-to-master") sender="peer"; receiver="master"; path="peer_to_master" ;;
+      "collab-master-to-peer") sender="master"; receiver="peer"; path="master_to_peer" ;;
+      "collab-master-to-master") sender="master"; receiver="master"; path="master_to_master" ;;
+      "collab-daemon-to-peer") sender="daemon"; receiver="peer"; path="daemon_to_peer" ;;
+      "collab-daemon-to-master") sender="daemon"; receiver="master"; path="daemon_to_master" ;;
+      "collab-restart-replay") sender="daemon"; receiver="peer"; path="restart_replay" ;;
+      *)
+        printf '%s\n' 'fixture collab stub: unknown message' >&2
+        exit 66
+        ;;
+    esac
+    printf '{"id":"%s","from":"%s","to":"%s","subject":"appsdk-collab-live:fixture-not-live:%s:%s:%s:fixture-environment:1","state":"read","answered":false}\n' "$2" "$sender" "$receiver" "$path" "$source_commit" "$artifact_hash"
+    ;;
+  *)
+    printf '%s\n' 'fixture collab stub: unsupported command' >&2
+    exit 64
+    ;;
+esac
+"#
+    .replace("__SOURCE_COMMIT__", source_commit)
+    .replace("__ARTIFACT_HASH__", artifact_hash);
+    fs::write(&collab, script).unwrap();
+    fs::set_permissions(&collab, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn write_collab_live_closure_fixture(
+    root: &Path,
+    module_id: &str,
+    artifact_hash: &str,
+    source_commit: &str,
+) -> Value {
+    let records = root.join(".appsdk/records");
+    let evidence_dir = records.join("evidence").join(module_id);
+    let mut evidence_ids = serde_json::Map::new();
+    let mut path_receipts = serde_json::Map::new();
+    for path in [
+        "peer_to_peer",
+        "peer_to_master",
+        "master_to_peer",
+        "master_to_master",
+        "daemon_to_peer",
+        "daemon_to_master",
+        "restart_replay",
+    ] {
+        let evidence_id = format!("collab-{}", path.replace('_', "-"));
+        let phase = if path == "restart_replay" {
+            "deployment_restart"
+        } else {
+            "deployed_blackbox"
+        };
+        let kind = if path == "restart_replay" {
+            "restart"
+        } else {
+            "sample_replay"
+        };
+        let (sender, receiver) = match path {
+            "peer_to_peer" => ("peer", "peer"),
+            "peer_to_master" => ("peer", "master"),
+            "master_to_peer" => ("master", "peer"),
+            "master_to_master" => ("master", "master"),
+            "daemon_to_peer" => ("daemon", "peer"),
+            "daemon_to_master" => ("daemon", "master"),
+            "restart_replay" => ("daemon", "peer"),
+            _ => unreachable!(),
+        };
+        let challenge = format!(
+            "appsdk-collab-live:fixture-not-live:{path}:{source_commit}:{artifact_hash}:fixture-environment:1"
+        );
+        fs::write(
+            evidence_dir.join(format!("{evidence_id}.json")),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "evidence_id": evidence_id,
+                "issue_id": "issue-1",
+                "experiment_id": "experiment-1",
+                "phase": phase,
+                "kind": kind,
+                "source_commit": source_commit,
+                "artifact_hash": artifact_hash,
+                "execution_surface": "deployed_blackbox",
+                "environment_id": "fixture-environment",
+                "entrypoint": "fixture://collab-live-closure",
+                "scope": {"module_id": module_id},
+                "producer": {"adapter": "fixture", "identity": "fixture-not-live"},
+                "result": "pass",
+                "created_at": "2026-01-01T00:06:40Z",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "input_hashes": ["input-1"],
+                "scope_hash": "scope-1"
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        evidence_ids.insert(path.into(), Value::String(evidence_id.clone()));
+        path_receipts.insert(
+            path.into(),
+            serde_json::json!({
+                "evidence_id": evidence_id,
+                "message_id": format!("collab-{}", path.replace('_', "-")),
+                "sender": sender,
+                "receiver": receiver,
+                "source_commit": source_commit,
+                "artifact_hash": artifact_hash,
+                "environment_id": "fixture-environment",
+                "entrypoint": "fixture://collab-live-closure",
+                "endpoint_generation": 1,
+                "challenge": challenge,
+                "observed_at": "2026-01-01T00:06:40Z"
+            }),
+        );
+    }
+    let closure = serde_json::json!({
+        "closure_id": "fixture-not-live",
+        "issue_id": "issue-1",
+        "module_id": module_id,
+        "fix_candidate_id": "candidate-1",
+        "artifact_hash": artifact_hash,
+        "scope_hash": "scope-1",
+        "source_commit": source_commit,
+        "environment_id": "fixture-environment",
+        "entrypoint": "fixture://collab-live-closure",
+        "collab_identity": {
+            "worker_id": "fixture-worker",
+            "binding_id": "fixture-binding",
+            "native_thread_id": "fixture-thread",
+            "app_scope_id": "fixture-app",
+            "project_scope_id": "fixture-project"
+        },
+        "route_receipt": {
+            "daemon_live": true,
+            "endpoint_generation": 1,
+            "route_scope": {
+                "project_scope": "fixture-project",
+                "app_scope_id": "fixture-app"
+            },
+            "storage_root": "fixture-storage",
+            "resolved_at": "2026-01-01T00:06:40Z",
+            "source": "collab_cli"
+        },
+        "evidence_ids": Value::Object(evidence_ids),
+        "path_receipts": Value::Object(path_receipts),
+        "created_at": "2026-01-01T00:06:40Z"
+    });
+    fs::write(
+        records.join("collab-live-closure-fixture-not-live.json"),
+        serde_json::to_string_pretty(&closure).unwrap() + "\n",
+    )
+    .unwrap();
+    closure
 }
 
 fn prepare_retire_fixture(name: &str, candidate_issue: &str, validation_issue: &str) -> PathBuf {

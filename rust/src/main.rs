@@ -244,6 +244,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/mainline-receipt-record.schema.json"),
     ),
     (
+        "contracts/records/collab-live-closure-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/collab-live-closure-record.schema.json"),
+    ),
+    (
         "contracts/records/merge-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/merge-record.schema.json"),
@@ -792,6 +797,10 @@ fn bootstrap_contracts(root: &Path) {
         (
             "contracts/records/mainline-receipt-record.schema.json",
             include_str!("../../contracts/records/mainline-receipt-record.schema.json"),
+        ),
+        (
+            "contracts/records/collab-live-closure-record.schema.json",
+            include_str!("../../contracts/records/collab-live-closure-record.schema.json"),
         ),
         (
             "contracts/records/merge-record.schema.json",
@@ -1686,6 +1695,7 @@ fn assert_declared_contracts(root: &Path, project: &Value) {
         "contracts/records/merge-queue-state.schema.json",
         "contracts/records/integration-record.schema.json",
         "contracts/records/mainline-receipt-record.schema.json",
+        "contracts/records/collab-live-closure-record.schema.json",
         "contracts/records/merge-record.schema.json",
         "contracts/records/promotion-record.schema.json",
         "contracts/records/regression-report.schema.json",
@@ -3971,7 +3981,12 @@ fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: O
     }
 }
 
-fn assert_development_scenarios(root: &Path, project: &Value) -> bool {
+struct DevelopmentScenarios {
+    multi_worker_collaboration: bool,
+    multi_worktree_merge_queue: bool,
+}
+
+fn assert_development_scenarios(root: &Path, project: &Value) -> DevelopmentScenarios {
     let manifest_path = project
         .pointer("/development_scenarios/manifest")
         .and_then(Value::as_str)
@@ -4014,7 +4029,10 @@ fn assert_development_scenarios(root: &Path, project: &Value) -> bool {
     if multi_worktree && !multi_worker {
         fail("MERGE_QUEUE_COLLABORATION_REQUIRED");
     }
-    multi_worktree
+    DevelopmentScenarios {
+        multi_worker_collaboration: multi_worker,
+        multi_worktree_merge_queue: multi_worktree,
+    }
 }
 
 fn assert_project_contract(root: &Path, project: &Value) {
@@ -8236,6 +8254,388 @@ fn lifecycle_chain_validate_evidence(
     evidence
 }
 
+const COLLAB_LIVE_CLOSURE_PATHS: [&str; 7] = [
+    "peer_to_peer",
+    "peer_to_master",
+    "master_to_peer",
+    "master_to_master",
+    "daemon_to_peer",
+    "daemon_to_master",
+    "restart_replay",
+];
+
+fn collab_live_closure_challenge(
+    closure_id: &str,
+    path: &str,
+    source_commit: &str,
+    artifact_hash: &str,
+    environment_id: &str,
+    endpoint_generation: u64,
+) -> String {
+    format!(
+        "appsdk-collab-live:{closure_id}:{path}:{source_commit}:{artifact_hash}:{environment_id}:{endpoint_generation}"
+    )
+}
+
+fn collab_live_closure_route(
+    root: &Path,
+    expected_project_scope: &str,
+    expected_app_scope: &str,
+    expected_worker_id: &str,
+    expected_binding_id: &str,
+    expected_native_thread_id: &str,
+) -> Value {
+    let mut context_command = Command::new("collab");
+    context_command
+        .arg("context")
+        .current_dir(root)
+        .env("CODEX_THREAD_ID", expected_native_thread_id);
+    let context = run_goal_collab_command(context_command, GOAL_COLLAB_READ_TIMEOUT)
+        .unwrap_or_else(|error| fail(error));
+    if !context.status.success() {
+        let detail = String::from_utf8_lossy(&context.stderr).trim().to_string();
+        fail(if detail.is_empty() {
+            "COLLAB_LIVE_CLOSURE_CONTEXT_FAILED".to_string()
+        } else {
+            detail
+        });
+    }
+    let context: Value = serde_json::from_slice(&context.stdout)
+        .unwrap_or_else(|_| fail("COLLAB_LIVE_CLOSURE_CONTEXT_INVALID"));
+    if context.get("registered").and_then(Value::as_bool) != Some(true)
+        || context.pointer("/liveness/live").and_then(Value::as_bool) != Some(true)
+    {
+        fail("COLLAB_LIVE_CLOSURE_DAEMON_NOT_LIVE");
+    }
+    if context.pointer("/project_root").and_then(Value::as_str) != Some(expected_project_scope) {
+        fail("COLLAB_LIVE_CLOSURE_PROJECT_SCOPE_MISMATCH");
+    }
+    if context
+        .pointer("/identity/worker_id")
+        .and_then(Value::as_str)
+        != Some(expected_worker_id)
+        || context
+            .pointer("/identity/transport/thread_id")
+            .and_then(Value::as_str)
+            .is_none()
+    {
+        fail("COLLAB_LIVE_CLOSURE_IDENTITY_MISSING");
+    }
+    if context
+        .pointer("/identity/transport/thread_id")
+        .and_then(Value::as_str)
+        != Some(expected_native_thread_id)
+    {
+        fail("COLLAB_LIVE_CLOSURE_THREAD_MISMATCH");
+    }
+
+    let mut route_command = Command::new("collab");
+    route_command
+        .args(["route", "resolve", "--native-thread-id"])
+        .arg(expected_native_thread_id);
+    let route = run_goal_collab_command(route_command, GOAL_COLLAB_READ_TIMEOUT)
+        .unwrap_or_else(|error| fail(error));
+    if !route.status.success() {
+        let detail = String::from_utf8_lossy(&route.stderr).trim().to_string();
+        fail(if detail.is_empty() {
+            "COLLAB_LIVE_CLOSURE_ROUTE_FAILED".to_string()
+        } else {
+            detail
+        });
+    }
+    let route: Value = serde_json::from_slice(&route.stdout)
+        .unwrap_or_else(|_| fail("COLLAB_LIVE_CLOSURE_ROUTE_INVALID"));
+    if route
+        .get("endpoint_generation")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+        || route.get("project_scope").and_then(Value::as_str) != Some(expected_project_scope)
+        || route.get("canonical_root").and_then(Value::as_str) != Some(expected_project_scope)
+        || route.get("app_scope_id").and_then(Value::as_str) != Some(expected_app_scope)
+        || route.get("agent_id").and_then(Value::as_str) != Some(expected_worker_id)
+        || route.get("binding_id").and_then(Value::as_str) != Some(expected_binding_id)
+        || route.get("native_thread_id").and_then(Value::as_str) != Some(expected_native_thread_id)
+        || route.get("storage_root").and_then(Value::as_str).is_none()
+    {
+        fail("COLLAB_LIVE_CLOSURE_ROUTE_INVALID");
+    }
+    route
+}
+
+fn collab_live_closure_message(
+    root: &Path,
+    message_id: &str,
+    expected_sender: &str,
+    expected_receiver: &str,
+    expected_challenge: &str,
+) -> Value {
+    assert_identifier(message_id, "INVALID_COLLAB_MESSAGE_ID");
+    let mut command = Command::new("collab");
+    command.args(["msg", message_id]).current_dir(root);
+    let message = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
+        .unwrap_or_else(|error| fail(error));
+    if !message.status.success() {
+        let detail = String::from_utf8_lossy(&message.stderr).trim().to_string();
+        fail(if detail.is_empty() {
+            "COLLAB_LIVE_CLOSURE_MESSAGE_FAILED".to_string()
+        } else {
+            detail
+        });
+    }
+    let message: Value = serde_json::from_slice(&message.stdout)
+        .unwrap_or_else(|_| fail("COLLAB_LIVE_CLOSURE_MESSAGE_INVALID"));
+    if message.get("id").and_then(Value::as_str) != Some(message_id)
+        || message.get("from").and_then(Value::as_str) != Some(expected_sender)
+        || message.get("to").and_then(Value::as_str) != Some(expected_receiver)
+        || message.get("state").and_then(Value::as_str) != Some("read")
+        || message.get("subject").and_then(Value::as_str) != Some(expected_challenge)
+    {
+        fail("COLLAB_LIVE_CLOSURE_MESSAGE_NOT_CHALLENGE_BOUND");
+    }
+    message
+}
+
+fn assert_collab_live_closure(
+    root: &Path,
+    module_id: &str,
+    promotion: &Value,
+    issue_id: &str,
+    candidate_id: &str,
+    artifact_hash: &str,
+    scope_hash: &str,
+    source_commit: &str,
+) {
+    let closure_id = producer_string(
+        promotion,
+        "/collab_live_closure_record_id",
+        "COLLAB_LIVE_CLOSURE_RECORD_MISSING",
+    );
+    assert_identifier(&closure_id, "INVALID_COLLAB_LIVE_CLOSURE_ID");
+    let closure = read_record(root, &format!("collab-live-closure-{closure_id}.json"));
+    for path in [
+        "/closure_id",
+        "/issue_id",
+        "/module_id",
+        "/fix_candidate_id",
+        "/artifact_hash",
+        "/scope_hash",
+        "/source_commit",
+        "/environment_id",
+        "/entrypoint",
+        "/collab_identity/worker_id",
+        "/collab_identity/binding_id",
+        "/collab_identity/native_thread_id",
+        "/collab_identity/app_scope_id",
+        "/collab_identity/project_scope_id",
+        "/route_receipt/storage_root",
+        "/route_receipt/resolved_at",
+        "/created_at",
+    ] {
+        record_str(&closure, path, "collab-live-closure-record.json");
+    }
+    if record_str(&closure, "/closure_id", "collab-live-closure-record.json") != closure_id
+        || record_str(&closure, "/issue_id", "collab-live-closure-record.json") != issue_id
+        || record_str(&closure, "/module_id", "collab-live-closure-record.json") != module_id
+        || record_str(
+            &closure,
+            "/fix_candidate_id",
+            "collab-live-closure-record.json",
+        ) != candidate_id
+        || record_str(
+            &closure,
+            "/artifact_hash",
+            "collab-live-closure-record.json",
+        ) != artifact_hash
+        || record_str(&closure, "/scope_hash", "collab-live-closure-record.json") != scope_hash
+        || record_str(
+            &closure,
+            "/source_commit",
+            "collab-live-closure-record.json",
+        ) != source_commit
+        || closure
+            .pointer("/route_receipt/source")
+            .and_then(Value::as_str)
+            != Some("collab_cli")
+        || closure
+            .pointer("/route_receipt/daemon_live")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        fail("COLLAB_LIVE_CLOSURE_BINDING_MISMATCH");
+    }
+    let environment_id = record_str(
+        &closure,
+        "/environment_id",
+        "collab-live-closure-record.json",
+    );
+    let entrypoint = record_str(&closure, "/entrypoint", "collab-live-closure-record.json");
+    let project_scope = record_str(
+        &closure,
+        "/collab_identity/project_scope_id",
+        "collab-live-closure-record.json",
+    );
+    let app_scope = record_str(
+        &closure,
+        "/collab_identity/app_scope_id",
+        "collab-live-closure-record.json",
+    );
+    let worker_id = record_str(
+        &closure,
+        "/collab_identity/worker_id",
+        "collab-live-closure-record.json",
+    );
+    let native_thread_id = record_str(
+        &closure,
+        "/collab_identity/native_thread_id",
+        "collab-live-closure-record.json",
+    );
+    let binding_id = record_str(
+        &closure,
+        "/collab_identity/binding_id",
+        "collab-live-closure-record.json",
+    );
+    let route = collab_live_closure_route(
+        root,
+        project_scope,
+        app_scope,
+        worker_id,
+        binding_id,
+        native_thread_id,
+    );
+    if route.get("endpoint_generation") != closure.pointer("/route_receipt/endpoint_generation")
+        || route.get("project_scope") != closure.pointer("/route_receipt/route_scope/project_scope")
+        || route.get("app_scope_id") != closure.pointer("/route_receipt/route_scope/app_scope_id")
+        || route.get("storage_root") != closure.pointer("/route_receipt/storage_root")
+    {
+        fail("COLLAB_LIVE_CLOSURE_ROUTE_DRIFT");
+    }
+    let evidence_ids = closure
+        .get("evidence_ids")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_MATRIX_MISSING"));
+    let path_receipts = closure
+        .get("path_receipts")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_MATRIX_MISSING"));
+    if evidence_ids.len() != COLLAB_LIVE_CLOSURE_PATHS.len()
+        || path_receipts.len() != COLLAB_LIVE_CLOSURE_PATHS.len()
+    {
+        fail("COLLAB_LIVE_CLOSURE_MATRIX_MISSING");
+    }
+    let mut seen_evidence_ids = std::collections::HashSet::new();
+    let mut seen_message_ids = std::collections::HashSet::new();
+    let endpoint_generation = route
+        .get("endpoint_generation")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_ROUTE_INVALID"));
+    for path in COLLAB_LIVE_CLOSURE_PATHS {
+        let evidence_id = evidence_ids
+            .get(path)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fail(format!("COLLAB_LIVE_CLOSURE_PATH_MISSING:{}", path)));
+        if !seen_evidence_ids.insert(evidence_id.to_string()) {
+            fail(format!("COLLAB_LIVE_CLOSURE_EVIDENCE_REUSED:{}", path));
+        }
+        let receipt = path_receipts
+            .get(path)
+            .filter(|value| value.is_object())
+            .unwrap_or_else(|| fail(format!("COLLAB_LIVE_CLOSURE_PATH_MISSING:{}", path)));
+        let message_id = record_str(receipt, "/message_id", "collab-live-closure-record.json");
+        let challenge = record_str(receipt, "/challenge", "collab-live-closure-record.json");
+        let expected_challenge = collab_live_closure_challenge(
+            &closure_id,
+            path,
+            source_commit,
+            artifact_hash,
+            environment_id,
+            endpoint_generation,
+        );
+        if record_str(receipt, "/evidence_id", "collab-live-closure-record.json") != evidence_id
+            || record_str(receipt, "/source_commit", "collab-live-closure-record.json")
+                != source_commit
+            || record_str(receipt, "/artifact_hash", "collab-live-closure-record.json")
+                != artifact_hash
+            || record_str(
+                receipt,
+                "/environment_id",
+                "collab-live-closure-record.json",
+            ) != environment_id
+            || record_str(receipt, "/entrypoint", "collab-live-closure-record.json") != entrypoint
+            || receipt
+                .pointer("/endpoint_generation")
+                .and_then(Value::as_u64)
+                != Some(endpoint_generation)
+            || challenge != expected_challenge
+        {
+            fail(format!("COLLAB_LIVE_CLOSURE_PATH_MISMATCH:{}", path));
+        }
+        if !seen_message_ids.insert(message_id.to_string()) {
+            fail(format!("COLLAB_LIVE_CLOSURE_MESSAGE_REUSED:{}", path));
+        }
+        let expected_sender = if path.starts_with("daemon_to_") {
+            "daemon"
+        } else if path.starts_with("master_to_") {
+            "master"
+        } else if path.starts_with("peer_to_") {
+            "peer"
+        } else {
+            "daemon"
+        };
+        let expected_receiver = if path.ends_with("_to_master") {
+            "master"
+        } else {
+            "peer"
+        };
+        if record_str(receipt, "/sender", "collab-live-closure-record.json") != expected_sender
+            || record_str(receipt, "/receiver", "collab-live-closure-record.json")
+                != expected_receiver
+        {
+            fail(format!(
+                "COLLAB_LIVE_CLOSURE_PATH_DIRECTION_MISMATCH:{}",
+                path
+            ));
+        }
+        collab_live_closure_message(
+            root,
+            message_id,
+            expected_sender,
+            expected_receiver,
+            &expected_challenge,
+        );
+        let evidence = evidence_by_id(root, module_id, evidence_id);
+        assert_evidence_record(
+            &evidence,
+            evidence_id,
+            EvidenceValidationMode::Current(Utc::now()),
+        );
+        let expected_phase = if path == "restart_replay" {
+            "deployment_restart"
+        } else {
+            "deployed_blackbox"
+        };
+        let expected_kind = if path == "restart_replay" {
+            "restart"
+        } else {
+            "sample_replay"
+        };
+        if record_str(&evidence, "/issue_id", evidence_id) != issue_id
+            || evidence.pointer("/scope/module_id").and_then(Value::as_str) != Some(module_id)
+            || record_str(&evidence, "/scope_hash", evidence_id) != scope_hash
+            || record_str(&evidence, "/source_commit", evidence_id) != source_commit
+            || record_str(&evidence, "/artifact_hash", evidence_id) != artifact_hash
+            || record_str(&evidence, "/environment_id", evidence_id) != environment_id
+            || record_str(&evidence, "/entrypoint", evidence_id) != entrypoint
+            || record_str(&evidence, "/result", evidence_id) != "pass"
+            || record_str(&evidence, "/phase", evidence_id) != expected_phase
+            || record_str(&evidence, "/kind", evidence_id) != expected_kind
+        {
+            fail(format!("COLLAB_LIVE_CLOSURE_EVIDENCE_MISMATCH:{}", path));
+        }
+    }
+}
+
 fn lifecycle_chain_promotion_id(issue_id: &str, module_id: &str, candidate_id: &str) -> String {
     producer_stable_id(
         "promotion",
@@ -8820,7 +9220,9 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
                 .find(|module| module.get("module_id").and_then(Value::as_str) == Some(module_id))
         })
         .unwrap_or_else(|| fail(format!("MODULE_NOT_FOUND:{}", module_id)));
-    let parallel_development = assert_development_scenarios(root, &project);
+    let scenarios = assert_development_scenarios(root, &project);
+    let parallel_development = scenarios.multi_worktree_merge_queue;
+    let collaboration_development = scenarios.multi_worker_collaboration;
     module_artifact_matches_project(module, &artifact);
     let issue_id = producer_string(&worktree, "/issue_id", "worktree-record.json");
     let candidate_id =
@@ -8961,7 +9363,7 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         "bug_closure_verified": true,
         "created_at": promotion_time.to_rfc3339()
     });
-    if parallel_development {
+    if collaboration_development {
         for (field, error) in [
             (
                 "collaboration_record_id",
@@ -8979,6 +9381,10 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
                 "mainline_receipt_record_id",
                 "PROMOTION_MAINLINE_RECEIPT_RECORD_MISSING",
             ),
+            (
+                "collab_live_closure_record_id",
+                "PROMOTION_COLLAB_LIVE_CLOSURE_RECORD_MISSING",
+            ),
         ] {
             promotion[field] =
                 Value::String(producer_string(&observation, &format!("/{}", field), error));
@@ -8991,6 +9397,18 @@ fn lifecycle_chain_promotion(root: &Path, module_id: &str, input_path: &str) {
         assert_parallel_merge_gate_for_promotion(root, module_id, &promotion);
     } else {
         assert_single_merge_gate(root, module_id);
+    }
+    if collaboration_development {
+        assert_collab_live_closure(
+            root,
+            module_id,
+            &promotion,
+            &issue_id,
+            &candidate_id,
+            &artifact_hash,
+            &scope_hash,
+            &merge_commit,
+        );
     }
     // A promotion is the closure boundary for a tracked defect.  Validate the
     // current bug state on every invocation, including cache probes, so a
@@ -10861,7 +11279,7 @@ fn assert_single_merge_gate(root: &Path, module_id: &str) {
 
 fn assert_fix_merge_gate(root: &Path, module_id: &str) {
     let project = read_project(root);
-    if assert_development_scenarios(root, &project) {
+    if assert_development_scenarios(root, &project).multi_worktree_merge_queue {
         assert_parallel_merge_gate(root, module_id);
     } else {
         assert_single_merge_gate(root, module_id);
@@ -10876,7 +11294,9 @@ fn assert_fix_lifecycle_graph(
     artifact: &Value,
 ) {
     let project = read_project(root);
-    let parallel_development = assert_development_scenarios(root, &project);
+    let scenarios = assert_development_scenarios(root, &project);
+    let parallel_development = scenarios.multi_worktree_merge_queue;
+    let collaboration_development = scenarios.multi_worker_collaboration;
     assert_fix_architecture_gate(root, module_id, artifact);
     assert_fix_effectiveness_gate(root, module_id);
     assert_fix_merge_gate(root, module_id);
@@ -11108,6 +11528,18 @@ fn assert_fix_lifecycle_graph(
         {
             fail("PROMOTION_PARALLEL_MERGE_REFERENCE_MISMATCH");
         }
+    }
+    if collaboration_development {
+        assert_collab_live_closure(
+            root,
+            module_id,
+            promotion,
+            issue_id,
+            record_str(&candidate, "/fix_candidate_id", &candidate_name),
+            record_str(artifact, "/artifact_hash", "artifact"),
+            scope_hash,
+            merge_commit,
+        );
     }
     if !(record_time(&worktree, &worktree_name) <= record_time(&reproduction, &reproduction_name)
         && record_time(&reproduction, &reproduction_name)
@@ -13087,7 +13519,7 @@ fn write_project_scaffold(root: &Path) {
     "freeze_requirements": ["git_clean", "source_commit_or_tag", "library_hash", "public_api_hash", "review_pass", "previous_active_immutable"],
     "promotion_requires": ["experiment_evidence", "architecture_review_pass", "unique_owner", "required_gates"],
     "runtime_forbidden_roots": ["playground/**", "generated/**"],
-    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/pre-review-validation-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/collaboration-index.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/merge-queue-state.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
+    "record_contracts": ["contracts/records/worktree-record.schema.json", "contracts/records/reproduction-record.schema.json", "contracts/records/evidence-record.schema.json", "contracts/records/fix-candidate-record.schema.json", "contracts/records/goal-clarification-record.schema.json", "contracts/records/review-record.schema.json", "contracts/records/effectiveness-record.schema.json", "contracts/records/pre-review-validation-record.schema.json", "contracts/records/collaboration-record.schema.json", "contracts/records/collaboration-index.schema.json", "contracts/records/merge-queue-record.schema.json", "contracts/records/merge-queue-state.schema.json", "contracts/records/integration-record.schema.json", "contracts/records/mainline-receipt-record.schema.json", "contracts/records/collab-live-closure-record.schema.json", "contracts/records/merge-record.schema.json", "contracts/records/promotion-record.schema.json", "contracts/records/regression-report.schema.json", "contracts/records/freeze-record.schema.json", "contracts/records/record-graph.contract.json"],
     "zone_transition_contract": "contracts/transitions/zone-transition.manifest.json",
     "playground_retention": "archive_then_remove",
     "debug_merge_comment_required": true

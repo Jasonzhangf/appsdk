@@ -45,6 +45,7 @@
       "contracts/records/merge-queue-state.schema.json",
       "contracts/records/integration-record.schema.json",
       "contracts/records/mainline-receipt-record.schema.json",
+      "contracts/records/collab-live-closure-record.schema.json",
       "contracts/records/merge-record.schema.json",
       "contracts/records/promotion-record.schema.json",
       "contracts/records/freeze-record.schema.json",

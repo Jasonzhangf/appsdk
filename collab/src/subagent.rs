@@ -415,6 +415,7 @@ pub fn exec_launch(file: &std::path::Path) -> Result<()> {
 
 fn launch(
     server: &Server,
+    route_owner: &Server,
     record: &mut Record,
     settings: &config::Subagent,
     environment: std::collections::BTreeMap<String, String>,
@@ -477,7 +478,7 @@ fn launch(
         root: server.root.clone(),
     };
     let mut ident = crate::identity::load_or_create(&scope, Some(record.peer.clone()), None)?;
-    let registered = crate::server::handle_register_with_app_scope(
+    let registered = crate::server::handle_register_with_app_scope_unfinalized(
         server,
         ident.worker_id.clone(),
         ident.token.clone(),
@@ -497,12 +498,92 @@ fn launch(
             registered.error.unwrap_or_default()
         );
     }
-    let (runtime, transport) =
-        crate::identity::registration_from_receipt(&registered.data, &ident.worker_id, &scope.root)
-            .context("child registration receipt did not contain its runtime binding")?;
-    crate::identity::persist_registration(&scope, &mut ident, runtime, transport.clone())
-        .context("cannot persist child runtime binding")?;
-    crate::client::adapters::codex_app_server::immediate_notify(
+    let child_cwd = server.root.display().to_string();
+    let (runtime, transport) = match crate::identity::registration_from_receipt(
+        &registered.data,
+        &ident.worker_id,
+        &scope.root,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let archive_result = crate::client::adapters::codex_app_server::archive_thread(
+                &parent_transport,
+                thread_id.as_str(),
+            );
+            let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
+                server,
+                &ident.worker_id,
+                &child_cwd,
+                app_scope,
+                &record.parent,
+                "child registration receipt invalid",
+            );
+            let archive_status = archive_result
+                .map(|_| "archived".to_owned())
+                .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
+            let cleanup_status = cleanup_result
+                .map(|_| "binding retired".to_owned())
+                .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
+            bail!(
+                    "child registration receipt invalid: {error}; thread {archive_status}; {cleanup_status}"
+                );
+        }
+    };
+    if let Err(error) =
+        crate::identity::persist_registration(&scope, &mut ident, runtime, transport.clone())
+    {
+        let archive_result = crate::client::adapters::codex_app_server::archive_thread(
+            &parent_transport,
+            thread_id.as_str(),
+        );
+        let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
+            server,
+            &ident.worker_id,
+            &child_cwd,
+            app_scope,
+            &record.parent,
+            "child runtime persistence failed",
+        );
+        let archive_status = archive_result
+            .map(|_| "archived".to_owned())
+            .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
+        let cleanup_status = cleanup_result
+            .map(|_| "binding retired".to_owned())
+            .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
+        bail!(
+            "cannot persist child runtime binding: {error}; thread {archive_status}; {cleanup_status}"
+        );
+    }
+    if let Err(route_error) = crate::server::commit_current_thread_route_for_runtime(
+        route_owner,
+        server,
+        &ident.worker_id,
+        &child_cwd,
+        app_scope,
+    ) {
+        let archive_result = crate::client::adapters::codex_app_server::archive_thread(
+            &parent_transport,
+            thread_id.as_str(),
+        );
+        let cleanup_result = crate::server::retire_runtime_binding_after_route_failure(
+            server,
+            &ident.worker_id,
+            &child_cwd,
+            app_scope,
+            &record.parent,
+            "child route publication failed",
+        );
+        let archive_status = archive_result
+            .map(|_| "archived".to_owned())
+            .unwrap_or_else(|error| format!("archive failed: {error}"));
+        let cleanup_status = cleanup_result
+            .map(|_| "binding retired".to_owned())
+            .unwrap_or_else(|error| format!("binding cleanup failed: {error}"));
+        bail!(
+            "child route publication failed: {route_error}; thread {archive_status}; {cleanup_status}"
+        );
+    }
+    if let Err(error) = crate::client::adapters::codex_app_server::immediate_notify(
         &transport,
         Some(
             parent_transport
@@ -512,8 +593,39 @@ fn launch(
         ),
         &prompt,
         &format!("collab-subagent-start-{}", record.id),
-    )
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    ) {
+        let archive_result = crate::client::adapters::codex_app_server::archive_thread(
+            &parent_transport,
+            thread_id.as_str(),
+        );
+        let route_cleanup = crate::server::retire_current_thread_route_after_launch_failure(
+            route_owner,
+            server,
+            &ident.worker_id,
+            &child_cwd,
+            app_scope,
+        );
+        let binding_cleanup = crate::server::retire_runtime_binding_after_route_failure(
+            server,
+            &ident.worker_id,
+            &child_cwd,
+            app_scope,
+            &record.parent,
+            "child notification failed",
+        );
+        let archive_status = archive_result
+            .map(|_| "archived".to_owned())
+            .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
+        let route_status = route_cleanup
+            .map(|_| "route retired".to_owned())
+            .unwrap_or_else(|cleanup_error| format!("route cleanup failed: {cleanup_error}"));
+        let binding_status = binding_cleanup
+            .map(|_| "binding retired".to_owned())
+            .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
+        bail!(
+            "child notification failed: {error}; thread {archive_status}; {route_status}; {binding_status}"
+        );
+    }
     let _ = environment;
     record.status = "starting".into();
     record.ready_deadline_ms = now_ms() + settings.startup.ready_timeout_seconds as i64 * 1000;
@@ -530,24 +642,32 @@ pub fn handle_with_env(
     action: Action,
     environment: std::collections::BTreeMap<String, String>,
 ) -> Resp {
-    handle_with_env_route(server, actor, token, action, None, environment)
+    handle_with_env_route(server, server, actor, token, action, None, environment)
 }
 
-/// Production wire entry point. The app scope was admitted from the parent's
-/// validated ProjectContext and is carried into child registration explicitly.
 pub(crate) fn handle_with_env_for_app_scope(
     server: &Server,
+    route_owner: &Server,
     actor: &str,
     token: &str,
     action: Action,
     app_scope: AppServerId,
     environment: std::collections::BTreeMap<String, String>,
 ) -> Resp {
-    handle_with_env_route(server, actor, token, action, Some(app_scope), environment)
+    handle_with_env_route(
+        server,
+        route_owner,
+        actor,
+        token,
+        action,
+        Some(app_scope),
+        environment,
+    )
 }
 
 fn handle_with_env_route(
     server: &Server,
+    route_owner: &Server,
     actor: &str,
     token: &str,
     action: Action,
@@ -598,13 +718,22 @@ fn handle_with_env_route(
             Err(response) => return response,
         }
     }
-    match run(server, actor, token, action, environment, app_scope) {
+    match run(
+        server,
+        route_owner,
+        actor,
+        token,
+        action,
+        environment,
+        app_scope,
+    ) {
         Ok(value) => Resp::data(value),
         Err(e) => Resp::err(e.to_string()),
     }
 }
 fn run(
     server: &Server,
+    route_owner: &Server,
     actor: &str,
     token: &str,
     action: Action,
@@ -693,6 +822,7 @@ fn run(
         }
         if let Err(e) = launch(
             server,
+            route_owner,
             &mut record,
             &config.subagent,
             environment,

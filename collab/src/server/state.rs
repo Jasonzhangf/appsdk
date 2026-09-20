@@ -658,6 +658,9 @@ pub enum Event {
     GlobalCurrentThreadRouteSet {
         binding: super::global_state::RuntimeBinding,
     },
+    GlobalCurrentThreadRouteRetired {
+        binding: super::global_state::RuntimeBinding,
+    },
     GlobalMigrationCommitEvidence {
         evidence: super::global_state::MigrationCommitEvidence,
     },
@@ -1190,6 +1193,13 @@ impl State {
             Event::GlobalCurrentThreadRouteSet { binding } => {
                 let mut next = self.global.clone();
                 next.set_current_thread_route(binding.clone())
+                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
+            }
+            Event::GlobalCurrentThreadRouteRetired { binding } => {
+                let mut next = self.global.clone();
+                next.retire_current_thread_route(binding.clone())
                     .map_err(|error| format!("global reducer rejected event: {error}"))?;
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;

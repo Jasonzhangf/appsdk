@@ -14456,15 +14456,7 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
     None
 }
 
-fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
-    let lock_path = root.join(".appsdk/sdk.lock");
-    if !lock_path.is_file() {
-        return Vec::new();
-    }
-    let lock: Value = serde_json::from_str(
-        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
-    )
-    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+fn lock_migration_bundle_witnesses(lock: &Value) -> Vec<String> {
     let mut witnesses = lock
         .get("previous_bundle_digests")
         .and_then(Value::as_array)
@@ -14486,6 +14478,24 @@ fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
             witnesses.push(digest.to_string());
         }
     }
+    witnesses
+}
+
+fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
+    let lock_path = root.join(".appsdk/sdk.lock");
+    if !lock_path.is_file() {
+        return Vec::new();
+    }
+    let lock: Value = serde_json::from_str(
+        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+    let lock_witnesses = lock_migration_bundle_witnesses(&lock);
+    let lock_bundle = lock
+        .get("bundle_digest")
+        .and_then(Value::as_str)
+        .filter(|digest| valid_bundle_digest(digest));
+    let mut records = Vec::new();
     for step in SDK_MAP_MIGRATION_STEPS {
         let record_path = sdk_map_migration_root(root, step).join("record.json");
         if !record_path.is_file() {
@@ -14501,9 +14511,24 @@ fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
             .and_then(Value::as_str)
             .filter(|digest| valid_bundle_digest(digest))
         {
-            if digest != sdk_bundle_digest() && !witnesses.iter().any(|known| known == digest) {
-                witnesses.push(digest.to_string());
+            if digest != sdk_bundle_digest() {
+                records.push(digest.to_string());
             }
+        }
+    }
+    if !records
+        .iter()
+        .any(|digest| Some(digest.as_str()) == lock_bundle)
+        && !records
+            .iter()
+            .any(|digest| lock_witnesses.iter().any(|known| known == digest))
+    {
+        return Vec::new();
+    }
+    let mut witnesses = lock_witnesses;
+    for digest in records {
+        if !witnesses.iter().any(|known| known == &digest) {
+            witnesses.push(digest);
         }
     }
     witnesses
@@ -14755,7 +14780,7 @@ fn install_governance_maps(root: &Path, step: &str, force: bool) {
     }
 }
 
-fn migrate_governance_maps(root: &Path, project: &Value, step: &str, pin_witness: bool) {
+fn migrate_governance_maps(root: &Path, project: &Value, step: &str) {
     let migration_root = sdk_map_migration_root(root, step);
     if migration_root.join("record.json").is_file() {
         let manifest = sdk_map_migration_manifest(step);
@@ -14782,7 +14807,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, step: &str, pin_witness
             .and_then(Value::as_str)
             .is_some_and(|digest| digest != sdk_bundle_digest());
         let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
-        if bundle_changed && !bundle_transition && !pin_witness {
+        if bundle_changed && !bundle_transition {
             fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
         }
         let has_custom_map_binding = record
@@ -17440,16 +17465,16 @@ fn pin_lock(root: &Path, binary: &Path) {
     }
     if matches!(project_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
         let migrated_project = read_project(root);
-        migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6", true);
+        migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6");
         project = migrated_project;
         project["sdk"]["version"] = Value::String("0.1.6".into());
         write_project(root, &project);
     } else {
         let current_project = read_project(root);
-        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6", true);
+        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6");
     }
     let migrated_project = read_project(root);
-    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.7", true);
+    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.7");
     install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());

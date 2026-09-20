@@ -9661,15 +9661,12 @@ fn pin_lock_preserves_historical_custom_maps_with_bundle_witness() {
         let name = entry["name"].as_str().unwrap().to_string();
         let live = root.join(".appsdk/maps").join(&name);
         let snapshot = root.join(entry["snapshot_path"].as_str().unwrap());
-        let content = fs::read_to_string(&live).unwrap() + "\n";
         entry["canonical_source_digest"] = entry["source_digest"].clone();
         entry["canonical_target_digest"] = entry["target_digest"].clone();
-        entry["source_digest"] = Value::String(digest(&content));
-        entry["target_digest"] = Value::String(digest(&content));
-        fs::write(&live, &content).unwrap();
-        fs::write(&snapshot, &content).unwrap();
-        preserved.push((live, snapshot, content));
+        let historical = fs::read_to_string(&snapshot).unwrap();
+        preserved.push((live, snapshot, historical));
     }
+    install_current_governance_maps(&root);
     let historical_record = serde_json::to_string_pretty(&record).unwrap() + "\n";
     fs::write(&record_path, &historical_record).unwrap();
     for _ in 0..2 {
@@ -9685,8 +9682,7 @@ fn pin_lock_preserves_historical_custom_maps_with_bundle_witness() {
             String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(fs::read_to_string(&record_path).unwrap(), historical_record);
-        for (live, snapshot, content) in &preserved {
-            assert_eq!(&fs::read_to_string(live).unwrap(), content);
+        for (_live, snapshot, content) in &preserved {
             assert_eq!(&fs::read_to_string(snapshot).unwrap(), content);
         }
         let verified = run(&["verify", root_text]);
@@ -9725,7 +9721,8 @@ fn pin_lock_preserves_historical_custom_maps_with_bundle_witness() {
     assert!(String::from_utf8_lossy(&rejected.stderr)
         .contains("SDK_MIGRATION_SNAPSHOT_MISMATCH:resource-map.json"));
     fs::write(&preserved[0].1, &preserved[0].2).unwrap();
-    record["maps"][0]["canonical_target_digest"] = Value::String("sha256:invalid".into());
+    record["maps"][0]["canonical_target_digest"] =
+        Value::String(format!("sha256:{}", "f".repeat(64)));
     fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
     let rejected = run(&[
         "pin-lock",
@@ -9997,6 +9994,8 @@ fn pin_lock_migrates_stale_project_record_contracts() {
     assert!(run(&["new", root_text]).status.success());
     let worktree = root.join("contracts/records/worktree-record.schema.json");
     let promotion = root.join("contracts/records/promotion-record.schema.json");
+    let live_closure = root.join("contracts/records/collab-live-closure-record.schema.json");
+    fs::remove_file(&live_closure).unwrap();
     let mut current_worktree: Value =
         serde_json::from_str(&fs::read_to_string(&worktree).unwrap()).unwrap();
     current_worktree["properties"]
@@ -10019,7 +10018,14 @@ fn pin_lock_migrates_stale_project_record_contracts() {
         serde_json::to_vec_pretty(&current_promotion).unwrap(),
     )
     .unwrap();
-    assert!(run(&["verify", root_text]).status.success());
+    let rejected = run(&["verify", root_text]);
+    assert!(
+        !rejected.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("DECLARED_RECORD_CONTRACT_MISSING"));
     assert!(run(&[
         "pin-lock",
         root_text,
@@ -10039,6 +10045,13 @@ fn pin_lock_migrates_stale_project_record_contracts() {
         serde_json::from_str::<Value>(&fs::read_to_string(&promotion).unwrap()).unwrap(),
         serde_json::from_str::<Value>(include_str!(
             "../../contracts/records/promotion-record.schema.json"
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&live_closure).unwrap()).unwrap(),
+        serde_json::from_str::<Value>(include_str!(
+            "../../contracts/records/collab-live-closure-record.schema.json"
         ))
         .unwrap()
     );

@@ -6637,6 +6637,94 @@ fn agent_rebind_migrates_all_active_dag_references() {
 }
 
 #[test]
+fn agent_rebind_rejects_projection_key_collisions_before_journal_commit() {
+    for collision_kind in ["master_wake.updated", "wakeup.updated"] {
+        let root = temp_root("agent-rebind-key-collision");
+        register_scope(
+            &root,
+            "scope",
+            "app",
+            "/project",
+            &["master-old", "master-new"],
+        );
+        register_agent(&root, "scope", "master-old", "master", "master", None);
+        if collision_kind == "master_wake.updated" {
+            call(
+                &root,
+                json!({
+                    "op": "accumulate_wake",
+                    "master": { "scopeId": "scope", "sessionId": "master-old" },
+                    "signal": {
+                        "signalId": "collision-signal",
+                        "key": "collision",
+                        "kind": "collision",
+                        "title": "collision",
+                        "priority": "p2",
+                        "summary": "collision fixture",
+                        "observedAt": "2026-01-01T00:00:00Z"
+                    }
+                }),
+            );
+        } else {
+            call(
+                &root,
+                json!({
+                    "op": "set_agent_state",
+                    "address": { "scopeId": "scope", "sessionId": "master-old" },
+                    "state": "idle",
+                    "at": "2026-01-01T00:00:00Z"
+                }),
+            );
+        }
+
+        let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+        let contents = fs::read_to_string(&mailbox).unwrap();
+        let mut lines: Vec<Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let mut orphan = lines
+            .iter()
+            .find(|event| event["kind"] == collision_kind)
+            .unwrap()
+            .clone();
+        orphan["eventId"] = json!(format!("event-orphan-{collision_kind}"));
+        orphan["data"]["address"]["sessionId"] = json!("master-new");
+        lines.push(orphan);
+        let rewritten = lines
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&mailbox, format!("{rewritten}\n")).unwrap();
+
+        let error = call_error(
+            &root,
+            json!({
+                "op": "rebind_agent",
+                "rebind": {
+                    "from": { "scopeId": "scope", "sessionId": "master-old" },
+                    "to": { "scopeId": "scope", "sessionId": "master-new" },
+                    "runtimeId": "runtime-scope"
+                }
+            }),
+        );
+        assert!(
+            error.contains(if collision_kind == "master_wake.updated" {
+                "duplicate master wake accumulator"
+            } else {
+                "duplicate wakeup record"
+            }),
+            "{error}"
+        );
+        let after = fs::read_to_string(&mailbox).unwrap();
+        assert_eq!(after.matches("\"kind\":\"agent.rebound\"").count(), 0);
+        assert!(call(&root, json!({ "op": "status" })).is_object());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn tampered_agent_rebind_event_fails_closed_on_replay() {
     let root = temp_root("agent-rebind-tamper");
     register_scope(

@@ -164,15 +164,13 @@ fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
 
 pub(crate) fn default_appserver_notification_sink() -> Arc<AppServerNotificationSink> {
     Arc::new(|transport, source_thread_id, body, message_id, explicit| {
-        let result = if explicit {
-            let source_thread_id = source_thread_id.ok_or_else(|| {
-                "explicit App Server notification requires the sender native thread id".to_string()
-            })?;
-            crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
-        } else {
-            crate::client::adapters::queue_wakeup(transport, body, message_id)
-        };
-        result.map_err(|error| error.to_string())
+        if explicit && source_thread_id.is_none() {
+            return Err(
+                "explicit App Server notification requires the sender native thread id".to_string(),
+            );
+        }
+        crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
+            .map_err(|error| error.to_string())
     })
 }
 
@@ -3733,6 +3731,57 @@ mod notification_batch_tests {
             Some(&(Some("thread-sender".into()), true))
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_notification_uses_immediate_without_sender_thread() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "automatic-notice",
+            now - 120_001,
+        );
+        let observed = Arc::new(Mutex::new(None));
+        {
+            let observed = Arc::clone(&observed);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit| {
+                *observed.lock().unwrap() = Some((source.map(str::to_owned), explicit));
+                Ok(json!({"accepted": true}))
+            });
+        }
+
+        assert!(attempt_notification_with_at(
+            &server,
+            "automatic-notice",
+            &subscription_id,
+            now,
+        ));
+        assert_eq!(observed.lock().unwrap().as_ref(), Some(&(None, false)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_notification_sink_requires_sender_thread_only_for_explicit_delivery() {
+        let transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+            namespace: Some("codex_tui".into()),
+            thread_id: Some("thread-recipient".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        };
+        let sink = default_appserver_notification_sink();
+        let error = sink(&transport, None, "explicit", "message-explicit", true).unwrap_err();
+        assert_eq!(
+            error,
+            "explicit App Server notification requires the sender native thread id"
+        );
     }
 
     #[test]

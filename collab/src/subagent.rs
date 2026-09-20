@@ -504,10 +504,12 @@ fn launch(
         .context("cannot persist child runtime binding")?;
     crate::client::adapters::codex_app_server::immediate_notify(
         &transport,
-        parent_transport
-            .thread_id
-            .as_deref()
-            .context("parent App Server transport has no thread_id")?,
+        Some(
+            parent_transport
+                .thread_id
+                .as_deref()
+                .context("parent App Server transport has no thread_id")?,
+        ),
         &prompt,
         &format!("collab-subagent-start-{}", record.id),
     )

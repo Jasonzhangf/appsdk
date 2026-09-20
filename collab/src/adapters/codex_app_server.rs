@@ -423,21 +423,6 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             operation: "thread/turns/list",
         });
     }
-    let queue_wakeup = method_exists(
-        &mut client,
-        "thread/queue/add",
-        json!({
-            "threadId": thread_id.as_str(),
-            "input": [],
-            "clientUserMessageId": "",
-        }),
-    )?;
-    if !queue_wakeup {
-        return Err(AdapterError::CapabilityUnavailable {
-            endpoint: EndpointKind::Tui,
-            operation: "thread/queue/add",
-        });
-    }
     Ok(SelectedTransport {
         kind: TransportKind::AppServer,
         endpoint: Some(format!("unix://{}", socket_path.display())),
@@ -448,10 +433,9 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             "read_thread".into(),
             "send_message_to_thread".into(),
             "wait_reply".into(),
-            "queue_wakeup".into(),
         ],
         self_check:
-            "initialize, thread/loaded/list/read identity, turn/start, turn/steer, thread/turns/list, and thread/queue/add method probes passed"
+            "initialize, thread/loaded/list/read identity, turn/start, turn/steer, and thread/turns/list method probes passed"
                 .into(),
     })
 }
@@ -461,7 +445,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
 /// the turn; execution and reply are observed separately.
 pub fn immediate_notify(
     transport: &SelectedTransport,
-    source_thread_id: &str,
+    source_thread_id: Option<&str>,
     body: &str,
     client_user_message_id: &str,
 ) -> Result<Value, AdapterError> {
@@ -522,7 +506,11 @@ pub fn immediate_notify(
                     "toolOutput": {
                         "name": "send_message_to_thread",
                         "namespace": "codex_tui",
-                        "output": delegated_prompt(source_thread_id, client_user_message_id, body),
+                        "output": delegated_prompt(
+                            source_thread_id,
+                            client_user_message_id,
+                            body,
+                        ),
                     },
                     "clientUserMessageId": client_user_message_id,
                 }),
@@ -791,10 +779,22 @@ pub(crate) fn escape_delegated_text(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn delegated_prompt(source_thread_id: &str, client_user_message_id: &str, body: &str) -> String {
+fn delegated_prompt(
+    source_thread_id: Option<&str>,
+    client_user_message_id: &str,
+    body: &str,
+) -> String {
+    let source = source_thread_id
+        .map(|source_thread_id| {
+            format!(
+                "  <source_thread_id>{}</source_thread_id>\n",
+                escape_delegated_text(source_thread_id)
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "<codex_delegation>\n  <source_thread_id>{}</source_thread_id>\n  <client_message_id>{}</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
-        escape_delegated_text(source_thread_id),
+        "<codex_delegation>\n{}  <client_message_id>{}</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+        source,
         escape_delegated_text(client_user_message_id),
         escape_delegated_text(body)
     )
@@ -822,8 +822,23 @@ fn active_turn_id_from_page(page: &Value) -> Result<Option<String>, AdapterError
             })?;
     let mut active = Vec::new();
     for (index, turn) in turns.iter().enumerate() {
-        if turn.get("status").and_then(Value::as_str) != Some("inProgress") {
-            continue;
+        match turn.get("status").and_then(Value::as_str) {
+            Some("inProgress") => {}
+            Some("completed" | "interrupted" | "failed") => continue,
+            Some(status) => {
+                return Err(AdapterError::Unknown {
+                    operation: "turn/steer",
+                    detail: format!(
+                        "AUTO_NOTIFY_UNSUPPORTED_TURN_STATUS: turn at data[{index}] has status {status}"
+                    ),
+                })
+            }
+            None => {
+                return Err(AdapterError::Unknown {
+                    operation: "turn/steer",
+                    detail: format!("turn at data[{index}] is missing status"),
+                })
+            }
         }
         let turn_id = turn
             .get("id")
@@ -1394,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_requires_appserver_queue_wakeup_method() {
+    fn candidate_does_not_require_appserver_queue_wakeup_method() {
         let socket = std::env::temp_dir().join(format!(
             "collab-queue-optional-{}-{}.sock",
             std::process::id(),
@@ -1444,7 +1459,7 @@ mod tests {
                 stream
                     .write_all(&encode_frame(0x1, &serde_json::to_vec(&response).unwrap()))
                     .unwrap();
-                if method == "thread/queue/add" {
+                if method == "thread/turns/list" {
                     break;
                 }
             }
@@ -1456,17 +1471,12 @@ mod tests {
             namespace: "codex_tui".into(),
             thread_id: "thread-1".into(),
         };
-        let error = verify_candidate(&candidate).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                AdapterError::CapabilityUnavailable {
-                    operation: "thread/queue/add",
-                    ..
-                }
-            ),
-            "{error}"
-        );
+        let selected = verify_candidate(&candidate).unwrap();
+        assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
+        assert!(!selected
+            .capabilities
+            .iter()
+            .any(|capability| capability == "queue_wakeup"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -1701,12 +1711,6 @@ mod tests {
                 &mut stream,
                 json!({"id": turns["id"], "result": {"data": []}}),
             );
-            let queue = next_request(&mut stream);
-            assert_eq!(queue["method"], "thread/queue/add");
-            respond(
-                &mut stream,
-                json!({"id": queue["id"], "error": {"code": -32600, "message": "invalid params"}}),
-            );
             stream.shutdown(Shutdown::Both).ok();
         });
 
@@ -1724,7 +1728,7 @@ mod tests {
 
     #[test]
     fn candidate_rejects_appserver_without_steer_or_turns_list_methods() {
-        for missing_method in ["turn/steer", "thread/turns/list", "thread/queue/add"] {
+        for missing_method in ["turn/steer", "thread/turns/list"] {
             let socket = std::env::temp_dir().join(format!(
                 "collab-candidate-method-{}-{}.sock",
                 std::process::id(),
@@ -1762,7 +1766,7 @@ mod tests {
                             "thread/items/list" => {
                                 json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
                             }
-                            "turn/start" | "turn/steer" | "thread/queue/add" => {
+                            "turn/start" | "turn/steer" => {
                                 json!({"id": id, "error": {"code": -32600, "message": "invalid params"}})
                             }
                             "thread/turns/list" => {
@@ -1867,6 +1871,23 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn active_turn_selection_rejects_unknown_and_missing_status() {
+        for turn in [
+            json!({"id": "turn-queued", "status": "queued"}),
+            json!({"id": "turn-1"}),
+        ] {
+            let error = active_turn_id_from_page(&json!({"data": [turn]})).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("AUTO_NOTIFY_UNSUPPORTED_TURN_STATUS")
+                    || error.to_string().contains("is missing status"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -2030,7 +2051,7 @@ mod tests {
 
         let receipt = immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-active",
         )
@@ -2096,7 +2117,7 @@ mod tests {
 
         let receipt = immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-interrupted",
         )
@@ -2147,7 +2168,7 @@ mod tests {
 
         let error = immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-multiple-active",
         )
@@ -2210,7 +2231,7 @@ mod tests {
 
         immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-start",
         )
@@ -2265,7 +2286,7 @@ mod tests {
         transport.thread_id = Some("recipient-thread".into());
         immediate_notify(
             &transport,
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-source-thread",
         )
@@ -2308,7 +2329,7 @@ mod tests {
 
         let error = immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-start",
         )
@@ -2353,7 +2374,7 @@ mod tests {
 
         let error = immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-start",
         )
@@ -2405,7 +2426,7 @@ mod tests {
 
             let error = immediate_notify(
                 &selected_transport(&socket),
-                "sender-thread",
+                Some("sender-thread"),
                 "notify body",
                 "message-start",
             )
@@ -2451,7 +2472,7 @@ mod tests {
 
         let error = immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-start",
         )
@@ -2495,8 +2516,12 @@ mod tests {
     #[test]
     fn delegated_prompt_escapes_xml_special_characters() {
         assert_eq!(
-            delegated_prompt("thread-1", "message-1", "a & b < c > d"),
+            delegated_prompt(Some("thread-1"), "message-1", "a & b < c > d"),
             "<codex_delegation>\n  <source_thread_id>thread-1</source_thread_id>\n  <client_message_id>message-1</client_message_id>\n  <input>a &amp; b &lt; c &gt; d</input>\n</codex_delegation>"
+        );
+        assert_eq!(
+            delegated_prompt(None, "message-1", "automatic"),
+            "<codex_delegation>\n  <client_message_id>message-1</client_message_id>\n  <input>automatic</input>\n</codex_delegation>"
         );
     }
 
@@ -2509,7 +2534,7 @@ mod tests {
         let transport = verify_candidate(&candidate).expect("live App Server candidate");
         let receipt = immediate_notify(
             &transport,
-            candidate.thread_id.as_str(),
+            Some(candidate.thread_id.as_str()),
             "Reply with exactly COLLAB_START_PROBE_OK and do not run tools.",
             "collab-start-probe",
         )
@@ -2556,11 +2581,70 @@ mod tests {
 
         assert!(immediate_notify(
             &selected_transport(&socket),
-            "sender-thread",
+            Some("sender-thread"),
             "notify body",
             "message-queued"
         )
         .is_err());
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn default_notification_sink_starts_automatic_turn_without_sender_thread() {
+        let socket = temp_socket("notify-automatic");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
+            let request = next_request(&mut stream);
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            assert_eq!(
+                request["params"]["clientUserMessageId"],
+                "message-automatic"
+            );
+            assert_eq!(
+                request["params"]["toolOutput"]["output"],
+                "<codex_delegation>\n  <client_message_id>message-automatic</client_message_id>\n  <input>automatic body</input>\n</codex_delegation>"
+            );
+            respond(
+                &mut stream,
+                json!({
+                    "id": request["id"],
+                    "result": {
+                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let receipt = crate::server::default_appserver_notification_sink()(
+            &selected_transport(&socket),
+            None,
+            "automatic body",
+            "message-automatic",
+            false,
+        )
+        .unwrap();
+        assert_eq!(receipt["turn"]["id"], "turn-started");
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

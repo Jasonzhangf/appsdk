@@ -25,8 +25,8 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 - Registration creates or refreshes one reusable default `direct-message`
   lease with a bounded 600-second TTL; inspect its current status and expiry
   with `collab notify status`.
-- App Server delivery means the native queue accepted a bounded preview; it is
-  not execution, read, or reply.
+- App Server delivery means the native thread accepted a bounded `turn/start`
+  or `turn/steer`; it is not execution, read, or reply.
 - Server state, journal, and mailbox are durable truth; a failed wake cannot
   roll back state or fabricate success.
 - The runtime is part of the worker identity boundary, not a task preference.
@@ -112,8 +112,9 @@ sends through the selected transport. After the receiving Agent registers a
 finite subscription, the daemon may send one id,
 abbreviated subject, safe one-line original body preview, and final submit key
 as one submit through the server-selected transport. App Server uses
-`thread/queue/add`. The direct-message lease is reusable until expiry; resource,
-deadline, and async-result subscriptions remain one-shot.
+`turn/start`, or `turn/steer` when exactly one `inProgress` turn is active. The
+direct-message lease is reusable until expiry; resource, deadline, and
+async-result subscriptions remain one-shot.
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a
 transport is unavailable; mailbox state remains authoritative.

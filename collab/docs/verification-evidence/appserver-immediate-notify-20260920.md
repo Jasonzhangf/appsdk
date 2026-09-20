@@ -35,7 +35,7 @@ COLLAB_APPSERVER_SOCKET=<isolated.sock> \
 COLLAB_APPSERVER_NAMESPACE=codex_app \
 CODEX_THREAD_ID=<thread_a> \
 cargo test --manifest-path collab/Cargo.toml \
-  client::adapters::codex_app_server::tests::live_appserver_candidate_is_admitted_when_loaded_or_startable \
+  client::adapters::codex_app_server::tests::live_appserver_candidate_is_admitted_when_loaded_or_rejected_when_unloaded \
   -- --nocapture
 ```
 

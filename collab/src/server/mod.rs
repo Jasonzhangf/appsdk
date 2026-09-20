@@ -5090,7 +5090,7 @@ pub(crate) fn scheduler_admit_subagent_start(
         return Ok(None);
     }
 
-    if requested_id.is_some_and(|id| server.state.lock().unwrap().subagents.contains_key(id)) {
+    if requested_id.is_some() {
         return Ok(None);
     }
 
@@ -15525,25 +15525,25 @@ mod scheduler_admission_tests {
         }]);
         let server = Arc::new(server);
 
-        let start = |id: &str, token: &str| {
+        let start = |id: Option<&str>, token: &str| {
             dispatch(
                 &server,
                 Req::Subagent {
                     worker_id: "master".into(),
                     token: token.into(),
                     command: crate::subagent::Action::Start {
-                        id: Some(id.into()),
+                        id: id.map(str::to_owned),
                         runtime: Some("codex".into()),
                     },
                     launch_env: Default::default(),
                 },
             )
         };
-        let first = start("unneeded-child", "token-master");
+        let first = start(None, "token-master");
         assert!(first.ok, "{first:?}");
         assert_eq!(first.data["admission"]["decision"], "use-registered-peer");
         assert_eq!(first.data["admission"]["worker_id"], "idle-peer");
-        let second = start("unneeded-child-2", "token-master");
+        let second = start(None, "token-master");
         assert!(second.ok, "{second:?}");
         assert_eq!(second.data["admission"], first.data["admission"]);
         let direct = crate::subagent::handle_with_env(
@@ -15551,7 +15551,7 @@ mod scheduler_admission_tests {
             "master",
             "token-master",
             crate::subagent::Action::Start {
-                id: Some("direct-child".into()),
+                id: None,
                 runtime: Some("codex".into()),
             },
             Default::default(),
@@ -15571,7 +15571,7 @@ mod scheduler_admission_tests {
             3
         );
 
-        let denied = start("denied-child", "wrong-token");
+        let denied = start(None, "wrong-token");
         assert!(!denied.ok);
         assert!(denied.error.unwrap().contains("authentication failed"));
         let state = server.state.lock().unwrap();
@@ -15636,7 +15636,7 @@ mod scheduler_admission_tests {
     }
 
     #[test]
-    fn managed_idle_capacity_is_reused_and_existing_start_semantics_are_preserved() {
+    fn omitted_id_reuses_managed_idle_capacity_and_explicit_existing_id_is_preserved() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "managed-peer", "%managed-peer");
@@ -15671,7 +15671,7 @@ mod scheduler_admission_tests {
                 worker_id: "master".into(),
                 token: "token-master".into(),
                 command: crate::subagent::Action::Start {
-                    id: Some("new-child".into()),
+                    id: None,
                     runtime: Some("codex".into()),
                 },
                 launch_env: Default::default(),
@@ -15728,6 +15728,49 @@ mod scheduler_admission_tests {
     }
 
     #[test]
+    fn explicit_unknown_id_bypasses_registered_and_managed_capacity_reuse() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "idle-peer", "%idle-peer");
+        register(&server, "managed-peer", "%managed-peer");
+        server.commit(&[
+            Event::MasterAssigned {
+                worker_id: "master".into(),
+                assigned_by: "operator".into(),
+                approval: Some("scheduler test".into()),
+                assigned_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "existing-child".into(),
+                    parent: "master".into(),
+                    peer: "managed-peer".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-managed-peer".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: 0,
+                    last_message: None,
+                    error: None,
+                    probe_failures: Vec::new(),
+                    runtime: Some("codex".into()),
+                },
+            },
+        ]);
+
+        let admission = scheduler_admit_subagent_start(
+            &server,
+            "master",
+            "token-master",
+            Some("requested-child"),
+            Some("codex"),
+        )
+        .unwrap();
+        assert!(admission.is_none(), "{admission:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn admission_audit_failure_is_explicit_and_does_not_create_child() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
@@ -15747,7 +15790,7 @@ mod scheduler_admission_tests {
                 worker_id: "master".into(),
                 token: "token-master".into(),
                 command: crate::subagent::Action::Start {
-                    id: Some("audit-failure-child".into()),
+                    id: None,
                     runtime: Some("codex".into()),
                 },
                 launch_env: Default::default(),
@@ -15772,14 +15815,9 @@ mod scheduler_admission_tests {
             approval: Some("scheduler test".into()),
             assigned_ms: now_ms(),
         }]);
-        let decision = scheduler_admit_subagent_start(
-            &server,
-            "master",
-            "token-master",
-            Some("new-child"),
-            Some("codex"),
-        )
-        .unwrap();
+        let decision =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
+                .unwrap();
         assert!(decision.is_none());
         let audit =
             std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl")).unwrap();

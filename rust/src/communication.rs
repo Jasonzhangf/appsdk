@@ -1977,11 +1977,12 @@ impl CommunicationStore {
             to: rebound.clone(),
             tombstone: tombstone.clone(),
         };
+        let data = serde_json::to_value(&event).unwrap();
         let operation = DiscoveryOperation::Rebind {
             event: event.clone(),
         };
         let pending_id = self.begin_discovery(operation.clone())?;
-        if let Err(error) = self.commit("agent.rebound", serde_json::to_value(&event).unwrap()) {
+        if let Err(error) = self.commit("agent.rebound", data) {
             return Err(Self::discovery_pending_error(error, &pending_id));
         }
         self.publish_and_finish(&pending_id, &operation)?;
@@ -5333,6 +5334,9 @@ impl CommunicationStore {
     }
 
     fn commit(&mut self, kind: &str, data: Value) -> CommResult<String> {
+        if kind == "agent.rebound" {
+            self.validate_agent_rebound_event(&data)?;
+        }
         let event = EventRecord {
             protocol: PROTOCOL.into(),
             event_id: new_id("event"),
@@ -5919,6 +5923,13 @@ impl CommunicationStore {
         Ok(())
     }
 
+    fn validate_agent_rebound_event(&mut self, data: &Value) -> CommResult<()> {
+        let original = self.projection.clone();
+        let result = self.apply_agent_rebound_event(data);
+        self.projection = original;
+        result
+    }
+
     fn migrate_rebound_references(&mut self, from: &Address, to: &Address) -> CommResult<()> {
         for agent in self.projection.agents.values_mut() {
             if agent.parent.as_ref() == Some(from) {
@@ -5988,7 +5999,16 @@ impl CommunicationStore {
                     )?;
                 }
             }
-            migrated_master_wake.insert(new_accumulator.address.key(), new_accumulator);
+            let key = new_accumulator.address.key();
+            if migrated_master_wake
+                .insert(key.clone(), new_accumulator)
+                .is_some()
+            {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    format!("agent rebound creates duplicate master wake accumulator: {key}"),
+                ));
+            }
         }
 
         let old_wakeup = self.projection.wakeup.clone();
@@ -6016,7 +6036,13 @@ impl CommunicationStore {
                     )?;
                 }
             }
-            migrated_wakeup.insert(new_record.address.key(), new_record);
+            let key = new_record.address.key();
+            if migrated_wakeup.insert(key.clone(), new_record).is_some() {
+                return Err(CommError::new(
+                    "event_data_invalid",
+                    format!("agent rebound creates duplicate wakeup record: {key}"),
+                ));
+            }
         }
 
         for message in old_messages.values() {

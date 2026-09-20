@@ -2146,6 +2146,108 @@ fn rebind_failure_replays_from_local_pending_intent() {
 }
 
 #[test]
+fn rebind_recovery_rejects_projection_key_collision_before_journal_commit() {
+    let root = temp_root("discovery-rebind-recovery-collision");
+    let host = root.join(".appsdk-host");
+    register_scope_with_host(
+        &root,
+        &host,
+        "scope-rebind-recovery-collision",
+        "app-rebind-recovery-collision",
+        &["master-old", "master-new"],
+    );
+    register_agent_with_host(
+        &root,
+        &host,
+        "scope-rebind-recovery-collision",
+        "master-old",
+        "master",
+        "master",
+        None,
+    );
+    call_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope-rebind-recovery-collision", "sessionId": "master-old" },
+            "state": "idle",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+    );
+
+    let registry_file = host.join("communication.jsonl");
+    let registry_backup = host.join("communication.jsonl.backup");
+    fs::rename(&registry_file, &registry_backup).unwrap();
+    fs::create_dir_all(&registry_file).unwrap();
+    let error = call_error_with_host(
+        &root,
+        &host,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope-rebind-recovery-collision", "sessionId": "master-old" },
+                "to": { "scopeId": "scope-rebind-recovery-collision", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope-rebind-recovery-collision"
+            }
+        }),
+    );
+    assert!(
+        error.contains("communication_discovery_registration_failed"),
+        "{error}"
+    );
+
+    let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
+    let contents = fs::read_to_string(&mailbox).unwrap();
+    let mut lines: Vec<Value> = contents
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let pending_index = lines
+        .iter()
+        .rposition(|event| {
+            event["kind"] == "discovery.pending"
+                && event["data"]["operation"]["operation"] == "rebind"
+        })
+        .unwrap();
+    lines.truncate(pending_index + 1);
+    let orphan = json!({
+        "protocol": "appsdk-comm/v1",
+        "eventId": "event-orphan-recovery-collision",
+        "at": "2026-01-01T00:00:00Z",
+        "kind": "wakeup.updated",
+        "data": {
+            "address": { "scopeId": "scope-rebind-recovery-collision", "sessionId": "master-new" },
+            "idleSince": null,
+            "remindersSent": 0,
+            "nextDueAt": null,
+            "stopped": false,
+            "lastReminderAt": null
+        }
+    });
+    lines.push(orphan.clone());
+    let rewritten = lines
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&mailbox, format!("{rewritten}\n")).unwrap();
+
+    fs::remove_dir_all(&registry_file).unwrap();
+    fs::rename(&registry_backup, &registry_file).unwrap();
+    let error = call_error_with_host(&root, &host, json!({ "op": "status" }));
+    assert!(
+        error.contains("communication_discovery_recovery_failed")
+            && error.contains("duplicate wakeup record"),
+        "{error}"
+    );
+    let after = fs::read_to_string(&mailbox).unwrap();
+    assert_eq!(after.matches("\"kind\":\"agent.rebound\"").count(), 0);
+    assert!(after.contains("\"kind\":\"discovery.pending\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn idle_notifications_are_idempotent_and_batched_after_two_minutes() {
     let root = temp_root("notifications");
     register_scope(&root, "scope", "app", "/project", &["master", "worker"]);

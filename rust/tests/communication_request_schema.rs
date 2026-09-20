@@ -180,6 +180,77 @@ fn schema_rejects_advance_loop_without_identifier() {
 }
 
 #[test]
+fn schema_rejects_conflicting_flat_aliases() {
+    let v = validator();
+    assert!(!v.is_valid(&json!({
+        "op": "update_bug",
+        "bugId": "bug-1",
+        "bug_id": "bug-2",
+        "status": "active",
+        "actor": address()
+    })));
+    assert!(!v.is_valid(&json!({
+        "op": "advance_loop",
+        "loopId": "loop-1",
+        "loop_id": "loop-2",
+        "complete": false
+    })));
+    assert!(!v.is_valid(&json!({
+        "op": "report_bug",
+        "bugId": "bug-1",
+        "bug_id": "bug-2",
+        "scopeId": "scope",
+        "title": "broken",
+        "priority": "p1",
+        "description": "details",
+        "reporter": address()
+    })));
+    assert!(!v.is_valid(&json!({
+        "op": "create_loop",
+        "loopId": "loop-1",
+        "loop_id": "loop-2",
+        "kind": "delivery",
+        "owner": address(),
+        "trigger": "start",
+        "work": "implement",
+        "gate": "tests",
+        "state": "ready",
+        "stop": "verified"
+    })));
+}
+
+#[test]
+fn schema_rejects_conflicting_nested_aliases() {
+    let v = validator();
+    assert!(!v.is_valid(&json!({
+        "op": "report_bug",
+        "bug": {
+            "bugId": "bug-1",
+            "bug_id": "bug-2",
+            "scopeId": "scope",
+            "title": "broken",
+            "priority": "p1",
+            "description": "details",
+            "reporter": address()
+        }
+    })));
+    assert!(!v.is_valid(&json!({
+        "op": "create_loop",
+        "loop": {
+            "loopId": "loop-1",
+            "loop_id": "loop-2",
+            "kind": "delivery",
+            "owner": address(),
+            "trigger": "start",
+            "work": "implement",
+            "gate": "tests",
+            "state": "ready",
+            "stop": "verified"
+        }
+    })));
+}
+
+#[test]
 fn schema_rejects_string_message_for_send() {
     let v = validator();
     assert!(!v.is_valid(&json!({

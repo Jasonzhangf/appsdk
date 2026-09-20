@@ -105,10 +105,12 @@
     "state": {"type": "string", "minLength": 1},
     "observedAt": {"type": ["string", "null"], "format": "date-time"},
     "bugId": {"type": "string", "minLength": 1},
+    "bug_id": {"type": "string", "minLength": 1},
     "description": {"type": "string", "minLength": 1},
     "reporter": {"$ref": "#/$defs/address"},
     "worktreeId": {"type": ["string", "null"]},
     "loopId": {"type": "string", "minLength": 1},
+    "loop_id": {"type": "string", "minLength": 1},
     "owner": {"$ref": "#/$defs/address"},
     "trigger": {"type": "string", "minLength": 1},
     "work": {"type": "string", "minLength": 1},
@@ -327,7 +329,12 @@
         },
         "required": ["op"]
       },
-      "then": {"required": ["bugId", "status", "actor"]}
+      "then": {
+        "anyOf": [
+          {"required": ["bugId", "status", "actor"]},
+          {"required": ["bug_id", "status", "actor"]}
+        ]
+      }
     },
     {
       "if": {
@@ -336,7 +343,12 @@
         },
         "required": ["op"]
       },
-      "then": {"required": ["loopId"]}
+      "then": {
+        "anyOf": [
+          {"required": ["loopId"]},
+          {"required": ["loop_id"]}
+        ]
+      }
     },
     {
       "if": {

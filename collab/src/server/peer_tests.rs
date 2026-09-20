@@ -3220,6 +3220,11 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
                 last_wake_attempt_ms: 0,
             },
         },
+        Event::DeliveryMode {
+            msg_id: old_id.clone(),
+            mode: "explicit-notification".into(),
+            source_thread_id: Some("thread-source".into()),
+        },
     ]);
     let mailbox = root.join(".agent-collab/mailbox");
     assert!(mailbox.join("m-old.json").exists());
@@ -3232,6 +3237,7 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
     assert_eq!(purge_expired_storage(&server, now), 1);
     let state = server.state.lock().unwrap();
     assert!(!state.msgs.contains_key(&old_id));
+    assert!(!state.delivery_source_threads.contains_key(&old_id));
     assert!(state.msgs.contains_key(&fresh_id));
     assert!(state.workers.contains_key("peer"));
     drop(state);
@@ -3244,6 +3250,7 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
 
     let replayed = replay(&root).unwrap();
     assert!(!replayed.msgs.contains_key(&old_id));
+    assert!(!replayed.delivery_source_threads.contains_key(&old_id));
     assert_eq!(replayed.msgs[&fresh_id].body, "fresh body");
     assert_eq!(
         replayed.workers["peer"]

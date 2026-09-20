@@ -313,7 +313,14 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             })?;
         loaded_ids.push(loaded_id);
     }
-    let loaded_by_list = loaded_ids.contains(&thread_id.as_str());
+    if !loaded_ids.contains(&thread_id.as_str()) {
+        return Err(AdapterError::RouteUnavailable {
+            detail: format!(
+                "thread {} is persisted but not loaded by the App Server",
+                thread_id.as_str()
+            ),
+        });
+    }
     let response = match client.call("thread/read", json!({"threadId": thread_id.as_str()})) {
         Ok(response) => response,
         Err(AdapterError::Unknown { operation, detail })
@@ -343,31 +350,6 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
                 thread_id, observed
             ),
         });
-    }
-    if !loaded_by_list {
-        match response
-            .pointer("/thread/status/type")
-            .and_then(Value::as_str)
-        {
-            Some("notLoaded") => {}
-            Some(status) => {
-                return Err(AdapterError::Unknown {
-                    operation: "thread/loaded/list",
-                    detail: format!(
-                        "thread {} is absent from loaded list but reports status {status}",
-                        thread_id.as_str()
-                    ),
-                })
-            }
-            None => {
-                return Err(AdapterError::RouteUnavailable {
-                    detail: format!(
-                        "thread {} is persisted but not loaded by the App Server",
-                        thread_id.as_str()
-                    ),
-                })
-            }
-        }
     }
     // Item history is a diagnostic capability, not a registration or wake
     // requirement. Some App Server builds expose thread/read and notification
@@ -497,7 +479,9 @@ pub fn immediate_notify(
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            "notLoaded".into()
+            return Err(AdapterError::RouteUnavailable {
+                detail: format!("thread {thread_id} is persisted but not loaded by the App Server"),
+            });
         }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
@@ -877,7 +861,10 @@ fn notification_action(
             Some(turn_id) => NotificationAction::Steer(turn_id),
             None => NotificationAction::Start,
         }),
-        "idle" | "notLoaded" => Ok(NotificationAction::Start),
+        "idle" => Ok(NotificationAction::Start),
+        "notLoaded" => Err(AdapterError::RouteUnavailable {
+            detail: "thread is persisted but not loaded by the App Server".into(),
+        }),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -1525,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_accepts_persisted_thread_that_is_not_loaded_but_readable() {
+    fn candidate_rejects_persisted_thread_that_is_not_loaded() {
         let socket = std::env::temp_dir().join(format!(
             "collab-unloaded-thread-{}-{}.sock",
             std::process::id(),
@@ -1550,48 +1537,11 @@ mod tests {
                     "result": {"data": ["some-other-thread"]}
                 }),
             );
-            let read = next_request(&mut stream);
-            assert_eq!(read["method"], "thread/read");
-            assert_eq!(read["params"]["threadId"], "persisted-thread");
-            respond(
-                &mut stream,
-                json!({
-                    "id": read["id"],
-                    "error": {
-                        "code": -32602,
-                        "message": "thread not loaded: persisted-thread"
-                    }
-                }),
-            );
-            let items = next_request(&mut stream);
-            assert_eq!(items["method"], "thread/items/list");
-            respond(
-                &mut stream,
-                json!({"id": items["id"], "error": {"code": -32601, "message": "unsupported"}}),
-            );
-            let turn_start = next_request(&mut stream);
-            assert_eq!(turn_start["method"], "turn/start");
-            respond(
-                &mut stream,
-                json!({"id": turn_start["id"], "error": {"code": -32600, "message": "invalid params"}}),
-            );
-            let steer = next_request(&mut stream);
-            assert_eq!(steer["method"], "turn/steer");
-            respond(
-                &mut stream,
-                json!({"id": steer["id"], "error": {"code": -32600, "message": "invalid params"}}),
-            );
-            let turns = next_request(&mut stream);
-            assert_eq!(turns["method"], "thread/turns/list");
-            respond(
-                &mut stream,
-                json!({"id": turns["id"], "result": {"data": []}}),
-            );
-            let queue = next_request(&mut stream);
-            assert_eq!(queue["method"], "thread/queue/add");
-            respond(
-                &mut stream,
-                json!({"id": queue["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "unloaded thread must not issue another App Server method"
             );
             stream.shutdown(Shutdown::Both).ok();
         });
@@ -1601,9 +1551,12 @@ mod tests {
             namespace: "codex_tui".into(),
             thread_id: "persisted-thread".into(),
         };
-        let selected = verify_candidate(&candidate).unwrap();
-        assert_eq!(selected.thread_id.as_deref(), Some("persisted-thread"));
-        assert!(selected.self_check.contains("thread/loaded/list/read"));
+        let error = verify_candidate(&candidate).unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("persisted but not loaded"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -1908,9 +1861,10 @@ mod tests {
             notification_action("idle", None).unwrap(),
             NotificationAction::Start
         );
-        assert_eq!(
-            notification_action("notLoaded", None).unwrap(),
-            NotificationAction::Start
+        let error = notification_action("notLoaded", None).unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
         );
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
@@ -2238,7 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_starts_not_loaded_thread() {
+    fn immediate_notify_rejects_not_loaded_thread() {
         let socket = temp_socket("notify-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2260,39 +2214,32 @@ mod tests {
                     }
                 }),
             );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            assert_eq!(request["params"]["threadId"], "thread-1");
+            let mut byte = [0_u8; 1];
             assert_eq!(
-                request["params"]["toolOutput"]["output"],
-                "<codex_delegation>\n  <source_thread_id>sender-thread</source_thread_id>\n  <client_message_id>message-start</client_message_id>\n  <input>notify body</input>\n</codex_delegation>"
-            );
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
+                stream.read(&mut byte).unwrap(),
+                0,
+                "not-loaded thread must not issue turn/start"
             );
             stream.shutdown(Shutdown::Both).ok();
         });
 
-        let receipt = immediate_notify(
+        let error = immediate_notify(
             &selected_transport(&socket),
             "sender-thread",
             "notify body",
             "message-start",
         )
-        .unwrap();
-        assert_eq!(receipt["turn"]["id"], "turn-started");
+        .unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
+        );
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
 
     #[test]
-    fn immediate_notify_starts_thread_read_not_loaded_error() {
+    fn immediate_notify_rejects_thread_read_not_loaded_error() {
         let socket = temp_socket("notify-read-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2312,29 +2259,26 @@ mod tests {
                     }
                 }),
             );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            assert_eq!(request["params"]["threadId"], "thread-1");
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "not-loaded thread must not issue turn/start"
             );
             stream.shutdown(Shutdown::Both).ok();
         });
 
-        let receipt = immediate_notify(
+        let error = immediate_notify(
             &selected_transport(&socket),
             "sender-thread",
             "notify body",
             "message-start",
         )
-        .unwrap();
-        assert_eq!(receipt["turn"]["id"], "turn-started");
+        .unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
+        );
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

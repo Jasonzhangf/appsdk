@@ -20014,6 +20014,10 @@ fn goal_subscription_by_subject_candidates(
     Ok(matches.into_iter().next())
 }
 
+fn goal_subscription_is_terminal(status: &str) -> bool {
+    matches!(status, "consumed" | "expired" | "cancelled")
+}
+
 fn goal_fail(format_json: bool, error: &str, record: Option<&Value>) -> ! {
     eprintln!("{}", error);
     if format_json {
@@ -20500,6 +20504,7 @@ where
                 }
             };
             let goal_subject = format!("goal:{}", goal_id);
+            let mut terminal_previous = None;
             if let Some(existing) = existing.as_ref() {
                 if existing["desired"].as_str() == Some("cancel_pending") {
                     match goal_subscription_by_subject_candidates(
@@ -20594,21 +20599,35 @@ where
                         }
                         Ok(None) if recovering => {}
                         Ok(None) => {
-                            let mut recovery = existing.clone();
-                            goal_mark_recovery_required(
-                                &mut recovery,
-                                "GOAL_EXISTING_SUBSCRIPTION_NOT_RECONCILED: no armed deadline subscription matches the retained or canonical subject".into(),
-                            );
-                            if let Err(error) = goal_record_write(root, &recovery) {
-                                drop(_goal_lock);
-                                goal_fail(format_json, &error, Some(&recovery));
+                            let retained = goal_record_subscription_id(existing).map(|id| {
+                                goal_subscription_status(root, &id)
+                                    .map(|(status, remote_record)| (status, remote_record))
+                            });
+                            match retained {
+                                Some(Ok((remote_status, remote_record)))
+                                    if existing["goal_id"].as_str() == Some(goal_id.as_str())
+                                        && goal_subscription_is_terminal(&remote_status) =>
+                                {
+                                    terminal_previous = Some((remote_status, remote_record));
+                                }
+                                _ => {
+                                    let mut recovery = existing.clone();
+                                    goal_mark_recovery_required(
+                                        &mut recovery,
+                                        "GOAL_EXISTING_SUBSCRIPTION_NOT_RECONCILED: no armed deadline subscription matches the retained or canonical subject".into(),
+                                    );
+                                    if let Err(error) = goal_record_write(root, &recovery) {
+                                        drop(_goal_lock);
+                                        goal_fail(format_json, &error, Some(&recovery));
+                                    }
+                                    drop(_goal_lock);
+                                    goal_fail(
+                                        format_json,
+                                        recovery["error"].as_str().unwrap(),
+                                        Some(&recovery),
+                                    );
+                                }
                             }
-                            drop(_goal_lock);
-                            goal_fail(
-                                format_json,
-                                recovery["error"].as_str().unwrap(),
-                                Some(&recovery),
-                            );
                         }
                         Err(error) => {
                             let mut recovery = existing.clone();
@@ -20654,10 +20673,18 @@ where
                 "active": false,
                 "recovery": "When the one-shot deadline is consumed, expires, or Collab restarts, rerun appsdk goal subscribe with this goal to create a fresh one-shot deadline; renewal is explicit and is not automatic."
             });
-            if let Some(previous) = existing
-                .as_ref()
-                .filter(|previous| previous["desired"].as_str() == Some("recovery_required"))
-            {
+            if let Some(previous) = existing.as_ref().filter(|previous| {
+                previous["desired"].as_str() == Some("recovery_required")
+                    || terminal_previous.is_some()
+            }) {
+                let mut previous = previous.clone();
+                if let Some((remote_status, remote_record)) = terminal_previous {
+                    previous["remote_state"] = Value::String(remote_status.clone());
+                    previous["observed"] = Value::String(remote_status);
+                    previous["active"] = Value::Bool(false);
+                    previous["collab_subscribed"] = Value::Bool(false);
+                    previous["collab_subscription"] = remote_record;
+                }
                 let mut history = previous["recovery_history"]
                     .as_array()
                     .cloned()

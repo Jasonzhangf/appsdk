@@ -20134,6 +20134,100 @@ esac
 }
 
 #[test]
+fn goal_subscribe_rearms_consumed_subscription_without_cancel() {
+    let root = temp_root("goal-consumed-rearm");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "notify subscribe")
+    count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
+    printf '%s' "$count" > subscribe-count
+    if [ "$count" = "1" ]; then
+      printf '%s\n' '{"subscription_id":"sub-consumed","status":"armed"}'
+    else
+      printf '%s\n' '{"subscription_id":"sub-rearmed","status":"armed"}'
+    fi
+    ;;
+  "notify status")
+    printf '%s\n' '{"subscriptions":[{"id":"sub-consumed","status":"consumed","event":"deadline","subject":"goal:sha256:consumed-goal"}]}'
+    ;;
+  "notify unsubscribe")
+    printf '%s\n' 'unexpected cancel' > cancel-called
+    printf '%s\n' '{"subscription_id":"sub-consumed","status":"cancelled"}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let initial = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial_json: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let goal_id = initial_json["goal_id"].as_str().unwrap().to_string();
+    assert_eq!(initial_json["subscription_id"], "sub-consumed");
+    assert_eq!(initial_json["subject"], format!("goal:{}", goal_id));
+
+    let rearmed = Command::new(binary())
+        .args(["goal", "subscribe", "--goal", "long-task.md", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        rearmed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rearmed.stderr)
+    );
+    let rearmed_json: Value = serde_json::from_slice(&rearmed.stdout).unwrap();
+    assert_eq!(rearmed_json["active"], true);
+    assert_eq!(rearmed_json["desired"], "subscribed");
+    assert_eq!(rearmed_json["observed"], "subscribed");
+    assert_eq!(rearmed_json["subscription_id"], "sub-rearmed");
+    assert_eq!(rearmed_json["subject"], format!("goal:{}", goal_id));
+    let previous = &rearmed_json["recovery_history"][0]["previous_record"];
+    assert_eq!(previous["subscription_id"], "sub-consumed");
+    assert_eq!(previous["remote_state"], "consumed");
+    assert_eq!(previous["observed"], "consumed");
+    assert_eq!(previous["active"], false);
+    assert_eq!(previous["collab_subscribed"], false);
+    assert_eq!(previous["collab_subscription"]["id"], "sub-consumed");
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(root.join(".appsdk-control/long-task-goal.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["subscription_id"], "sub-rearmed");
+    assert_eq!(
+        persisted["recovery_history"][0]["previous_record"]["subscription_id"],
+        "sub-consumed"
+    );
+    assert!(!root.join("cancel-called").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn goal_status_reconciles_armed_subscription_after_recovery_required() {
     let root = temp_root("goal-status-recovery-reconciliation");
     fs::create_dir_all(root.join(".appsdk-control")).unwrap();

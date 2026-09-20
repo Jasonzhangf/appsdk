@@ -1885,17 +1885,20 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
     assert_eq!(observed.data["notification_channel"], "none");
     assert!(observed.data.get("screen_tail").is_none());
     assert!(observed.data["tasks"].as_array().unwrap().len() == 1);
-    assert!(
-        crate::subagent::handle(
-            &server,
-            "child",
-            "token-child",
-            Action::Ready {
-                id: "managed".into()
-            }
-        )
-        .ok
+    let ready = crate::subagent::handle(
+        &server,
+        "child",
+        "token-child",
+        Action::Ready {
+            id: "managed".into(),
+        },
     );
+    assert!(!ready.ok);
+    assert!(ready
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("APPSERVER_NOTIFICATION_REJECTED:"));
     assert_eq!(
         server.state.lock().unwrap().subagents["managed"].status,
         "idle"
@@ -5010,6 +5013,141 @@ fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
     assert_eq!(response.data["notification"], "sent");
     drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_send_reports_appserver_rejection_after_durable_commit() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+        Err(
+            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+                .into(),
+        )
+    });
+
+    let response = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready for your review.".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_deref(),
+        Some(
+            "APPSERVER_NOTIFICATION_REJECTED: ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+        )
+    );
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "subscribed-not-sent");
+    assert_eq!(
+        response.data["notification_error"],
+        "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+    );
+    let message_id = response.data["msg_id"].as_str().unwrap();
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
+    assert_eq!(state.msgs[message_id].state, "pending");
+    drop(state);
+    assert!(root
+        .join(".agent-collab/mailbox")
+        .join(format!("{message_id}.json"))
+        .exists());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_send_duplicate_after_rejection_does_not_report_success() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+        Err(
+            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+                .into(),
+        )
+    });
+
+    let first = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready for your review.".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!first.ok);
+    let message_id = first.data["msg_id"].as_str().unwrap().to_owned();
+
+    let duplicate = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready for your review.".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!duplicate.ok);
+    assert_eq!(duplicate.data["msg_id"], message_id);
+    assert_eq!(duplicate.data["durable"], true);
+    assert_eq!(duplicate.data["notification"], "subscribed-not-sent");
+    assert_eq!(
+        duplicate.error.as_deref(),
+        Some(
+            "APPSERVER_NOTIFICATION_REJECTED: notification was not attempted for the selected App Server transport"
+        )
+    );
+    assert_eq!(server.state.lock().unwrap().msgs.len(), 1);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_send_reports_when_subscription_transport_mismatches() {
+    let (server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get_mut("recipient")
+        .unwrap()
+        .transport = Some(test_appserver_transport("mismatched-thread-recipient"));
+
+    let response = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready for your review.".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_deref(),
+        Some(
+            "APPSERVER_NOTIFICATION_REJECTED: notification was not attempted for the selected App Server transport"
+        )
+    );
+    assert_eq!(response.data["notification"], "subscribed-not-sent");
+    assert_eq!(
+        response.data["notification_error"],
+        "notification was not attempted for the selected App Server transport"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

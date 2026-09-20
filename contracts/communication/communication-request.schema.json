@@ -261,8 +261,12 @@
         "oneOf": [
           {"required": ["bug"]},
           {
-            "required": ["bugId", "scopeId", "title", "priority", "description", "reporter"],
-            "not": {"required": ["bug"]}
+            "required": ["scopeId", "title", "priority", "description", "reporter"],
+            "not": {"required": ["bug"]},
+            "anyOf": [
+              {"required": ["bugId"]},
+              {"required": ["bug_id"]}
+            ]
           }
         ]
       }
@@ -278,8 +282,12 @@
         "oneOf": [
           {"required": ["loop"]},
           {
-            "required": ["loopId", "kind", "owner", "trigger", "work", "gate", "state", "stop"],
-            "not": {"required": ["loop"]}
+            "required": ["kind", "owner", "trigger", "work", "gate", "state", "stop"],
+            "not": {"required": ["loop"]},
+            "anyOf": [
+              {"required": ["loopId"]},
+              {"required": ["loop_id"]}
+            ]
           }
         ]
       }
@@ -633,9 +641,10 @@
     },
     "bugRequest": {
       "type": "object",
-      "required": ["bugId", "scopeId", "title", "priority", "description", "reporter"],
+      "required": ["scopeId", "title", "priority", "description", "reporter"],
       "properties": {
         "bugId": {"type": "string", "minLength": 1},
+        "bug_id": {"type": "string", "minLength": 1},
         "scopeId": {"type": "string", "minLength": 1},
         "title": {"type": "string", "minLength": 1},
         "priority": {"$ref": "#/$defs/priority"},
@@ -643,13 +652,18 @@
         "reporter": {"$ref": "#/$defs/address"},
         "worktreeId": {"type": ["string", "null"]}
       },
+      "anyOf": [
+        {"required": ["bugId"]},
+        {"required": ["bug_id"]}
+      ],
       "additionalProperties": false
     },
     "loopRequest": {
       "type": "object",
-      "required": ["loopId", "kind", "owner", "trigger", "work", "gate", "state", "stop"],
+      "required": ["kind", "owner", "trigger", "work", "gate", "state", "stop"],
       "properties": {
         "loopId": {"type": "string", "minLength": 1},
+        "loop_id": {"type": "string", "minLength": 1},
         "kind": {"type": "string", "minLength": 1},
         "owner": {"$ref": "#/$defs/address"},
         "trigger": {"type": "string", "minLength": 1},
@@ -660,6 +674,10 @@
         "maxIterations": {"type": "integer", "minimum": 1},
         "deadlineAt": {"type": ["string", "null"], "format": "date-time"}
       },
+      "anyOf": [
+        {"required": ["loopId"]},
+        {"required": ["loop_id"]}
+      ],
       "additionalProperties": false
     },
     "adapter": {

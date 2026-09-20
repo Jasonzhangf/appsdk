@@ -1025,6 +1025,7 @@ impl State {
     pub fn drop_message(&mut self, id: &str) {
         self.msgs.remove(id);
         self.delivery_modes.remove(id);
+        self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
     }
 

@@ -14381,11 +14381,17 @@ fn sdk_map_migration_entry<'a>(manifest: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"))
 }
 
+fn valid_bundle_digest(digest: &str) -> bool {
+    digest
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<String> {
     let record_bundle = record
         .get("bundle_digest")
         .and_then(Value::as_str)
-        .filter(|digest| digest.starts_with("sha256:"))?;
+        .filter(|digest| valid_bundle_digest(digest))?;
     let lock_path = root.join(".appsdk/sdk.lock");
     if !lock_path.is_file() {
         return None;
@@ -14400,20 +14406,16 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
         &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
     )
     .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-    let lock_bundle = lock.get("bundle_digest").and_then(Value::as_str)?;
+    let lock_bundle = lock
+        .get("bundle_digest")
+        .and_then(Value::as_str)
+        .filter(|digest| valid_bundle_digest(digest))?;
     let lock_previous_bundle = lock.get("previous_bundle_digest").and_then(Value::as_str);
     let current_bundle = sdk_bundle_digest();
     if record_bundle == current_bundle {
         return None;
     }
-    let lock_bundle_is_valid = lock_bundle.len() == 71
-        && lock_bundle.starts_with("sha256:")
-        && lock_bundle[7..]
-            .chars()
-            .all(|byte| byte.is_ascii_hexdigit());
-    if lock_bundle == record_bundle
-        || (lock_bundle_is_valid && lock_previous_bundle == Some(record_bundle))
-    {
+    if lock_bundle == record_bundle || lock_previous_bundle == Some(record_bundle) {
         return Some(record_bundle.to_string());
     }
     None

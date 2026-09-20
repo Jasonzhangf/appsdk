@@ -9582,6 +9582,39 @@ fn pin_lock_rejects_invalid_chained_bundle_witness_without_overwrite() {
 }
 
 #[test]
+fn pin_lock_rejects_equal_malformed_bundle_witness_without_overwrite() {
+    let root = temp_root("pin-lock-equal-malformed-witness");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut record: Value = serde_json::from_str(&original_record).unwrap();
+    record["bundle_digest"] = Value::String("sha256:invalid".into());
+    let malformed_record = serde_json::to_string_pretty(&record).unwrap() + "\n";
+    fs::write(&record_path, &malformed_record).unwrap();
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["bundle_digest"] = Value::String("sha256:invalid".into());
+    lock["previous_bundle_digest"] = Value::String(previous_bundle_digest);
+    let malformed_lock = serde_json::to_string_pretty(&lock).unwrap() + "\n";
+    fs::write(&lock_path, &malformed_lock).unwrap();
+
+    let rejected = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED")
+    );
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), malformed_lock);
+    assert_eq!(fs::read_to_string(&record_path).unwrap(), malformed_record);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_rejects_unreconciled_live_map_without_overwrite() {
     let root = temp_root("pin-lock-unreconciled-live-map");
     let root_text = root.to_str().unwrap();

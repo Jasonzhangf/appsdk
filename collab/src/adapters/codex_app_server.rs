@@ -441,16 +441,13 @@ pub fn immediate_notify(
     })?;
     let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
     client.initialize()?;
-    let (thread, status) = match thread_metadata(&mut client, thread_id.as_str()) {
-        Ok(thread) => {
-            let status = thread_status_from_metadata(&thread)?;
-            (Some(thread), status)
-        }
+    let status = match thread_metadata(&mut client, thread_id.as_str()) {
+        Ok(thread) => thread_status_from_metadata(&thread)?,
         Err(AdapterError::Unknown { operation, detail })
             if operation == "rpc"
                 && detail == format!("thread not loaded: {}", thread_id.as_str()) =>
         {
-            (None, "notLoaded".to_owned())
+            "notLoaded".to_owned()
         }
         Err(error) => return Err(error),
     };
@@ -459,22 +456,8 @@ pub fn immediate_notify(
         _ => None,
     };
     let action = notification_action(&status, active_turn_id)?;
-    if matches!(action, NotificationAction::Resume) {
-        let exclude_turns = thread
-            .as_ref()
-            .and_then(|thread| thread.get("historyMode"))
-            .and_then(Value::as_str)
-            .is_some_and(|history_mode| history_mode == "paginated");
-        client.call(
-            "thread/resume",
-            json!({
-                "threadId": thread_id.as_str(),
-                "excludeTurns": exclude_turns,
-            }),
-        )?;
-    }
     match action {
-        NotificationAction::Resume | NotificationAction::Start => {
+        NotificationAction::Start => {
             let receipt = client.call(
                 "turn/start",
                 json!({
@@ -778,7 +761,6 @@ fn active_turn_id_from_page(page: &Value) -> Result<Option<String>, AdapterError
 #[derive(Debug, PartialEq, Eq)]
 enum NotificationAction {
     Start,
-    Resume,
     Steer(String),
 }
 
@@ -792,7 +774,7 @@ fn notification_action(
             None => NotificationAction::Start,
         }),
         "idle" => Ok(NotificationAction::Start),
-        "notLoaded" => Ok(NotificationAction::Resume),
+        "notLoaded" => Ok(NotificationAction::Start),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -1646,7 +1628,7 @@ mod tests {
         );
         assert_eq!(
             notification_action("notLoaded", None).unwrap(),
-            NotificationAction::Resume
+            NotificationAction::Start
         );
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
@@ -1974,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_resumes_not_loaded_thread_before_turn_start() {
+    fn immediate_notify_starts_not_loaded_thread_without_resume() {
         let socket = temp_socket("notify-start-not-loaded");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -1996,22 +1978,6 @@ mod tests {
                     }
                 }),
             );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
             let request = next_request(&mut stream);
             assert_eq!(request["method"], "turn/start");
             assert_eq!(request["params"]["threadId"], "thread-1");
@@ -2044,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_resumes_thread_when_read_reports_not_loaded_error() {
+    fn immediate_notify_starts_thread_when_read_reports_not_loaded_error() {
         let socket = temp_socket("notify-read-not-loaded-error");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2064,22 +2030,6 @@ mod tests {
                     }
                 }),
             );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
             let request = next_request(&mut stream);
             assert_eq!(request["method"], "turn/start");
             assert_eq!(request["params"]["threadId"], "thread-1");
@@ -2112,8 +2062,8 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_resume_includes_paginated_history_when_requested() {
-        let socket = temp_socket("notify-resume-paginated");
+    fn immediate_notify_ignores_history_mode_when_starting_not_loaded_thread() {
+        let socket = temp_socket("notify-start-paginated");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -2135,21 +2085,6 @@ mod tests {
                     }
                 }),
             );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["excludeTurns"], true);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
             let request = next_request(&mut stream);
             assert_eq!(request["method"], "turn/start");
             respond(
@@ -2176,8 +2111,8 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_resume_omits_paginated_history_for_legacy_threads() {
-        let socket = temp_socket("notify-resume-legacy");
+    fn immediate_notify_starts_legacy_not_loaded_thread_directly() {
+        let socket = temp_socket("notify-start-legacy");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -2195,21 +2130,6 @@ mod tests {
                             "id": "thread-1",
                             "status": {"type": "notLoaded"},
                             "historyMode": "legacy"
-                        }
-                    }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
                         }
                     }
                 }),
@@ -2249,7 +2169,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn live_immediate_notify_resumes_not_loaded_thread() {
+    fn live_immediate_notify_starts_not_loaded_thread() {
         let Some(candidate) = candidate_from_env().unwrap() else {
             panic!("CODEX_THREAD_ID is required");
         };
@@ -2257,8 +2177,8 @@ mod tests {
         let receipt = immediate_notify(
             &transport,
             candidate.thread_id.as_str(),
-            "Reply with exactly COLLAB_RESUME_PROBE_OK and do not run tools.",
-            "collab-resume-probe",
+            "Reply with exactly COLLAB_START_PROBE_OK and do not run tools.",
+            "collab-start-probe",
         )
         .expect("live immediate notify");
         assert_eq!(receipt["turn"]["status"], "inProgress");

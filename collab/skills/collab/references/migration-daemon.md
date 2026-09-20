@@ -45,6 +45,25 @@ automatically: first prove an exact copy is Collab from its own version
 response, then remove only that verified pair. Unverified path collisions
 remain untouched and must be reported.
 
+The upgrade is a replacement, not a compatibility layer:
+
+- Build and install from the reviewed `origin/main`; use only the installed
+  `$CARGO_HOME/bin/collab` and `$CARGO_HOME/bin/collab-mcp` for subsequent
+  checks.
+- Do not migrate, interpret, or read old local Collab control history merely
+  to keep an old project alive. For an explicitly authorized clean epoch, use
+  the current `collab reset --discard-legacy` owner; for replayable state, use
+  `collab migrate`.
+- If a verified legacy user-local Collab binary pair exists, remove only that
+  exact pair after the canonical pair is installed. Do not remove project
+  `.agent-collab/`, `~/.collab/`, AppSDK state, or business source.
+- If the installed path still resolves an old binary, fix `PATH` or the shell
+  command cache and verify `command -v` and `--version`; never keep an older
+  binary as a fallback.
+- After the installed version is current, verify `collab status --all`,
+  `collab context`, and one live App Server send/consume/reply replay. Binary
+  installation alone does not prove the running daemon or route is current.
+
 The global daemon can be shared by multiple projects. A binary upgrade alone
 does not authorize stopping or restarting it. Keep the existing daemon running
 unless an operator explicitly opens a maintenance window; then use only the
@@ -170,6 +189,21 @@ collab up
 - Restart only after reviewed source reaches verified latest main.
 - After restart prove one PID/socket, preserved durable state, identity rebind,
   migration verify, and one real subscribed notice.
+
+### Endpoint mismatch and not-loaded recovery
+
+When `collab context` reports `endpoint_live=false`, `identity_valid=false`,
+`presence=missing`, or `thread_state=notLoaded`, first classify the endpoint
+owner before changing lifecycle state. `persisted but not loaded` means the
+thread is durable but is not loaded by the selected App Server; it does not
+authorize a new registration or a `turn/start` attempt.
+
+Use the endpoint/thread recovery contract in
+[`state-paths.md`](state-paths.md#app-server-endpoint-and-thread-recovery).
+The recovery owner must preserve the selected endpoint, thread ID, binding
+generation, and active-writer evidence, then rebind through the supported
+peer path. A successful recovery requires a loaded thread and
+`endpoint_live=true` before any notification is sent.
 
 ## Deprecated commands
 

@@ -125,3 +125,45 @@ an identity file, run a reset, or promote a peer. Check `collab master status`
 separately, report the exact context error to the live master, and use the
 migration/reset owner only when that owner explicitly decides the project-local
 control plane is unrecoverable.
+
+## App Server endpoint and thread recovery
+
+A registered route is live only when the selected App Server endpoint owns the
+same native thread and the thread is loaded. `persisted but not loaded`,
+`notLoaded`, or an active-writer conflict means the durable registration and
+the current TUI runtime are on different endpoints; it is not a reason to
+re-register, edit `routes.jsonl`, copy a token, or start another daemon.
+
+Diagnose read-only from the canonical project main checkout:
+
+```sh
+collab context
+collab route resolve
+collab worker status <peer-id>
+```
+
+Record the selected endpoint, native thread ID, binding generation,
+`endpoint_live`, `identity_valid`, `presence`, `agent.thread_state`, and the
+exact error. The recovery owner must then prove the endpoint owner:
+
+1. The endpoint in the selected transport must be the App Server that owns the
+   current Codex TUI/thread. A managed control socket is valid only when the
+   current thread is loaded there.
+2. If the current TUI owns the thread but is not connected to the selected
+   managed endpoint, the route endpoint must be corrected through the
+   supported peer rebind/recovery path. Do not point the route at a test or
+   disposable socket.
+3. If the selected App Server reports the thread as not loaded, do not call
+   `turn/start`, `turn/steer`, or `thread/queue/add`. The current contract
+   requires a loaded thread before notification.
+4. If the endpoint reports an active writer conflict, identify the exact
+   lock/owner and resolve the runtime ownership. Do not kill a process by name,
+   remove a lock by hand, or start a second daemon.
+5. After the endpoint/thread owner is corrected, run `collab worker recover`
+   once, then `collab context`. Success requires `endpoint_live=true`,
+   `identity_valid=true`, `presence=present`, and a loaded thread. A command
+   acceptance without those fields is not recovery.
+
+For a worktree, run only `collab context` and `collab route resolve`; the
+canonical project main checkout owns registration and recovery. Never create a
+worktree-local peer or endpoint to make the route appear live.

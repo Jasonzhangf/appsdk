@@ -630,7 +630,7 @@ fn assert_bundle_manifest() {
 fn install_bundle_resources(root: &Path) {
     assert_bundle_manifest();
     let mut installed = Vec::new();
-    for (source, class, content) in sdk_bundle_resource_entries() {
+    for (source, class, embedded_content) in sdk_bundle_resource_entries() {
         let target = root.join(sdk_resource_install_relative(&source, &class));
         assert_no_symlink_components(root, &target, "sdk_resource");
         if fs::symlink_metadata(&target)
@@ -645,12 +645,22 @@ fn install_bundle_resources(root: &Path) {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).unwrap_or_else(|_| fail("SDK_RESOURCE_WRITE_FAILED"));
         }
-        atomic_write_bytes(&target, content.as_bytes(), "SDK_RESOURCE_WRITE_FAILED");
+        let source_path = root.join(&source);
+        let project_record_contract = class == "contracts"
+            && source.starts_with("contracts/records/")
+            && CANONICAL_RECORD_CONTRACTS.contains(&source.as_str());
+        let content = if project_record_contract && source_path.is_file() {
+            assert_no_symlink_components(root, &source_path, "sdk_resource_source");
+            fs::read(&source_path).unwrap_or_else(|_| fail("SDK_RESOURCE_SOURCE_READ_FAILED"))
+        } else {
+            embedded_content.as_bytes().to_vec()
+        };
+        atomic_write_bytes(&target, &content, "SDK_RESOURCE_WRITE_FAILED");
         installed.push(serde_json::json!({
             "source": source,
             "class": class,
             "path": target.strip_prefix(root).unwrap().to_string_lossy(),
-            "digest": digest_bytes(content.as_bytes())
+            "digest": digest_bytes(&content)
         }));
     }
     let record = serde_json::json!({
@@ -12602,6 +12612,16 @@ fn assert_sdk_resources(root: &Path, required: bool, allow_reset_resource_gaps: 
         }
         if !target.is_file() || file_sha256(&target, "sdk_resource") != expected {
             fail(format!("SDK_RESOURCE_MISMATCH:{}", relative));
+        }
+        let project_record_contract = class == "contracts"
+            && source.starts_with("contracts/records/")
+            && CANONICAL_RECORD_CONTRACTS.contains(&source);
+        let source_path = root.join(source);
+        if project_record_contract && source_path.is_file() {
+            assert_no_symlink_components(root, &source_path, "sdk_resource_source");
+            if file_sha256(&source_path, "sdk_resource_source") != expected {
+                fail(format!("SDK_RESOURCE_SOURCE_MISMATCH:{}", source));
+            }
         }
     }
     for (source, class, _) in bundle_entries {

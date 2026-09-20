@@ -8667,6 +8667,51 @@ fn verify_rejects_contracts_that_drop_canonical_semantics() {
 }
 
 #[test]
+fn install_bundle_resources_projects_declared_record_contract_sources() {
+    let root = temp_root("project-record-contract-projection");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let source = root.join("contracts/records/worktree-record.schema.json");
+    let installed = root.join(".appsdk/contracts/records/worktree-record.schema.json");
+    let mut schema: Value = serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+    schema["properties"]["project_extension"] = serde_json::json!({"type": "string"});
+    schema["required"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::String("project_extension".into()));
+    fs::write(
+        &source,
+        serde_json::to_string_pretty(&schema).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let refreshed = run(&["init", root_text]);
+    assert!(
+        refreshed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    assert_eq!(fs::read(&source).unwrap(), fs::read(&installed).unwrap());
+
+    let record: Value =
+        serde_json::from_slice(&fs::read(root.join(".appsdk/sdk-resources.json")).unwrap()).unwrap();
+    let entry = record["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["source"] == "contracts/records/worktree-record.schema.json")
+        .unwrap();
+    assert_eq!(entry["digest"], digest(&fs::read_to_string(&source).unwrap()));
+
+    fs::write(&installed, "{\"drifted\":true}\n").unwrap();
+    let rejected = run(&["verify", root_text]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("SDK_RESOURCE_MISMATCH:.appsdk/contracts/records/worktree-record.schema.json"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn reset_receipt_validation_is_mode_aware_and_fail_closed() {
     let root = temp_root("reset-receipt-validation");
     let root_text = root.to_str().unwrap();

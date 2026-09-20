@@ -277,9 +277,10 @@ The replacement order is:
    install, restart, or delivery evidence.
 
 If a legacy user-local Collab binary pair is proven by its own version
-response, remove only that verified pair after the canonical pair is
-installed. Never remove `~/.appsdk`, `~/.collab`, project `.agent-collab/`, or
-business source as part of binary cleanup.
+response, removal requires explicit user authorization naming the exact binary
+paths. After the canonical pair is installed, remove only those authorized,
+verified paths. Never remove `~/.appsdk`, `~/.collab`, project
+`.agent-collab/`, or business source as part of binary cleanup.
 
 The lower-level `appsdk reset-governance --discard-legacy` command remains
 available and uses the same transactional reset owner. Neither command

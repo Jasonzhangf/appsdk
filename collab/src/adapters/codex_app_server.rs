@@ -1355,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn live_appserver_candidate_is_admitted_when_loaded_or_startable() {
+    fn live_appserver_candidate_is_admitted_when_loaded_or_rejected_when_unloaded() {
         let Some(candidate) = candidate_from_env().unwrap() else {
             return;
         };

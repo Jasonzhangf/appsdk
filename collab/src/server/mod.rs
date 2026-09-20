@@ -4909,27 +4909,71 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
     }
 }
 
+fn merge_appserver_presence(
+    identity_presence: IdentityPresence,
+    status_presence: IdentityPresence,
+) -> IdentityPresence {
+    match identity_presence {
+        IdentityPresence::Present => status_presence,
+        missing_or_unknown => missing_or_unknown,
+    }
+}
+
 fn appserver_agent_view(
     server: &Server,
     worker: &WorkerRec,
-) -> (serde_json::Value, serde_json::Value) {
+) -> (IdentityPresence, serde_json::Value, serde_json::Value) {
     let Some(transport) = selected_transport_for_worker(worker) else {
-        return (serde_json::Value::Null, serde_json::Value::Null);
+        return (
+            IdentityPresence::Missing,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
     };
     let Some(thread_id) = transport.thread_id.as_deref() else {
-        return (serde_json::Value::Null, serde_json::Value::Null);
+        return (
+            IdentityPresence::Missing,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
     };
-    let Ok(raw) = (server.appserver_thread_status)(&transport, thread_id) else {
-        return (serde_json::Value::Null, serde_json::Value::Null);
+    let raw = match (server.appserver_thread_status)(&transport, thread_id) {
+        Ok(raw) => raw,
+        Err(error) if error.starts_with("ADAPTER_ROUTE_UNAVAILABLE:") => {
+            return (
+                IdentityPresence::Missing,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            )
+        }
+        Err(_) => {
+            return (
+                IdentityPresence::Unknown,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            )
+        }
     };
     let Some(thread) = raw.get("thread") else {
-        return (serde_json::Value::Null, serde_json::Value::Null);
+        return (
+            IdentityPresence::Unknown,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
     };
     let Some(status) = thread.get("status").and_then(serde_json::Value::as_object) else {
-        return (serde_json::Value::Null, serde_json::Value::Null);
+        return (
+            IdentityPresence::Unknown,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
     };
     let Some(thread_state) = status.get("type").and_then(serde_json::Value::as_str) else {
-        return (serde_json::Value::Null, serde_json::Value::Null);
+        return (
+            IdentityPresence::Unknown,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
     };
     let active_flags = status
         .get("activeFlags")
@@ -4955,6 +4999,7 @@ fn appserver_agent_view(
         .get("turn_status_error")
         .and_then(serde_json::Value::as_str);
     (
+        IdentityPresence::Present,
         serde_json::json!({
             "thread_state": thread_state,
             "active_flags": active_flags,
@@ -7769,15 +7814,24 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let master_wake = st.master_wake.clone();
     drop(st);
 
-    let presence = worker_identity_presence(server, &worker);
     let is_appserver = worker
         .transport
         .as_ref()
         .is_some_and(|transport| transport.kind == TransportKind::AppServer);
-    let (agent, _raw) = if is_appserver {
-        appserver_agent_view(server, &worker)
+    let (presence, agent, _raw) = if is_appserver {
+        let identity_presence = worker_identity_presence(server, &worker);
+        let (status_presence, agent, raw) = appserver_agent_view(server, &worker);
+        (
+            merge_appserver_presence(identity_presence, status_presence),
+            agent,
+            raw,
+        )
     } else {
-        (serde_json::Value::Null, serde_json::Value::Null)
+        (
+            worker_identity_presence(server, &worker),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
     };
     let peers: Vec<_> = peer_snapshots
         .into_iter()
@@ -8114,55 +8168,68 @@ fn worker_status_summary_with_maps(
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
-    let presence = worker_identity_presence(server, w);
-    let endpoint_live = presence == IdentityPresence::Present;
     let is_appserver = w
         .transport
         .as_ref()
         .is_some_and(|transport| transport.kind == TransportKind::AppServer);
-    let (ownership, identity_valid, agent_state, appserver) = if is_appserver {
-        let ownership = endpoint_live.then_some(Ok(true));
-        let identity_valid = endpoint_live;
-        let (agent_view, _raw) = appserver_agent_view(server, w);
-        let thread_state = agent_view
-            .get("thread_state")
-            .and_then(serde_json::Value::as_str);
-        let active_flags = agent_view
-            .get("active_flags")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let agent_state = match (presence, thread_state) {
-            (IdentityPresence::Missing, _) => "absent",
-            (IdentityPresence::Unknown, _) => "unknown",
-            (IdentityPresence::Present, Some("active"))
-                if active_flags.iter().any(|flag| flag == "waitingOnApproval") =>
-            {
-                "waiting_approval"
-            }
-            (IdentityPresence::Present, Some("active"))
-                if active_flags.iter().any(|flag| flag == "waitingOnUserInput") =>
-            {
-                "waiting_input"
-            }
-            (IdentityPresence::Present, Some("active")) => "working",
-            (IdentityPresence::Present, Some("idle")) => "idle",
-            (IdentityPresence::Present, Some("systemError")) => "system_error",
-            (IdentityPresence::Present, Some("notLoaded")) => "not_loaded",
-            _ => "unknown",
+    let (presence, endpoint_live, ownership, identity_valid, agent_state, appserver) =
+        if is_appserver {
+            let identity_presence = worker_identity_presence(server, w);
+            let (status_presence, agent_view, _raw) = appserver_agent_view(server, w);
+            let presence = merge_appserver_presence(identity_presence, status_presence);
+            let endpoint_live = presence == IdentityPresence::Present;
+            let ownership = endpoint_live.then_some(Ok(true));
+            let identity_valid = endpoint_live;
+            let thread_state = agent_view
+                .get("thread_state")
+                .and_then(serde_json::Value::as_str);
+            let active_flags = agent_view
+                .get("active_flags")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let agent_state = match (presence, thread_state) {
+                (IdentityPresence::Missing, _) => "absent",
+                (IdentityPresence::Unknown, _) => "unknown",
+                (IdentityPresence::Present, Some("active"))
+                    if active_flags.iter().any(|flag| flag == "waitingOnApproval") =>
+                {
+                    "waiting_approval"
+                }
+                (IdentityPresence::Present, Some("active"))
+                    if active_flags.iter().any(|flag| flag == "waitingOnUserInput") =>
+                {
+                    "waiting_input"
+                }
+                (IdentityPresence::Present, Some("active")) => "working",
+                (IdentityPresence::Present, Some("idle")) => "idle",
+                (IdentityPresence::Present, Some("systemError")) => "system_error",
+                (IdentityPresence::Present, Some("notLoaded")) => "not_loaded",
+                _ => "unknown",
+            };
+            (
+                presence,
+                endpoint_live,
+                ownership,
+                identity_valid,
+                agent_state,
+                agent_view,
+            )
+        } else {
+            let presence = worker_identity_presence(server, w);
+            let endpoint_live = presence == IdentityPresence::Present;
+            let ownership = None;
+            let identity_valid = false;
+            let agent_state = "absent";
+            (
+                presence,
+                endpoint_live,
+                ownership,
+                identity_valid,
+                agent_state,
+                serde_json::Value::Null,
+            )
         };
-        (ownership, identity_valid, agent_state, agent_view)
-    } else {
-        let ownership = None;
-        let identity_valid = false;
-        let agent_state = "absent";
-        (
-            ownership,
-            identity_valid,
-            agent_state,
-            serde_json::Value::Null,
-        )
-    };
     let unacked_notifications = msgs
         .values()
         .filter(|m| m.to == w.id && m.state == "delivered")

@@ -6186,6 +6186,79 @@ fn context_projects_appserver_thread_and_turn_state_without_guessing() {
 }
 
 #[test]
+fn appserver_status_probe_timeout_is_durable_unknown() {
+    let (mut server, root) = test_server();
+    let registration = register_appserver(&mut server, "timeout-peer", "thread-timeout-peer");
+    assert!(
+        registration.ok,
+        "{}",
+        registration.error.unwrap_or_default()
+    );
+    server.appserver_thread_status =
+        Arc::new(|_, _| Err("ADAPTER_TIMEOUT: thread/read timed out".into()));
+    let server = Arc::new(server);
+
+    let context = handle_context(&server, "timeout-peer".into(), "token-timeout-peer".into());
+    assert!(context.data["agent"].is_null());
+
+    let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
+    assert_eq!(status.data["workers"][0]["status"], "unknown");
+    assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert!(status.data["workers"][0]["endpoint_live"].is_null());
+    assert!(status.data["workers"][0]["identity_valid"].is_null());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn appserver_status_route_unavailable_is_missing_not_unknown() {
+    let (mut server, root) = test_server();
+    let registration = register_appserver(&mut server, "missing-peer", "thread-missing-peer");
+    assert!(
+        registration.ok,
+        "{}",
+        registration.error.unwrap_or_default()
+    );
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded".into())
+    });
+    let server = Arc::new(server);
+
+    let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
+    assert_eq!(status.data["workers"][0]["status"], "lost");
+    assert_eq!(status.data["workers"][0]["agent_state"], "absent");
+    assert_eq!(status.data["workers"][0]["presence"], "missing");
+    assert_eq!(status.data["workers"][0]["endpoint_live"], false);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn appserver_identity_timeout_cannot_be_overridden_by_successful_status_probe() {
+    let (mut server, root) = test_server();
+    let registration =
+        register_appserver(&mut server, "timeout-identity", "thread-timeout-identity");
+    assert!(
+        registration.ok,
+        "{}",
+        registration.error.unwrap_or_default()
+    );
+    server.appserver_candidate_check =
+        Arc::new(|_| Err("ADAPTER_TIMEOUT: candidate verification timed out".into()));
+    let server = Arc::new(server);
+
+    let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
+    assert_eq!(status.data["workers"][0]["status"], "unknown");
+    assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert!(status.data["workers"][0]["endpoint_live"].is_null());
+    assert!(status.data["workers"][0]["identity_valid"].is_null());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn architecture_source_has_no_live_declared_role_or_dispatch_owner() {
     let server_source = include_str!("mod.rs");
     let state_source = include_str!("state.rs");

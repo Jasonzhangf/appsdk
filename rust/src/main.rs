@@ -743,87 +743,13 @@ fn bootstrap_contracts(root: &Path) {
         "contracts/transitions/zone-transition.manifest.json",
         CANONICAL_ZONE_TRANSITION_CONTRACT,
     );
+    for &(relative, _, content) in SDK_BUNDLE_RESOURCES
+        .iter()
+        .filter(|(path, class, _)| *class == "contracts" && path.starts_with("contracts/records/"))
+    {
+        write_embedded_contract(root, relative, content);
+    }
     for (relative, content) in [
-        (
-            "contracts/records/worktree-record.schema.json",
-            include_str!("../../contracts/records/worktree-record.schema.json"),
-        ),
-        (
-            "contracts/records/reproduction-record.schema.json",
-            include_str!("../../contracts/records/reproduction-record.schema.json"),
-        ),
-        (
-            "contracts/records/evidence-record.schema.json",
-            include_str!("../../contracts/records/evidence-record.schema.json"),
-        ),
-        (
-            "contracts/records/goal-clarification-record.schema.json",
-            include_str!("../../contracts/records/goal-clarification-record.schema.json"),
-        ),
-        (
-            "contracts/records/fix-candidate-record.schema.json",
-            include_str!("../../contracts/records/fix-candidate-record.schema.json"),
-        ),
-        (
-            "contracts/records/review-record.schema.json",
-            include_str!("../../contracts/records/review-record.schema.json"),
-        ),
-        (
-            "contracts/records/effectiveness-record.schema.json",
-            include_str!("../../contracts/records/effectiveness-record.schema.json"),
-        ),
-        (
-            "contracts/records/pre-review-validation-record.schema.json",
-            include_str!("../../contracts/records/pre-review-validation-record.schema.json"),
-        ),
-        (
-            "contracts/records/collaboration-record.schema.json",
-            include_str!("../../contracts/records/collaboration-record.schema.json"),
-        ),
-        (
-            "contracts/records/collaboration-index.schema.json",
-            include_str!("../../contracts/records/collaboration-index.schema.json"),
-        ),
-        (
-            "contracts/records/merge-queue-record.schema.json",
-            include_str!("../../contracts/records/merge-queue-record.schema.json"),
-        ),
-        (
-            "contracts/records/merge-queue-state.schema.json",
-            include_str!("../../contracts/records/merge-queue-state.schema.json"),
-        ),
-        (
-            "contracts/records/integration-record.schema.json",
-            include_str!("../../contracts/records/integration-record.schema.json"),
-        ),
-        (
-            "contracts/records/mainline-receipt-record.schema.json",
-            include_str!("../../contracts/records/mainline-receipt-record.schema.json"),
-        ),
-        (
-            "contracts/records/collab-live-closure-record.schema.json",
-            include_str!("../../contracts/records/collab-live-closure-record.schema.json"),
-        ),
-        (
-            "contracts/records/merge-record.schema.json",
-            include_str!("../../contracts/records/merge-record.schema.json"),
-        ),
-        (
-            "contracts/records/promotion-record.schema.json",
-            include_str!("../../contracts/records/promotion-record.schema.json"),
-        ),
-        (
-            "contracts/records/regression-report.schema.json",
-            include_str!("../../contracts/records/regression-report.schema.json"),
-        ),
-        (
-            "contracts/records/freeze-record.schema.json",
-            include_str!("../../contracts/records/freeze-record.schema.json"),
-        ),
-        (
-            "contracts/records/record-graph.contract.json",
-            include_str!("../../contracts/records/record-graph.contract.json"),
-        ),
         (
             "contracts/lifecycle-state-machines.json",
             include_str!("../../contracts/lifecycle-state-machines.json"),
@@ -14455,11 +14381,17 @@ fn sdk_map_migration_entry<'a>(manifest: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| fail("INVALID_SDK_MAP_MIGRATION_MANIFEST"))
 }
 
+fn valid_bundle_digest(digest: &str) -> bool {
+    digest
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<String> {
     let record_bundle = record
         .get("bundle_digest")
         .and_then(Value::as_str)
-        .filter(|digest| digest.starts_with("sha256:"))?;
+        .filter(|digest| valid_bundle_digest(digest))?;
     let lock_path = root.join(".appsdk/sdk.lock");
     if !lock_path.is_file() {
         return None;
@@ -14474,20 +14406,16 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
         &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
     )
     .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
-    let lock_bundle = lock.get("bundle_digest").and_then(Value::as_str)?;
+    let lock_bundle = lock
+        .get("bundle_digest")
+        .and_then(Value::as_str)
+        .filter(|digest| valid_bundle_digest(digest))?;
     let lock_previous_bundle = lock.get("previous_bundle_digest").and_then(Value::as_str);
     let current_bundle = sdk_bundle_digest();
     if record_bundle == current_bundle {
         return None;
     }
-    let lock_bundle_is_valid = lock_bundle.len() == 71
-        && lock_bundle.starts_with("sha256:")
-        && lock_bundle[7..]
-            .chars()
-            .all(|byte| byte.is_ascii_hexdigit());
-    if lock_bundle == record_bundle
-        || (lock_bundle_is_valid && lock_previous_bundle == Some(record_bundle))
-    {
+    if lock_bundle == record_bundle || lock_previous_bundle == Some(record_bundle) {
         return Some(record_bundle.to_string());
     }
     None
@@ -14596,7 +14524,7 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
         || record
             .get("bundle_digest")
             .and_then(Value::as_str)
-            .filter(|digest| digest.starts_with("sha256:"))
+            .filter(|digest| valid_bundle_digest(digest))
             .is_none()
         || DateTime::parse_from_rfc3339(record_str(&record, "/created_at", "sdk-migration-record"))
             .is_err()
@@ -14610,6 +14538,7 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
     if maps.len() != GOVERNANCE_MAP_NAMES.len() {
         fail("INVALID_SDK_MIGRATION_RECORD");
     }
+    let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
     for name in GOVERNANCE_MAP_NAMES {
         let declared = sdk_map_migration_entry(&manifest, name);
         let entry = maps
@@ -14617,12 +14546,28 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
             .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
             .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
         let expected_snapshot = format!(".appsdk/migrations/{step}/maps/{}", name);
+        let canonical_source = entry
+            .get("canonical_source_digest")
+            .or_else(|| entry.get("source_digest"))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let canonical_target = entry
+            .get("canonical_target_digest")
+            .or_else(|| entry.get("target_digest"))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
+        let explicit_custom_source = entry
+            .get("canonical_source_digest")
+            .is_some_and(|value| !value.is_null());
+        let explicit_custom_target = entry
+            .get("canonical_target_digest")
+            .is_some_and(|value| !value.is_null());
         if entry
             .get("canonical_source_digest")
             .is_some_and(|value| !value.is_null() && Some(value) != declared.get("source_digest"))
-            || entry.get("canonical_target_digest").is_some_and(|value| {
-                !value.is_null() && Some(value) != declared.get("target_digest")
-            })
+            || (Some(canonical_target) != declared.get("target_digest")
+                && explicit_custom_target
+                && !(bundle_transition
+                    && Some(canonical_target) == entry.get("target_digest")
+                    && canonical_target.as_str().is_some_and(valid_bundle_digest)))
             || entry.get("snapshot_path").and_then(Value::as_str)
                 != Some(expected_snapshot.as_str())
         {
@@ -14637,7 +14582,16 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
         }
         if check_live_target {
             let live_digest = file_sha256(&root.join(".appsdk/maps").join(name), "governance_map");
-            if live_digest != record_str(entry, "/target_digest", "sdk-migration-map") {
+            let current_target = record_str(declared, "/target_digest", "sdk-map-migration");
+            let current_target_is_authorized = bundle_transition
+                && live_digest == current_target
+                && explicit_custom_source
+                && explicit_custom_target
+                && Some(canonical_source) == declared.get("source_digest")
+                && Some(canonical_target) == entry.get("target_digest");
+            if live_digest != record_str(entry, "/target_digest", "sdk-migration-map")
+                && !current_target_is_authorized
+            {
                 fail(format!("SDK_MIGRATION_TARGET_MAP_MISMATCH:{}", name));
             }
         }
@@ -15131,17 +15085,16 @@ fn install_current_project_contract(
     assert_no_symlink_components(root, &target, "governance_contract_migration");
     let canonical: Value = serde_json::from_str(canonical)
         .unwrap_or_else(|_| fail("INVALID_CANONICAL_RECORD_CONTRACT"));
-    if !target.is_file() {
-        return;
-    }
     if !replace_legacy {
-        let current: Value = serde_json::from_str(
-            &fs::read_to_string(&target)
-                .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED")),
-        )
-        .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
-        if current == canonical {
-            return;
+        if target.is_file() {
+            let current: Value = serde_json::from_str(
+                &fs::read_to_string(&target)
+                    .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED")),
+            )
+            .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
+            if current == canonical {
+                return;
+            }
         }
     }
     let mut content = serde_json::to_vec_pretty(&canonical)

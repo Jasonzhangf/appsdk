@@ -6079,9 +6079,18 @@ fn handle_worker_close(
         return Resp::err("master cannot close itself; delegate first");
     }
     let Some(target) = state.workers.get(&target_id).cloned() else {
-        return Resp::err(format!("target worker {} not registered", target_id));
+        let Some(closed) = state.worker_closures.get(&target_id).cloned() else {
+            return Resp::err(format!("target worker {} not registered", target_id));
+        };
+        return Resp::data(json!({
+            "closed": closed.worker_id,
+            "closed_by": closed.closed_by,
+            "reason": closed.reason,
+            "snapshot_captured_ms": closed.snapshot_captured_ms,
+            "at_ms": closed.at_ms,
+            "reused": true,
+        }));
     };
-
     // Closing a worker that still owns live work would strand the task and its
     // worktree. The task lifecycle must be resolved first.
     let owned: Vec<String> = state
@@ -6098,6 +6107,28 @@ fn handle_worker_close(
         ));
     }
 
+    let Some(target_thread_id) = target
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.thread_id.as_deref())
+    else {
+        return Resp::err(format!(
+            "worker {} has no bound App Server thread; snapshot evidence is unavailable",
+            target_id
+        ));
+    };
+    let snapshot = state
+        .worker_snapshots
+        .get(&target_id)
+        .filter(|receipt| receipt.thread_id == target_thread_id)
+        .map(|receipt| receipt.captured_ms);
+    let Some(snapshot_captured_ms) = snapshot else {
+        return Resp::err(format!(
+            "worker {} requires a successful worker snapshot for its bound App Server thread before close",
+            target_id
+        ));
+    };
+
     let now = now_ms();
     server.commit_locked(
         &mut state,
@@ -6105,6 +6136,7 @@ fn handle_worker_close(
             worker_id: target_id.clone(),
             closed_by: worker_id.clone(),
             reason: reason.clone(),
+            snapshot_captured_ms: Some(snapshot_captured_ms),
             at_ms: now,
         }],
     );
@@ -6112,7 +6144,66 @@ fn handle_worker_close(
         "closed": target_id,
         "closed_by": worker_id,
         "reason": reason,
+        "snapshot_captured_ms": snapshot_captured_ms,
         "transport": target.transport,
+    }))
+}
+
+fn handle_worker_snapshot(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    target_id: String,
+    lines: usize,
+) -> Resp {
+    let (transport, thread_id) = {
+        let state = server.state.lock().unwrap();
+        if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+            return error;
+        }
+        let Some(target) = state.workers.get(&target_id) else {
+            return Resp::err(format!("target worker {} not registered", target_id));
+        };
+        let Some(transport) = target.transport.clone() else {
+            return Resp::err(format!("worker {} has no registered transport", target_id));
+        };
+        let Some(thread_id) = transport.thread_id.clone() else {
+            return Resp::err(format!(
+                "worker {} has no bound App Server thread; snapshot evidence is unavailable",
+                target_id
+            ));
+        };
+        (transport, thread_id)
+    };
+    if !(1..=200).contains(&lines) {
+        return Resp::err("snapshot lines must be 1..200");
+    }
+    let items = match crate::client::adapters::codex_app_server::read_thread_items(
+        &transport, &thread_id, lines,
+    ) {
+        Ok(items) => items,
+        Err(error) => return Resp::err(error.to_string()),
+    };
+    let text = match serde_json::to_string_pretty(&items) {
+        Ok(text) => text,
+        Err(error) => return Resp::err(format!("serialize worker snapshot: {error}")),
+    };
+    let tail: Vec<_> = text.lines().rev().take(lines).collect();
+    let captured_ms = now_ms();
+    if let Err(error) = server.commit_checked(&[Event::WorkerSnapshotCaptured {
+        worker_id: target_id.clone(),
+        thread_id: thread_id.clone(),
+        captured_ms,
+    }]) {
+        return Resp::err(format!("worker snapshot receipt journal failure: {error}"));
+    }
+    Resp::data(json!({
+        "worker_id": target_id,
+        "captured_ms": captured_ms,
+        "thread_id": thread_id,
+        "snapshot_receipt": true,
+        "items": items,
+        "text_tail": tail.into_iter().rev().collect::<Vec<_>>().join("\n")
     }))
 }
 
@@ -8405,6 +8496,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::MasterDelegate { .. }
         | Req::TransferMaster { .. }
         | Req::RemoveWorker { .. }
+        | Req::WorkerSnapshot { .. }
         | Req::WorkerClose { .. }
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
@@ -8434,9 +8526,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
 fn subagent_action_mutates(action: &crate::subagent::Action) -> bool {
     !matches!(
         action,
-        crate::subagent::Action::List
-            | crate::subagent::Action::Status { .. }
-            | crate::subagent::Action::Snapshot { .. }
+        crate::subagent::Action::List | crate::subagent::Action::Status { .. }
     )
 }
 
@@ -8519,6 +8609,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::WorkerClose {
+            worker_id, token, ..
+        }
+        | Req::WorkerSnapshot {
             worker_id, token, ..
         } => Some((worker_id, token)),
         _ => None,
@@ -9263,6 +9356,12 @@ fn dispatch_with_route_context(
                 "count": workers.len()
             }))
         }
+        Req::WorkerSnapshot {
+            worker_id,
+            token,
+            target_id,
+            lines,
+        } => handle_worker_snapshot(server, worker_id, token, target_id, lines),
         Req::MasterId => handle_master_status(server),
         Req::MasterRecover {
             worker_id: _,
@@ -9495,6 +9594,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::MasterPromote { worker_id, .. }
         | Req::MasterDelegate { worker_id, .. }
         | Req::WorkerClose { worker_id, .. }
+        | Req::WorkerSnapshot { worker_id, .. }
         | Req::MasterRecover { worker_id, .. }
         | Req::TransferMaster { worker_id, .. }
         | Req::RemoveWorker { worker_id, .. } => {

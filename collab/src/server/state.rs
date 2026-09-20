@@ -253,6 +253,30 @@ pub struct NotificationDeliveryFailure {
     pub failed_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentSnapshotReceipt {
+    pub subagent_id: String,
+    pub thread_id: String,
+    pub captured_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerSnapshotReceipt {
+    pub worker_id: String,
+    pub thread_id: String,
+    pub captured_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerCloseReceipt {
+    pub worker_id: String,
+    pub closed_by: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_captured_ms: Option<i64>,
+    pub at_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerAdmissionRecord {
     pub request_id: String,
@@ -459,6 +483,16 @@ pub enum Event {
     SubagentUpdated {
         subagent: crate::subagent::Record,
     },
+    SubagentSnapshotCaptured {
+        subagent_id: String,
+        thread_id: String,
+        captured_ms: i64,
+    },
+    WorkerSnapshotCaptured {
+        worker_id: String,
+        thread_id: String,
+        captured_ms: i64,
+    },
     Registered {
         worker: WorkerRec,
     },
@@ -472,6 +506,8 @@ pub enum Event {
         worker_id: String,
         closed_by: String,
         reason: String,
+        #[serde(default)]
+        snapshot_captured_ms: Option<i64>,
         at_ms: i64,
     },
     #[serde(rename = "MasterTransferred")]
@@ -618,6 +654,9 @@ pub struct State {
     pub master_wake: MasterWakeAccumulator,
     pub keepalives: HashMap<String, super::keepalive::Record>,
     pub subagents: HashMap<String, crate::subagent::Record>,
+    pub subagent_snapshots: HashMap<String, SubagentSnapshotReceipt>,
+    pub worker_snapshots: HashMap<String, WorkerSnapshotReceipt>,
+    pub worker_closures: HashMap<String, WorkerCloseReceipt>,
     pub workers: HashMap<String, WorkerRec>,
     pub msgs: HashMap<String, Message>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
@@ -800,13 +839,59 @@ impl State {
             Event::SubagentUpdated { subagent } => {
                 self.subagents.insert(subagent.id.clone(), subagent.clone());
             }
+            Event::SubagentSnapshotCaptured {
+                subagent_id,
+                thread_id,
+                captured_ms,
+            } => {
+                self.subagent_snapshots.insert(
+                    subagent_id.clone(),
+                    SubagentSnapshotReceipt {
+                        subagent_id: subagent_id.clone(),
+                        thread_id: thread_id.clone(),
+                        captured_ms: *captured_ms,
+                    },
+                );
+            }
+            Event::WorkerSnapshotCaptured {
+                worker_id,
+                thread_id,
+                captured_ms,
+            } => {
+                self.worker_snapshots.insert(
+                    worker_id.clone(),
+                    WorkerSnapshotReceipt {
+                        worker_id: worker_id.clone(),
+                        thread_id: thread_id.clone(),
+                        captured_ms: *captured_ms,
+                    },
+                );
+            }
             Event::Registered { worker } => {
+                self.worker_closures.remove(&worker.id);
+                self.worker_snapshots.remove(&worker.id);
                 self.workers.insert(worker.id.clone(), worker.clone());
             }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
             }
-            Event::WorkerClosed { worker_id, .. } => {
+            Event::WorkerClosed {
+                worker_id,
+                closed_by,
+                reason,
+                snapshot_captured_ms,
+                at_ms,
+            } => {
+                self.worker_closures.insert(
+                    worker_id.clone(),
+                    WorkerCloseReceipt {
+                        worker_id: worker_id.clone(),
+                        closed_by: closed_by.clone(),
+                        reason: reason.clone(),
+                        snapshot_captured_ms: *snapshot_captured_ms,
+                        at_ms: *at_ms,
+                    },
+                );
                 self.workers.remove(worker_id);
                 self.keepalives.remove(worker_id);
             }
@@ -1118,6 +1203,15 @@ impl State {
                 accumulator: self.master_wake.clone(),
             });
         }
+        let mut closures: Vec<_> = self.worker_closures.values().cloned().collect();
+        closures.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+        events.extend(closures.into_iter().map(|receipt| Event::WorkerClosed {
+            worker_id: receipt.worker_id,
+            closed_by: receipt.closed_by,
+            reason: receipt.reason,
+            snapshot_captured_ms: receipt.snapshot_captured_ms,
+            at_ms: receipt.at_ms,
+        }));
         let mut workers: Vec<_> = self.workers.values().cloned().collect();
         workers.sort_by(|a, b| a.id.cmp(&b.id));
         events.extend(
@@ -1141,6 +1235,28 @@ impl State {
             subagents
                 .into_iter()
                 .map(|subagent| Event::SubagentUpdated { subagent }),
+        );
+        let mut snapshots: Vec<_> = self.subagent_snapshots.values().cloned().collect();
+        snapshots.sort_by(|a, b| a.subagent_id.cmp(&b.subagent_id));
+        events.extend(
+            snapshots
+                .into_iter()
+                .map(|receipt| Event::SubagentSnapshotCaptured {
+                    subagent_id: receipt.subagent_id,
+                    thread_id: receipt.thread_id,
+                    captured_ms: receipt.captured_ms,
+                }),
+        );
+        let mut worker_snapshots: Vec<_> = self.worker_snapshots.values().cloned().collect();
+        worker_snapshots.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+        events.extend(
+            worker_snapshots
+                .into_iter()
+                .map(|receipt| Event::WorkerSnapshotCaptured {
+                    worker_id: receipt.worker_id,
+                    thread_id: receipt.thread_id,
+                    captured_ms: receipt.captured_ms,
+                }),
         );
         let mut tasks: Vec<_> = self.tasks.values().cloned().collect();
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1400,7 +1516,6 @@ mod tests {
         ))
     }
 
-    #[test]
     #[test]
     fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         let mut state = State::default();
@@ -1989,6 +2104,36 @@ mod tests {
             replayed.notification_subscriptions["sub-periodic-seeded"].fired_count,
             seeded_state.notification_subscriptions["sub-periodic-seeded"].fired_count
         );
+    }
+
+    #[test]
+    fn worker_close_tombstone_replays_without_deleting_re_registration() {
+        let worker = |id: &str, token: &str, registered_ms: i64| WorkerRec {
+            id: id.into(),
+            token: token.into(),
+            cwd: "/tmp/project".into(),
+            registered_ms,
+            transport: None,
+        };
+        let mut state = State::default();
+        state.apply(&Event::WorkerClosed {
+            worker_id: "peer-a".into(),
+            closed_by: "master".into(),
+            reason: "confirmed offline".into(),
+            snapshot_captured_ms: Some(10),
+            at_ms: 20,
+        });
+        state.apply(&Event::Registered {
+            worker: worker("peer-a", "token-new", 30),
+        });
+
+        let mut replayed = State::default();
+        for event in state.snapshot_events() {
+            replayed.apply(&event);
+        }
+        assert_eq!(replayed.workers["peer-a"].token, "token-new");
+        assert!(!replayed.worker_closures.contains_key("peer-a"));
+        assert!(!replayed.worker_snapshots.contains_key("peer-a"));
     }
 
     #[test]

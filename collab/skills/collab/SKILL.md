@@ -356,6 +356,11 @@ leave the child idle. A subagent with an unfinished task is not repeatedly
 woken just because its task is not closed. `subagent status` includes tasks,
 parent mailbox, counters and notification/ACK history.
 `subagent snapshot <id> --lines 40` reads the screen only on request.
+Before `collab worker close` or `collab subagent close`, take a successful
+snapshot of that subagent's bound App Server thread. The close gate consumes
+the durable snapshot receipt; a client-supplied boolean is not evidence.
+For an ordinary peer without a managed-subagent record, use
+`collab worker snapshot <worker-id> --lines 40` before `collab worker close`.
 
 ## Cross-project master communication
 

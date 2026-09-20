@@ -380,6 +380,14 @@ enum WorkerCmd {
         /// Optional worker ID to inspect (defaults to all registered workers)
         id: Option<String>,
     },
+    /// Capture durable App Server thread evidence before closing a worker
+    Snapshot {
+        /// Worker ID to inspect
+        id: String,
+        /// Maximum number of recent thread items to read
+        #[arg(long, default_value_t = 40)]
+        lines: usize,
+    },
     /// Live master retires a worker registration
     Close {
         /// Worker ID to close
@@ -667,6 +675,14 @@ fn command_envelope(scope: &Scope, ident: &Identity) -> anyhow::Result<proto::Co
     ))
 }
 
+fn subagent_observe_query(command: &subagent::Action) -> Option<(Option<String>, Option<usize>)> {
+    match command {
+        subagent::Action::List => Some((None, None)),
+        subagent::Action::Status { id } => Some((Some(id.clone()), None)),
+        _ => None,
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
@@ -685,12 +701,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Subagent { command } => {
             let scope = Scope::resolve()?;
-            let query = match &command {
-                subagent::Action::List => Some((None, None)),
-                subagent::Action::Status { id } => Some((Some(id.clone()), None)),
-                subagent::Action::Snapshot { id, lines } => Some((Some(id.clone()), Some(*lines))),
-                _ => None,
-            };
+            let query = subagent_observe_query(&command);
             if let Some((id, snapshot_lines)) = query {
                 let value: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),
@@ -1055,6 +1066,21 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     let ident = me(&scope, None)?;
                     let v: serde_json::Value =
                         call_project(&scope, &ident, &Req::WorkerStatus { worker_id: id })?;
+                    out(&v);
+                    Ok(())
+                }
+                WorkerCmd::Snapshot { id, lines } => {
+                    let ident = me(&scope, None)?;
+                    let v: serde_json::Value = call_project(
+                        &scope,
+                        &ident,
+                        &Req::WorkerSnapshot {
+                            worker_id: ident.worker_id.clone(),
+                            token: ident.token.clone(),
+                            target_id: id,
+                            lines,
+                        },
+                    )?;
                     out(&v);
                     Ok(())
                 }
@@ -1753,5 +1779,16 @@ mod tests {
             root.canonicalize().unwrap().to_string_lossy()
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn subagent_snapshot_uses_the_authenticated_mutation_route() {
+        assert!(subagent_observe_query(&subagent::Action::List).is_some());
+        assert!(subagent_observe_query(&subagent::Action::Status { id: "child".into() }).is_some());
+        assert!(subagent_observe_query(&subagent::Action::Snapshot {
+            id: "child".into(),
+            lines: 40,
+        })
+        .is_none());
     }
 }

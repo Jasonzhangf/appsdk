@@ -760,8 +760,46 @@ fn run(
     }
     match action {
         Action::Snapshot { lines, .. } => {
+            let thread_id = record
+                .thread_id
+                .as_deref()
+                .context("subagent has no App Server thread binding")?
+                .to_owned();
+            let transport = state
+                .workers
+                .get(&record.peer)
+                .and_then(|worker| worker.transport.clone())
+                .context("subagent has no registered App Server transport")?;
+            if !(1..=200).contains(&lines) {
+                bail!("snapshot lines must be 1..200");
+            }
             drop(state);
-            return observe(server, Some(&record.id), Some(lines));
+            let items = crate::client::adapters::codex_app_server::read_thread_items(
+                &transport, &thread_id, lines,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let text = serde_json::to_string_pretty(&items)?;
+            let tail: Vec<_> = text.lines().rev().take(lines).collect();
+            let captured_ms = now_ms();
+            server
+                .commit_checked(&[Event::SubagentSnapshotCaptured {
+                    subagent_id: record.id.clone(),
+                    thread_id: thread_id.clone(),
+                    captured_ms,
+                }])
+                .map_err(|error| {
+                    anyhow::anyhow!("subagent snapshot receipt journal failure: {error}")
+                })?;
+            let mut value = json!({
+                "subagent_id": record.id,
+                "captured_ms": captured_ms,
+                "thread_id": thread_id,
+                "snapshot_receipt": true,
+                "items": items,
+                "text_tail": tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            });
+            merge_follow_up(&mut value);
+            return Ok(value);
         }
         Action::Rearm { .. } => {
             server
@@ -954,6 +992,18 @@ fn run(
             if record.status == "probing" && record.error.is_none() {
                 bail!("startup probe is in progress; check status, or close after its bounded completion");
             }
+            let snapshot = state
+                .subagent_snapshots
+                .get(&record.id)
+                .filter(|receipt| record.thread_id.as_deref() == Some(receipt.thread_id.as_str()))
+                .cloned();
+            let Some(snapshot) = snapshot else {
+                bail!(
+                    "subagent {} requires a successful snapshot of its bound App Server thread before close",
+                    record.id
+                );
+            };
+            let snapshot_captured_ms = snapshot.captured_ms;
             record.status = "closing".into();
             server
                 .commit_locked_checked(
@@ -984,6 +1034,10 @@ fn run(
                 .map_err(|error| {
                     anyhow::anyhow!("subagent close outcome unknown: external close completed but journal commit failed: {error}")
                 })?;
+            return Ok(json!({
+                "subagent": record,
+                "snapshot_captured_ms": snapshot_captured_ms
+            }));
         }
         _ => unreachable!(),
     }

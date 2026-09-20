@@ -5051,11 +5051,39 @@ fn explicit_send_reports_appserver_rejection_after_durable_commit() {
         response.data["notification_error"],
         "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
     );
+    assert_eq!(response.data["failure"], "notification_delivery_failed");
+    assert_eq!(response.data["repair_required"], true);
+    assert!(response.data["escalation"]
+        .as_str()
+        .unwrap()
+        .contains("live master"));
     let message_id = response.data["msg_id"].as_str().unwrap();
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
     assert_eq!(state.msgs[message_id].state, "pending");
+    assert_eq!(
+        state.notification_delivery_failures[message_id].error,
+        "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+    );
     drop(state);
+    let replayed = replay(&root).unwrap();
+    let failure = &replayed.notification_delivery_failures[message_id];
+    assert_eq!(failure.operation, "notification.emitted");
+    assert_eq!(
+        failure.error,
+        "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+    );
+    assert!(failure.failed_ms > 0);
+
+    {
+        let state = server.state.lock().unwrap();
+        server.rewrite_journal_locked(&state).unwrap();
+    }
+    let compacted = replay(&root).unwrap();
+    assert_eq!(
+        compacted.notification_delivery_failures[message_id],
+        *failure
+    );
     assert!(root
         .join(".agent-collab/mailbox")
         .join(format!("{message_id}.json"))
@@ -5104,11 +5132,24 @@ fn explicit_send_duplicate_after_rejection_does_not_report_success() {
     assert_eq!(duplicate.data["notification"], "subscribed-not-sent");
     assert_eq!(
         duplicate.error.as_deref(),
-        Some(
-            "APPSERVER_NOTIFICATION_REJECTED: notification was not attempted for the selected App Server transport"
-        )
+        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
     );
-    assert_eq!(server.state.lock().unwrap().msgs.len(), 1);
+    assert_eq!(
+        duplicate.data["notification_error"],
+        "no notification batch is ready"
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(
+            state.notification_delivery_failures[&message_id].error,
+            "no notification batch is ready"
+        );
+    }
+    assert_eq!(
+        replay(&root).unwrap().notification_delivery_failures[&message_id].operation,
+        "notification.not_attempted"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -5140,13 +5181,27 @@ fn explicit_send_reports_when_subscription_transport_mismatches() {
     assert_eq!(
         response.error.as_deref(),
         Some(
-            "APPSERVER_NOTIFICATION_REJECTED: notification was not attempted for the selected App Server transport"
+            "APPSERVER_NOTIFICATION_REJECTED: subscription does not match the selected App Server transport"
         )
     );
     assert_eq!(response.data["notification"], "subscribed-not-sent");
     assert_eq!(
         response.data["notification_error"],
-        "notification was not attempted for the selected App Server transport"
+        "subscription does not match the selected App Server transport"
+    );
+    let message_id = response.data["msg_id"].as_str().unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        let failure = &state.notification_delivery_failures[message_id];
+        assert_eq!(failure.operation, "notification.not_attempted");
+        assert_eq!(
+            failure.error,
+            "subscription does not match the selected App Server transport"
+        );
+    }
+    assert_eq!(
+        replay(&root).unwrap().notification_delivery_failures[message_id].error,
+        "subscription does not match the selected App Server transport"
     );
     std::fs::remove_dir_all(root).ok();
 }

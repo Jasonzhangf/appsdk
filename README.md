@@ -4,6 +4,24 @@
 
 AppSDK 不包含任何业务协议、provider、项目 pipeline 或运行时实现。新项目拥有业务语义；AppSDK 只提供机制。
 
+## Collab runtime
+
+本仓库同时维护 `collab/` 下的独立 Collab runtime。它保留自己的 Cargo
+package 和 `collab` / `collab-mcp` binary；AppSDK 只统一源码版本、构建、安装
+和维护入口，不把 Collab 合并成 AppSDK 主 binary 的子命令。
+
+```bash
+scripts/build-collab.sh
+scripts/install-global-collab.sh
+collab down
+collab up
+collab context
+```
+
+`collab/` 是唯一 Collab source/build truth。安装脚本从当前 AppSDK checkout
+构建并安装两个独立 binary；安装不会自动重启 daemon，必须通过官方
+`collab down` → `collab up` 受控重启，再用 `collab context` 验证 live route。
+
 默认流程：明确目标/范围 → 实现 → 相关验证 → review → 授权交付。
 质量、安全和证据真实性门禁按适用范围强制。Collab 保持多 worker 自动注册、
 通信与任务/文件归属；仅协作不强制启用合并队列。Guidance、Memory 默认辅助，

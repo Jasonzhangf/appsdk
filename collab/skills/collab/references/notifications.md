@@ -1,0 +1,113 @@
+# Notifications
+
+Read this only for event subscriptions or notification delivery diagnosis.
+Ordinary peer notification is always:
+
+```sh
+collab sendmessage --to <peer> --subject <short-topic> "<original message>"
+```
+
+## Subscription commands
+
+```sh
+collab notify subscribe --event direct-message --ttl-seconds <bounded>
+collab notify subscribe --event resource-released --subject <resource-id> \
+  --ttl-seconds <bounded>
+collab notify subscribe --event deadline --subject <timer-id> \
+  --ttl-seconds <bounded>
+collab notify subscribe --event async-result --subject <operation-id> \
+  --ttl-seconds <bounded>
+collab notify status
+collab notify unsubscribe <subscription-id>
+```
+
+- AppSDK project initialization creates/refreshes the seven-day reusable default
+  `direct-message` lease through official `collab init`. An explicit owner
+  unsubscribe of that lease stays cancelled; later `register` / `context` /
+  `ack` must not silently re-arm it. Last owned `collab task close` cancels
+  the owner's direct-message auto-notify. There is no `collab notify close`
+  command; cancel a specific owner-scoped lease with
+  `collab notify unsubscribe <subscription-id>`. After a finished task, the
+  task close lifecycle stops the owner's auto-notify. `collab init` or
+  `collab notify subscribe --event direct-message` re-arms it for the next
+  collaboration.
+- Direct-message leases are owner-scoped and reusable until expiry. Resource,
+  deadline, and async-result subscriptions are exact-subject and one-shot.
+- Success consumes only a one-shot event subscription. Expiry or unsubscribe
+  ends any subscription; one attempted batch exhausts only its messages on a
+  reusable direct-message lease.
+- Before every attempt, the daemon revalidates owner, event, subject, TTL,
+  selected App Server thread liveness and ownership, worker
+  registration match, Agent presence, and Agent state. If the selected
+  transport is dead, unowned, or mismatched (`identity-mismatch`), or the agent
+  is `absent`, the subscription transitions to its explicit unavailable state
+  to prevent notification storms. `absent` and `unknown` produce zero
+  transport input.
+- Timer ticks, restart, replay, re-registration, or delivery mode cannot reset
+  the one-attempt lifetime cap. Delivery requires the agent to be in a prompt/idle
+  `waiting` state; actively `working` agents defer delivery without burning
+  attempts, protecting active execution from pollution.
+- Unacknowledged notification throttling (Backpressure): To prevent notification
+  storms and terminal pollution, push knocks pause when unacknowledged notifications
+  reach `max_unacked` (default 3, range 1-5). Run `collab ack <id>` or `collab ack --all`
+  to resume push delivery. Messages remain safely buffered in the durable mailbox.
+- The bound subscription event policy supplies the automatic retry window: the
+  default `direct-message` batch window is 120 seconds, while an event configured
+  as `immediate` has a zero retry delay. At dispatch, include eligible unsent
+  messages for the recipient, capped at 3 previews per batch knock. Excess
+  messages remain in the inbox with `[+N more pending in inbox]`. When unacked
+  notifications reach the throttle cap, the batch preview appends an
+  `[ACK REQUIRED: ...]` notice. Combine previews into one line with one final
+  Enter; reserve attempts before sending. Failed, absent, unknown, or uncertain
+  ordinary delivery remains pending; automatic eligibility still respects the
+  bound event window and the lifetime attempt cap. Explicit notification
+  delivery is never an automatic timer candidate; a later explicit operation
+  must be used when its first delivery failed.
+- P0 urgency is explicit: only a typed goal/deadline interrupt is marked P0. A blocked
+  task, wait-timeout, or scheduling blocker is P1 operational work and must not be
+  reclassified as a P0 interrupt by subject text alone.
+- One safe preview contains notification ID, abbreviated subject, and one-line
+  original body. Control characters are escaped. An explicit
+  `collab sendmessage` is delivered through App Server `turn/start`, which
+  starts or steers the target turn. Daemon-generated wakeup and long-horizon
+  notifications use `thread/queue/add`; queue acceptance is not execution,
+  read, or reply. The server owns both operation choices.
+- Full subject/body remains in the mailbox without a matching subscription.
+  This outcome is not a sender-selected `mailbox-only` mode.
+- A failed/lost/delayed/duplicate wake never rolls back mailbox truth or counts
+  as lifecycle evidence.
+- The daemon never infers continuation from task state, thread title, heartbeat,
+  progress, ACK, or elapsed time, and must not create a `CONTINUE_TASK` message.
+  The task-liveness rule is an Agent/skill obligation: when a supported
+  timer/wake or direct wake arrives, the owner inspects durable task state and
+  continues or escalates it. It is not a second queue or a synthetic periodic
+  task. A worker does not poll on a fixed internal schedule.
+
+## Worker inspection and acknowledgment
+
+```sh
+collab ack <notification-id>
+collab ack --all
+collab worker status [worker-id]
+collab who
+```
+
+- `collab ack <id>` acknowledges a single notification.
+- `collab ack --all` acknowledges all unread or pending delivered notifications in one step.
+- `collab recv` reads and consumes the returned message batch atomically; a
+  successful receive writes `Delivered` and `Acked` together, so a follow-up
+  ACK is not required. `collab msg`, `collab inbox`, and `collab context` are
+  read-only and do not consume messages. Keep `ack` for legacy clients or
+  explicit recovery of already-delivered messages.
+- `collab worker status [worker-id]` inspects real-time worker health, including
+  `endpoint_live`, `identity_valid`, `agent_state`, `unacked_notifications`,
+  `notifications_paused`, `suspected_offline`, and `active_task`.
+
+After a preview, compare its ID/subject, urgency, current task, and interruption
+cost. Read durable details only when appropriate:
+
+```sh
+collab msg <notification-id>
+collab inbox
+collab context
+```

@@ -245,6 +245,14 @@ pub struct Message {
     pub last_wake_attempt_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotificationDeliveryFailure {
+    pub message_id: String,
+    pub operation: String,
+    pub error: String,
+    pub failed_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerAdmissionRecord {
     pub request_id: String,
@@ -485,6 +493,12 @@ pub enum Event {
         #[serde(default)]
         attempted_ms: i64,
     },
+    NotificationDeliveryFailed {
+        message_id: String,
+        operation: String,
+        error: String,
+        failed_ms: i64,
+    },
     NotificationSubscribed {
         subscription: NotificationSubscription,
     },
@@ -592,7 +606,7 @@ pub enum Event {
     },
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct State {
     /// Monotonic in-memory reducer revision and journal sequence.  These are
     /// not business payload and are advanced only by the resident writer.
@@ -606,6 +620,7 @@ pub struct State {
     pub subagents: HashMap<String, crate::subagent::Record>,
     pub workers: HashMap<String, WorkerRec>,
     pub msgs: HashMap<String, Message>,
+    pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     pub tasks: HashMap<String, TaskRec>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
@@ -817,6 +832,22 @@ impl State {
                         message.last_wake_attempt_ms = *attempted_ms;
                     }
                 }
+            }
+            Event::NotificationDeliveryFailed {
+                message_id,
+                operation,
+                error,
+                failed_ms,
+            } => {
+                self.notification_delivery_failures.insert(
+                    message_id.clone(),
+                    NotificationDeliveryFailure {
+                        message_id: message_id.clone(),
+                        operation: operation.clone(),
+                        error: error.clone(),
+                        failed_ms: *failed_ms,
+                    },
+                );
             }
             Event::NotificationSubscribed { subscription } => {
                 self.notification_subscriptions
@@ -1146,6 +1177,22 @@ impl State {
                 .into_iter()
                 .map(|subscription| Event::NotificationSubscribed { subscription }),
         );
+        let mut delivery_failures: Vec<_> = self
+            .notification_delivery_failures
+            .values()
+            .cloned()
+            .collect();
+        delivery_failures.sort_by(|a, b| {
+            (a.failed_ms, a.message_id.as_str()).cmp(&(b.failed_ms, b.message_id.as_str()))
+        });
+        events.extend(delivery_failures.into_iter().map(|failure| {
+            Event::NotificationDeliveryFailed {
+                message_id: failure.message_id,
+                operation: failure.operation,
+                error: failure.error,
+                failed_ms: failure.failed_ms,
+            }
+        }));
         let mut messages: Vec<_> = self.msgs.values().cloned().collect();
         messages.sort_by(|a, b| (a.created_ms, a.id.clone()).cmp(&(b.created_ms, b.id.clone())));
         for msg in messages {

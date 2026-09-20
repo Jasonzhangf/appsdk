@@ -343,7 +343,7 @@ enum NotificationDeliveryError {
 #[derive(Debug)]
 enum NotificationAttempt {
     Accepted,
-    NotAttempted,
+    NotAttempted(String),
     Rejected(String),
 }
 
@@ -3023,10 +3023,10 @@ fn attempt_appserver_notification_with_retry(
 ) -> NotificationAttempt {
     let mut state = server.state.lock().unwrap();
     let Some(seed_id) = state.msgs.get(message_id).map(|message| message.id.clone()) else {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted("durable message not found".into());
     };
     if !state.scheduler_message_deliverable(message_id) {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted("scheduler admission is not deliverable".into());
     }
     let unacked_notifications = state
         .msgs
@@ -3034,15 +3034,19 @@ fn attempt_appserver_notification_with_retry(
         .filter(|message| message.to == recipient && message.state == "delivered")
         .count();
     if unacked_notifications >= server.config.notifications.max_unacked as usize {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted(
+            "recipient has too many unacked notifications".into(),
+        );
     }
     let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted("notification subscription not found".into());
     };
     if subscription.worker_id != recipient
         || !subscription_matches_transport(subscription, transport)
     {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted(
+            "subscription does not match the selected App Server transport".into(),
+        );
     }
     let mut batch = state
         .msgs
@@ -3083,11 +3087,11 @@ fn attempt_appserver_notification_with_retry(
         .collect::<Vec<_>>();
     batch.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let Some(window_start_ms) = batch.first().map(|candidate| candidate.0) else {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted("no notification batch is ready".into());
     };
     let (batch, remaining) = mailbox::select_batch(batch, delay, window_start_ms);
     let Some(first) = batch.first() else {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted("notification batch is empty".into());
     };
     let last_attempt = state
         .msgs
@@ -3106,7 +3110,9 @@ fn attempt_appserver_notification_with_retry(
         .max()
         .unwrap_or(0);
     if now.saturating_sub(window_start_ms) < delay || now.saturating_sub(last_attempt) < delay {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted(
+            "notification delivery window has not elapsed".into(),
+        );
     }
     server.commit_locked(
         &mut state,
@@ -3147,6 +3153,20 @@ fn attempt_appserver_notification_with_retry(
                     seed_id
                 ),
             );
+            let mut state = server.state.lock().unwrap();
+            server.commit_locked(
+                &mut state,
+                &[Event::NotificationDeliveryFailed {
+                    message_id: seed_id,
+                    operation: if explicit {
+                        "notification.emitted".into()
+                    } else {
+                        "notification.batch_emitted".into()
+                    },
+                    error: error.clone(),
+                    failed_ms: now,
+                }],
+            );
             NotificationAttempt::Rejected(error)
         }
     }
@@ -3179,22 +3199,26 @@ fn attempt_notification_detailed_with_at(
     now: i64,
 ) -> NotificationAttempt {
     if !server.config.notifications.enabled {
-        return NotificationAttempt::NotAttempted;
+        return NotificationAttempt::NotAttempted("notifications are disabled".into());
     }
     let (recipient, transport, source_thread_id, delay, explicit) = {
         let mut state = server.state.lock().unwrap();
         let Some(seed) = state.msgs.get(message_id) else {
-            return NotificationAttempt::NotAttempted;
+            return NotificationAttempt::NotAttempted("durable message not found".into());
         };
         if !state.scheduler_message_deliverable(message_id) {
-            return NotificationAttempt::NotAttempted;
+            return NotificationAttempt::NotAttempted(
+                "scheduler admission is not deliverable".into(),
+            );
         }
         let recipient = seed.to.clone();
         let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
-            return NotificationAttempt::NotAttempted;
+            return NotificationAttempt::NotAttempted("notification subscription not found".into());
         };
         if subscription.worker_id != recipient {
-            return NotificationAttempt::NotAttempted;
+            return NotificationAttempt::NotAttempted(
+                "subscription does not belong to the recipient".into(),
+            );
         }
         let delay = state
             .delivery_modes
@@ -3207,18 +3231,31 @@ fn attempt_notification_detailed_with_at(
             .get(&recipient)
             .and_then(selected_transport_for_worker);
         let Some(transport) = worker_transport else {
-            return NotificationAttempt::NotAttempted;
+            return NotificationAttempt::NotAttempted(
+                "registered worker has no server-selected transport".into(),
+            );
         };
         if !subscription_matches_transport(subscription, &transport) {
             server.commit_locked(
                 &mut state,
-                &[Event::NotificationStatus {
-                    subscription_id: subscription_id.to_string(),
-                    status: "transport-lost".into(),
-                    updated_ms: now,
-                }],
+                &[
+                    Event::NotificationStatus {
+                        subscription_id: subscription_id.to_string(),
+                        status: "transport-lost".into(),
+                        updated_ms: now,
+                    },
+                    Event::NotificationDeliveryFailed {
+                        message_id: message_id.to_string(),
+                        operation: "notification.not_attempted".into(),
+                        error: "subscription does not match the selected App Server transport"
+                            .into(),
+                        failed_ms: now,
+                    },
+                ],
             );
-            return NotificationAttempt::NotAttempted;
+            return NotificationAttempt::NotAttempted(
+                "subscription does not match the selected App Server transport".into(),
+            );
         }
         let source_thread_id = state
             .delivery_source_threads
@@ -3234,7 +3271,7 @@ fn attempt_notification_detailed_with_at(
         let explicit = is_explicit_notification(&state, seed);
         (recipient, transport, source_thread_id, delay, explicit)
     };
-    attempt_appserver_notification_with_at(
+    let attempt = attempt_appserver_notification_with_at(
         server,
         message_id,
         subscription_id,
@@ -3253,7 +3290,20 @@ fn attempt_notification_detailed_with_at(
                 explicit,
             )
         },
-    )
+    );
+    if let NotificationAttempt::NotAttempted(error) = &attempt {
+        let mut state = server.state.lock().unwrap();
+        server.commit_locked(
+            &mut state,
+            &[Event::NotificationDeliveryFailed {
+                message_id: message_id.to_string(),
+                operation: "notification.not_attempted".into(),
+                error: error.clone(),
+                failed_ms: now,
+            }],
+        );
+    }
+    attempt
 }
 
 fn attempt_notification(server: &Server, message_id: &str, subscription_id: &str) -> bool {
@@ -3280,13 +3330,22 @@ fn notification_send_response(
             data["durable"] = json!(true);
             data["notification"] = json!("subscribed-not-sent");
             data["notification_error"] = json!(error);
+            data["failure"] = json!("notification_delivery_failed");
+            data["repair_required"] = json!(true);
+            data["escalation"] = json!(
+                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected transport, then retry explicitly"
+            );
             Resp::err_data(format!("APPSERVER_NOTIFICATION_REJECTED: {error}"), data)
         }
-        NotificationAttempt::NotAttempted => {
-            let error = "notification was not attempted for the selected App Server transport";
+        NotificationAttempt::NotAttempted(error) => {
             data["durable"] = json!(true);
             data["notification"] = json!("subscribed-not-sent");
             data["notification_error"] = json!(error);
+            data["failure"] = json!("notification_delivery_failed");
+            data["repair_required"] = json!(true);
+            data["escalation"] = json!(
+                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected transport, then retry explicitly"
+            );
             Resp::err_data(format!("APPSERVER_NOTIFICATION_REJECTED: {error}"), data)
         }
     }
@@ -6345,7 +6404,9 @@ pub(crate) fn handle_send_with_task(
                         now_ms(),
                     )
                 })
-                .unwrap_or(NotificationAttempt::NotAttempted);
+                .unwrap_or_else(|| {
+                    NotificationAttempt::NotAttempted("no notification subscription".into())
+                });
             return notification_send_response(
                 json!({
                     "msg_id": existing_id,
@@ -6412,7 +6473,9 @@ pub(crate) fn handle_send_with_task(
         .map(|subscription| {
             attempt_notification_detailed_with_at(server, &mid, &subscription.id, now_ms())
         })
-        .unwrap_or(NotificationAttempt::NotAttempted);
+        .unwrap_or_else(|| {
+            NotificationAttempt::NotAttempted("no notification subscription".into())
+        });
     notification_send_response(
         json!({
             "msg_id": mid,
@@ -6510,7 +6573,9 @@ fn handle_cross_project_send(
         .map(|subscription| {
             attempt_notification_detailed_with_at(server, &mid, &subscription.id, now_ms())
         })
-        .unwrap_or(NotificationAttempt::NotAttempted);
+        .unwrap_or_else(|| {
+            NotificationAttempt::NotAttempted("no notification subscription".into())
+        });
     notification_send_response(
         json!({
             "msg_id": mid,

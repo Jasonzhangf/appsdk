@@ -83,6 +83,20 @@ pub(super) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     )
 }
 
+fn promote_master(server: &Server, worker_id: &str, approval: &str) {
+    let response = handle_master_promote(
+        server,
+        worker_id.into(),
+        format!("token-{worker_id}"),
+        approval.into(),
+    );
+    assert!(
+        response.ok,
+        "master promotion for {worker_id} failed: {:?}",
+        response.error
+    );
+}
+
 fn send_command(root: &Path, id: &str) -> crate::proto::CommandEnvelope {
     use crate::identity::{AppServerId, BindingId, CommandId, OperationId};
     use crate::proto::CommandEnvelope;
@@ -121,12 +135,7 @@ fn master_idle_subscription_is_restricted_to_the_live_master_and_supported_inter
     let (server, root) = test_server();
     register(&server, "master", "%master");
     register(&server, "worker", "%worker");
-    server.commit(&[Event::MasterAssigned {
-        worker_id: "master".into(),
-        assigned_by: "operator".into(),
-        approval: Some("user-approved".into()),
-        assigned_ms: now_ms(),
-    }]);
+    promote_master(&server, "master", "user-approved");
 
     let worker = handle_notification_subscribe(
         &server,
@@ -445,13 +454,8 @@ fn authenticated_send_supersedes_earlier_reply() {
 fn cancelling_master_idle_subscription_supersedes_pending_wake() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
+    promote_master(&server, "master", "user-approved");
     server.commit(&[
-        Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("user-approved".into()),
-            assigned_ms: now_ms(),
-        },
         Event::NotificationSubscribed {
             subscription: NotificationSubscription {
                 id: "sub-master-idle".into(),
@@ -530,12 +534,7 @@ fn deadline_subscription_requires_live_master_authority() {
     assert!(!denied.ok);
     assert!(denied.error.unwrap().contains("deadline subscriptions"));
 
-    server.commit(&[Event::MasterAssigned {
-        worker_id: "master".into(),
-        assigned_by: "master".into(),
-        approval: Some("user approved test master".into()),
-        assigned_ms: now_ms(),
-    }]);
+    promote_master(&server, "master", "user approved test master");
     let accepted = handle_notification_subscribe(
         &server,
         "master".into(),
@@ -556,12 +555,7 @@ fn deadline_subscription_requires_live_master_authority() {
 fn goal_deadline_rejects_periodic_rearm_options() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
-    server.commit(&[Event::MasterAssigned {
-        worker_id: "master".into(),
-        assigned_by: "operator".into(),
-        approval: Some("user-approved".into()),
-        assigned_ms: now_ms(),
-    }]);
+    promote_master(&server, "master", "user-approved");
 
     let response = handle_notification_subscribe(
         &server,
@@ -587,12 +581,7 @@ fn goal_deadline_rejects_periodic_rearm_options() {
 fn goal_deadline_registration_deduplicates_same_deadline() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
-    server.commit(&[Event::MasterAssigned {
-        worker_id: "master".into(),
-        assigned_by: "operator".into(),
-        approval: Some("user-approved".into()),
-        assigned_ms: now_ms(),
-    }]);
+    promote_master(&server, "master", "user-approved");
     let trigger_ms = now_ms() + 10_000;
     let first = handle_notification_subscribe(
         &server,
@@ -1330,12 +1319,7 @@ fn subagent_start_journal_failure_does_not_launch_or_write_success() {
     for fault in [StartAppend, StartSync] {
         let (mut server, root) = test_server();
         register(&server, "parent", "%parent");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "parent".into(),
-            assigned_by: "operator".into(),
-            approval: Some("start journal regression".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server, "parent", "start journal regression");
         let server = Arc::new(server);
         crate::server::inject_subagent_journal_fault(fault);
         let result = dispatch(
@@ -2667,8 +2651,8 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     );
     assert!(delegated.ok, "{}", delegated.error.unwrap_or_default());
     assert_eq!(
-        server.state.lock().unwrap().master_worker_id.as_deref(),
-        Some("peer-b")
+        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        Some("peer-b".into())
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -2708,8 +2692,8 @@ fn dead_master_transport_is_not_claimable_and_allows_approved_self_promote() {
     );
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
     assert_eq!(
-        server.state.lock().unwrap().master_worker_id.as_deref(),
-        Some("peer-b")
+        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        Some("peer-b".into())
     );
     let live = super::handle_master_status(&server);
     assert_eq!(live.data["master"]["worker_id"], "peer-b");
@@ -2873,8 +2857,8 @@ fn master_promotion_allows_verified_appserver() {
     );
     assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
     assert_eq!(
-        server.state.lock().unwrap().master_worker_id.as_deref(),
-        Some("peer-appserver")
+        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        Some("peer-appserver".into())
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -2901,6 +2885,202 @@ fn master_assigned_replays_approval_and_live_identity() {
     let mut legacy_replay = State::default();
     legacy_replay.apply(&serde_json::from_str(legacy).unwrap());
     assert_eq!(legacy_replay.master_worker_id.as_deref(), Some("peer-b"));
+}
+
+#[test]
+fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
+    assert!(registered.ok, "{registered:?}");
+
+    let promoted = super::handle_master_promote(
+        &server,
+        "peer-appserver".into(),
+        "token-peer-appserver".into(),
+        "user approved peer-appserver as collab master".into(),
+    );
+    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+
+    let (scope, generation) = {
+        let state = server.state.lock().unwrap();
+        let binding = state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "peer-appserver")
+            .unwrap()
+            .clone();
+        let grant = state
+            .global
+            .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+            .expect("promotion must commit a generation-bound typed master grant");
+        assert_eq!(grant.endpoint_generation, binding.endpoint_generation);
+        (binding.route_scope(), binding.endpoint_generation)
+    };
+
+    let reconnected = register_appserver(&mut server, "peer-appserver", "thread-appserver-next");
+    assert!(reconnected.ok, "{reconnected:?}");
+    {
+        let state = server.state.lock().unwrap();
+        let binding = state
+            .global
+            .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
+            .unwrap();
+        assert_eq!(binding.endpoint_generation, generation + 1);
+        assert!(state
+            .global
+            .lookup_master_grant_for(&scope, &binding.binding_id)
+            .is_none());
+        assert_eq!(
+            state
+                .global
+                .role_for_binding(&scope.project_scope_id, &binding.binding_id),
+            crate::server::global_state::PeerRole::Peer
+        );
+    }
+    let status = super::handle_master_status(&server);
+    assert!(status.ok, "{status:?}");
+    assert!(status.data["master"].is_null(), "{status:?}");
+    assert!(status.data["recorded_unusable"].is_null(), "{status:?}");
+
+    let replayed = super::replay(&root).unwrap();
+    assert!(replayed.master_worker_id.is_none());
+    let binding = replayed
+        .global
+        .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
+        .unwrap();
+    assert!(replayed
+        .global
+        .lookup_master_grant_for(&scope, &binding.binding_id)
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_master_assignment_cannot_override_typed_grant_on_replay() {
+    use std::io::Write;
+
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
+    assert!(registered.ok, "{registered:?}");
+    let promoted = super::handle_master_promote(
+        &server,
+        "peer-appserver".into(),
+        "token-peer-appserver".into(),
+        "user approved peer-appserver as collab master".into(),
+    );
+    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+
+    let legacy = Event::MasterAssigned {
+        worker_id: "peer-appserver".into(),
+        assigned_by: "legacy-operator".into(),
+        approval: Some("legacy approval".into()),
+        assigned_ms: 1,
+    };
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap();
+    writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
+    drop(file);
+
+    let replayed = super::replay(&root).expect("mixed legacy and typed authority must replay");
+    assert!(replayed.master_worker_id.is_none());
+    let binding = replayed
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == "peer-appserver")
+        .unwrap();
+    let grant = replayed
+        .global
+        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+        .expect("typed grant must remain authoritative");
+    assert_eq!(grant.granted_by, "peer-appserver");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_master_assignment_before_runtime_rebind_does_not_regrant_authority() {
+    use std::io::Write;
+
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
+    assert!(registered.ok, "{registered:?}");
+
+    let legacy = Event::MasterAssigned {
+        worker_id: "peer-appserver".into(),
+        assigned_by: "legacy-operator".into(),
+        approval: Some("legacy approval".into()),
+        assigned_ms: 1,
+    };
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap();
+    writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
+    drop(file);
+
+    let reconnected = register_appserver(&mut server, "peer-appserver", "thread-appserver-next");
+    assert!(reconnected.ok, "{reconnected:?}");
+
+    let replayed = super::replay(&root).expect("legacy authority before reconnect must replay");
+    assert!(replayed.master_worker_id.is_none());
+    let binding = replayed
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == "peer-appserver")
+        .unwrap();
+    assert_eq!(binding.endpoint_generation, 2);
+    assert!(replayed
+        .global
+        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_master_assignment_after_runtime_binding_is_migrated() {
+    use std::io::Write;
+
+    let (server, root) = test_server();
+    register(&server, "peer-a", "thread-peer-a");
+
+    let legacy = Event::MasterAssigned {
+        worker_id: "peer-a".into(),
+        assigned_by: "peer-a".into(),
+        approval: Some("legacy approval".into()),
+        assigned_ms: 1,
+    };
+    let journal = root.join(".agent-collab/server/journal.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap();
+    writeln!(file, "{}", serde_json::to_string(&legacy).unwrap()).unwrap();
+    drop(file);
+
+    let replayed = super::replay(&root).expect("legacy authority after binding must replay");
+    assert!(replayed.master_worker_id.is_none());
+    let binding = replayed
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == "peer-a")
+        .unwrap();
+    let grant = replayed
+        .global
+        .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+        .expect("current legacy authority must migrate to a typed grant");
+    assert_eq!(grant.granted_by, "peer-a");
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -3542,12 +3722,7 @@ fn master_force_close_skips_owner_and_cleanup_requirements() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
-    server.commit(&[Event::MasterAssigned {
-        worker_id: "master".into(),
-        assigned_by: "master".into(),
-        approval: Some("user approved force-close test".into()),
-        assigned_ms: now_ms(),
-    }]);
+    promote_master(&server, "master", "user approved force-close test");
     let now = now_ms();
     server.commit(&[Event::TaskCreated {
         task: TaskRec {
@@ -6101,12 +6276,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
 fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     let (server, root) = test_server();
     register(&server, "master", "%master");
-    server.commit(&[Event::MasterAssigned {
-        worker_id: "master".into(),
-        assigned_by: "operator".into(),
-        approval: Some("user-approved".into()),
-        assigned_ms: now_ms(),
-    }]);
+    promote_master(&server, "master", "user-approved");
 
     let context = handle_context(&server, "master".into(), "token-master".into());
 
@@ -6609,6 +6779,55 @@ fn bulk_ack_with_empty_ids_acknowledges_all_inbox_messages() {
     let state = server_arc.state.lock().unwrap();
     assert!(state.msgs.values().all(|m| m.state == "read"));
     drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn typed_master_wake_delivery_marks_accumulator_notified() {
+    let (server, root) = test_server();
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user-approved");
+    let now = now_ms();
+    server.commit(&[
+        Event::MasterWakeSignal {
+            signal: crate::server::state::MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: now,
+        },
+        Event::Sent {
+            msg: crate::server::state::Message {
+                id: "master-wake".into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notify".into(),
+                subject: Some("worker-idle: worker".into()),
+                body: "wake".into(),
+                in_reply_to: None,
+                created_ms: now,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        },
+        Event::WakeBound {
+            message_id: "master-wake".into(),
+            subscription_id: "sub-master".into(),
+        },
+    ]);
+    assert_eq!(
+        server.state.lock().unwrap().master_wake.delivery_state,
+        "pending"
+    );
+
+    server.commit(&[Event::Delivered {
+        ids: vec!["master-wake".into()],
+    }]);
+
+    assert_eq!(
+        server.state.lock().unwrap().master_wake.delivery_state,
+        "notified_unconsumed"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

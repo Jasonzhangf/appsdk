@@ -496,6 +496,12 @@ pub enum Req {
     WorkerStatus {
         worker_id: Option<String>,
     },
+    WorkerSnapshot {
+        worker_id: String,
+        token: String,
+        target_id: String,
+        lines: usize,
+    },
     /// Live master retires a worker registration.
     WorkerClose {
         worker_id: String,

@@ -1446,8 +1446,14 @@ fn subagent_close_first_journal_failure_does_not_remove_external_manifest() {
     for fault in [CloseFirstAppend, CloseFirstSync] {
         let (mut server, root) = test_server();
         register(&server, "parent", "%parent");
+        register(&server, "child", "%child");
         server.commit(&[Event::SubagentUpdated {
             subagent: subagent_record("close-first-fault", "idle", "child"),
+        }]);
+        server.commit(&[Event::SubagentSnapshotCaptured {
+            subagent_id: "close-first-fault".into(),
+            thread_id: "thread-child".into(),
+            captured_ms: now_ms(),
         }]);
         let manifest = root.join(".agent-collab/server/launch-close-first-fault.json");
         std::fs::write(&manifest, b"test-only manifest").unwrap();
@@ -1479,6 +1485,11 @@ fn subagent_close_final_journal_failure_reports_unknown_and_stays_open() {
         register(&server, "child", "%child");
         server.commit(&[Event::SubagentUpdated {
             subagent: subagent_record("close-final-fault", "idle", "child"),
+        }]);
+        server.commit(&[Event::SubagentSnapshotCaptured {
+            subagent_id: "close-final-fault".into(),
+            thread_id: "thread-child".into(),
+            captured_ms: now_ms(),
         }]);
         let server = Arc::new(server);
         crate::server::inject_subagent_journal_fault(fault);
@@ -1642,7 +1653,7 @@ fn subagent_close_does_not_report_success_when_transition_cannot_persist() {
             parent: "parent".into(),
             peer: "child".into(),
             status: "idle".into(),
-            thread_id: None,
+            thread_id: Some("thread-child".into()),
             profile: None,
             created_ms: now_ms(),
             ready_deadline_ms: 0,
@@ -1651,6 +1662,11 @@ fn subagent_close_does_not_report_success_when_transition_cannot_persist() {
             probe_failures: Vec::new(),
             runtime: None,
         },
+    }]);
+    server.commit(&[Event::SubagentSnapshotCaptured {
+        subagent_id: "managed-close".into(),
+        thread_id: "thread-child".into(),
+        captured_ms: now_ms(),
     }]);
     *server.journal.lock().unwrap() =
         std::fs::File::open(root.join(".agent-collab/server/journal.jsonl")).unwrap();
@@ -2533,6 +2549,37 @@ fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
     assert!(!self_close.ok);
     assert!(self_close.error.unwrap().contains("cannot close itself"));
 
+    let missing_snapshot = super::handle_worker_close(
+        &server,
+        "peer-a".into(),
+        "token-peer-a".into(),
+        "peer-b".into(),
+        "transport looks dead".into(),
+    );
+    assert!(!missing_snapshot.ok);
+    assert!(missing_snapshot
+        .error
+        .unwrap()
+        .contains("requires a successful worker snapshot"));
+    server.commit(&[Event::SubagentUpdated {
+        subagent: crate::subagent::Record {
+            thread_id: Some("thread-b".into()),
+            ..subagent_record("managed-peer-b", "idle", "peer-b")
+        },
+    }]);
+    let mismatched_thread = super::handle_worker_close(
+        &server,
+        "peer-a".into(),
+        "token-peer-a".into(),
+        "peer-b".into(),
+        "transport looks dead".into(),
+    );
+    assert!(!mismatched_thread.ok);
+    assert!(mismatched_thread
+        .error
+        .unwrap()
+        .contains("requires a successful worker snapshot"));
+
     // A worker holding live work keeps its registration; the task lifecycle
     // has to be resolved first or the worktree is stranded.
     server.commit(&[Event::TaskCreated {
@@ -2579,6 +2626,11 @@ fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
             updated_ms: now_ms(),
         },
     }]);
+    server.commit(&[Event::WorkerSnapshotCaptured {
+        worker_id: "peer-b".into(),
+        thread_id: "thread-b".into(),
+        captured_ms: now_ms(),
+    }]);
     let closed = super::handle_worker_close(
         &server,
         "peer-a".into(),
@@ -2589,13 +2641,125 @@ fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
     assert!(closed.ok, "{}", closed.error.clone().unwrap_or_default());
     assert_eq!(closed.data["closed"], "peer-b");
     assert_eq!(closed.data["reason"], "transport dead after snapshot");
+    assert!(closed.data["snapshot_captured_ms"].is_i64());
     assert!(closed.data.get("archived_thread").is_none());
+
+    let repeated = super::handle_worker_close(
+        &server,
+        "peer-a".into(),
+        "token-peer-a".into(),
+        "peer-b".into(),
+        "a different reason must not rewrite the receipt".into(),
+    );
+    assert!(
+        repeated.ok,
+        "{}",
+        repeated.error.clone().unwrap_or_default()
+    );
+    assert_eq!(repeated.data["closed"], "peer-b");
+    assert_eq!(repeated.data["closed_by"], "peer-a");
+    assert_eq!(repeated.data["reason"], "transport dead after snapshot");
+    assert_eq!(repeated.data["reused"], true);
 
     let state = server.state.lock().unwrap();
     assert!(!state.workers.contains_key("peer-b"));
     assert!(!state.keepalives.contains_key("peer-b"));
+    assert_eq!(
+        state.worker_closures["peer-b"].snapshot_captured_ms,
+        Some(closed.data["snapshot_captured_ms"].as_i64().unwrap())
+    );
     drop(state);
 
+    let replayed = super::replay(&root).unwrap();
+    assert_eq!(replayed.worker_snapshots["peer-b"].thread_id, "thread-b");
+    assert_eq!(
+        replayed.worker_closures["peer-b"].reason,
+        "transport dead after snapshot"
+    );
+    assert!(replayed.worker_closures["peer-b"]
+        .snapshot_captured_ms
+        .is_some());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
+    let (server, root) = test_server();
+    register(&server, "master", "%master");
+    register(&server, "ordinary", "%ordinary");
+    assert!(
+        super::handle_master_promote(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "user approved master".into(),
+        )
+        .ok
+    );
+
+    let missing = super::handle_worker_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "ordinary".into(),
+        "confirmed offline".into(),
+    );
+    assert!(!missing.ok);
+    assert!(missing
+        .error
+        .unwrap()
+        .contains("requires a successful worker snapshot"));
+
+    let outsider_snapshot = super::handle_worker_snapshot(
+        &server,
+        "ordinary".into(),
+        "token-ordinary".into(),
+        "master".into(),
+        40,
+    );
+    assert!(!outsider_snapshot.ok);
+    assert!(outsider_snapshot
+        .error
+        .unwrap()
+        .contains("master authority required"));
+
+    server.commit(&[Event::WorkerSnapshotCaptured {
+        worker_id: "ordinary".into(),
+        thread_id: "thread-ordinary".into(),
+        captured_ms: now_ms(),
+    }]);
+    let closed = super::handle_worker_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "ordinary".into(),
+        "confirmed offline after snapshot".into(),
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert!(closed.data["snapshot_captured_ms"].is_i64());
+
+    let repeated = super::handle_worker_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "ordinary".into(),
+        "ignored duplicate".into(),
+    );
+    assert!(repeated.ok, "{}", repeated.error.unwrap_or_default());
+    assert_eq!(repeated.data["reused"], true);
+    assert_eq!(repeated.data["reason"], "confirmed offline after snapshot");
+
+    let replayed = replay(&root).unwrap();
+    assert!(!replayed.workers.contains_key("ordinary"));
+    assert_eq!(
+        replayed.worker_closures["ordinary"].reason,
+        "confirmed offline after snapshot"
+    );
+    assert_eq!(
+        replayed.worker_snapshots["ordinary"].thread_id,
+        "thread-ordinary"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

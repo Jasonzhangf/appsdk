@@ -326,7 +326,12 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            json!({"thread": {"id": thread_id.as_str(), "status": {"type": "notLoaded"}}})
+            return Err(AdapterError::RouteUnavailable {
+                detail: format!(
+                    "thread {} is persisted but not loaded by the App Server",
+                    thread_id.as_str()
+                ),
+            })
         }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
@@ -348,6 +353,18 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             detail: format!(
                 "thread identity mismatch: expected {}, observed {}",
                 thread_id, observed
+            ),
+        });
+    }
+    if response
+        .pointer("/thread/status/type")
+        .and_then(Value::as_str)
+        == Some("notLoaded")
+    {
+        return Err(AdapterError::RouteUnavailable {
+            detail: format!(
+                "thread {} is persisted but not loaded by the App Server",
+                thread_id.as_str()
             ),
         });
     }
@@ -1542,6 +1559,69 @@ mod tests {
                 stream.read(&mut byte).unwrap(),
                 0,
                 "unloaded thread must not issue another App Server method"
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let candidate = AppServerCandidate {
+            endpoint: format!("unix://{}", socket.display()),
+            namespace: "codex_tui".into(),
+            thread_id: "persisted-thread".into(),
+        };
+        let error = verify_candidate(&candidate).unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("persisted but not loaded"));
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn candidate_rejects_thread_that_unloads_after_loaded_list() {
+        let socket = std::env::temp_dir().join(format!(
+            "collab-unloaded-race-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let loaded = next_request(&mut stream);
+            assert_eq!(loaded["method"], "thread/loaded/list");
+            respond(
+                &mut stream,
+                json!({
+                    "id": loaded["id"],
+                    "result": {"data": ["persisted-thread"]}
+                }),
+            );
+            let read = next_request(&mut stream);
+            assert_eq!(read["method"], "thread/read");
+            assert_eq!(read["params"]["threadId"], "persisted-thread");
+            respond(
+                &mut stream,
+                json!({
+                    "id": read["id"],
+                    "error": {
+                        "code": -32602,
+                        "message": "thread not loaded: persisted-thread"
+                    }
+                }),
+            );
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "thread that unloads after loaded/list must not issue another App Server method"
             );
             stream.shutdown(Shutdown::Both).ok();
         });

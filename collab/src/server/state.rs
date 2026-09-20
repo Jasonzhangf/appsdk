@@ -426,6 +426,8 @@ pub enum Event {
     DeliveryMode {
         msg_id: String,
         mode: String,
+        #[serde(default)]
+        source_thread_id: Option<String>,
     },
     WakeAttempted {
         ids: Vec<String>,
@@ -558,6 +560,7 @@ pub struct State {
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
     pub cleanup_receipts: HashMap<String, CleanupReceipt>,
     pub delivery_modes: HashMap<String, String>,
+    pub delivery_source_threads: HashMap<String, String>,
     pub notification_subscriptions: HashMap<String, NotificationSubscription>,
     pub wake_bindings: HashMap<String, String>,
     pub migration: Option<MigrationRecord>,
@@ -745,8 +748,16 @@ impl State {
             Event::Sent { msg } => {
                 self.msgs.insert(msg.id.clone(), msg.clone());
             }
-            Event::DeliveryMode { msg_id, mode } => {
+            Event::DeliveryMode {
+                msg_id,
+                mode,
+                source_thread_id,
+            } => {
                 self.delivery_modes.insert(msg_id.clone(), mode.clone());
+                if let Some(source_thread_id) = source_thread_id {
+                    self.delivery_source_threads
+                        .insert(msg_id.clone(), source_thread_id.clone());
+                }
             }
             Event::WakeAttempted { ids, attempted_ms } => {
                 for id in ids {
@@ -1092,6 +1103,7 @@ impl State {
                 events.push(Event::DeliveryMode {
                     msg_id: id.clone(),
                     mode: mode.clone(),
+                    source_thread_id: self.delivery_source_threads.get(&id).cloned(),
                 });
             }
             if let Some(subscription_id) = self.wake_bindings.get(&id) {

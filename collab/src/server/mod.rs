@@ -2373,7 +2373,7 @@ impl ProjectRuntimeManager {
         assigned_by: &str,
         approval: Option<&str>,
         assigned_ms: i64,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let source_root = std::fs::canonicalize(from_project).map_err(|error| {
             format!("CROSS_PROJECT_SOURCE_REJECTED: canonicalize source project: {error}")
         })?;
@@ -2424,11 +2424,23 @@ impl ProjectRuntimeManager {
                         .into(),
                 );
             }
-            matches.push(key);
+            let source_thread_id = state
+                .workers
+                .get(from)
+                .and_then(selected_transport_for_worker)
+                .and_then(|transport| transport.thread_id)
+                .ok_or_else(|| {
+                    "CROSS_PROJECT_SOURCE_REJECTED: source master has no live App Server thread"
+                        .to_string()
+                })?;
+            matches.push((key, source_thread_id));
         }
 
         match matches.len() {
-            1 => Ok(()),
+            1 => Ok(matches
+                .pop()
+                .expect("one source match")
+                .1),
             0 => Err(
                 "CROSS_PROJECT_SOURCE_REJECTED: sender is not the live master of the source project"
                     .into(),
@@ -2463,19 +2475,21 @@ impl ProjectRuntimeManager {
             Ok(runtime) => runtime,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
-        if let Err(error) = self.verify_cross_project_source(
+        let source_thread_id = match self.verify_cross_project_source(
             &from,
             &from_project,
             &source_master_assigned_by,
             source_master_approval.as_deref(),
             source_master_assigned_ms,
         ) {
-            return (target, Resp::err(error));
-        }
+            Ok(source_thread_id) => source_thread_id,
+            Err(error) => return (target, Resp::err(error)),
+        };
         let response = handle_cross_project_send(
             &target,
             from,
             from_project,
+            source_thread_id,
             source_master_assigned_by,
             source_master_approval,
             source_master_assigned_ms,
@@ -3184,10 +3198,16 @@ fn attempt_notification_with_at(
             return false;
         }
         let source_thread_id = state
-            .workers
-            .get(&seed.from)
-            .and_then(selected_transport_for_worker)
-            .and_then(|transport| transport.thread_id);
+            .delivery_source_threads
+            .get(message_id)
+            .cloned()
+            .or_else(|| {
+                state
+                    .workers
+                    .get(&seed.from)
+                    .and_then(selected_transport_for_worker)
+                    .and_then(|transport| transport.thread_id)
+            });
         let explicit = is_explicit_notification(&state, seed);
         (recipient, transport, source_thread_id, delay, explicit)
     };
@@ -3272,10 +3292,16 @@ fn attempt_scheduler_notification(
                 return None;
             }
             let source_thread_id = state
-                .workers
-                .get(&seed.from)
-                .and_then(selected_transport_for_worker)
-                .and_then(|transport| transport.thread_id);
+                .delivery_source_threads
+                .get(message_id)
+                .cloned()
+                .or_else(|| {
+                    state
+                        .workers
+                        .get(&seed.from)
+                        .and_then(selected_transport_for_worker)
+                        .and_then(|transport| transport.thread_id)
+                });
             Some((
                 recipient,
                 transport,
@@ -3522,6 +3548,7 @@ mod notification_batch_tests {
             Event::DeliveryMode {
                 msg_id: "sender-attribution".into(),
                 mode: "explicit-notification".into(),
+                source_thread_id: None,
             },
         ]);
 
@@ -3673,6 +3700,7 @@ mod notification_batch_tests {
         server.commit(&[Event::DeliveryMode {
             msg_id: "explicit-notice".into(),
             mode: "explicit-notification".into(),
+            source_thread_id: None,
         }]);
 
         let delivered = Arc::new(Mutex::new(Vec::new()));
@@ -3842,10 +3870,16 @@ pub(crate) fn attempt_notification_with_default(
             return false;
         }
         let source_thread_id = state
-            .workers
-            .get(&seed.from)
-            .and_then(selected_transport_for_worker)
-            .and_then(|transport| transport.thread_id);
+            .delivery_source_threads
+            .get(message_id)
+            .cloned()
+            .or_else(|| {
+                state
+                    .workers
+                    .get(&seed.from)
+                    .and_then(selected_transport_for_worker)
+                    .and_then(|transport| transport.thread_id)
+            });
         let explicit = is_explicit_notification(&state, seed);
         (recipient, transport, source_thread_id, delay, explicit)
     };
@@ -5638,6 +5672,7 @@ pub(crate) fn handle_scheduler_dispatch(
         events.push(Event::DeliveryMode {
             msg_id: message_id.clone(),
             mode: "explicit-notification".into(),
+            source_thread_id: None,
         });
         if let Some(subscription) = &subscription {
             events.push(Event::WakeBound {
@@ -6276,6 +6311,7 @@ pub(crate) fn handle_send_with_task(
     events.push(Event::DeliveryMode {
         msg_id: mid.clone(),
         mode: "explicit-notification".into(),
+        source_thread_id: None,
     });
     if let Some(subscription) = &subscription {
         events.push(Event::WakeBound {
@@ -6313,6 +6349,7 @@ fn handle_cross_project_send(
     server: &Server,
     from: String,
     from_project: String,
+    source_thread_id: String,
     source_master_assigned_by: String,
     source_master_approval: Option<String>,
     source_master_assigned_ms: i64,
@@ -6379,6 +6416,7 @@ fn handle_cross_project_send(
         Event::DeliveryMode {
             msg_id: mid.clone(),
             mode: "explicit-notification".into(),
+            source_thread_id: Some(source_thread_id),
         },
     ];
     if let Some(subscription) = &subscription {
@@ -8598,36 +8636,9 @@ fn dispatch_with_route_context(
                 app_scope,
             )
         }
-        Req::CrossProjectSend {
-            from,
-            from_project,
-            source_master_assigned_by,
-            source_master_approval,
-            source_master_assigned_ms,
-            to,
-            subject,
-            body,
-            in_reply_to,
-        } => {
-            if project_context.is_some() {
-                Resp::err(
-                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: cross-project wire requests require independently verified source and target route owners",
-                )
-            } else {
-                handle_cross_project_send(
-                    server,
-                    from,
-                    from_project,
-                    source_master_assigned_by,
-                    source_master_approval,
-                    source_master_assigned_ms,
-                    to,
-                    subject,
-                    body,
-                    in_reply_to,
-                )
-            }
-        }
+        Req::CrossProjectSend { .. } => Resp::err(
+            "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: cross-project wire requests require independently verified source and target route owners",
+        ),
         Req::NotificationMethods => Resp::data(json!({
             "methods": ["appserver"],
             "priority": ["appserver"],
@@ -9838,6 +9849,7 @@ mod host_route_registry_tests {
             Event::DeliveryMode {
                 msg_id: message_id.clone(),
                 mode: "explicit-notification".into(),
+                source_thread_id: None,
             },
         ]);
 
@@ -11348,8 +11360,16 @@ mod host_route_registry_tests {
     #[tokio::test]
     async fn manager_cross_project_appserver_masters_send_and_reject_forged_source_evidence() {
         let (mut server, host_root, _) = test_server();
+        let notification_sources = Arc::new(Mutex::new(Vec::new()));
+        let notification_sources_for_sink = notification_sources.clone();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-        with_appserver_notification_sink(&mut server, |_, _, _, _, _| Ok(json!({"queued": true})));
+        with_appserver_notification_sink(&mut server, move |_, source, _, _, _| {
+            notification_sources_for_sink
+                .lock()
+                .unwrap()
+                .push(source.map(str::to_owned));
+            Ok(json!({"queued": true}))
+        });
 
         let project_a = host_root.with_file_name(format!(
             "{}-cross-project-a",
@@ -11481,6 +11501,10 @@ mod host_route_registry_tests {
         assert_eq!(delivered.data["cross_project"], true);
         assert_eq!(delivered.data["source_master"], master_a);
         assert_eq!(delivered.data["target_master"], master_b);
+        assert_eq!(
+            notification_sources.lock().unwrap().as_slice(),
+            [Some("thread-a".to_string())]
+        );
         let message_id = delivered.data["msg_id"].as_str().unwrap().to_owned();
         assert!(target_runtime
             .state
@@ -16393,6 +16417,7 @@ mod scheduler_admission_tests {
             Event::DeliveryMode {
                 msg_id: "scheduler-req-pending-recovery-1".into(),
                 mode: "explicit-notification".into(),
+                source_thread_id: None,
             },
             Event::WakeBound {
                 message_id: "scheduler-req-pending-recovery-1".into(),

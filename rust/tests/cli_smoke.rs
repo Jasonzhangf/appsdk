@@ -10438,6 +10438,30 @@ fn pin_lock_migrates_stale_project_record_contracts() {
 }
 
 #[test]
+fn pin_lock_restores_missing_record_contract_directory() {
+    let root = temp_root("record-contract-directory-migration");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let records = root.join("contracts/records");
+    fs::remove_dir_all(&records).unwrap();
+
+    let result = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(records.is_dir());
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_reconciles_matching_authoring_bundle_mirror() {
     let root = temp_root("pin-lock-authoring-bundle-mirror");
     let root_text = root.to_str().unwrap();

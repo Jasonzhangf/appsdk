@@ -15237,6 +15237,11 @@ fn install_current_project_contract(
     let mut content = serde_json::to_vec_pretty(&canonical)
         .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
     content.push(b'\n');
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
+        assert_no_symlink_components(root, parent, "governance_contract_migration");
+    }
     atomic_write_bytes(
         &target,
         &content,

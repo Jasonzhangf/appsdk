@@ -263,7 +263,7 @@
           {
             "required": ["scopeId", "title", "priority", "description", "reporter"],
             "not": {"required": ["bug"]},
-            "anyOf": [
+            "oneOf": [
               {"required": ["bugId"]},
               {"required": ["bug_id"]}
             ]
@@ -284,7 +284,7 @@
           {
             "required": ["kind", "owner", "trigger", "work", "gate", "state", "stop"],
             "not": {"required": ["loop"]},
-            "anyOf": [
+            "oneOf": [
               {"required": ["loopId"]},
               {"required": ["loop_id"]}
             ]
@@ -338,7 +338,7 @@
         "required": ["op"]
       },
       "then": {
-        "anyOf": [
+        "oneOf": [
           {"required": ["bugId", "status", "actor"]},
           {"required": ["bug_id", "status", "actor"]}
         ]
@@ -352,7 +352,7 @@
         "required": ["op"]
       },
       "then": {
-        "anyOf": [
+        "oneOf": [
           {"required": ["loopId"]},
           {"required": ["loop_id"]}
         ]
@@ -652,7 +652,7 @@
         "reporter": {"$ref": "#/$defs/address"},
         "worktreeId": {"type": ["string", "null"]}
       },
-      "anyOf": [
+      "oneOf": [
         {"required": ["bugId"]},
         {"required": ["bug_id"]}
       ],
@@ -674,7 +674,7 @@
         "maxIterations": {"type": "integer", "minimum": 1},
         "deadlineAt": {"type": ["string", "null"], "format": "date-time"}
       },
-      "anyOf": [
+      "oneOf": [
         {"required": ["loopId"]},
         {"required": ["loop_id"]}
       ],

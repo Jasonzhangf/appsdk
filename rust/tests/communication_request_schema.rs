@@ -102,6 +102,64 @@ fn schema_accepts_record_error_snake_case_loop_alias() {
 }
 
 #[test]
+fn schema_accepts_report_bug_snake_case_alias_flat_and_nested() {
+    let v = validator();
+    let flat = json!({
+        "op": "report_bug",
+        "bug_id": "bug-1",
+        "scopeId": "scope",
+        "title": "broken",
+        "priority": "p1",
+        "description": "details",
+        "reporter": address()
+    });
+    assert!(v.is_valid(&flat));
+    let nested = json!({
+        "op": "report_bug",
+        "bug": {
+            "bug_id": "bug-1",
+            "scopeId": "scope",
+            "title": "broken",
+            "priority": "p1",
+            "description": "details",
+            "reporter": address()
+        }
+    });
+    assert!(v.is_valid(&nested));
+}
+
+#[test]
+fn schema_accepts_create_loop_snake_case_alias_flat_and_nested() {
+    let v = validator();
+    let flat = json!({
+        "op": "create_loop",
+        "loop_id": "loop-1",
+        "kind": "delivery",
+        "owner": address(),
+        "trigger": "start",
+        "work": "implement",
+        "gate": "tests",
+        "state": "ready",
+        "stop": "verified"
+    });
+    assert!(v.is_valid(&flat));
+    let nested = json!({
+        "op": "create_loop",
+        "loop": {
+            "loop_id": "loop-1",
+            "kind": "delivery",
+            "owner": address(),
+            "trigger": "start",
+            "work": "implement",
+            "gate": "tests",
+            "state": "ready",
+            "stop": "verified"
+        }
+    });
+    assert!(v.is_valid(&nested));
+}
+
+#[test]
 fn schema_rejects_update_bug_without_identifier() {
     let v = validator();
     let request = json!({

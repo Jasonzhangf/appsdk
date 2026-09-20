@@ -805,19 +805,64 @@ fn live_closure_function_call_output_fields(item: &serde_json::Value) -> Option<
 
 fn live_closure_item_matches_input(
     item: &serde_json::Value,
-    challenge: &str,
+    expected_input: &str,
     message_id: &str,
 ) -> bool {
     live_closure_item_turn_id(item).is_some()
         && (live_closure_item_message_id(item) == Some(message_id)
-            && live_closure_item_contains_challenge(item, challenge)
+            && live_closure_item_contains_challenge(item, expected_input)
             || live_closure_function_call_output_fields(item).is_some_and(
                 |(observed_message_id, observed)| {
                     observed_message_id == message_id
                         && observed
-                            == client::adapters::codex_app_server::escape_delegated_text(challenge)
+                            == client::adapters::codex_app_server::escape_delegated_text(
+                                expected_input,
+                            )
                 },
             ))
+}
+
+fn live_closure_expected_native_input(
+    receipt: &serde_json::Value,
+    message_id: &str,
+    challenge: &str,
+) -> anyhow::Result<String> {
+    if receipt.get("id").and_then(serde_json::Value::as_str) != Some(message_id)
+        || receipt.get("body").and_then(serde_json::Value::as_str) != Some(challenge)
+        || receipt.get("subject").and_then(serde_json::Value::as_str) != Some(challenge)
+        || receipt.get("type").and_then(serde_json::Value::as_str) != Some("notify")
+    {
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_MESSAGE_BINDING_MISMATCH");
+    }
+    let message = server::state::Message {
+        id: message_id.to_owned(),
+        from: receipt
+            .get("from")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_MESSAGE_SENDER_MISSING"))?
+            .to_owned(),
+        to: receipt
+            .get("to")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_MESSAGE_RECIPIENT_MISSING"))?
+            .to_owned(),
+        mtype: "notify".into(),
+        subject: Some(challenge.to_owned()),
+        body: challenge.to_owned(),
+        in_reply_to: None,
+        created_ms: 0,
+        state: receipt
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending")
+            .to_owned(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+    };
+    server::mailbox::notification_text(&message)
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_NATIVE_INPUT_UNAVAILABLE"))
 }
 
 fn live_closure_page_cursor(page: &serde_json::Value) -> anyhow::Result<Option<String>> {
@@ -975,6 +1020,7 @@ where
 fn observe_live_closure_target(
     transport: &SelectedTransport,
     challenge: &str,
+    expected_input: &str,
     message_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let thread_id = transport
@@ -990,7 +1036,7 @@ fn observe_live_closure_target(
     let items = live_closure_turn_items(&turns)?;
     let input = items
         .iter()
-        .find(|item| live_closure_item_matches_input(item, challenge, message_id));
+        .find(|item| live_closure_item_matches_input(item, expected_input, message_id));
     let Some(input) = input else {
         anyhow::bail!(
             "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:challenge_or_message_not_observed"
@@ -1079,9 +1125,18 @@ fn live_closure_observe(
         })
         .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE:{to}"))?;
     let transport = live_closure_target_transport(target)?;
+    let message_status: serde_json::Value = call_project(
+        scope,
+        &ident,
+        &Req::MsgStatus {
+            msg_id: message_id.clone(),
+        },
+    )?;
+    let expected_input =
+        live_closure_expected_native_input(&message_status, &message_id, &challenge)?;
     let observation_deadline = Instant::now() + live_closure_timeout()?;
     let target_execution = wait_live_closure_fresh_thread_materialization(
-        || observe_live_closure_target(&transport, &challenge, &message_id),
+        || observe_live_closure_target(&transport, &challenge, &expected_input, &message_id),
         observation_deadline,
         Duration::from_millis(500),
     )?;
@@ -1363,6 +1418,25 @@ fn live_closure_probe(
     if message_id.is_empty() {
         anyhow::bail!("COLLAB_LIVE_CLOSURE_PROBE_MESSAGE_ID_MISSING");
     }
+    let message_status: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
+        client::call_with_context(
+            &target_scope.sock_path(),
+            &Req::MsgStatus {
+                msg_id: message_id.to_owned(),
+            },
+            Some(cli_project_context(&target_scope.root)?),
+        )?
+    } else {
+        call_project(
+            scope,
+            &ident,
+            &Req::MsgStatus {
+                msg_id: message_id.to_owned(),
+            },
+        )?
+    };
+    let expected_input =
+        live_closure_expected_native_input(&message_status, message_id, &challenge)?;
     let target_transport = live_closure_target_transport(target).map_err(|error| {
         first_failure(
             "COLLAB_LIVE_CLOSURE_TARGET_TRANSPORT_INVALID",
@@ -1372,7 +1446,12 @@ fn live_closure_probe(
     })?;
     let observation_deadline = Instant::now() + timeout;
     let target_execution = loop {
-        match observe_live_closure_target(&target_transport, &challenge, message_id) {
+        match observe_live_closure_target(
+            &target_transport,
+            &challenge,
+            &expected_input,
+            message_id,
+        ) {
             Ok(execution) => break execution,
             Err(error)
                 if error
@@ -2502,6 +2581,73 @@ mod tests {
             Some("message-2")
         );
         assert_eq!(live_closure_item_message_id(&json!({})), None);
+    }
+
+    #[test]
+    fn live_closure_expected_input_matches_the_real_notification_payload() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let expected = live_closure_expected_native_input(
+            &json!({
+                "id": "message-1",
+                "from": "sender",
+                "to": "recipient",
+                "type": "notify",
+                "subject": challenge,
+                "body": challenge,
+                "state": "pending"
+            }),
+            "message-1",
+            challenge,
+        )
+        .unwrap();
+
+        assert!(expected.starts_with("COLLAB_NOTIFY message-1 ["));
+        assert!(expected.contains(challenge));
+        assert!(expected.contains("READ IS NOT DONE"));
+        assert!(live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-1",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-1</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+                    client::adapters::codex_app_server::escape_delegated_text(&expected)
+                )
+            }),
+            &expected,
+            "message-1"
+        ));
+    }
+
+    #[test]
+    fn live_closure_expected_input_rejects_raw_challenge_as_native_payload() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let expected = live_closure_expected_native_input(
+            &json!({
+                "id": "message-1",
+                "from": "sender",
+                "to": "recipient",
+                "type": "notify",
+                "subject": challenge,
+                "body": challenge,
+                "state": "pending"
+            }),
+            "message-1",
+            challenge,
+        )
+        .unwrap();
+        assert!(!live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-1",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-1</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
+                )
+            }),
+            &expected,
+            "message-1"
+        ));
     }
 
     #[test]

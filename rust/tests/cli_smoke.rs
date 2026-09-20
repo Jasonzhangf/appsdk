@@ -6312,6 +6312,78 @@ fn lifecycle_chain_parallel_promotion_rejects_reused_collab_live_evidence() {
 }
 
 #[test]
+fn lifecycle_chain_parallel_promotion_rejects_reused_collab_live_message() {
+    let (root, input, _) = prepare_parallel_promotion_fixture("collab-live-closure-message-reused");
+    let closure_path = root.join(".appsdk/records/collab-live-closure-fixture-not-live.json");
+    let mut closure: Value =
+        serde_json::from_str(&fs::read_to_string(&closure_path).unwrap()).unwrap();
+    let peer_to_peer = closure["path_receipts"]["peer_to_peer"]["message_id"].clone();
+    closure["path_receipts"]["restart_replay"]["message_id"] = peer_to_peer;
+    fs::write(
+        &closure_path,
+        serde_json::to_string_pretty(&closure).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&root.join("fixture-bin")));
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("COLLAB_LIVE_CLOSURE_MESSAGE_REUSED:restart_replay"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_parallel_promotion_rejects_collab_live_identity_drift() {
+    let (root, input, _) = prepare_parallel_promotion_fixture("collab-live-closure-identity-drift");
+    let closure_path = root.join(".appsdk/records/collab-live-closure-fixture-not-live.json");
+    let mut closure: Value =
+        serde_json::from_str(&fs::read_to_string(&closure_path).unwrap()).unwrap();
+    closure["path_receipts"]["daemon_to_master"]["artifact_hash"] =
+        Value::String("artifact-2".into());
+    fs::write(
+        &closure_path,
+        serde_json::to_string_pretty(&closure).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&root.join("fixture-bin")));
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("COLLAB_LIVE_CLOSURE_PATH_MISMATCH:daemon_to_master"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lifecycle_chain_parallel_promotion_rejects_wrong_collab_live_direction() {
+    let (root, input, _) =
+        prepare_parallel_promotion_fixture("collab-live-closure-wrong-direction");
+    let closure_path = root.join(".appsdk/records/collab-live-closure-fixture-not-live.json");
+    let mut closure: Value =
+        serde_json::from_str(&fs::read_to_string(&closure_path).unwrap()).unwrap();
+    closure["path_receipts"]["master_to_peer"]["sender"] = Value::String("peer".into());
+    fs::write(
+        &closure_path,
+        serde_json::to_string_pretty(&closure).unwrap() + "\n",
+    )
+    .unwrap();
+    let result = run_parallel_promotion(&root, &input, Some(&root.join("fixture-bin")));
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("COLLAB_LIVE_CLOSURE_PATH_DIRECTION_MISMATCH:master_to_peer"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lifecycle_chain_parallel_promotion_rejects_source_only_collab_evidence() {
     let (root, input, _) = prepare_parallel_promotion_fixture("collab-live-closure-source-only");
     let evidence_path = root.join(".appsdk/records/evidence/app-core/collab-peer-to-peer.json");
@@ -13119,6 +13191,15 @@ fn promotion_schema_requires_authoritative_bug_closure() {
     assert_eq!(
         schema["properties"]["bug_closure_verified"]["type"],
         "boolean"
+    );
+    let collaboration_requires_closure = schema["allOf"].as_array().unwrap().iter().any(|rule| {
+        rule.pointer("/if/required/0").and_then(Value::as_str) == Some("collaboration_record_id")
+            && rule.pointer("/then/required/0").and_then(Value::as_str)
+                == Some("collab_live_closure_record_id")
+    });
+    assert!(
+        collaboration_requires_closure,
+        "collaboration promotion must require collab_live_closure_record_id"
     );
 }
 

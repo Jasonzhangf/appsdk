@@ -47,14 +47,17 @@
       "type": "object",
       "required": ["peer_to_peer", "peer_to_master", "master_to_peer", "master_to_master", "daemon_to_peer", "daemon_to_master", "restart_replay"],
       "additionalProperties": false,
+      "propertyNames": {
+        "enum": ["peer_to_peer", "peer_to_master", "master_to_peer", "master_to_master", "daemon_to_peer", "daemon_to_master", "restart_replay"]
+      },
       "properties": {
-        "peer_to_peer": {"type": "string"},
-        "peer_to_master": {"type": "string"},
-        "master_to_peer": {"type": "string"},
-        "master_to_master": {"type": "string"},
-        "daemon_to_peer": {"type": "string"},
-        "daemon_to_master": {"type": "string"},
-        "restart_replay": {"type": "string"}
+        "peer_to_peer": {"type": "string", "minLength": 1},
+        "peer_to_master": {"type": "string", "minLength": 1},
+        "master_to_peer": {"type": "string", "minLength": 1},
+        "master_to_master": {"type": "string", "minLength": 1},
+        "daemon_to_peer": {"type": "string", "minLength": 1},
+        "daemon_to_master": {"type": "string", "minLength": 1},
+        "restart_replay": {"type": "string", "minLength": 1}
       }
     },
     "path_receipts": {
@@ -62,13 +65,48 @@
       "required": ["peer_to_peer", "peer_to_master", "master_to_peer", "master_to_master", "daemon_to_peer", "daemon_to_master", "restart_replay"],
       "additionalProperties": false,
       "properties": {
-        "peer_to_peer": {"$ref": "#/$defs/path_receipt"},
-        "peer_to_master": {"$ref": "#/$defs/path_receipt"},
-        "master_to_peer": {"$ref": "#/$defs/path_receipt"},
-        "master_to_master": {"$ref": "#/$defs/path_receipt"},
-        "daemon_to_peer": {"$ref": "#/$defs/path_receipt"},
-        "daemon_to_master": {"$ref": "#/$defs/path_receipt"},
-        "restart_replay": {"$ref": "#/$defs/path_receipt"}
+        "peer_to_peer": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "peer"}, "receiver": {"const": "peer"}}}
+          ]
+        },
+        "peer_to_master": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "peer"}, "receiver": {"const": "master"}}}
+          ]
+        },
+        "master_to_peer": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "master"}, "receiver": {"const": "peer"}}}
+          ]
+        },
+        "master_to_master": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "master"}, "receiver": {"const": "master"}}}
+          ]
+        },
+        "daemon_to_peer": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "daemon"}, "receiver": {"const": "peer"}}}
+          ]
+        },
+        "daemon_to_master": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "daemon"}, "receiver": {"const": "master"}}}
+          ]
+        },
+        "restart_replay": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "daemon"}, "receiver": {"const": "peer"}}}
+          ]
+        }
       }
     },
     "created_at": {"type": "string"}
@@ -77,18 +115,19 @@
     "path_receipt": {
       "type": "object",
       "required": ["evidence_id", "message_id", "challenge", "sender", "receiver", "source_commit", "artifact_hash", "environment_id", "entrypoint", "endpoint_generation", "observed_at"],
+      "additionalProperties": false,
       "properties": {
-        "evidence_id": {"type": "string"},
-        "message_id": {"type": "string"},
-        "challenge": {"type": "string"},
+        "evidence_id": {"type": "string", "minLength": 1},
+        "message_id": {"type": "string", "minLength": 1},
+        "challenge": {"type": "string", "minLength": 1},
         "sender": {"enum": ["peer", "master", "daemon"]},
         "receiver": {"enum": ["peer", "master"]},
-        "source_commit": {"type": "string"},
-        "artifact_hash": {"type": "string"},
-        "environment_id": {"type": "string"},
-        "entrypoint": {"type": "string"},
+        "source_commit": {"type": "string", "minLength": 1},
+        "artifact_hash": {"type": "string", "minLength": 1},
+        "environment_id": {"type": "string", "minLength": 1},
+        "entrypoint": {"type": "string", "minLength": 1},
         "endpoint_generation": {"type": "integer", "minimum": 1},
-        "observed_at": {"type": "string"}
+        "observed_at": {"type": "string", "minLength": 1}
       }
     }
   }

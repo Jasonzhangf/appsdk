@@ -1810,17 +1810,16 @@ impl ProjectRuntimeManager {
         for record in &route_records {
             let key = (record.app_scope_id.clone(), record.project_scope.clone());
             let storage_root = PathBuf::from(&record.storage_root);
-            if (storage_roots_equal(&storage_root, &host.root)
+            let resident_storage = storage_roots_equal(&storage_root, &host.root)
                 .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
                 || storage_roots_equal(&storage_root, &host.storage_root)
-                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?)
-                && !routes.get(&key).is_some_and(|route| {
-                    route
-                        .runtime
-                        .as_ref()
-                        .is_some_and(|runtime| Arc::ptr_eq(runtime, &host))
-                })
-            {
+                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+            let record_root = std::fs::canonicalize(&record.canonical_root)
+                .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+            let resident_self_route = record.app_scope_id == crate::identity::CLI_APP_SERVER_ID
+                && record_root == Path::new(host_root.as_str())
+                && record.project_scope == host_root.as_str();
+            if resident_storage && !resident_self_route {
                 return Err(format!(
                     "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by resident host",
                     record.storage_root
@@ -1846,14 +1845,22 @@ impl ProjectRuntimeManager {
 
         for record in route_records {
             let (key, root, storage_root) = validate_host_route_record(&record)?;
-            if key.1 == host_root.as_str()
-                && routes.get(&key).is_some_and(|route| {
-                    route
-                        .runtime
-                        .as_ref()
-                        .is_some_and(|runtime| Arc::ptr_eq(runtime, &host))
-                })
-            {
+            let resident_self_route = key.0 == crate::identity::CLI_APP_SERVER_ID
+                && root == Path::new(host_root.as_str())
+                && key.1 == host_root.as_str()
+                && (storage_roots_equal(&storage_root, &host.root)
+                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
+                    || storage_roots_equal(&storage_root, &host.storage_root)
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?);
+            if resident_self_route {
+                routes.insert(
+                    key,
+                    RuntimeRoute {
+                        root,
+                        storage_root,
+                        runtime: Some(host.clone()),
+                    },
+                );
                 continue;
             }
             routes.insert(
@@ -13740,6 +13747,81 @@ mod host_route_registry_tests {
 
         assert!(manager.routes.lock().unwrap().is_empty());
         assert_eq!(std::fs::read_to_string(&route_journal).unwrap(), contents);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_replays_from_host_journal() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: "appserver-cli".into(),
+            project_scope: canonical_root.to_string_lossy().into_owned(),
+            canonical_root: canonical_root.to_string_lossy().into_owned(),
+            storage_root: canonical_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        std::fs::write(
+            &route_journal,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let routes = manager.routes.lock().unwrap();
+        let route = routes
+            .get(&(
+                "appserver-cli".into(),
+                canonical_root.to_string_lossy().into_owned(),
+            ))
+            .unwrap();
+        assert!(route
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, &server)));
+        assert_eq!(route.storage_root, canonical_root);
+        assert_eq!(
+            std::fs::read_to_string(&route_journal).unwrap(),
+            format!("{}\n", serde_json::to_string(&record).unwrap())
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_rejects_non_cli_app_scope_on_host_storage() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: "app-b".into(),
+            project_scope: canonical_root.to_string_lossy().into_owned(),
+            canonical_root: canonical_root.to_string_lossy().into_owned(),
+            storage_root: canonical_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        std::fs::write(
+            &route_journal,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+
+        let error = match ProjectRuntimeManager::new(server, &host_paths) {
+            Ok(_) => panic!("non-CLI app route must not claim the resident reducer"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("HOST_ROUTE_REPLAY_FAILED:"), "{error}");
+        assert!(error.contains("resident host"), "{error}");
 
         std::fs::remove_dir_all(root).unwrap();
     }

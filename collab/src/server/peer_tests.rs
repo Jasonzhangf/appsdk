@@ -23,6 +23,7 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
             journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {
@@ -1518,6 +1519,7 @@ fn replayed_command_is_idempotent_and_operation_conflict_fails_closed() {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(super::replay(&root).unwrap()),
             journal: Mutex::new(journal),
             appserver_candidate_check: crate::server::default_appserver_candidate_check(),

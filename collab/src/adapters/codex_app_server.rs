@@ -447,9 +447,7 @@ pub fn immediate_notify(
             (Some(thread), status)
         }
         Err(AdapterError::Unknown { operation, detail })
-            if operation == "rpc"
-                && (detail == format!("thread not loaded: {}", thread_id.as_str())
-                    || detail == format!("thread not found: {}", thread_id.as_str())) =>
+            if is_not_loaded_thread_error(&operation, &detail, thread_id.as_str()) =>
         {
             (None, "notLoaded".to_owned())
         }
@@ -506,6 +504,14 @@ pub fn immediate_notify(
             Ok(receipt)
         }
     }
+}
+
+fn is_not_loaded_thread_error(operation: &str, detail: &str, thread_id: &str) -> bool {
+    operation == "rpc"
+        && (detail == "thread not loaded"
+            || detail == format!("thread not loaded: {thread_id}")
+            || detail == "thread not found"
+            || detail == format!("thread not found: {thread_id}"))
 }
 
 /// Queue one background wake through a server-selected App Server transport.
@@ -2152,6 +2158,67 @@ mod tests {
             let request = next_request(&mut stream);
             assert_eq!(request["method"], "turn/start");
             assert_eq!(request["params"]["threadId"], "thread-1");
+            respond(
+                &mut stream,
+                json!({
+                    "id": request["id"],
+                    "result": {
+                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        immediate_notify(
+            &selected_transport(&socket),
+            "sender-thread",
+            "notify body",
+            "message-start",
+        )
+        .unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn immediate_notify_starts_thread_when_read_reports_thread_not_found_without_id() {
+        let socket = temp_socket("notify-read-not-found-no-id");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "error": {
+                        "code": -32602,
+                        "message": "thread not found"
+                    }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
+            let request = next_request(&mut stream);
+            assert_eq!(request["method"], "turn/start");
             respond(
                 &mut stream,
                 json!({

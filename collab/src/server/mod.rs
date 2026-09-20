@@ -461,6 +461,7 @@ pub struct Server {
     /// paths equal for backwards compatibility.
     pub storage_root: PathBuf,
     pub journal_path: PathBuf,
+    pub(crate) host_paths: HostPaths,
     pub state: Mutex<State>,
     pub journal: Mutex<std::fs::File>,
     pub appserver_candidate_check: Arc<AppServerCandidateCheck>,
@@ -1512,13 +1513,15 @@ fn validate_transport_candidates(
         return Err("TRANSPORT_NONE: server self-check found no App Server candidate".into());
     };
     let state = server.state.lock().unwrap();
-    if let Some(owner) = appserver_thread_owner(&state, &candidate.thread_id) {
-        if owner != worker_id {
+    match appserver_thread_binding(&state, &candidate.thread_id) {
+        Ok(Some(binding)) if binding.agent_id.as_str() != worker_id => {
             return Err(format!(
                 "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
-                candidate.thread_id, owner
+                candidate.thread_id, binding.agent_id
             ));
         }
+        Ok(_) => {}
+        Err(error) => return Err(error),
     }
     drop(state);
     match (server.appserver_candidate_check)(candidate) {
@@ -1538,19 +1541,39 @@ fn validate_transport_candidates(
     }
 }
 
-fn appserver_thread_owner(state: &State, thread_id: &str) -> Option<String> {
-    state
+fn appserver_thread_binding<'a>(
+    state: &'a State,
+    thread_id: &str,
+) -> Result<Option<&'a RuntimeBinding>, String> {
+    let mut bindings = state
         .global
         .projects
         .values()
         .flat_map(|project| project.runtime_bindings.values())
-        .find(|binding| {
+        .filter(|binding| {
             binding
                 .native_thread_id
                 .as_ref()
                 .is_some_and(|native_thread_id| native_thread_id.as_str() == thread_id)
-        })
-        .map(|binding| binding.agent_id.as_str().to_owned())
+        });
+    let Some(binding) = bindings.next() else {
+        return Ok(None);
+    };
+    if bindings.next().is_some() {
+        return Err(format!(
+            "RUNTIME_BINDING_REJECTED: App Server thread {thread_id} is bound to multiple workers"
+        ));
+    }
+    Ok(Some(binding))
+}
+
+fn current_thread_binding<'a>(
+    state: &'a State,
+    thread_id: &str,
+) -> Result<Option<&'a RuntimeBinding>, String> {
+    let native_thread_id = NativeThreadId::new(thread_id.to_owned())
+        .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+    Ok(state.global.lookup_current_thread_route(&native_thread_id))
 }
 
 type RouteKey = (String, String);
@@ -1878,6 +1901,86 @@ impl ProjectRuntimeManager {
         Ok(manager)
     }
 
+    fn native_thread_binding(&self, thread_id: &str) -> Result<Option<RuntimeBinding>, String> {
+        let runtimes = {
+            let routes = self.routes.lock().unwrap();
+            let mut runtimes = Vec::new();
+            for route in routes.values() {
+                let Some(runtime) = route.runtime.as_ref() else {
+                    continue;
+                };
+                if runtimes
+                    .iter()
+                    .any(|existing: &Arc<Server>| Arc::ptr_eq(existing, runtime))
+                {
+                    continue;
+                }
+                runtimes.push(runtime.clone());
+            }
+            runtimes
+        };
+        let mut bindings = Vec::new();
+        {
+            let state = self.host.state.lock().unwrap();
+            if let Some(binding) = appserver_thread_binding(&state, thread_id)? {
+                bindings.push(binding.clone());
+            }
+        }
+        for runtime in runtimes {
+            let state = runtime.state.lock().unwrap();
+            if let Some(binding) = appserver_thread_binding(&state, thread_id)? {
+                if !bindings.iter().any(|existing| existing == binding) {
+                    bindings.push(binding.clone());
+                }
+            }
+        }
+        let Some(binding) = bindings.first().cloned() else {
+            return Ok(None);
+        };
+        if bindings.iter().any(|candidate| candidate != &binding) {
+            return Err(format!(
+                "RUNTIME_BINDING_REJECTED: App Server thread {thread_id} is bound to multiple workers"
+            ));
+        }
+        Ok(Some(binding))
+    }
+
+    fn validate_current_thread_candidate(
+        &self,
+        context: &ProjectContext,
+        req: &Req,
+    ) -> Result<(), String> {
+        let Req::Register {
+            worker_id,
+            candidates: Some(candidates),
+            ..
+        } = req
+        else {
+            return Ok(());
+        };
+        let Some(candidate) = candidates.appserver.as_ref() else {
+            return Ok(());
+        };
+        let Some(binding) = self.native_thread_binding(&candidate.thread_id)? else {
+            return Ok(());
+        };
+        if binding.agent_id.as_str() != worker_id {
+            return Err(format!(
+                "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
+                candidate.thread_id, binding.agent_id
+            ));
+        }
+        if binding.app_scope_id != context.app_scope_id
+            || binding.project_scope != context.project_scope
+        {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: App Server thread belongs to another project route"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     fn runtimes(&self) -> Vec<Arc<Server>> {
         let mut result = Vec::new();
         let routes = self.routes.lock().unwrap();
@@ -2006,16 +2109,26 @@ impl ProjectRuntimeManager {
                 "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
             )
         })?;
-        if self
+        let current = self
             .host
             .state
             .lock()
             .unwrap()
             .global
             .lookup_current_thread_route(native_thread_id)
-            == Some(&binding)
-        {
+            .cloned();
+        if current.as_ref() == Some(&binding) {
             return Ok(());
+        }
+        if let Some(existing) = current {
+            if existing.agent_id != binding.agent_id
+                || existing.route_scope() != binding.route_scope()
+            {
+                return Err(format!(
+                    "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
+                    native_thread_id, existing.agent_id
+                ));
+            }
         }
         self.host
             .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
@@ -2156,6 +2269,7 @@ impl ProjectRuntimeManager {
             root,
             storage_root,
             journal_path,
+            host_paths: self.host.host_paths.clone(),
             state: Mutex::new(state),
             journal: Mutex::new(journal_file),
             appserver_candidate_check: self.host.appserver_candidate_check.clone(),
@@ -2590,6 +2704,9 @@ impl ProjectRuntimeManager {
             _ => None,
         };
         let _register_guard = is_register.then(|| self.register_gate.lock().unwrap());
+        if let Err(error) = self.validate_current_thread_candidate(&context, &req) {
+            return (self.host.clone(), Resp::err(error));
+        }
         if matches!(req, Req::CrossProjectSend { .. }) {
             return self.dispatch_cross_project_send(&context, req);
         }
@@ -3577,6 +3694,7 @@ mod notification_batch_tests {
                 root: root.clone(),
                 storage_root: root.clone(),
                 journal_path: root.join(".agent-collab/server/journal.jsonl"),
+                host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
                 state: Mutex::new(State::default()),
                 journal: Mutex::new(journal),
                 appserver_candidate_check: Arc::new(|candidate| {
@@ -8910,21 +9028,25 @@ fn validate_cli_register_rebind(
     };
     let expected_binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
         .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
+    let orphan_recovery;
+    let persisted_thread_id;
     {
         let state = server.state.lock().unwrap();
-        let worker = state.workers.get(worker_id).cloned().ok_or_else(|| {
-            "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
-                .to_owned()
-        })?;
-        let Some(project) = state.global.lookup_project_for_route(&route_scope) else {
+        if state
+            .global
+            .lookup_project_for_route(&route_scope)
+            .is_none()
+        {
             return Err(
                 "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker has no registered runtime route"
                     .into(),
             );
-        };
-        let bindings = project
-            .runtime_bindings
+        }
+        let bindings = state
+            .global
+            .projects
             .values()
+            .flat_map(|project| project.runtime_bindings.values())
             .filter(|binding| binding.agent_id.as_str() == worker_id)
             .collect::<Vec<_>>();
         if bindings.len() != 1 {
@@ -8933,6 +9055,14 @@ fn validate_cli_register_rebind(
             );
         }
         let binding = bindings[0];
+        if binding.app_scope_id != route_scope.app_scope_id
+            || binding.project_scope != route_scope.project_scope_id
+        {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: registered worker binding does not match the CLI route"
+                    .into(),
+            );
+        }
         if binding.binding_id != expected_binding_id {
             return Err(
                 "RUNTIME_BINDING_REJECTED: registered worker binding does not match the CLI route"
@@ -8948,7 +9078,13 @@ fn validate_cli_register_rebind(
         binding
             .validate()
             .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
-        if worker.token != token {
+        persisted_thread_id = binding
+            .native_thread_id
+            .as_ref()
+            .map(|thread_id| thread_id.as_str().to_owned());
+        let persisted_worker = state.workers.get(worker_id);
+        orphan_recovery = persisted_worker.is_none();
+        if persisted_worker.is_some_and(|worker| worker.token != token) {
             let Some(candidate) = candidates
                 .as_ref()
                 .and_then(|candidates| candidates.appserver.as_ref())
@@ -8966,17 +9102,20 @@ fn validate_cli_register_rebind(
                         runtime.agent_id == binding.agent_id
                             && runtime.native_thread_id == binding.native_thread_id
                     });
-            if appserver_thread_owner(&state, &candidate.thread_id).as_deref() != Some(worker_id)
-                || !same_runtime_thread
-            {
+            let candidate_owner = appserver_thread_binding(&state, &candidate.thread_id)
+                .map(|binding| binding.map(|binding| binding.agent_id.as_str()))?;
+            if candidate_owner != Some(worker_id) || !same_runtime_thread {
                 return Err(
                     "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
                         .to_owned(),
                 );
             }
         }
+        let worker_cwd = persisted_worker
+            .map(|worker| worker.cwd.as_str())
+            .unwrap_or(project_context.canonical_root.as_str());
         let worker_scope =
-            GlobalState::canonical_project_scope(Path::new(&worker.cwd)).map_err(|error| {
+            GlobalState::canonical_project_scope(Path::new(worker_cwd)).map_err(|error| {
                 format!("RUNTIME_BINDING_REJECTED: worker cwd is not a project route: {error}")
             })?;
         if worker_scope != route_scope.project_scope_id {
@@ -8984,6 +9123,43 @@ fn validate_cli_register_rebind(
                 "RUNTIME_BINDING_REJECTED: worker cwd does not match the requested project route"
                     .into(),
             );
+        }
+        if orphan_recovery {
+            let persisted = crate::identity::read_persisted(&server.host_paths, worker_id)
+                .map_err(|error| {
+                    format!("RUNTIME_BINDING_REJECTED: read persisted identity: {error}")
+                })?
+                .ok_or_else(|| {
+                    "RUNTIME_BINDING_REJECTED: orphan recovery requires a persisted identity"
+                        .to_owned()
+                })?;
+            let persisted_runtime = persisted.runtime.as_ref().ok_or_else(|| {
+                "RUNTIME_BINDING_REJECTED: persisted identity has no registered runtime".to_owned()
+            })?;
+            let registered_runtime = crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                binding_id: binding.binding_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            };
+            if persisted.worker_id != worker_id
+                || persisted.token != token
+                || persisted.project_scope.as_ref() != Some(&route_scope.project_scope_id)
+            {
+                return Err(
+                    "RUNTIME_BINDING_REJECTED: persisted identity does not own the registered worker"
+                        .to_owned(),
+                );
+            }
+            crate::identity::validate_binding(&registered_runtime, persisted_runtime).map_err(
+                |error| {
+                    format!(
+                        "RUNTIME_BINDING_REJECTED: persisted identity runtime does not match the registered binding: {error}"
+                    )
+                },
+            )?;
         }
     }
 
@@ -8994,13 +9170,40 @@ fn validate_cli_register_rebind(
         .ok_or_else(|| {
             "RUNTIME_BINDING_REJECTED: CLI rebind requires an App Server candidate".to_owned()
         })?;
-    if let Some(owner) = appserver_thread_owner(&server.state.lock().unwrap(), &candidate.thread_id)
-    {
-        if owner != worker_id {
+    let state = server.state.lock().unwrap();
+    let candidate_binding = appserver_thread_binding(&state, &candidate.thread_id)?;
+    if orphan_recovery {
+        let Some(candidate_binding) = candidate_binding else {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted App Server thread"
+                    .to_owned(),
+            );
+        };
+        if candidate_binding.agent_id.as_str() != worker_id
+            || candidate_binding.binding_id != expected_binding_id
+            || candidate_binding.app_scope_id != route_scope.app_scope_id
+            || candidate_binding.project_scope != route_scope.project_scope_id
+            || persisted_thread_id.as_deref() != Some(candidate.thread_id.as_str())
+        {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted App Server thread"
+                    .to_owned(),
+            );
+        }
+    } else if let Some(candidate_binding) = candidate_binding {
+        if candidate_binding.agent_id.as_str() != worker_id {
             return Err(format!(
                 "RUNTIME_BINDING_REJECTED: candidate App Server thread {} is already bound to worker {}",
-                candidate.thread_id, owner
+                candidate.thread_id, candidate_binding.agent_id
             ));
+        }
+        if candidate_binding.app_scope_id != route_scope.app_scope_id
+            || candidate_binding.project_scope != route_scope.project_scope_id
+        {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: candidate App Server thread belongs to another project route"
+                    .to_owned(),
+            );
         }
     }
     Ok(())
@@ -9847,6 +10050,30 @@ fn validate_wire_route_principals(
             WireRoutePrincipal::Authenticated { worker_id, .. }
             | WireRoutePrincipal::Selected { worker_id } => worker_id,
         };
+        if let Req::Register {
+            candidates: Some(candidates),
+            ..
+        } = req
+        {
+            if let Some(candidate) = candidates.appserver.as_ref() {
+                if let Some(binding) = current_thread_binding(&state, &candidate.thread_id)? {
+                    if binding.agent_id.as_str() != worker_id {
+                        return Err(format!(
+                            "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
+                            candidate.thread_id, binding.agent_id
+                        ));
+                    }
+                    if binding.app_scope_id != route_scope.app_scope_id
+                        || binding.project_scope != route_scope.project_scope_id
+                    {
+                        return Err(
+                            "RUNTIME_BINDING_REJECTED: App Server thread belongs to another project route"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
         let bindings = state
             .global
             .projects
@@ -9856,16 +10083,25 @@ fn validate_wire_route_principals(
             .collect::<Vec<_>>();
 
         // A new wire Register is the only request allowed to create its first
-        // binding.  A same-named binding in another project remains a route
-        // conflict even when the resident legacy worker projection is absent.
+        // binding.  A binding in another project remains a route conflict even
+        // when the resident legacy worker projection is absent.  A unique
+        // binding on the exact incoming route is the recovery shape after a
+        // daemon restart, so let the existing register preflight validate its
+        // token and runtime identity.
         if matches!(req, Req::Register { .. }) && state.workers.get(worker_id).is_none() {
             if bindings.is_empty() {
                 continue;
             }
-            return Err(format!(
-                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} is already bound to another project route",
-                worker_id
-            ));
+            if bindings.len() != 1
+                || bindings[0].app_scope_id != route_scope.app_scope_id
+                || bindings[0].project_scope != route_scope.project_scope_id
+            {
+                return Err(format!(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} is already bound to another project route",
+                    worker_id
+                ));
+            }
+            continue;
         }
 
         let mut routes = std::collections::BTreeSet::new();
@@ -10076,6 +10312,7 @@ mod host_route_registry_tests {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: journal_path.clone(),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
             journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
@@ -11068,7 +11305,7 @@ mod host_route_registry_tests {
     }
 
     #[tokio::test]
-    async fn native_thread_route_resolution_uses_latest_cross_project_registration() {
+    async fn native_thread_route_resolution_rejects_cross_project_thread_reuse() {
         let (server, root, host_journal) = test_server();
         let project_a = root.with_file_name(format!(
             "{}-current-a",
@@ -11108,18 +11345,25 @@ mod host_route_registry_tests {
                 candidates: test_candidates(shared_thread),
             },
         );
-        assert!(second.ok, "{second:?}");
+        assert!(!second.ok, "{second:?}");
+        assert!(
+            second
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")),
+            "{second:?}"
+        );
 
         let current = manager
             .resolve_route_by_native_thread(shared_thread)
             .unwrap();
         assert_eq!(
             current.project_scope.as_str(),
-            context_b.project_scope.as_str()
+            context_a.project_scope.as_str()
         );
-        assert_eq!(current.app_scope_id.as_str(), "current-app-b");
-        assert_eq!(current.agent_id.as_str(), "current-worker-b");
-        assert_eq!(current.binding_id.as_str(), "binding-current-worker-b");
+        assert_eq!(current.app_scope_id.as_str(), "current-app-a");
+        assert_eq!(current.agent_id.as_str(), "current-worker-a");
+        assert_eq!(current.binding_id.as_str(), "binding-current-worker-a");
 
         let (_, rejected) = manager.dispatch_sync(
             Some(context_b.clone()),
@@ -11152,6 +11396,7 @@ mod host_route_registry_tests {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: host_journal.clone(),
+            host_paths: host_paths.clone(),
             state: Mutex::new(replay(&root).unwrap()),
             journal: Mutex::new(
                 std::fs::OpenOptions::new()
@@ -14447,6 +14692,275 @@ mod host_route_registry_tests {
     }
 
     #[tokio::test]
+    async fn wire_register_recovers_an_orphan_binding_on_the_same_route() {
+        let (server, root, _) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "orphan-binding-worker";
+        let token = "token-orphan-binding-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
+        write_global_identity(
+            &server.host_paths,
+            worker_id,
+            token,
+            Some(&GlobalState::canonical_project_scope(&root).unwrap()),
+            &old_runtime,
+        );
+
+        // A daemon restart may replay the durable binding while the resident
+        // worker projection is absent.  The same identity and route must be
+        // able to recover that binding instead of being treated as a
+        // cross-project registration.
+        server.state.lock().unwrap().workers.remove(worker_id);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let recovered = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(recovered.ok, "{recovered:?}");
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.workers[worker_id].token, token);
+        let bindings = state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .collect::<Vec<_>>();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].endpoint_generation,
+            old_runtime.endpoint_generation + 1
+        );
+        assert_eq!(
+            bindings[0].binding_id,
+            BindingId::new(format!("binding-{worker_id}")).unwrap()
+        );
+        assert_eq!(bindings[0].app_scope_id.as_str(), app);
+        assert_eq!(
+            bindings[0].project_scope,
+            GlobalState::canonical_project_scope(&root).unwrap()
+        );
+        assert_eq!(
+            bindings[0].native_thread_id.as_ref().unwrap().as_str(),
+            format!("thread-{worker_id}")
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_register_orphan_recovery_rejects_an_unbound_replacement_thread() {
+        let (server, root, journal_path) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "orphan-binding-negative-worker";
+        let token = "token-orphan-binding-negative-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let runtime = runtime_for_registered(&server, &root, worker_id, app);
+        write_global_identity(
+            &server.host_paths,
+            worker_id,
+            token,
+            Some(&GlobalState::canonical_project_scope(&root).unwrap()),
+            &runtime,
+        );
+
+        server.state.lock().unwrap().workers.remove(worker_id);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let forged = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: "forged-token".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-unbound-replacement"),
+            },
+        )
+        .await;
+        assert!(!forged.ok, "{forged:?}");
+        assert!(forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_register_orphan_recovery_rejects_a_forged_token_on_the_persisted_thread() {
+        let (server, root, journal_path) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "orphan-binding-forged-token-worker";
+        let token = "token-orphan-binding-forged-token-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let runtime = runtime_for_registered(&server, &root, worker_id, app);
+        write_global_identity(
+            &server.host_paths,
+            worker_id,
+            token,
+            Some(&GlobalState::canonical_project_scope(&root).unwrap()),
+            &runtime,
+        );
+
+        server.state.lock().unwrap().workers.remove(worker_id);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let forged = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: "forged-token".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(!forged.ok, "{forged:?}");
+        assert!(forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_register_orphan_recovery_rejects_ambiguous_global_bindings() {
+        let (server, root, journal_path) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "orphan-binding-ambiguous-worker";
+        let token = "token-orphan-binding-ambiguous-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let runtime = runtime_for_registered(&server, &root, worker_id, app);
+        write_global_identity(
+            &server.host_paths,
+            worker_id,
+            token,
+            Some(&GlobalState::canonical_project_scope(&root).unwrap()),
+            &runtime,
+        );
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let ambiguous = RuntimeBinding::new(
+            project_scope.clone(),
+            AppServerId::new(app).unwrap(),
+            AgentId::new(worker_id.to_owned()).unwrap(),
+            RuntimeId::new("runtime-orphan-ambiguous").unwrap(),
+            BindingId::new("binding-orphan-ambiguous").unwrap(),
+            runtime.endpoint_generation,
+            runtime.native_thread_id.clone(),
+        )
+        .unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .projects
+            .get_mut(project_scope.as_str())
+            .unwrap()
+            .runtime_bindings
+            .insert(ambiguous.binding_id.as_str().into(), ambiguous);
+        server.state.lock().unwrap().workers.remove(worker_id);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let rejected = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(!rejected.ok, "{rejected:?}");
+        assert!(rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")
+                || error.starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn wire_cli_recover_rejects_forged_token_thread_and_route() {
         let (server, root, journal_path) = test_server();
         let app = crate::identity::CLI_APP_SERVER_ID;
@@ -15475,6 +15989,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         root: scope.root.clone(),
         storage_root: scope.root.clone(),
         journal_path: project_server_dir.join("journal.jsonl"),
+        host_paths: host_paths.clone(),
         state: Mutex::new(state),
         journal: Mutex::new(journal_file),
         appserver_candidate_check: default_appserver_candidate_check(),
@@ -15565,6 +16080,7 @@ mod reducer_binding_tests {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
             journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {
@@ -15675,6 +16191,7 @@ mod reducer_binding_tests {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
             journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {

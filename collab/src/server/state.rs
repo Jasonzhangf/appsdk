@@ -290,7 +290,6 @@ pub struct WorkerCloseReceipt {
     pub snapshot_captured_ms: Option<i64>,
     pub at_ms: i64,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerAdmissionRecord {
     pub request_id: String,
@@ -1557,6 +1556,51 @@ mod tests {
             std::process::id(),
             REPLAY_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn notification_delivery_failure_replays_and_compacts() {
+        let mut state = State::default();
+        let event = Event::NotificationDeliveryFailed {
+            message_id: "msg-persisted-failure".into(),
+            operation: "notification.emitted".into(),
+            error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
+            failed_ms: 42,
+        };
+        state.apply(&event);
+        assert_eq!(
+            state.notification_delivery_failures["msg-persisted-failure"],
+            NotificationDeliveryFailure {
+                message_id: "msg-persisted-failure".into(),
+                operation: "notification.emitted".into(),
+                error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
+                failed_ms: 42,
+            }
+        );
+
+        let compacted = state.snapshot_events();
+        assert!(compacted.iter().any(|candidate| {
+            matches!(
+                candidate,
+                Event::NotificationDeliveryFailed {
+                    message_id,
+                    operation,
+                    error,
+                    failed_ms,
+                } if message_id == "msg-persisted-failure"
+                    && operation == "notification.emitted"
+                    && error == "ADAPTER_ROUTE_UNAVAILABLE: persisted failure"
+                    && *failed_ms == 42
+            )
+        }));
+        let mut replayed = State::default();
+        for event in compacted {
+            replayed.apply(&event);
+        }
+        assert_eq!(
+            replayed.notification_delivery_failures,
+            state.notification_delivery_failures
+        );
     }
 
     #[test]

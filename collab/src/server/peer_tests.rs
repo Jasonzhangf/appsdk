@@ -23,6 +23,7 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(State::default()),
             journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| {
@@ -1518,6 +1519,7 @@ fn replayed_command_is_idempotent_and_operation_conflict_fails_closed() {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(super::replay(&root).unwrap()),
             journal: Mutex::new(journal),
             appserver_candidate_check: crate::server::default_appserver_candidate_check(),
@@ -1903,6 +1905,11 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
         server.state.lock().unwrap().subagents["managed"].status,
         "idle"
     );
+    server.commit(&[Event::SubagentSnapshotCaptured {
+        subagent_id: "managed".into(),
+        thread_id: "thread-child".into(),
+        captured_ms: now_ms(),
+    }]);
     assert!(
         crate::subagent::handle(
             &server,

@@ -376,6 +376,18 @@ fn identity_path_at(host_paths: &HostPaths, worker_id: &str) -> anyhow::Result<P
         .join("identity.json"))
 }
 
+/// Read the persisted host identity for one exact worker.
+///
+/// This is intentionally read-only. Recovery callers must prove that the
+/// requested token and runtime still match the global identity record before
+/// rebuilding a missing resident worker projection.
+pub(crate) fn read_persisted(
+    host_paths: &HostPaths,
+    worker_id: &str,
+) -> anyhow::Result<Option<Identity>> {
+    read_identity(&identity_path_at(host_paths, worker_id)?)
+}
+
 fn identity_temp_path(path: &std::path::Path) -> PathBuf {
     path.parent().unwrap().join(format!(
         "identity.json.tmp.{}.{}",

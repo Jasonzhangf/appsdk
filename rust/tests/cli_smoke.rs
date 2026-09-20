@@ -9606,9 +9606,7 @@ fn pin_lock_rejects_equal_malformed_bundle_witness_without_overwrite() {
         binary().to_str().unwrap(),
     ]);
     assert!(!rejected.status.success());
-    assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED")
-    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
     assert_eq!(fs::read_to_string(&lock_path).unwrap(), malformed_lock);
     assert_eq!(fs::read_to_string(&record_path).unwrap(), malformed_record);
     fs::remove_dir_all(root).unwrap();
@@ -9809,6 +9807,60 @@ fn pin_lock_rejects_custom_map_record_from_bundle_reconciliation() {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_malformed_migration_record_bundle_digest() {
+    let root = temp_root("invalid-migration-record-bundle-digest");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, _) = install_previous_bundle_migration_record(&root);
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let mut record: Value = serde_json::from_str(&original_record).unwrap();
+    record["bundle_digest"] = Value::String("sha256:invalid".into());
+    fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let rejected = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pin_lock_rejects_migration_record_missing_required_map_digest() {
+    for field in ["source_digest", "target_digest"] {
+        let root = temp_root(&format!("invalid-migration-record-missing-{field}"));
+        let root_text = root.to_str().unwrap();
+        assert!(run(&["new", root_text]).status.success());
+        let (original_record, _) = install_previous_bundle_migration_record(&root);
+        let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+        let mut record: Value = serde_json::from_str(&original_record).unwrap();
+        record["maps"][0].as_object_mut().unwrap().remove(field);
+        fs::write(
+            &record_path,
+            serde_json::to_string_pretty(&record).unwrap() + "\n",
+        )
+        .unwrap();
+
+        let rejected = run(&[
+            "pin-lock",
+            root_text,
+            "--binary",
+            binary().to_str().unwrap(),
+        ]);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_MIGRATION_RECORD"));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

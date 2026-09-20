@@ -14524,7 +14524,7 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
         || record
             .get("bundle_digest")
             .and_then(Value::as_str)
-            .filter(|digest| digest.starts_with("sha256:"))
+            .filter(|digest| valid_bundle_digest(digest))
             .is_none()
         || DateTime::parse_from_rfc3339(record_str(&record, "/created_at", "sdk-migration-record"))
             .is_err()
@@ -14548,10 +14548,12 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
         let expected_snapshot = format!(".appsdk/migrations/{step}/maps/{}", name);
         let canonical_source = entry
             .get("canonical_source_digest")
-            .unwrap_or_else(|| entry.get("source_digest").unwrap());
+            .or_else(|| entry.get("source_digest"))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
         let canonical_target = entry
             .get("canonical_target_digest")
-            .unwrap_or_else(|| entry.get("target_digest").unwrap());
+            .or_else(|| entry.get("target_digest"))
+            .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
         let explicit_custom_source = entry
             .get("canonical_source_digest")
             .is_some_and(|value| !value.is_null());
@@ -14565,11 +14567,7 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
                 && explicit_custom_target
                 && !(bundle_transition
                     && Some(canonical_target) == entry.get("target_digest")
-                    && canonical_target.as_str().is_some_and(|digest| {
-                        digest.strip_prefix("sha256:").is_some_and(|hex| {
-                            hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        })
-                    })))
+                    && canonical_target.as_str().is_some_and(valid_bundle_digest)))
             || entry.get("snapshot_path").and_then(Value::as_str)
                 != Some(expected_snapshot.as_str())
         {

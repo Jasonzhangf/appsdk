@@ -3765,6 +3765,11 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     );
     assert!(first.ok, "{}", first.error.unwrap_or_default());
     let receipt_id = first.data["receipt_id"].as_str().unwrap().to_owned();
+    assert_eq!(first.data["cleanup"]["result"], "unverified");
+    assert_eq!(
+        first.data["next_action"],
+        "manual close recorded; worktree/branch cleanup remains unverified"
+    );
     let task_updated_ms = server.state.lock().unwrap().tasks["orphan"].updated_ms;
     let journal_path = root.join(".agent-collab/server/journal.jsonl");
     let journal_after_first = std::fs::read_to_string(&journal_path).unwrap();
@@ -3781,6 +3786,11 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
     assert!(second.ok, "{}", second.error.unwrap_or_default());
     assert_eq!(second.data["idempotent"], true);
     assert_eq!(second.data["receipt_id"], receipt_id);
+    assert_eq!(second.data["cleanup"]["result"], "unverified");
+    assert_eq!(
+        second.data["next_action"],
+        "manual close recorded; worktree/branch cleanup remains unverified"
+    );
     assert_eq!(
         server.state.lock().unwrap().tasks["orphan"].updated_ms,
         task_updated_ms
@@ -3790,6 +3800,20 @@ fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
         journal_after_first
     );
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_manual_cleanup_receipt_replays_as_unverified() {
+    let receipt: CleanupReceipt = serde_json::from_value(json!({
+        "id": "cleanup-manual-legacy-1",
+        "task_id": "legacy-task",
+        "worktree_path": "playground/legacy-task",
+        "branch": "codex/legacy-task",
+        "verified_ms": 1,
+        "manual_reason": "legacy force close without verified cleanup",
+    }))
+    .unwrap();
+    assert_eq!(receipt.verification, CleanupVerification::Unverified);
 }
 
 #[test]

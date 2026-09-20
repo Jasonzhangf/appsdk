@@ -349,6 +349,7 @@ pub struct TaskLifecycleRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "CleanupReceiptRepr")]
 pub struct CleanupReceipt {
     pub id: String,
     pub task_id: String,
@@ -361,12 +362,52 @@ pub struct CleanupReceipt {
     pub manual_reason: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CleanupReceiptRepr {
+    id: String,
+    task_id: String,
+    worktree_path: Option<String>,
+    branch: Option<String>,
+    verified_ms: i64,
+    #[serde(default)]
+    verification: Option<CleanupVerification>,
+    #[serde(default)]
+    manual_reason: Option<String>,
+}
+
+impl From<CleanupReceiptRepr> for CleanupReceipt {
+    fn from(receipt: CleanupReceiptRepr) -> Self {
+        let verification = receipt
+            .verification
+            .unwrap_or_else(|| CleanupVerification::legacy(&receipt.manual_reason));
+        Self {
+            id: receipt.id,
+            task_id: receipt.task_id,
+            worktree_path: receipt.worktree_path,
+            branch: receipt.branch,
+            verified_ms: receipt.verified_ms,
+            verification,
+            manual_reason: receipt.manual_reason,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupVerification {
     #[default]
     Verified,
     Unverified,
+}
+
+impl CleanupVerification {
+    fn legacy(manual_reason: &Option<String>) -> Self {
+        if manual_reason.is_some() {
+            Self::Unverified
+        } else {
+            Self::Verified
+        }
+    }
 }
 
 pub fn task_resource_active(status: &str) -> bool {

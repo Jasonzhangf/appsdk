@@ -7262,6 +7262,7 @@ fn handle_task_close(
                     && receipt.worktree_path == task.worktree_path
                     && receipt.branch == task.branch
             }) {
+                let cleanup_verified = receipt.verification == CleanupVerification::Verified;
                 return Resp::data(json!({
                     "task": task.id,
                     "status": task.status,
@@ -7269,12 +7270,20 @@ fn handle_task_close(
                     "manual": true,
                     "reason": receipt.manual_reason,
                     "receipt_id": receipt.id,
+                    "cleanup": {
+                        "result": if cleanup_verified { "verified" } else { "unverified" },
+                        "reason": receipt.manual_reason,
+                    },
                     "superseded_pending_keepalives": [],
                     "stale_workers": stale_worker_views(&st, &|worker| {
                         worker_identity_presence(server, worker)
                     }),
                     "idempotent": true,
-                    "next_action": "lifecycle complete; keepalives for this task owner stopped",
+                    "next_action": if cleanup_verified {
+                        "lifecycle complete; keepalives for this task owner stopped"
+                    } else {
+                        "manual close recorded; worktree/branch cleanup remains unverified"
+                    },
                 }));
             }
         }

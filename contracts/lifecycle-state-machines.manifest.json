@@ -4,9 +4,9 @@
     "initial": "open",
     "chains": [
       {"chain_id":"single-worker-v1","scenario_condition":"parallel_pair_disabled","states":["open","worktree_ready","reproduced","fix_candidate","pre_review_validated","architecture_reviewed","effectiveness_verified","mainline_merged","promoted","closed"]},
-      {"chain_id":"parallel-worktree-v1","scenario_condition":"parallel_pair_enabled","states":["open","collaboration_claimed","worktree_ready","reproduced","fix_candidate","pre_review_validated","architecture_reviewed","effectiveness_verified","merge_queued","integration_built","integration_verified","mainline_merged","remote_verified","promoted","closed"]}
+      {"chain_id":"parallel-worktree-v1","scenario_condition":"parallel_pair_enabled","states":["open","collaboration_claimed","worktree_ready","reproduced","fix_candidate","pre_review_validated","architecture_reviewed","effectiveness_verified","merge_queued","integration_built","integration_verified","mainline_merged","remote_verified","collab_live_closed","promoted","closed"]}
     ],
-    "states": ["open","collaboration_claimed","worktree_ready","reproduced","fix_candidate","pre_review_validated","architecture_reviewed","effectiveness_verified","merge_queued","integration_built","integration_verified","mainline_merged","remote_verified","promoted","closed"],
+    "states": ["open","collaboration_claimed","worktree_ready","reproduced","fix_candidate","pre_review_validated","architecture_reviewed","effectiveness_verified","merge_queued","integration_built","integration_verified","mainline_merged","remote_verified","collab_live_closed","promoted","closed"],
     "transitions": [
       {"from":"open","to":"collaboration_claimed","scenario_condition":"parallel_pair_enabled","requirements":["exclusive_worker","exclusive_semantic_claim","scenario_pair_enabled"]},
       {"from":"open","to":"worktree_ready","scenario_condition":"parallel_pair_disabled","requirements":["isolated_worktree","initial_clean","base_commit","scope_hash"]},
@@ -23,7 +23,8 @@
       {"from":"integration_verified","to":"mainline_merged","scenario_condition":"parallel_pair_enabled","requirements":["tested_integration_commit_merged"]},
       {"from":"mainline_merged","to":"remote_verified","scenario_condition":"parallel_pair_enabled","requirements":["remote_main_receipt"]},
       {"from":"mainline_merged","to":"promoted","scenario_condition":"parallel_pair_disabled","requirements":["promotion_record","record_graph_pass"]},
-      {"from":"remote_verified","to":"promoted","scenario_condition":"parallel_pair_enabled","requirements":["promotion_record","record_graph_pass","debug_merge_comment"]},
+      {"from":"remote_verified","to":"collab_live_closed","scenario_condition":"parallel_pair_enabled","requirements":["collab_live_closure"]},
+      {"from":"collab_live_closed","to":"promoted","scenario_condition":"parallel_pair_enabled","requirements":["promotion_record","record_graph_pass","debug_merge_comment"]},
       {"from":"promoted","to":"closed","requirements":["closeout_record","playground_cleanup"]}
     ]
   },

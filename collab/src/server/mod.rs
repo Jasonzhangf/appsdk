@@ -4941,10 +4941,24 @@ pub(crate) fn registered_idle_peer_for_admission(
     let probed: Vec<WorkerRec> = candidates
         .into_iter()
         .filter(|worker| {
-            matches!(
+            if !matches!(
                 worker_identity_presence(server, worker),
                 IdentityPresence::Present
-            )
+            ) {
+                return false;
+            }
+            if !worker
+                .transport
+                .as_ref()
+                .is_some_and(|transport| transport.kind == TransportKind::AppServer)
+            {
+                return true;
+            }
+            appserver_agent_view(server, worker)
+                .0
+                .get("can_accept_direct_input")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
         })
         .collect();
 
@@ -15652,6 +15666,26 @@ mod scheduler_admission_tests {
                 .as_deref(),
             Some("existing-child")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admission_excludes_appserver_peer_that_cannot_accept_direct_input() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "not-loaded-peer", "%not-loaded-peer");
+        server.appserver_thread_status = Arc::new(|_, thread_id| {
+            Ok(serde_json::json!({
+                "thread": {
+                    "id": thread_id,
+                    "status": {"type": "notLoaded"},
+                    "canAcceptDirectInput": false,
+                    "turns": [{"status": "interrupted"}]
+                }
+            }))
+        });
+
+        assert!(registered_idle_peer_for_admission(&server, "master").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

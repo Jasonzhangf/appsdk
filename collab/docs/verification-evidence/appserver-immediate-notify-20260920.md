@@ -1,15 +1,18 @@
 # App Server immediate-notification verification evidence
 
-Base: `0f3005cbcb4aa4ca4bd6a6ad2427367d72727630`
-Candidate: `8b9c06a624a804d4bab2849ae937492d2bf6b5d1`
-Environment: macOS arm64, Codex CLI `0.154.0`, Collab `0.2.0043`
+Base: `448ace19b0e949f1d8a1919c259e46f6219dbd3c`
+Code candidate: `e3b34e2fc96cd4913c96a00942c7665bb6bf22bd`
+Code tree: `d6da3ea284df7ce94be9dc2fac7ef804cbd7199a`
+Environment: macOS arm64, Codex CLI `0.154.0`, Collab `0.2.0048`
 
-The review scope binds this evidence to the exact candidate commit and tree.
+The isolated checks below ran against the exact code candidate tree above.
+This evidence document is committed in a docs-only child of that candidate;
+the code tree is unchanged by that child.
 
 ## Isolation
 
 - Started a disposable `codex app-server` with a temporary `CODEX_HOME` and
-  `unix://` socket under `/tmp`.
+  `unix://` socket under `/tmp/collab-9cb568f-integration.hjFaBC`.
 - Created two real persisted App Server threads through `thread/start`.
 - Used no existing `~/.collab` route, daemon, socket, device, or terminal
   session.
@@ -19,8 +22,8 @@ The review scope binds this evidence to the exact candidate commit and tree.
 Observed isolated identities:
 
 ```text
-thread_a=01a0c0ce-09a7-74d2-8d20-4a09f8126cc6
-thread_b=01a0c0ce-0a4e-7412-a9d9-4018073b9a90
+thread_a=01a0c0ef-a610-7b61-9aca-194d2c57f67b
+thread_b=01a0c0ef-a656-76f2-a291-a59344fe438e
 ```
 
 ## Loaded admission

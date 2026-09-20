@@ -27,9 +27,10 @@ use mailbox::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use state::{
-    goal_deadline_key, now_ms, task_resource_active, wait_cycle, CleanupReceipt, Event,
-    GlobalEvent, Message, MigrationRecord, NotificationSubscription, State, TaskRec, TypedCommand,
-    TypedEnvelope, WaitSpec, WorkerRec, WorktreeBinding, MAX_WAKE_ATTEMPTS,
+    goal_deadline_key, now_ms, task_resource_active, wait_cycle, CleanupReceipt,
+    CleanupVerification, Event, GlobalEvent, Message, MigrationRecord, NotificationSubscription,
+    State, TaskRec, TypedCommand, TypedEnvelope, WaitSpec, WorkerRec, WorktreeBinding,
+    MAX_WAKE_ATTEMPTS,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7288,6 +7289,7 @@ fn handle_task_close(
             worktree_path: closed.worktree_path.clone(),
             branch: closed.branch.clone(),
             verified_ms: closed.updated_ms,
+            verification: CleanupVerification::Unverified,
             manual_reason: Some(reason.clone()),
         };
         let superseded: Vec<String> = st
@@ -7342,9 +7344,13 @@ fn handle_task_close(
             "manual": true,
             "reason": reason,
             "receipt_id": receipt.id,
+            "cleanup": {
+                "result": "unverified",
+                "reason": receipt.manual_reason,
+            },
             "superseded_pending_keepalives": superseded,
             "stale_workers": stale_workers,
-            "next_action": "lifecycle complete; keepalives for this task owner stopped",
+            "next_action": "manual close recorded; worktree/branch cleanup remains unverified",
         }));
     }
     if task.owner != worker_id {
@@ -7385,6 +7391,7 @@ fn handle_task_close(
         worktree_path: closed.worktree_path.clone(),
         branch: closed.branch.clone(),
         verified_ms: closed.updated_ms,
+        verification: CleanupVerification::Verified,
         manual_reason: None,
     };
     let superseded: Vec<String> = st
@@ -7545,8 +7552,12 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
             "required": cleanup_required,
             "status": if !cleanup_required {
                 "not_required"
-            } else if cleanup_receipt.is_some() {
+            } else if cleanup_receipt.is_some_and(|receipt| {
+                receipt.verification == CleanupVerification::Verified
+            }) {
                 "verified"
+            } else if cleanup_receipt.is_some() {
+                "unverified"
             } else {
                 "pending"
             },

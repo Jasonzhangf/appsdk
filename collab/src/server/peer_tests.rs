@@ -3572,12 +3572,24 @@ fn master_force_close_skips_owner_and_cleanup_requirements() {
         Some("worktree dirty and merge blocked; force closing per master".into()),
     );
     assert!(resp.ok, "{}", resp.error.unwrap_or_default());
+    assert_eq!(resp.data["status"], "closed");
+    assert_eq!(resp.data["cleanup"]["result"], "unverified");
+    assert_eq!(
+        resp.data["next_action"],
+        "manual close recorded; worktree/branch cleanup remains unverified"
+    );
     let state = server.state.lock().unwrap();
     assert_eq!(state.tasks["stuck"].status, "closed");
     assert_eq!(
         state.cleanup_receipts["stuck"].manual_reason.as_deref(),
         Some("worktree dirty and merge blocked; force closing per master"),
     );
+    assert_eq!(
+        state.cleanup_receipts["stuck"].verification,
+        crate::server::state::CleanupVerification::Unverified
+    );
+    let projected = task_view(&state, &state.tasks["stuck"]);
+    assert_eq!(projected["cleanup"]["status"], "unverified");
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

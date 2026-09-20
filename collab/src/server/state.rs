@@ -356,7 +356,17 @@ pub struct CleanupReceipt {
     pub branch: Option<String>,
     pub verified_ms: i64,
     #[serde(default)]
+    pub verification: CleanupVerification,
+    #[serde(default)]
     pub manual_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupVerification {
+    #[default]
+    Verified,
+    Unverified,
 }
 
 pub fn task_resource_active(status: &str) -> bool {

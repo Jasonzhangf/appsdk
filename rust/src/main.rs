@@ -42,6 +42,28 @@ const GOVERNANCE_MAP_NAMES: [&str; 4] = [
     "mainline-call-map.json",
     "verification-map.json",
 ];
+const CANONICAL_RECORD_CONTRACTS: [&str; 20] = [
+    "contracts/records/worktree-record.schema.json",
+    "contracts/records/reproduction-record.schema.json",
+    "contracts/records/evidence-record.schema.json",
+    "contracts/records/fix-candidate-record.schema.json",
+    "contracts/records/goal-clarification-record.schema.json",
+    "contracts/records/review-record.schema.json",
+    "contracts/records/effectiveness-record.schema.json",
+    "contracts/records/pre-review-validation-record.schema.json",
+    "contracts/records/collaboration-record.schema.json",
+    "contracts/records/collaboration-index.schema.json",
+    "contracts/records/merge-queue-record.schema.json",
+    "contracts/records/merge-queue-state.schema.json",
+    "contracts/records/integration-record.schema.json",
+    "contracts/records/mainline-receipt-record.schema.json",
+    "contracts/records/collab-live-closure-record.schema.json",
+    "contracts/records/merge-record.schema.json",
+    "contracts/records/promotion-record.schema.json",
+    "contracts/records/regression-report.schema.json",
+    "contracts/records/freeze-record.schema.json",
+    "contracts/records/record-graph.contract.json",
+];
 const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "contracts/sdk-bundle.manifest.json",
@@ -1608,34 +1630,12 @@ fn assert_declared_contracts(root: &Path, project: &Value) {
     if !canonical_project {
         fail("NON_CANONICAL_GOVERNANCE_CONTRACT");
     }
-    let canonical_records = [
-        "contracts/records/worktree-record.schema.json",
-        "contracts/records/reproduction-record.schema.json",
-        "contracts/records/evidence-record.schema.json",
-        "contracts/records/fix-candidate-record.schema.json",
-        "contracts/records/goal-clarification-record.schema.json",
-        "contracts/records/review-record.schema.json",
-        "contracts/records/effectiveness-record.schema.json",
-        "contracts/records/pre-review-validation-record.schema.json",
-        "contracts/records/collaboration-record.schema.json",
-        "contracts/records/collaboration-index.schema.json",
-        "contracts/records/merge-queue-record.schema.json",
-        "contracts/records/merge-queue-state.schema.json",
-        "contracts/records/integration-record.schema.json",
-        "contracts/records/mainline-receipt-record.schema.json",
-        "contracts/records/collab-live-closure-record.schema.json",
-        "contracts/records/merge-record.schema.json",
-        "contracts/records/promotion-record.schema.json",
-        "contracts/records/regression-report.schema.json",
-        "contracts/records/freeze-record.schema.json",
-        "contracts/records/record-graph.contract.json",
-    ];
     let declared_records = project
         .pointer("/governance/record_contracts")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_PROJECT_CONTRACT:/governance/record_contracts"));
-    if declared_records.len() != canonical_records.len()
-        || canonical_records.iter().any(|path| {
+    if declared_records.len() != CANONICAL_RECORD_CONTRACTS.len()
+        || CANONICAL_RECORD_CONTRACTS.iter().any(|path| {
             !declared_records
                 .iter()
                 .any(|value| value.as_str() == Some(*path))
@@ -17377,6 +17377,12 @@ fn pin_lock(root: &Path, binary: &Path) {
     install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());
+    project["governance"]["record_contracts"] = Value::Array(
+        CANONICAL_RECORD_CONTRACTS
+            .iter()
+            .map(|path| Value::String((*path).into()))
+            .collect(),
+    );
     let mut lock = serde_json::Map::new();
     lock.insert("sdk".into(), Value::String("appsdk".into()));
     lock.insert("version".into(), Value::String(SDK_VERSION.into()));

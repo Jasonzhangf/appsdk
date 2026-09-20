@@ -10077,6 +10077,7 @@ fn pin_lock_migrates_stale_project_record_contracts() {
     let root = temp_root("record-contract-migration");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
+    let project_file = root.join(".appsdk/project.json");
     let worktree = root.join("contracts/records/worktree-record.schema.json");
     let promotion = root.join("contracts/records/promotion-record.schema.json");
     let live_closure = root.join("contracts/records/collab-live-closure-record.schema.json");
@@ -10139,6 +10140,33 @@ fn pin_lock_migrates_stale_project_record_contracts() {
             "../../contracts/records/collab-live-closure-record.schema.json"
         ))
         .unwrap()
+    );
+    let migrated_project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    assert_eq!(
+        migrated_project["governance"]["record_contracts"],
+        serde_json::json!([
+            "contracts/records/worktree-record.schema.json",
+            "contracts/records/reproduction-record.schema.json",
+            "contracts/records/evidence-record.schema.json",
+            "contracts/records/fix-candidate-record.schema.json",
+            "contracts/records/goal-clarification-record.schema.json",
+            "contracts/records/review-record.schema.json",
+            "contracts/records/effectiveness-record.schema.json",
+            "contracts/records/pre-review-validation-record.schema.json",
+            "contracts/records/collaboration-record.schema.json",
+            "contracts/records/collaboration-index.schema.json",
+            "contracts/records/merge-queue-record.schema.json",
+            "contracts/records/merge-queue-state.schema.json",
+            "contracts/records/integration-record.schema.json",
+            "contracts/records/mainline-receipt-record.schema.json",
+            "contracts/records/collab-live-closure-record.schema.json",
+            "contracts/records/merge-record.schema.json",
+            "contracts/records/promotion-record.schema.json",
+            "contracts/records/regression-report.schema.json",
+            "contracts/records/freeze-record.schema.json",
+            "contracts/records/record-graph.contract.json"
+        ])
     );
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();

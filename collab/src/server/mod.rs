@@ -3577,7 +3577,13 @@ mod notification_batch_tests {
                     Ok(serde_json::json!({"accepted": true}))
                 }),
                 appserver_thread_status: Arc::new(|_, thread_id| {
-                    Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+                    Ok(serde_json::json!({
+                        "thread": {
+                            "id": thread_id,
+                            "status": {"type": "idle"},
+                            "canAcceptDirectInput": true
+                        }
+                    }))
                 }),
                 appserver_thread_archive: Arc::new(|_, _| {
                     Ok(serde_json::json!({"archived": true}))
@@ -4383,7 +4389,7 @@ fn verify(state: &State, worker_id: &str, token: &str) -> Result<WorkerRec, Resp
 fn migration_issues(server: &Server, state: &State) -> Vec<String> {
     let mut issues = Vec::new();
     for worker in state.workers.values() {
-        match worker_identity_presence(server, worker) {
+        match worker_presence(server, worker) {
             IdentityPresence::Present => {}
             IdentityPresence::Missing => issues.push(format!(
                 "worker {} has no live server-verified App Server transport",
@@ -5372,6 +5378,39 @@ fn merge_appserver_presence(
     }
 }
 
+fn worker_presence_with_view(
+    server: &Server,
+    worker: &WorkerRec,
+) -> (IdentityPresence, serde_json::Value) {
+    if !worker
+        .transport
+        .as_ref()
+        .is_some_and(|transport| transport.kind == TransportKind::AppServer)
+    {
+        return (
+            worker_identity_presence(server, worker),
+            serde_json::Value::Null,
+        );
+    }
+    let identity_presence = worker_identity_presence(server, worker);
+    let (status_presence, agent_view, _) = appserver_agent_view(server, worker);
+    let presence = merge_appserver_presence(identity_presence, status_presence);
+    let presence = match (
+        presence,
+        agent_view
+            .get("thread_state")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        (IdentityPresence::Present, Some("notLoaded" | "systemError")) => IdentityPresence::Missing,
+        _ => presence,
+    };
+    (presence, agent_view)
+}
+
+fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
+    worker_presence_with_view(server, worker).0
+}
+
 fn appserver_agent_view(
     server: &Server,
     worker: &WorkerRec,
@@ -5494,10 +5533,7 @@ pub(crate) fn registered_idle_peer_for_admission(
     let probed: Vec<WorkerRec> = candidates
         .into_iter()
         .filter(|worker| {
-            if !matches!(
-                worker_identity_presence(server, worker),
-                IdentityPresence::Present
-            ) {
+            if !matches!(worker_presence(server, worker), IdentityPresence::Present) {
                 return false;
             }
             if !worker
@@ -5570,12 +5606,7 @@ pub(crate) fn idle_managed_subagent_for_admission(
 
     let probed: Vec<(crate::subagent::Record, WorkerRec)> = candidates
         .into_iter()
-        .filter(|(_, worker)| {
-            matches!(
-                worker_identity_presence(server, worker),
-                IdentityPresence::Present
-            )
-        })
+        .filter(|(_, worker)| matches!(worker_presence(server, worker), IdentityPresence::Present))
         .collect();
 
     let state = server.state.lock().unwrap();
@@ -5619,7 +5650,7 @@ pub(crate) fn live_master_id(
     else {
         return Ok(None);
     };
-    match worker_identity_presence(server, worker) {
+    match worker_presence(server, worker) {
         IdentityPresence::Present => Ok(Some(worker.id.clone())),
         IdentityPresence::Missing => Ok(None),
         IdentityPresence::Unknown => Err(
@@ -5674,9 +5705,7 @@ pub(crate) fn scheduler_admit_subagent_start(
     }) else {
         return Ok(None);
     };
-    if master.id != worker_id
-        || worker_identity_presence(server, &master) != IdentityPresence::Present
-    {
+    if master.id != worker_id || worker_presence(server, &master) != IdentityPresence::Present {
         return Ok(None);
     }
 
@@ -6105,9 +6134,7 @@ pub(crate) fn handle_scheduler_dispatch(
     }) else {
         return Resp::err("scheduler dispatch requires a live master");
     };
-    if master.id != worker_id
-        || worker_identity_presence(server, &master) != IdentityPresence::Present
-    {
+    if master.id != worker_id || worker_presence(server, &master) != IdentityPresence::Present {
         return Resp::err("scheduler dispatch requires the live registered master");
     }
 
@@ -6390,7 +6417,7 @@ fn handle_master_promote(
         Err(error) => return Resp::err(error),
         Ok(None) => {}
     }
-    match worker_identity_presence(server, &worker) {
+    match worker_presence(server, &worker) {
         IdentityPresence::Present => {}
         IdentityPresence::Missing => {
             return Resp::err("master promotion requires a live registered transport")
@@ -6431,7 +6458,7 @@ fn handle_master_delegate(
     let Some(target) = state.workers.get(&target_id) else {
         return Resp::err(format!("target worker {} not registered", target_id));
     };
-    match worker_identity_presence(server, target) {
+    match worker_presence(server, target) {
         IdentityPresence::Present => {}
         IdentityPresence::Missing => {
             return Resp::err("master delegation requires a live target transport")
@@ -6902,7 +6929,7 @@ pub(crate) fn handle_send_with_task(
     let Some(recipient) = st.workers.get(&to) else {
         return Resp::err(format!("recipient {} not registered", to));
     };
-    if worker_identity_presence(server, recipient) == IdentityPresence::Missing {
+    if worker_presence(server, recipient) == IdentityPresence::Missing {
         return Resp::err("recipient has no live server-verified transport");
     }
     if let Some(ref rid) = in_reply_to {
@@ -7091,7 +7118,7 @@ fn handle_cross_project_send(
     let Some(recipient) = st.workers.get(&to) else {
         return Resp::err(format!("recipient {} not registered", to));
     };
-    if worker_identity_presence(server, recipient) != IdentityPresence::Present {
+    if worker_presence(server, recipient) != IdentityPresence::Present {
         return Resp::err(
             "cross-project communication requires a live target identity on its server-selected transport",
         );
@@ -7942,10 +7969,7 @@ fn handle_task_close(
             Err(error) => return Resp::err(error),
         };
         let owner_identity_live = st.workers.get(&task.owner).is_some_and(|owner| {
-            !matches!(
-                worker_identity_presence(server, owner),
-                IdentityPresence::Missing
-            )
+            !matches!(worker_presence(server, owner), IdentityPresence::Missing)
         });
         let authorized = live_master.as_deref() == Some(worker_id.as_str())
             || (live_master.is_none() && (task.owner == worker_id || !owner_identity_live));
@@ -7981,7 +8005,7 @@ fn handle_task_close(
                     },
                     "superseded_pending_keepalives": [],
                     "stale_workers": stale_worker_views(&st, &|worker| {
-                        worker_identity_presence(server, worker)
+                        worker_presence(server, worker)
                     }),
                     "idempotent": true,
                     "next_action": if cleanup_verified {
@@ -8048,8 +8072,7 @@ fn handle_task_close(
             }
         }
         server.commit_locked(&mut st, &events);
-        let stale_workers =
-            stale_worker_views(&st, &|worker| worker_identity_presence(server, worker));
+        let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
         drop(st);
         return Resp::data(json!({
             "task": closed.id,
@@ -8211,7 +8234,7 @@ fn handle_task_close(
         server.commit_locked(&mut st, &events);
     }
 
-    let stale_workers = stale_worker_views(&st, &|worker| worker_identity_presence(server, worker));
+    let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
     drop(st);
     for (message_id, subscription_id) in subscribed_notifications {
         attempt_notification(server, &message_id, &subscription_id);
@@ -8401,29 +8424,11 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let master_wake = st.master_wake.clone();
     drop(st);
 
-    let is_appserver = worker
-        .transport
-        .as_ref()
-        .is_some_and(|transport| transport.kind == TransportKind::AppServer);
-    let (presence, agent, _raw) = if is_appserver {
-        let identity_presence = worker_identity_presence(server, &worker);
-        let (status_presence, agent, raw) = appserver_agent_view(server, &worker);
-        (
-            merge_appserver_presence(identity_presence, status_presence),
-            agent,
-            raw,
-        )
-    } else {
-        (
-            worker_identity_presence(server, &worker),
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-        )
-    };
+    let (presence, agent) = worker_presence_with_view(server, &worker);
     let peers: Vec<_> = peer_snapshots
         .into_iter()
         .map(|(peer, peer_role)| {
-            let peer_presence = worker_identity_presence(server, &peer);
+            let peer_presence = worker_presence(server, &peer);
             json!({
                 "worker_id": peer.id,
                 "id": peer.id,
@@ -8761,9 +8766,7 @@ fn worker_status_summary_with_maps(
         .is_some_and(|transport| transport.kind == TransportKind::AppServer);
     let (presence, endpoint_live, ownership, identity_valid, agent_state, appserver) =
         if is_appserver {
-            let identity_presence = worker_identity_presence(server, w);
-            let (status_presence, agent_view, _raw) = appserver_agent_view(server, w);
-            let presence = merge_appserver_presence(identity_presence, status_presence);
+            let (presence, agent_view) = worker_presence_with_view(server, w);
             let endpoint_live = presence == IdentityPresence::Present;
             let ownership = endpoint_live.then_some(Ok(true));
             let identity_valid = endpoint_live;
@@ -8776,6 +8779,8 @@ fn worker_status_summary_with_maps(
                 .cloned()
                 .unwrap_or_default();
             let agent_state = match (presence, thread_state) {
+                (IdentityPresence::Missing, Some("systemError")) => "system_error",
+                (IdentityPresence::Missing, Some("notLoaded")) => "not_loaded",
                 (IdentityPresence::Missing, _) => "absent",
                 (IdentityPresence::Unknown, _) => "unknown",
                 (IdentityPresence::Present, Some("active"))
@@ -8803,7 +8808,7 @@ fn worker_status_summary_with_maps(
                 agent_view,
             )
         } else {
-            let presence = worker_identity_presence(server, w);
+            let presence = worker_presence(server, w);
             let endpoint_live = presence == IdentityPresence::Present;
             let ownership = None;
             let identity_valid = false;
@@ -10298,7 +10303,13 @@ mod host_route_registry_tests {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
-                Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": true
+                    }
+                }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
             mailbox_notify: Notify::new(),
@@ -11380,7 +11391,13 @@ mod host_route_registry_tests {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
-                Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": true
+                    }
+                }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
             mailbox_notify: Notify::new(),
@@ -15989,7 +16006,13 @@ mod reducer_binding_tests {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
-                Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": true
+                    }
+                }))
             }),
             appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
             mailbox_notify: Notify::new(),

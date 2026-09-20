@@ -411,7 +411,13 @@ mod tests {
                     Ok(serde_json::json!({"accepted": true}))
                 }),
                 appserver_thread_status: Arc::new(|_, thread_id| {
-                    Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+                    Ok(serde_json::json!({
+                        "thread": {
+                            "id": thread_id,
+                            "status": {"type": "idle"},
+                            "canAcceptDirectInput": true
+                        }
+                    }))
                 }),
                 appserver_thread_archive: Arc::new(|_, _| {
                     Ok(serde_json::json!({"archived": true}))

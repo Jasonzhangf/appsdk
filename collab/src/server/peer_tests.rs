@@ -2871,6 +2871,55 @@ fn dead_master_transport_is_not_claimable_and_allows_approved_self_promote() {
 }
 
 #[test]
+fn not_loaded_master_thread_is_recorded_unusable_and_allows_approved_self_promote() {
+    let (mut server, root) = test_server();
+    register(&server, "peer-a", "thread-a");
+    register(&server, "peer-b", "thread-b");
+    assert!(
+        super::handle_master_promote(
+            &server,
+            "peer-a".into(),
+            "token-peer-a".into(),
+            "user approved peer-a as collab master".into(),
+        )
+        .ok
+    );
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": if thread_id == "thread-a" {"notLoaded"} else {"idle"}},
+                "canAcceptDirectInput": thread_id != "thread-a"
+            }
+        }))
+    });
+
+    let status = super::handle_master_status(&server);
+    assert!(status.data["master"].is_null(), "{status:?}");
+    assert_eq!(status.data["recorded_unusable"]["worker_id"], "peer-a");
+    assert_eq!(
+        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        None
+    );
+    let context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
+    assert!(context.data["master"].is_null(), "{context:?}");
+    assert_eq!(context.data["recorded_unusable"]["worker_id"], "peer-a");
+
+    let promoted = super::handle_master_promote(
+        &server,
+        "peer-b".into(),
+        "token-peer-b".into(),
+        "user approved peer-b after the previous master thread became unusable".into(),
+    );
+    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+    assert_eq!(
+        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        Some("peer-b".into())
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cross_project_send_requires_master_endpoints_on_both_sides() {
     let (server, root) = test_server();
     register(&server, "target-master", "%target-master");
@@ -4009,6 +4058,39 @@ fn orphan_force_close_defers_when_owner_appserver_probe_is_unknown() {
     assert_eq!(
         server.state.lock().unwrap().tasks["working"].status,
         "working"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn orphan_force_close_treats_not_loaded_owner_as_dead() {
+    let (mut server, root) = test_server();
+    register(&server, "owner", "thread-owner");
+    register(&server, "peer", "thread-peer");
+    assert!(create_task(&server, "owner", "orphan", "feature").ok);
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": if thread_id == "thread-owner" {"notLoaded"} else {"idle"}},
+                "canAcceptDirectInput": thread_id != "thread-owner"
+            }
+        }))
+    });
+
+    let closed = handle_task_close(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "orphan".into(),
+        true,
+        Some("owner native thread is not loaded".into()),
+    );
+    assert!(closed.ok, "{closed:?}");
+    assert_eq!(closed.data["status"], "closed");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["orphan"].status,
+        "closed"
     );
     std::fs::remove_dir_all(root).ok();
 }

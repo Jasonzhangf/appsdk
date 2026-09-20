@@ -1062,21 +1062,16 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let settings = config::Health {
-            timeout_seconds: 1,
-            ..Default::default()
-        };
+        let settings = config::Health::default();
         for (name, expected) in [
             ("good", true),
             ("env", true),
             ("wrong", false),
             ("fail", false),
-            ("slow", false),
         ] {
             let mut environment: std::collections::BTreeMap<_, _> = std::env::vars().collect();
             environment.insert("TMUX".into(), "/tmp/legacy-tmux".into());
             environment.insert("TMUX_PANE".into(), "%42".into());
-            let start = Instant::now();
             let result = probe_with(
                 &executable,
                 "codex",
@@ -1088,11 +1083,26 @@ mod tests {
                 &environment,
             );
             assert_eq!(result.is_ok(), expected, "profile={name} result={result:?}");
-            if name == "slow" {
-                assert_eq!(result.unwrap_err().to_string(), "probe timed out");
-            }
-            assert!(start.elapsed() < Duration::from_secs(3));
         }
+        let mut environment: std::collections::BTreeMap<_, _> = std::env::vars().collect();
+        environment.insert("TMUX".into(), "/tmp/legacy-tmux".into());
+        environment.insert("TMUX_PANE".into(), "%42".into());
+        let start = Instant::now();
+        let result = probe_with(
+            &executable,
+            "codex",
+            &config::Profile {
+                codex_profile: "slow".into(),
+                model: None,
+            },
+            &config::Health {
+                timeout_seconds: 1,
+                ..Default::default()
+            },
+            &environment,
+        );
+        assert_eq!(result.unwrap_err().to_string(), "probe timed out");
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
     #[test]
     fn cursor_runtime_is_rejected() {

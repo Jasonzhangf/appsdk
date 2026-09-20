@@ -294,6 +294,33 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
     let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut client = Client::connect(&socket_path, timeout)?;
     client.initialize()?;
+    let loaded = client.call("thread/loaded/list", json!({}))?;
+    let loaded = loaded
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AdapterError::Unknown {
+            operation: "thread/loaded/list",
+            detail: "response is missing data array".into(),
+        })?;
+    let mut loaded_ids = Vec::with_capacity(loaded.len());
+    for (index, value) in loaded.iter().enumerate() {
+        let loaded_id = value
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| AdapterError::Unknown {
+                operation: "thread/loaded/list",
+                detail: format!("data[{index}] must be a non-empty thread id"),
+            })?;
+        loaded_ids.push(loaded_id);
+    }
+    if !loaded_ids.contains(&thread_id.as_str()) {
+        return Err(AdapterError::RouteUnavailable {
+            detail: format!(
+                "thread {} is persisted but not loaded by the App Server",
+                thread_id.as_str()
+            ),
+        });
+    }
     let response = client
         .call("thread/read", json!({"threadId": thread_id.as_str()}))
         .map_err(|error| match error {
@@ -401,7 +428,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             "queue_wakeup".into(),
         ],
         self_check:
-            "initialize, thread/read identity, turn/start, turn/steer, thread/turns/list, and thread/queue/add method probes passed"
+            "initialize, thread/loaded/list ownership, thread/read identity, turn/start, turn/steer, thread/turns/list, and thread/queue/add method probes passed"
                 .into(),
     })
 }
@@ -1273,31 +1300,39 @@ mod tests {
     }
 
     #[test]
-    fn live_appserver_candidate_passes_full_server_self_check_when_available() {
+    fn live_appserver_candidate_is_admitted_only_when_loaded() {
         let Some(candidate) = candidate_from_env().unwrap() else {
             return;
         };
-        let selected = verify_candidate(&candidate).expect("live App Server self-check");
-        assert_eq!(selected.kind, TransportKind::AppServer);
-        assert_eq!(
-            selected.endpoint.as_deref(),
-            Some(candidate.endpoint.as_str())
-        );
-        assert_eq!(
-            selected.namespace.as_deref(),
-            Some(candidate.namespace.as_str())
-        );
-        assert_eq!(
-            selected.thread_id.as_deref(),
-            Some(candidate.thread_id.as_str())
-        );
-        assert!(selected
-            .capabilities
-            .iter()
-            .any(|capability| capability == "send_message_to_thread"));
-        assert!(selected.self_check.contains("turn/start"));
-        assert!(selected.self_check.contains("turn/steer"));
-        assert!(selected.self_check.contains("thread/turns/list"));
+        match verify_candidate(&candidate) {
+            Ok(selected) => {
+                assert_eq!(selected.kind, TransportKind::AppServer);
+                assert_eq!(
+                    selected.endpoint.as_deref(),
+                    Some(candidate.endpoint.as_str())
+                );
+                assert_eq!(
+                    selected.namespace.as_deref(),
+                    Some(candidate.namespace.as_str())
+                );
+                assert_eq!(
+                    selected.thread_id.as_deref(),
+                    Some(candidate.thread_id.as_str())
+                );
+                assert!(selected
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "send_message_to_thread"));
+                assert!(selected.self_check.contains("thread/loaded/list"));
+                assert!(selected.self_check.contains("turn/start"));
+                assert!(selected.self_check.contains("turn/steer"));
+                assert!(selected.self_check.contains("thread/turns/list"));
+            }
+            Err(AdapterError::RouteUnavailable { detail }) => {
+                assert!(detail.contains("persisted but not loaded"), "{detail}");
+            }
+            Err(error) => panic!("unexpected live App Server self-check error: {error}"),
+        }
     }
 
     #[test]
@@ -1325,6 +1360,9 @@ mod tests {
                 let method = request["method"].as_str().unwrap();
                 let response = match method {
                     "initialize" => json!({"id": id, "result": {}}),
+                    "thread/loaded/list" => {
+                        json!({"id": id, "result": {"data": ["thread-1"]}})
+                    }
                     "thread/read" => {
                         json!({"id": id, "result": {"thread": {"id": "thread-1"}}})
                     }
@@ -1405,6 +1443,9 @@ mod tests {
                 };
                 let response = match request["method"].as_str().unwrap() {
                     "initialize" => json!({"id": id, "result": {}}),
+                    "thread/loaded/list" => {
+                        json!({"id": id, "result": {"data": ["missing-thread"]}})
+                    }
                     "thread/read" => {
                         json!({"id": id, "error": {"code": -32602, "message": "thread not found"}})
                     }
@@ -1428,6 +1469,125 @@ mod tests {
         let error = verify_candidate(&candidate).unwrap_err();
         assert!(matches!(error, AdapterError::RouteUnavailable { .. }));
         assert!(error.to_string().contains("ADAPTER_ROUTE_UNAVAILABLE"));
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn candidate_rejects_persisted_thread_that_is_not_loaded() {
+        let socket = std::env::temp_dir().join(format!(
+            "collab-unloaded-thread-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let loaded = next_request(&mut stream);
+            assert_eq!(loaded["method"], "thread/loaded/list");
+            respond(
+                &mut stream,
+                json!({
+                    "id": loaded["id"],
+                    "result": {"data": ["some-other-thread"]}
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let candidate = AppServerCandidate {
+            endpoint: format!("unix://{}", socket.display()),
+            namespace: "codex_tui".into(),
+            thread_id: "persisted-thread".into(),
+        };
+        let error = verify_candidate(&candidate).unwrap_err();
+        assert!(matches!(error, AdapterError::RouteUnavailable { .. }));
+        assert!(error.to_string().contains("persisted but not loaded"));
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn candidate_accepts_loaded_thread_after_loaded_list_identity_check() {
+        let socket = PathBuf::from("/tmp").join(format!(
+            "collab-candidate-loaded-thread-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let loaded = next_request(&mut stream);
+            assert_eq!(loaded["method"], "thread/loaded/list");
+            respond(
+                &mut stream,
+                json!({"id": loaded["id"], "result": {"data": ["thread-1"]}}),
+            );
+            let read = next_request(&mut stream);
+            assert_eq!(read["method"], "thread/read");
+            assert_eq!(read["params"]["threadId"], "thread-1");
+            respond(
+                &mut stream,
+                json!({
+                    "id": read["id"],
+                    "result": {"thread": {"id": "thread-1", "status": {"type": "idle"}}}
+                }),
+            );
+            let items = next_request(&mut stream);
+            assert_eq!(items["method"], "thread/items/list");
+            respond(
+                &mut stream,
+                json!({"id": items["id"], "error": {"code": -32601, "message": "unsupported"}}),
+            );
+            let turn_start = next_request(&mut stream);
+            assert_eq!(turn_start["method"], "turn/start");
+            respond(
+                &mut stream,
+                json!({"id": turn_start["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            );
+            let steer = next_request(&mut stream);
+            assert_eq!(steer["method"], "turn/steer");
+            respond(
+                &mut stream,
+                json!({"id": steer["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            );
+            let turns = next_request(&mut stream);
+            assert_eq!(turns["method"], "thread/turns/list");
+            respond(
+                &mut stream,
+                json!({"id": turns["id"], "result": {"data": []}}),
+            );
+            let queue = next_request(&mut stream);
+            assert_eq!(queue["method"], "thread/queue/add");
+            respond(
+                &mut stream,
+                json!({"id": queue["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let candidate = AppServerCandidate {
+            endpoint: format!("unix://{}", socket.display()),
+            namespace: "codex_tui".into(),
+            thread_id: "thread-1".into(),
+        };
+        let selected = verify_candidate(&candidate).unwrap();
+        assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
+        assert!(selected.self_check.contains("thread/loaded/list"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -1463,6 +1623,9 @@ mod tests {
                     } else {
                         match method {
                             "initialize" => json!({"id": id, "result": {}}),
+                            "thread/loaded/list" => {
+                                json!({"id": id, "result": {"data": ["thread-1"]}})
+                            }
                             "thread/read" => {
                                 json!({"id": id, "result": {"thread": {"id": "thread-1"}}})
                             }

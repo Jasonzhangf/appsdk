@@ -1,0 +1,2088 @@
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+
+use super::global_state::{GlobalState, ProjectRegistration, RuntimeBinding, StateError};
+use crate::proto::{CommandEnvelope, SelectedTransport, TransportKind};
+
+pub fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+pub fn default_task_status() -> String {
+    "working".into()
+}
+
+pub fn default_priority() -> String {
+    "p2".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitSpec {
+    #[serde(default)]
+    pub waiter: String,
+    pub waiting_for: String,
+    pub responsible_actor: String,
+    pub reason: String,
+    pub deadline_ms: i64,
+    pub resume_on: Vec<String>,
+    pub escalation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationRecord {
+    pub id: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub phase: String,
+    pub admission_frozen: bool,
+    pub snapshot_hash: Option<String>,
+    pub worker_count: usize,
+    pub task_count: usize,
+    pub message_count: usize,
+    pub operator: String,
+    pub issues: Vec<String>,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerRec {
+    pub id: String,
+    pub token: String,
+    pub cwd: String,
+    pub registered_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<SelectedTransport>,
+}
+
+impl WorkerRec {
+    pub fn transport_kind(&self) -> Option<TransportKind> {
+        self.transport
+            .as_ref()
+            .map(|transport| transport.kind.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeBinding {
+    pub worktree_root: String,
+    pub owning_project_scope: String,
+    pub task_id: String,
+    pub owner_agent_id: String,
+    pub binding_id: String,
+    pub base_commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommandReceipt {
+    pub operation_id: String,
+    pub outcome: serde_json::Value,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "cmd")]
+pub enum TypedCommand {
+    RegisterWorker {
+        registration: ProjectRegistration,
+        binding: RuntimeBinding,
+        worker: WorkerRec,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "gr")]
+pub enum GlobalEvent {
+    ProjectRegistered {
+        registration: ProjectRegistration,
+    },
+    RuntimeBound {
+        binding: RuntimeBinding,
+    },
+    MigrationCommitEvidence {
+        evidence: super::global_state::MigrationCommitEvidence,
+    },
+}
+
+impl GlobalEvent {
+    pub fn apply(self, global: &mut GlobalState) -> Result<(), StateError> {
+        match self {
+            Self::ProjectRegistered { registration } => {
+                global.register_project(registration).map(|_| ())
+            }
+            Self::RuntimeBound { binding } => global.bind_runtime(binding).map(|_| ()),
+            Self::MigrationCommitEvidence { evidence } => {
+                global.record_migration_commit_evidence(evidence)
+            }
+        }
+    }
+}
+
+impl From<TypedCommand> for GlobalEvent {
+    fn from(command: TypedCommand) -> Self {
+        match command {
+            TypedCommand::RegisterWorker { registration, .. } => {
+                GlobalEvent::ProjectRegistered { registration }
+            }
+        }
+    }
+}
+
+impl TypedCommand {
+    pub fn global_events(&self) -> Vec<GlobalEvent> {
+        match self {
+            Self::RegisterWorker {
+                registration,
+                binding,
+                ..
+            } => vec![
+                GlobalEvent::ProjectRegistered {
+                    registration: registration.clone(),
+                }
+                .into(),
+                GlobalEvent::RuntimeBound {
+                    binding: binding.clone(),
+                }
+                .into(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TypedEnvelope {
+    pub command: TypedCommand,
+    pub envelope: CommandEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedApplyError(pub StateError);
+
+impl From<StateError> for TypedApplyError {
+    fn from(value: StateError) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for TypedApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for TypedApplyError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TypedOutcome {
+    pub receipt: super::global_state::CommandReceipt,
+    pub replayed: bool,
+}
+
+pub const MAX_WAKE_ATTEMPTS: u32 = 1;
+pub const MAX_NOTIFICATION_REPEATS: u32 = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationSubscription {
+    pub id: String,
+    pub worker_id: String,
+    pub event: String,
+    pub subject: Option<String>,
+    pub target: String,
+    pub method: String,
+    pub trigger_ms: Option<i64>,
+    #[serde(default)]
+    pub trigger_times_ms: Vec<i64>,
+    #[serde(default)]
+    pub interval_ms: Option<i64>,
+    #[serde(default = "default_repeat_count")]
+    pub repeat_count: u32,
+    #[serde(default)]
+    pub fired_count: u32,
+    pub expires_ms: i64,
+    pub status: String,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+    #[serde(default)]
+    pub status_reason: Option<String>,
+}
+
+pub fn default_repeat_count() -> u32 {
+    1
+}
+
+impl NotificationSubscription {
+    pub fn matches(&self, worker_id: &str, event: &str, subject: Option<&str>, now: i64) -> bool {
+        self.worker_id == worker_id
+            && self.event == event
+            && self.subject.as_deref() == subject
+            && self.method == "appserver"
+            && self.status == "armed"
+            && self.expires_ms > now
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    #[serde(rename = "type")]
+    pub mtype: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    pub body: String,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    pub created_ms: i64,
+    /// pending -> delivered -> read; replies may also become superseded.
+    pub state: String,
+    #[serde(default, alias = "nudge_count")]
+    pub wake_attempt_count: u32,
+    #[serde(default, alias = "last_nudge_ms")]
+    pub last_wake_attempt_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerAdmissionRecord {
+    pub request_id: String,
+    pub decision: String,
+    pub worker_id: String,
+    #[serde(default)]
+    pub managed_subagent_id: Option<String>,
+    pub message_id: String,
+    pub task_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+pub const REQUEST_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+
+pub fn is_goal_deadline(subscription: &NotificationSubscription) -> bool {
+    subscription.event == "deadline"
+        && subscription
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.starts_with("goal:"))
+}
+
+/// Canonical identity for one goal deadline occurrence. Registrations and the
+/// scheduler share this key so a new goal revision cannot shadow an existing
+/// goal merely because its deadline happens to be the same.
+pub fn goal_deadline_key(subscription: &NotificationSubscription) -> Option<(String, String, i64)> {
+    if !is_goal_deadline(subscription) {
+        return None;
+    }
+    let trigger = subscription
+        .interval_ms
+        .map(|interval| {
+            subscription
+                .trigger_ms
+                .unwrap_or(subscription.created_ms.saturating_add(interval))
+        })
+        .or_else(|| {
+            subscription
+                .trigger_times_ms
+                .get(subscription.fired_count as usize)
+                .copied()
+        })
+        .or(subscription.trigger_ms)?;
+    Some((
+        subscription.worker_id.clone(),
+        subscription.subject.clone()?,
+        trigger,
+    ))
+}
+
+pub use super::notification_state::{MasterWakeAccumulator, MasterWakeSignal};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRec {
+    pub id: String,
+    pub owner: String,
+    pub created_by: String,
+    #[serde(default)]
+    pub feature_id: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    #[serde(default = "default_priority")]
+    pub priority: String,
+    #[serde(default = "default_task_status")]
+    pub status: String,
+    #[serde(default)]
+    pub next_step: Option<String>,
+    #[serde(default)]
+    pub wait: Option<WaitSpec>,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+/// Lifecycle evidence is separate from TaskRec so older producers and journal
+/// events remain replayable as the task contract gains new milestones.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskLifecycleRecord {
+    #[serde(default)]
+    pub delivery_evidence: Option<String>,
+    #[serde(default)]
+    pub delivered_ms: Option<i64>,
+    #[serde(default)]
+    pub review_evidence: Option<String>,
+    #[serde(default)]
+    pub reviewer: Option<String>,
+    #[serde(default)]
+    pub reviewed_ms: Option<i64>,
+    #[serde(default)]
+    pub integration_commit: Option<String>,
+    #[serde(default)]
+    pub integration_evidence: Option<String>,
+    #[serde(default)]
+    pub integrated_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupReceipt {
+    pub id: String,
+    pub task_id: String,
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
+    pub verified_ms: i64,
+    #[serde(default)]
+    pub manual_reason: Option<String>,
+}
+
+pub fn task_resource_active(status: &str) -> bool {
+    !matches!(status, "waiting" | "merged" | "closed" | "cancelled")
+}
+
+pub fn wait_cycle(tasks: &HashMap<String, TaskRec>, task_id: &str, waiting_for: &str) -> bool {
+    let mut current = waiting_for;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current.to_string()) {
+        if current == task_id {
+            return true;
+        }
+        let Some(task) = tasks.get(current) else {
+            return false;
+        };
+        let Some(wait) = task.wait.as_ref() else {
+            return false;
+        };
+        current = &wait.waiting_for;
+    }
+    true
+}
+
+/// Journal events. Every mutation is an event: live path applies + appends,
+/// replay applies only. This is what makes restart recovery deterministic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "ev")]
+pub enum Event {
+    MasterWakeSignal {
+        signal: MasterWakeSignal,
+        at_ms: i64,
+    },
+    MasterWakeUpdated {
+        accumulator: MasterWakeAccumulator,
+    },
+    KeepaliveUpdated {
+        worker_id: String,
+        record: super::keepalive::Record,
+    },
+    SubagentUpdated {
+        subagent: crate::subagent::Record,
+    },
+    Registered {
+        worker: WorkerRec,
+    },
+    #[serde(rename = "WorkerRemoved")]
+    LegacyWorkerRemoved {
+        worker_id: String,
+    },
+    /// Master-authorized retirement of a worker registration. Unlike the legacy
+    /// remove-worker path this records who closed it and why.
+    WorkerClosed {
+        worker_id: String,
+        closed_by: String,
+        reason: String,
+        at_ms: i64,
+    },
+    #[serde(rename = "MasterTransferred")]
+    LegacyMasterTransferred {
+        from: String,
+        to: String,
+    },
+    Sent {
+        msg: Message,
+    },
+    DeliveryMode {
+        msg_id: String,
+        mode: String,
+    },
+    WakeAttempted {
+        ids: Vec<String>,
+        #[serde(default)]
+        attempted_ms: i64,
+    },
+    NotificationSubscribed {
+        subscription: NotificationSubscription,
+    },
+    NotificationStatus {
+        subscription_id: String,
+        status: String,
+        updated_ms: i64,
+    },
+    NotificationRebound {
+        subscription_id: String,
+        target: String,
+        updated_ms: i64,
+    },
+    NotificationSuppressed {
+        subscription_id: String,
+        status: String,
+        reason: String,
+        updated_ms: i64,
+    },
+    NotificationConsumed {
+        subscription_id: String,
+        message_id: String,
+        consumed_ms: i64,
+    },
+    WakeBound {
+        message_id: String,
+        subscription_id: String,
+    },
+    Delivered {
+        ids: Vec<String>,
+    },
+    Acked {
+        ids: Vec<String>,
+    },
+    #[serde(rename = "Nudged")]
+    LegacyNudged {
+        msg_id: String,
+    },
+    Superseded {
+        ids: Vec<String>,
+    },
+    TaskCreated {
+        task: TaskRec,
+    },
+    SchedulerAdmission {
+        admission: SchedulerAdmissionRecord,
+    },
+    SchedulerAdmissionStatus {
+        request_id: String,
+        status: String,
+        error: Option<String>,
+        updated_ms: i64,
+    },
+    TaskUpdated {
+        task: TaskRec,
+    },
+    TaskLifecycleUpdated {
+        task_id: String,
+        record: TaskLifecycleRecord,
+    },
+    CleanupVerified {
+        receipt: CleanupReceipt,
+    },
+    MigrationUpdated {
+        migration: MigrationRecord,
+    },
+    ReducerCheckpoint {
+        sequence: u64,
+        revision: u64,
+    },
+    CommandStarted {
+        command_id: String,
+        operation_id: String,
+    },
+    CommandRecorded {
+        command_id: String,
+        receipt: CommandReceipt,
+    },
+    CommandCompleted {
+        command_id: String,
+        operation_id: String,
+        receipt: CommandReceipt,
+    },
+    #[serde(alias = "RootAssigned")]
+    MasterAssigned {
+        worker_id: String,
+        assigned_by: String,
+        approval: Option<String>,
+        assigned_ms: i64,
+    },
+    WorktreeBound {
+        binding: WorktreeBinding,
+    },
+    GlobalProjectRegistered {
+        registration: super::global_state::ProjectRegistration,
+    },
+    GlobalRuntimeBound {
+        binding: super::global_state::RuntimeBinding,
+    },
+    GlobalCurrentThreadRouteSet {
+        binding: super::global_state::RuntimeBinding,
+    },
+    GlobalMigrationCommitEvidence {
+        evidence: super::global_state::MigrationCommitEvidence,
+    },
+}
+
+#[derive(Default)]
+pub struct State {
+    /// Monotonic in-memory reducer revision and journal sequence.  These are
+    /// not business payload and are advanced only by the resident writer.
+    pub revision: u64,
+    pub sequence: u64,
+    /// A failed journal write makes the in-memory reducer unsafe to mutate.
+    /// Keep the exact first failure so admission can fail closed.
+    pub journal_poison: Option<String>,
+    pub master_wake: MasterWakeAccumulator,
+    pub keepalives: HashMap<String, super::keepalive::Record>,
+    pub subagents: HashMap<String, crate::subagent::Record>,
+    pub workers: HashMap<String, WorkerRec>,
+    pub msgs: HashMap<String, Message>,
+    pub tasks: HashMap<String, TaskRec>,
+    pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
+    pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
+    pub cleanup_receipts: HashMap<String, CleanupReceipt>,
+    pub delivery_modes: HashMap<String, String>,
+    pub notification_subscriptions: HashMap<String, NotificationSubscription>,
+    pub wake_bindings: HashMap<String, String>,
+    pub migration: Option<MigrationRecord>,
+    /// Legacy journal projection kept for wire/replay compatibility.  Typed
+    /// command idempotency is owned by `global.command_receipts`; this map is
+    /// updated from the same committed event and is never consulted first.
+    pub command_receipts: HashMap<String, CommandReceipt>,
+    /// Keep the legacy event shape when compacting an old journal receipt.
+    /// Modern command transactions retain their Started/Completed framing.
+    legacy_command_ids: HashSet<String>,
+    pub global: super::global_state::GlobalState,
+    pub master_worker_id: Option<String>,
+    pub master_assigned_by: Option<String>,
+    pub master_approval: Option<String>,
+    pub master_assigned_ms: Option<i64>,
+    pub worktree_bindings: HashMap<String, WorktreeBinding>,
+}
+
+impl State {
+    pub(crate) fn restore_unique_current_thread_routes_from_bindings(
+        &mut self,
+    ) -> Result<(), String> {
+        let mut bindings = self
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .filter(|binding| binding.native_thread_id.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        bindings.sort_by(|left, right| {
+            left.native_thread_id
+                .as_ref()
+                .map(|thread| thread.as_str())
+                .cmp(
+                    &right
+                        .native_thread_id
+                        .as_ref()
+                        .map(|thread| thread.as_str()),
+                )
+        });
+        let mut recovered = self.global.clone();
+        for binding in bindings {
+            let thread = binding.native_thread_id.clone().unwrap();
+            if let Some(existing) = recovered.lookup_current_thread_route(&thread) {
+                if existing == &binding {
+                    continue;
+                }
+                return Err(format!(
+                    "journal replay rejected ambiguous current thread route {thread}"
+                ));
+            }
+            recovered
+                .set_current_thread_route(binding)
+                .map_err(|error| {
+                    format!("journal replay rejected current thread route: {error}")
+                })?;
+        }
+        recovered.set_counters(self.sequence, self.revision);
+        self.global = recovered;
+        Ok(())
+    }
+
+    /// Keep the typed projection on the daemon journal's version axis.  The
+    /// resident reducer is the only owner of these counters; the nested
+    /// global state mirrors them for typed CAS and receipts.
+    pub(crate) fn sync_global_version(&mut self) {
+        self.global.set_counters(self.sequence, self.revision);
+    }
+
+    pub(crate) fn advance_version(&mut self) -> Result<(), String> {
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "sequence counter overflow".to_string())?;
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "revision counter overflow".to_string())?;
+        self.sequence = sequence;
+        self.revision = revision;
+        self.sync_global_version();
+        Ok(())
+    }
+
+    pub(crate) fn set_checkpoint_version(
+        &mut self,
+        sequence: u64,
+        revision: u64,
+    ) -> Result<(), String> {
+        if sequence < self.sequence || revision < self.revision {
+            return Err(format!(
+                "reducer checkpoint regresses version: current ({}, {}), observed ({sequence}, {revision})",
+                self.sequence, self.revision
+            ));
+        }
+        self.sequence = sequence;
+        self.revision = revision;
+        self.sync_global_version();
+        Ok(())
+    }
+
+    fn consume_notification(&mut self, subscription_id: &str, consumed_ms: Option<i64>) {
+        let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id) else {
+            return;
+        };
+        subscription.fired_count = subscription.fired_count.saturating_add(1);
+        if is_goal_deadline(subscription) {
+            subscription.status = "consumed".into();
+            subscription.status_reason = Some("goal-deadline-one-shot-delivered".into());
+            if let Some(consumed_ms) = consumed_ms {
+                subscription.updated_ms = consumed_ms;
+            }
+            return;
+        }
+        let total = if subscription.interval_ms.is_some() {
+            subscription.repeat_count
+        } else {
+            subscription.trigger_times_ms.len().max(1) as u32
+        };
+        if subscription.fired_count >= total {
+            subscription.status = "consumed".into();
+        } else if let Some(interval) = subscription.interval_ms {
+            let next_trigger = consumed_ms
+                .filter(|_| subscription.event == "master-idle")
+                .map(|consumed| consumed.saturating_add(interval))
+                .or_else(|| {
+                    subscription
+                        .trigger_ms
+                        .map(|trigger| trigger.saturating_add(interval))
+                })
+                .unwrap_or_else(|| {
+                    subscription.created_ms.saturating_add(
+                        interval.saturating_mul(subscription.fired_count.saturating_add(1) as i64),
+                    )
+                });
+            subscription.trigger_ms = Some(next_trigger);
+            subscription.status = "armed".into();
+        } else {
+            subscription.status = "armed".into();
+        }
+        if let Some(consumed_ms) = consumed_ms {
+            subscription.updated_ms = consumed_ms;
+        }
+    }
+
+    /// Apply one event for legacy callers.  The journal writer uses
+    /// [`Self::apply_checked`] so a global reducer rejection is returned to
+    /// the command boundary instead of being mistaken for success.
+    pub fn apply(&mut self, ev: &Event) {
+        if let Err(error) = self.apply_checked(ev) {
+            self.journal_poison.get_or_insert(error);
+        }
+    }
+
+    pub fn apply_checked(&mut self, ev: &Event) -> Result<(), String> {
+        match ev {
+            Event::MasterWakeSignal { signal, at_ms } => {
+                super::notification_state::accumulate_master_wake(
+                    &mut self.master_wake,
+                    signal,
+                    *at_ms,
+                );
+            }
+            Event::KeepaliveUpdated { worker_id, record } => {
+                self.keepalives.insert(worker_id.clone(), record.clone());
+            }
+            Event::MasterWakeUpdated { accumulator } => {
+                self.master_wake = accumulator.clone();
+            }
+            Event::SubagentUpdated { subagent } => {
+                self.subagents.insert(subagent.id.clone(), subagent.clone());
+            }
+            Event::Registered { worker } => {
+                self.workers.insert(worker.id.clone(), worker.clone());
+            }
+            Event::LegacyWorkerRemoved { worker_id } => {
+                self.workers.remove(worker_id);
+            }
+            Event::WorkerClosed { worker_id, .. } => {
+                self.workers.remove(worker_id);
+                self.keepalives.remove(worker_id);
+            }
+            Event::LegacyMasterTransferred { .. } => {}
+            Event::Sent { msg } => {
+                self.msgs.insert(msg.id.clone(), msg.clone());
+            }
+            Event::DeliveryMode { msg_id, mode } => {
+                self.delivery_modes.insert(msg_id.clone(), mode.clone());
+            }
+            Event::WakeAttempted { ids, attempted_ms } => {
+                for id in ids {
+                    if let Some(message) = self.msgs.get_mut(id) {
+                        message.wake_attempt_count = message.wake_attempt_count.saturating_add(1);
+                        message.last_wake_attempt_ms = *attempted_ms;
+                    }
+                }
+            }
+            Event::NotificationSubscribed { subscription } => {
+                self.notification_subscriptions
+                    .insert(subscription.id.clone(), subscription.clone());
+            }
+            Event::NotificationStatus {
+                subscription_id,
+                status,
+                updated_ms,
+            } => {
+                if let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id)
+                {
+                    subscription.status = status.clone();
+                    subscription.status_reason = None;
+                    subscription.updated_ms = *updated_ms;
+                }
+            }
+            Event::NotificationRebound {
+                subscription_id,
+                target,
+                updated_ms,
+            } => {
+                if let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id)
+                {
+                    subscription.target = target.clone();
+                    subscription.updated_ms = *updated_ms;
+                }
+            }
+            Event::NotificationSuppressed {
+                subscription_id,
+                status,
+                reason,
+                updated_ms,
+            } => {
+                if let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id)
+                {
+                    subscription.status = status.clone();
+                    subscription.status_reason = Some(reason.clone());
+                    subscription.updated_ms = *updated_ms;
+                }
+            }
+            Event::NotificationConsumed {
+                subscription_id,
+                message_id: _,
+                consumed_ms,
+            } => {
+                self.consume_notification(subscription_id, Some(*consumed_ms));
+            }
+            Event::WakeBound {
+                message_id,
+                subscription_id,
+            } => {
+                self.wake_bindings
+                    .insert(message_id.clone(), subscription_id.clone());
+            }
+            Event::Delivered { ids } => {
+                for id in ids {
+                    if let Some(m) = self.msgs.get_mut(id) {
+                        if m.state == "pending" {
+                            m.state = "delivered".into();
+                        }
+                    }
+                }
+                if ids.iter().any(|id| {
+                    self.wake_bindings.contains_key(id)
+                        && self.msgs.get(id).is_some_and(|message| {
+                            message.from == "collab-server"
+                                && self.master_worker_id.as_deref() == Some(message.to.as_str())
+                        })
+                }) {
+                    super::notification_state::mark_master_wake_delivered(&mut self.master_wake);
+                }
+            }
+            Event::Acked { ids } => {
+                for id in ids {
+                    if let Some(m) = self.msgs.get_mut(id) {
+                        m.state = "read".into();
+                    }
+                    let Some(subscription_id) = self.wake_bindings.get(id).cloned() else {
+                        continue;
+                    };
+                    let Some(subscription) = self.notification_subscriptions.get(&subscription_id)
+                    else {
+                        continue;
+                    };
+                    let consumes_on_read = subscription.event != "direct-message"
+                        || subscription.trigger_ms.is_some()
+                        || !subscription.trigger_times_ms.is_empty()
+                        || subscription.interval_ms.is_some();
+                    if !consumes_on_read {
+                        continue;
+                    }
+                    let fired_count = subscription.fired_count;
+                    let read_count = self
+                        .wake_bindings
+                        .iter()
+                        .filter(|(_, bound)| *bound == &subscription_id)
+                        .filter(|(message_id, _)| {
+                            self.msgs
+                                .get(*message_id)
+                                .is_some_and(|message| message.state == "read")
+                        })
+                        .count() as u32;
+                    // recv records Delivered + Acked without a separate
+                    // NotificationConsumed event. Compare durable read
+                    // occurrences with the cursor so timer delivery, which
+                    // already records NotificationConsumed, remains idempotent.
+                    if read_count > fired_count {
+                        let consumed_ms = if subscription.event == "master-idle" {
+                            self.msgs.get(id).and_then(|message| {
+                                [message.last_wake_attempt_ms, message.created_ms]
+                                    .into_iter()
+                                    .find(|timestamp| *timestamp > 0)
+                            })
+                        } else {
+                            None
+                        };
+                        self.consume_notification(&subscription_id, consumed_ms);
+                    }
+                }
+            }
+            Event::Superseded { ids } => {
+                for id in ids {
+                    if let Some(m) = self.msgs.get_mut(id) {
+                        m.state = "superseded".into();
+                    }
+                }
+            }
+            Event::LegacyNudged { msg_id } => {
+                if let Some(m) = self.msgs.get_mut(msg_id) {
+                    m.wake_attempt_count = m.wake_attempt_count.saturating_add(1);
+                    m.last_wake_attempt_ms = 0;
+                }
+            }
+            Event::TaskCreated { task } | Event::TaskUpdated { task } => {
+                self.tasks.insert(task.id.clone(), task.clone());
+            }
+            Event::SchedulerAdmission { admission } => {
+                self.scheduler_admissions
+                    .insert(admission.request_id.clone(), admission.clone());
+            }
+            Event::SchedulerAdmissionStatus {
+                request_id,
+                status,
+                error,
+                updated_ms,
+            } => {
+                if let Some(admission) = self.scheduler_admissions.get_mut(request_id) {
+                    admission.status = status.clone();
+                    admission.error = error.clone();
+                    admission.updated_ms = *updated_ms;
+                }
+            }
+            Event::TaskLifecycleUpdated { task_id, record } => {
+                self.task_lifecycle.insert(task_id.clone(), record.clone());
+            }
+            Event::CleanupVerified { receipt } => {
+                self.cleanup_receipts
+                    .insert(receipt.task_id.clone(), receipt.clone());
+            }
+            Event::MigrationUpdated { migration } => {
+                self.migration = Some(migration.clone());
+            }
+            Event::ReducerCheckpoint { .. } => {}
+            Event::CommandStarted { .. } => {}
+            Event::CommandRecorded {
+                command_id,
+                receipt,
+            } => {
+                self.project_command_receipt(command_id, receipt)?;
+                self.legacy_command_ids.insert(command_id.clone());
+                self.command_receipts
+                    .insert(command_id.clone(), receipt.clone());
+            }
+            Event::CommandCompleted {
+                command_id,
+                operation_id: _,
+                receipt,
+            } => {
+                self.project_command_receipt(command_id, receipt)?;
+                self.command_receipts
+                    .insert(command_id.clone(), receipt.clone());
+            }
+            Event::MasterAssigned {
+                worker_id,
+                assigned_by,
+                approval,
+                assigned_ms,
+            } => {
+                self.master_worker_id = Some(worker_id.clone());
+                self.master_assigned_by = Some(assigned_by.clone());
+                self.master_approval = approval.clone();
+                self.master_assigned_ms = Some(*assigned_ms);
+            }
+            Event::WorktreeBound { binding } => {
+                self.worktree_bindings
+                    .insert(binding.binding_id.clone(), binding.clone());
+            }
+            Event::GlobalProjectRegistered { registration } => {
+                self.apply_global_event(&GlobalEvent::ProjectRegistered {
+                    registration: registration.clone(),
+                })?;
+            }
+            Event::GlobalRuntimeBound { binding } => {
+                self.apply_global_event(&GlobalEvent::RuntimeBound {
+                    binding: binding.clone(),
+                })?;
+            }
+            Event::GlobalCurrentThreadRouteSet { binding } => {
+                let mut next = self.global.clone();
+                next.set_current_thread_route(binding.clone())
+                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
+            }
+            Event::GlobalMigrationCommitEvidence { evidence } => {
+                self.apply_global_event(&GlobalEvent::MigrationCommitEvidence {
+                    evidence: evidence.clone(),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn project_command_receipt(
+        &mut self,
+        command_id: &str,
+        receipt: &CommandReceipt,
+    ) -> Result<(), String> {
+        let command_id = crate::identity::CommandId::new(command_id.to_owned())
+            .map_err(|error| format!("global command receipt has invalid command id: {error}"))?;
+        let operation_id = crate::identity::OperationId::new(receipt.operation_id.clone())
+            .map_err(|error| format!("global command receipt has invalid operation id: {error}"))?;
+        self.global
+            .record_command_projection(super::global_state::CommandReceipt {
+                command_id,
+                operation_id,
+                epoch: self.global.epoch,
+                sequence: receipt.sequence,
+                revision: receipt.revision,
+                outcome: receipt.outcome.clone(),
+            })
+            .map_err(|error| format!("global command receipt rejected: {error}"))
+    }
+
+    pub fn apply_global_event(&mut self, event: &GlobalEvent) -> Result<(), String> {
+        let mut next = self.global.clone();
+        event
+            .clone()
+            .apply(&mut next)
+            .map_err(|error| format!("global reducer rejected event: {error}"))?;
+        next.set_counters(self.sequence, self.revision);
+        self.global = next;
+        Ok(())
+    }
+
+    pub fn drop_message(&mut self, id: &str) {
+        self.msgs.remove(id);
+        self.delivery_modes.remove(id);
+        self.wake_bindings.remove(id);
+    }
+
+    pub fn snapshot_events(&self) -> Vec<Event> {
+        let mut events = Vec::new();
+        if self.master_wake.generation > 0 {
+            events.push(Event::MasterWakeUpdated {
+                accumulator: self.master_wake.clone(),
+            });
+        }
+        let mut workers: Vec<_> = self.workers.values().cloned().collect();
+        workers.sort_by(|a, b| a.id.cmp(&b.id));
+        events.extend(
+            workers
+                .into_iter()
+                .map(|worker| Event::Registered { worker }),
+        );
+        let mut keepalives: Vec<_> = self.keepalives.iter().collect();
+        keepalives.sort_by(|a, b| a.0.cmp(b.0));
+        events.extend(
+            keepalives
+                .into_iter()
+                .map(|(worker_id, record)| Event::KeepaliveUpdated {
+                    worker_id: worker_id.clone(),
+                    record: record.clone(),
+                }),
+        );
+        let mut subagents: Vec<_> = self.subagents.values().cloned().collect();
+        subagents.sort_by(|a, b| a.id.cmp(&b.id));
+        events.extend(
+            subagents
+                .into_iter()
+                .map(|subagent| Event::SubagentUpdated { subagent }),
+        );
+        let mut tasks: Vec<_> = self.tasks.values().cloned().collect();
+        tasks.sort_by(|a, b| a.id.cmp(&b.id));
+        events.extend(tasks.into_iter().map(|task| Event::TaskCreated { task }));
+        let mut scheduler_admissions: Vec<_> =
+            self.scheduler_admissions.values().cloned().collect();
+        scheduler_admissions.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+        events.extend(
+            scheduler_admissions
+                .into_iter()
+                .map(|admission| Event::SchedulerAdmission { admission }),
+        );
+        let mut lifecycle: Vec<_> = self.task_lifecycle.iter().collect();
+        lifecycle.sort_by(|a, b| a.0.cmp(b.0));
+        events.extend(
+            lifecycle
+                .into_iter()
+                .map(|(task_id, record)| Event::TaskLifecycleUpdated {
+                    task_id: task_id.clone(),
+                    record: record.clone(),
+                }),
+        );
+        let mut receipts: Vec<_> = self.cleanup_receipts.values().cloned().collect();
+        receipts.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        events.extend(
+            receipts
+                .into_iter()
+                .map(|receipt| Event::CleanupVerified { receipt }),
+        );
+        let mut subscriptions: Vec<_> = self.notification_subscriptions.values().cloned().collect();
+        subscriptions.sort_by(|a, b| a.id.cmp(&b.id));
+        events.extend(
+            subscriptions
+                .into_iter()
+                .map(|subscription| Event::NotificationSubscribed { subscription }),
+        );
+        let mut messages: Vec<_> = self.msgs.values().cloned().collect();
+        messages.sort_by(|a, b| (a.created_ms, a.id.clone()).cmp(&(b.created_ms, b.id.clone())));
+        for msg in messages {
+            let id = msg.id.clone();
+            events.push(Event::Sent { msg });
+            if let Some(mode) = self.delivery_modes.get(&id) {
+                events.push(Event::DeliveryMode {
+                    msg_id: id.clone(),
+                    mode: mode.clone(),
+                });
+            }
+            if let Some(subscription_id) = self.wake_bindings.get(&id) {
+                events.push(Event::WakeBound {
+                    message_id: id,
+                    subscription_id: subscription_id.clone(),
+                });
+            }
+        }
+        if let Some(migration) = self.migration.clone() {
+            events.push(Event::MigrationUpdated { migration });
+        }
+        let mut command_receipts: Vec<_> = self.command_receipts.iter().collect();
+        command_receipts.sort_by(|a, b| a.0.cmp(b.0));
+        for (command_id, receipt) in command_receipts {
+            if self.legacy_command_ids.contains(command_id) {
+                events.push(Event::CommandRecorded {
+                    command_id: command_id.clone(),
+                    receipt: receipt.clone(),
+                });
+            } else {
+                events.push(Event::CommandStarted {
+                    command_id: command_id.clone(),
+                    operation_id: receipt.operation_id.clone(),
+                });
+                events.push(Event::CommandCompleted {
+                    command_id: command_id.clone(),
+                    operation_id: receipt.operation_id.clone(),
+                    receipt: receipt.clone(),
+                });
+            }
+        }
+        if let Some(worker_id) = self.master_worker_id.clone() {
+            events.push(Event::MasterAssigned {
+                worker_id,
+                assigned_by: self.master_assigned_by.clone().unwrap_or_default(),
+                approval: self.master_approval.clone(),
+                assigned_ms: self.master_assigned_ms.unwrap_or(0),
+            });
+        }
+        let mut bindings: Vec<_> = self.worktree_bindings.values().cloned().collect();
+        bindings.sort_by(|a, b| a.binding_id.cmp(&b.binding_id));
+        events.extend(
+            bindings
+                .into_iter()
+                .map(|binding| Event::WorktreeBound { binding }),
+        );
+        for (_, project) in &self.global.projects {
+            for registration in project.registrations.values() {
+                events.push(Event::GlobalProjectRegistered {
+                    registration: registration.clone(),
+                });
+            }
+            for binding in project.runtime_bindings.values() {
+                events.push(Event::GlobalRuntimeBound {
+                    binding: binding.clone(),
+                });
+            }
+        }
+        events.extend(
+            self.global
+                .current_thread_routes
+                .values()
+                .cloned()
+                .map(|binding| Event::GlobalCurrentThreadRouteSet { binding }),
+        );
+        let mut migration_commit_evidence: Vec<_> = self
+            .global
+            .migration_commit_evidence
+            .values()
+            .cloned()
+            .collect();
+        migration_commit_evidence
+            .sort_by(|a, b| a.operation_id.as_str().cmp(b.operation_id.as_str()));
+        events.extend(
+            migration_commit_evidence
+                .into_iter()
+                .map(|evidence| Event::GlobalMigrationCommitEvidence { evidence }),
+        );
+        events.push(Event::ReducerCheckpoint {
+            sequence: self.sequence,
+            revision: self.revision,
+        });
+        events
+    }
+
+    pub fn admission_frozen(&self) -> bool {
+        self.journal_poison.is_some()
+            || self
+                .migration
+                .as_ref()
+                .is_some_and(|migration| migration.admission_frozen)
+    }
+
+    /// Unread (not yet acked) inbox of a worker, oldest first.
+    pub fn inbox_of(&self, worker_id: &str) -> Vec<&Message> {
+        let mut v: Vec<&Message> = self
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == worker_id
+                    && m.state != "read"
+                    && m.state != "superseded"
+                    && self.scheduler_message_deliverable(&m.id)
+            })
+            .collect();
+        v.sort_by_key(|m| m.created_ms);
+        v
+    }
+
+    pub fn scheduler_message_deliverable(&self, message_id: &str) -> bool {
+        !self
+            .scheduler_admissions
+            .values()
+            .any(|admission| admission.message_id == message_id && admission.status == "failed")
+    }
+
+    /// True when some other message is a reply to `msg`.
+    pub fn answered(&self, msg_id: &str) -> bool {
+        self.msgs
+            .values()
+            .any(|m| m.in_reply_to.as_deref() == Some(msg_id))
+    }
+
+    /// One live request per direction during the cooldown window.
+    pub fn recent_live_request(
+        &self,
+        from: &str,
+        to: &str,
+        now_ms: i64,
+    ) -> Option<(&String, &Message)> {
+        self.msgs.iter().find(|(_, m)| {
+            m.from == from
+                && m.to == to
+                && m.mtype == "request"
+                && m.state != "read"
+                && !self.answered(&m.id)
+                && now_ms - m.created_ms < REQUEST_COOLDOWN_MS
+        })
+    }
+
+    /// Earlier replies remain journaled, but only the newest one is active.
+    pub fn superseded_replies(&self, request_id: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .msgs
+            .values()
+            .filter(|m| {
+                m.mtype == "reply"
+                    && m.in_reply_to.as_deref() == Some(request_id)
+                    && m.state != "superseded"
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        ids.sort_by(|a, b| {
+            let rank = |id: &str| {
+                self.msgs
+                    .get(id)
+                    .map(|m| (m.created_ms, m.id.clone()))
+                    .unwrap_or_default()
+            };
+            rank(a).cmp(&rank(b))
+        });
+        ids
+    }
+
+    pub fn matching_subscription(
+        &self,
+        worker_id: &str,
+        event: &str,
+        subject: Option<&str>,
+        now: i64,
+    ) -> Option<&NotificationSubscription> {
+        self.notification_subscriptions
+            .values()
+            .filter(|subscription| subscription.matches(worker_id, event, subject, now))
+            .min_by_key(|subscription| (subscription.created_ms, subscription.id.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId};
+    use crate::scope::ProjectScopeId;
+    use crate::server::global_state::{ProjectRegistration, RuntimeBinding};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static REPLAY_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn replay_test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "collab-route-replay-{label}-{}-{}",
+            std::process::id(),
+            REPLAY_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    #[test]
+    fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
+        let mut state = State::default();
+        state.apply(&Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("approved".into()),
+            assigned_ms: 1,
+        });
+        let generated = |id: &str, subject: &str, created_ms: i64| Message {
+            id: id.into(),
+            from: "collab-server".into(),
+            to: "master".into(),
+            mtype: "notify".into(),
+            subject: Some(subject.into()),
+            body: "durable detail".into(),
+            in_reply_to: None,
+            created_ms,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+        };
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: 10,
+        });
+        state.apply(&Event::Sent {
+            msg: generated("idle-1", "worker-idle: worker", 10),
+        });
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: 20,
+        });
+        state.apply(&Event::Sent {
+            msg: generated("idle-duplicate", "worker-idle: worker", 20),
+        });
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerUnresponsive {
+                worker_id: "offline".into(),
+            },
+            at_ms: 30,
+        });
+        state.apply(&Event::Sent {
+            msg: generated("unresponsive", "worker-unresponsive: offline", 30),
+        });
+        assert_eq!(state.master_wake.generation, 1);
+        assert_eq!(state.master_wake.first_pending_ms, 10);
+        assert_eq!(state.master_wake.last_updated_ms, 30);
+        assert_eq!(state.master_wake.idle_workers, vec!["worker"]);
+        assert_eq!(state.master_wake.unresponsive_workers, vec!["offline"]);
+        assert_eq!(state.master_wake.delivery_state, "pending");
+
+        let explicit = Message {
+            from: "peer".into(),
+            ..generated("explicit", "worker-idle: ignored", 40)
+        };
+        state.apply(&Event::Sent { msg: explicit });
+        assert_eq!(state.master_wake.idle_workers, vec!["worker"]);
+        state.apply(&Event::WakeBound {
+            message_id: "idle-1".into(),
+            subscription_id: "sub-master".into(),
+        });
+        state.apply(&Event::Delivered {
+            ids: vec!["idle-1".into()],
+        });
+        assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
+        state.apply(&Event::Acked {
+            ids: vec!["idle-1".into()],
+        });
+        assert_eq!(state.master_wake.generation, 1);
+        assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerWorking {
+                worker_id: "worker".into(),
+            },
+            at_ms: 50,
+        });
+        assert!(state.master_wake.idle_workers.is_empty());
+        assert_eq!(state.master_wake.delivery_state, "pending");
+    }
+
+    #[test]
+    fn goal_due_is_idempotent_per_revision_and_advances_for_new_revision() {
+        let mut state = State::default();
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::GoalDue { revision: 7 },
+            at_ms: 10,
+        });
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::GoalDue { revision: 7 },
+            at_ms: 20,
+        });
+        assert_eq!(state.master_wake.active_goal_revision, Some(7));
+        assert_eq!(state.master_wake.last_updated_ms, 10);
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::GoalDue { revision: 8 },
+            at_ms: 30,
+        });
+        assert_eq!(state.master_wake.active_goal_revision, Some(8));
+        assert_eq!(state.master_wake.last_updated_ms, 30);
+    }
+
+    fn msg(id: &str, to: &str, mtype: &str) -> Message {
+        Message {
+            id: id.into(),
+            from: "a".into(),
+            to: to.into(),
+            mtype: mtype.into(),
+            subject: Some("test".into()),
+            body: "b".into(),
+            in_reply_to: None,
+            created_ms: 1,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+        }
+    }
+
+    #[test]
+    fn message_lifecycle() {
+        let mut st = State::default();
+        st.apply(&Event::Sent {
+            msg: msg("m1", "w2", "request"),
+        });
+        assert_eq!(st.inbox_of("w2").len(), 1);
+        assert!(st.inbox_of("w1").is_empty());
+
+        st.apply(&Event::Delivered {
+            ids: vec!["m1".into()],
+        });
+        assert_eq!(st.msgs["m1"].state, "delivered");
+        assert_eq!(st.inbox_of("w2").len(), 1);
+
+        st.apply(&Event::Acked {
+            ids: vec!["m1".into()],
+        });
+        assert_eq!(st.msgs["m1"].state, "read");
+        assert!(st.inbox_of("w2").is_empty());
+    }
+
+    #[test]
+    fn legacy_wake_attempt_replay_is_clock_independent() {
+        let event: Event = serde_json::from_str(r#"{"ev":"WakeAttempted","ids":["m1"]}"#).unwrap();
+        let mut first = State::default();
+        let mut second = State::default();
+        for state in [&mut first, &mut second] {
+            state.apply(&Event::Sent {
+                msg: msg("m1", "worker", "system"),
+            });
+            state.apply(&event);
+        }
+        assert_eq!(first.msgs["m1"].wake_attempt_count, 1);
+        assert_eq!(first.msgs["m1"].last_wake_attempt_ms, 0);
+        assert_eq!(
+            serde_json::to_value(&first.msgs["m1"]).unwrap(),
+            serde_json::to_value(&second.msgs["m1"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn command_receipt_and_worktree_binding_replay_preserve_durable_state() {
+        let mut state = State::default();
+        let receipt = CommandReceipt {
+            operation_id: "operation-1".into(),
+            outcome: serde_json::json!({"accepted": true}),
+            sequence: 4,
+            revision: 4,
+        };
+        let binding = WorktreeBinding {
+            worktree_root: "/project/playground/task".into(),
+            owning_project_scope: "/project".into(),
+            task_id: "task-1".into(),
+            owner_agent_id: "worker-1".into(),
+            binding_id: "binding-task-1".into(),
+            base_commit: "abc123".into(),
+        };
+        let events = [
+            Event::CommandRecorded {
+                command_id: "command-1".into(),
+                receipt: receipt.clone(),
+            },
+            Event::WorktreeBound {
+                binding: binding.clone(),
+            },
+        ];
+        for event in &events {
+            state.apply(event);
+        }
+
+        let replayed = events.iter().fold(State::default(), |mut state, event| {
+            state.apply(event);
+            state
+        });
+        assert_eq!(replayed.command_receipts["command-1"], receipt);
+        assert_eq!(replayed.worktree_bindings["binding-task-1"], binding);
+        assert_eq!(state.command_receipts, replayed.command_receipts);
+        assert_eq!(state.worktree_bindings, replayed.worktree_bindings);
+    }
+
+    #[test]
+    fn runtime_binding_replay_restores_the_unique_current_thread_route() {
+        let root = replay_test_root("unique");
+        let journal = root.join(".agent-collab/server/journal.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let scope = ProjectScopeId::new("/replay-project").unwrap();
+        let registration =
+            ProjectRegistration::new(scope.clone(), AppServerId::new("appserver-cli").unwrap())
+                .unwrap();
+        let binding = RuntimeBinding::new(
+            scope,
+            AppServerId::new("appserver-cli").unwrap(),
+            AgentId::new("agent-replay").unwrap(),
+            RuntimeId::new("runtime-replay").unwrap(),
+            BindingId::new("binding-replay").unwrap(),
+            4,
+            Some(NativeThreadId::new("thread-replay").unwrap()),
+        )
+        .unwrap();
+        let events = vec![
+            Event::GlobalProjectRegistered { registration },
+            Event::GlobalRuntimeBound {
+                binding: binding.clone(),
+            },
+        ];
+        let body = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&journal, format!("{body}\n")).unwrap();
+        let replayed = crate::server::replay(&root).unwrap();
+        assert_eq!(
+            replayed
+                .global
+                .lookup_current_thread_route(binding.native_thread_id.as_ref().unwrap()),
+            Some(&binding)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_binding_replay_rejects_ambiguous_current_thread_routes() {
+        let root = replay_test_root("ambiguous");
+        let journal = root.join(".agent-collab/server/journal.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let first_scope = ProjectScopeId::new("/replay-project-a").unwrap();
+        let second_scope = ProjectScopeId::new("/replay-project-b").unwrap();
+        let first = RuntimeBinding::new(
+            first_scope.clone(),
+            AppServerId::new("appserver-cli").unwrap(),
+            AgentId::new("agent-a").unwrap(),
+            RuntimeId::new("runtime-a").unwrap(),
+            BindingId::new("binding-a").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-shared").unwrap()),
+        )
+        .unwrap();
+        let second = RuntimeBinding::new(
+            second_scope.clone(),
+            AppServerId::new("appserver-cli").unwrap(),
+            AgentId::new("agent-b").unwrap(),
+            RuntimeId::new("runtime-b").unwrap(),
+            BindingId::new("binding-b").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-shared").unwrap()),
+        )
+        .unwrap();
+        let events = vec![
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(
+                    first_scope,
+                    AppServerId::new("appserver-cli").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(
+                    second_scope,
+                    AppServerId::new("appserver-cli").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound { binding: first },
+            Event::GlobalRuntimeBound { binding: second },
+        ];
+        let body = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&journal, format!("{body}\n")).unwrap();
+        let error = crate::server::replay(&root)
+            .err()
+            .expect("ambiguous replay must fail")
+            .to_string();
+        assert!(
+            error.contains("ambiguous current thread route thread-shared"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_role_field_is_ignored_on_replay() {
+        let mut st = State::default();
+        let event: Event = serde_json::from_str(
+            r#"{"ev":"Registered","worker":{"id":"legacy","token":"t","pane":"%1","cwd":"/tmp","registered_ms":1,"role":"master"}}"#,
+        )
+        .unwrap();
+        st.apply(&event);
+        let worker = serde_json::to_value(&st.workers["legacy"]).unwrap();
+        assert!(worker.get("role").is_none());
+    }
+
+    #[test]
+    fn answered_detection() {
+        let mut st = State::default();
+        st.apply(&Event::Sent {
+            msg: msg("m1", "w2", "request"),
+        });
+        let mut reply = msg("m2", "w1", "reply");
+        reply.in_reply_to = Some("m1".into());
+        st.apply(&Event::Sent { msg: reply });
+        assert!(st.answered("m1"));
+        assert!(!st.answered("m2"));
+    }
+
+    #[test]
+    fn request_cooldown_uses_only_recent_live_request() {
+        let mut st = State::default();
+        let mut request = msg("request", "w2", "request");
+        request.from = "w1".into();
+        request.created_ms = 500;
+        st.apply(&Event::Sent { msg: request });
+
+        let (id, _) = st
+            .recent_live_request("w1", "w2", 500 + REQUEST_COOLDOWN_MS - 1)
+            .expect("recent live request blocks a new send");
+        assert_eq!(id, "request");
+        assert!(st
+            .recent_live_request("w1", "w2", 500 + REQUEST_COOLDOWN_MS)
+            .is_none());
+    }
+
+    #[test]
+    fn wait_cycle_rejects_direct_and_transitive_cycles() {
+        let base = |id: &str| TaskRec {
+            id: id.into(),
+            owner: "worker".into(),
+            created_by: "worker".into(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: "p2".into(),
+            status: "waiting".into(),
+            next_step: None,
+            wait: None,
+            created_ms: 0,
+            updated_ms: 0,
+        };
+        let mut tasks = HashMap::new();
+        let mut a = base("a");
+        a.wait = Some(WaitSpec {
+            waiter: "a".into(),
+            waiting_for: "b".into(),
+            responsible_actor: "worker".into(),
+            reason: "resource_conflict".into(),
+            deadline_ms: 1,
+            resume_on: vec!["resource_released".into()],
+            escalation: "resource_owner_and_waiter_recheck".into(),
+        });
+        tasks.insert("a".into(), a);
+        assert!(wait_cycle(&tasks, "b", "a"));
+        assert!(!wait_cycle(&tasks, "c", "a"));
+    }
+
+    #[test]
+    fn latest_reply_supersedes_previous_replies() {
+        let mut st = State::default();
+        st.apply(&Event::Sent {
+            msg: msg("request", "w1", "request"),
+        });
+
+        let mut first = msg("reply-1", "w1", "reply");
+        first.in_reply_to = Some("request".into());
+        first.created_ms = 2;
+        st.apply(&Event::Sent { msg: first });
+        let stale_replies = st.superseded_replies("request");
+
+        let mut latest = msg("reply-2", "w1", "reply");
+        latest.in_reply_to = Some("request".into());
+        latest.created_ms = 3;
+        st.apply(&Event::Sent { msg: latest });
+        st.apply(&Event::Superseded { ids: stale_replies });
+
+        assert!(st.answered("request"));
+        assert_eq!(st.msgs["reply-1"].state, "superseded");
+        assert_eq!(st.msgs["reply-2"].state, "pending");
+        assert_eq!(
+            st.inbox_of("w1")
+                .iter()
+                .filter(|m| m.mtype == "reply")
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reply-2"]
+        );
+    }
+
+    #[test]
+    fn notification_subscription_is_explicit_exact_and_one_shot() {
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-release".into(),
+                worker_id: "waiter".into(),
+                event: "resource-released".into(),
+                subject: Some("holder-task".into()),
+                target: "thread-7".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 10_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+
+        assert!(state
+            .matching_subscription("waiter", "resource-released", Some("holder-task"), 9_999)
+            .is_some());
+        assert!(state
+            .matching_subscription("waiter", "resource-released", Some("other-task"), 9_999)
+            .is_none());
+        assert!(state
+            .matching_subscription("waiter", "resource-released", Some("holder-task"), 10_000)
+            .is_none());
+
+        state.apply(&Event::NotificationConsumed {
+            subscription_id: "sub-release".into(),
+            message_id: "message".into(),
+            consumed_ms: 8_000,
+        });
+        assert!(state
+            .matching_subscription("waiter", "resource-released", Some("holder-task"), 8_001)
+            .is_none());
+    }
+
+    #[test]
+    fn wake_binding_is_control_state_not_message_payload() {
+        let mut state = State::default();
+        state.apply(&Event::Sent {
+            msg: msg("message", "waiter", "notify"),
+        });
+        state.apply(&Event::WakeBound {
+            message_id: "message".into(),
+            subscription_id: "subscription".into(),
+        });
+
+        assert_eq!(state.wake_bindings["message"], "subscription");
+        assert!(serde_json::to_value(&state.msgs["message"])
+            .unwrap()
+            .get("subscription_id")
+            .is_none());
+    }
+
+    #[test]
+    fn periodic_subscription_consumes_exactly_its_repeat_count() {
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-periodic".into(),
+                worker_id: "waiter".into(),
+                event: "deadline".into(),
+                subject: Some("timer".into()),
+                target: "thread-7".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(1_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 10_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        for count in 1..=3 {
+            state.apply(&Event::NotificationConsumed {
+                subscription_id: "sub-periodic".into(),
+                message_id: format!("m{count}"),
+                consumed_ms: count * 1_000,
+            });
+            if count < 3 {
+                assert_eq!(
+                    state.notification_subscriptions["sub-periodic"].status,
+                    "armed"
+                );
+            }
+        }
+        assert_eq!(
+            state.notification_subscriptions["sub-periodic"].status,
+            "consumed"
+        );
+        assert_eq!(
+            state.notification_subscriptions["sub-periodic"].fired_count,
+            3
+        );
+    }
+
+    #[test]
+    fn periodic_subscription_persists_fixed_absolute_cursor_across_replay() {
+        let subscription = |id: &str, trigger_ms: Option<i64>| NotificationSubscription {
+            id: id.into(),
+            worker_id: "master".into(),
+            event: "deadline".into(),
+            subject: Some("periodic".into()),
+            target: "thread-7".into(),
+            method: "appserver".into(),
+            trigger_ms,
+            trigger_times_ms: Vec::new(),
+            interval_ms: Some(1_000),
+            repeat_count: 3,
+            fired_count: 0,
+            expires_ms: 20_000,
+            status: "armed".into(),
+            created_ms: 1_000,
+            updated_ms: 1_000,
+            status_reason: None,
+        };
+
+        let mut none_state = State::default();
+        none_state.apply(&Event::NotificationSubscribed {
+            subscription: subscription("sub-periodic-none", None),
+        });
+        let mut none_cursor = Vec::new();
+        for count in 1..=3 {
+            none_state.apply(&Event::NotificationConsumed {
+                subscription_id: "sub-periodic-none".into(),
+                message_id: format!("none-{count}"),
+                consumed_ms: 1_000 + (count as i64 * 1_000),
+            });
+            if count < 3 {
+                none_cursor
+                    .push(none_state.notification_subscriptions["sub-periodic-none"].trigger_ms);
+            }
+        }
+        assert_eq!(none_cursor, vec![Some(3_000), Some(4_000)]);
+
+        let mut seeded_state = State::default();
+        seeded_state.apply(&Event::NotificationSubscribed {
+            subscription: subscription("sub-periodic-seeded", Some(2_000)),
+        });
+        for count in 1..=2 {
+            seeded_state.apply(&Event::NotificationConsumed {
+                subscription_id: "sub-periodic-seeded".into(),
+                message_id: format!("seeded-{count}"),
+                consumed_ms: 1_000 + (count as i64 * 1_000),
+            });
+            assert_eq!(
+                seeded_state.notification_subscriptions["sub-periodic-seeded"].trigger_ms,
+                Some(2_000 + count as i64 * 1_000)
+            );
+        }
+
+        let mut replayed = State::default();
+        for event in seeded_state.snapshot_events() {
+            replayed.apply(&event);
+        }
+        assert_eq!(
+            replayed.notification_subscriptions["sub-periodic-seeded"].trigger_ms,
+            seeded_state.notification_subscriptions["sub-periodic-seeded"].trigger_ms
+        );
+        assert_eq!(
+            replayed.notification_subscriptions["sub-periodic-seeded"].fired_count,
+            seeded_state.notification_subscriptions["sub-periodic-seeded"].fired_count
+        );
+    }
+
+    #[test]
+    fn ack_consumes_scheduled_occurrence_once_and_replay_preserves_cursor() {
+        let subscription_id = "sub-ack-periodic";
+        let message_id = "message-ack-periodic";
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.into(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("ack-periodic".into()),
+                target: "thread-7".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(1_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 20_000,
+                status: "armed".into(),
+                created_ms: 1_000,
+                updated_ms: 1_000,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: message_id.into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("deadline:ack-periodic".into()),
+                body: "scheduled occurrence".into(),
+                in_reply_to: None,
+                created_ms: 2_000,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: message_id.into(),
+            subscription_id: subscription_id.into(),
+        });
+        state.apply(&Event::Delivered {
+            ids: vec![message_id.into()],
+        });
+        state.apply(&Event::Acked {
+            ids: vec![message_id.into()],
+        });
+
+        let subscription = &state.notification_subscriptions[subscription_id];
+        assert_eq!(subscription.fired_count, 1);
+        assert_eq!(subscription.trigger_ms, Some(3_000));
+        assert_eq!(subscription.status, "armed");
+
+        // A duplicate ACK sees the same read occurrence and cannot advance the
+        // durable cursor a second time.
+        state.apply(&Event::Acked {
+            ids: vec![message_id.into()],
+        });
+        let subscription = &state.notification_subscriptions[subscription_id];
+        assert_eq!(subscription.fired_count, 1);
+        assert_eq!(subscription.trigger_ms, Some(3_000));
+
+        let mut replayed = State::default();
+        for event in state.snapshot_events() {
+            replayed.apply(&event);
+        }
+        let replayed_subscription = &replayed.notification_subscriptions[subscription_id];
+        assert_eq!(replayed_subscription.fired_count, 1);
+        assert_eq!(replayed_subscription.trigger_ms, Some(3_000));
+        assert_eq!(replayed.msgs[message_id].state, "read");
+    }
+
+    #[test]
+    fn ack_after_timer_consumption_does_not_double_consume() {
+        let subscription_id = "sub-ack-timer";
+        let message_id = "message-ack-timer";
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.into(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("ack-timer".into()),
+                target: "thread-7".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(2_000),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(1_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 20_000,
+                status: "armed".into(),
+                created_ms: 1_000,
+                updated_ms: 1_000,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: message_id.into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("deadline:ack-timer".into()),
+                body: "timer occurrence".into(),
+                in_reply_to: None,
+                created_ms: 2_000,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: message_id.into(),
+            subscription_id: subscription_id.into(),
+        });
+        state.apply(&Event::Delivered {
+            ids: vec![message_id.into()],
+        });
+        state.apply(&Event::NotificationConsumed {
+            subscription_id: subscription_id.into(),
+            message_id: message_id.into(),
+            consumed_ms: 2_001,
+        });
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].fired_count,
+            1
+        );
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].trigger_ms,
+            Some(3_000)
+        );
+
+        state.apply(&Event::Acked {
+            ids: vec![message_id.into()],
+        });
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].fired_count,
+            1
+        );
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].trigger_ms,
+            Some(3_000)
+        );
+    }
+
+    #[test]
+    fn ack_on_reusable_direct_message_does_not_consume_subscription() {
+        let subscription_id = "sub-ack-direct";
+        let message_id = "message-ack-direct";
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.into(),
+                worker_id: "worker".into(),
+                event: "direct-message".into(),
+                subject: None,
+                target: "thread-7".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 20_000,
+                status: "armed".into(),
+                created_ms: 1_000,
+                updated_ms: 1_000,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: message_id.into(),
+                from: "peer".into(),
+                to: "worker".into(),
+                mtype: "notify".into(),
+                subject: Some("direct".into()),
+                body: "reusable message".into(),
+                in_reply_to: None,
+                created_ms: 2_000,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: message_id.into(),
+            subscription_id: subscription_id.into(),
+        });
+        state.apply(&Event::Delivered {
+            ids: vec![message_id.into()],
+        });
+        state.apply(&Event::Acked {
+            ids: vec![message_id.into()],
+        });
+
+        let subscription = &state.notification_subscriptions[subscription_id];
+        assert_eq!(subscription.fired_count, 0);
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(state.msgs[message_id].state, "read");
+    }
+}

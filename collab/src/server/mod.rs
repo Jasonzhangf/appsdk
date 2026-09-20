@@ -1,0 +1,16737 @@
+pub mod global_state;
+pub(crate) mod keepalive;
+pub mod mailbox;
+pub mod notification_contract;
+pub mod notification_state;
+pub mod presence;
+pub mod state;
+pub mod timers;
+
+pub use global_state::{GlobalState, ProjectRegistration, RuntimeBinding};
+
+use crate::identity::{
+    AgentId, AppServerId, BindingId, CommandId, NativeThreadId, OperationId, RuntimeId,
+};
+use crate::proto::{
+    CommandEnvelope, ProjectContext, Req, RequestEnvelope, Resp, RouteResolution,
+    SelectedTransport, TransportCandidates, TransportKind, MSG_TYPES,
+};
+use crate::scope::{HostPaths, ProjectScopeId, RouteScope, Scope};
+use crate::server::presence::{append_log, IdentityPresence};
+use mailbox::{
+    batch_notification_text, compose_notification, default_direct_message_id,
+    is_explicit_notification, missing_recipient_projection_messages, notification_text,
+    read_recipient_mailbox, truncate_notification, DEFAULT_DIRECT_MESSAGE_TTL_SECONDS,
+    MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER, MAX_NOTIFICATION_TTL_SECONDS, NOTIFICATION_EVENTS,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use state::{
+    goal_deadline_key, now_ms, task_resource_active, wait_cycle, CleanupReceipt, Event,
+    GlobalEvent, Message, MigrationRecord, NotificationSubscription, State, TaskRec, TypedCommand,
+    TypedEnvelope, WaitSpec, WorkerRec, WorktreeBinding, MAX_WAKE_ATTEMPTS,
+};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+use tokio::net::UnixListener;
+use tokio::sync::Notify;
+
+/// The resident v1 daemon owns one project reducer/journal.  Keep that
+/// ownership explicit at the host boundary instead of treating the process
+/// root as an implicit fallback for every valid project context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostRouteOwner {
+    ResidentProject { root: PathBuf, journal: PathBuf },
+    RegisteredNotReady { root: PathBuf },
+}
+
+#[derive(Debug, Clone, Default)]
+struct HostRouteRegistry {
+    /// The route identity is the pair, rather than the project alone.  A
+    /// project may be registered by more than one appserver, but this v1
+    /// daemon has one project reducer and therefore admits only its resident
+    /// app route.
+    routes: std::collections::BTreeMap<(String, String), HostRouteOwner>,
+}
+
+impl HostRouteRegistry {
+    fn for_server(server: &Server) -> Result<Self, String> {
+        let resident_scope = GlobalState::canonical_project_scope(&server.root)
+            .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+        let resident_root = PathBuf::from(resident_scope.as_str());
+        let resident_journal = server
+            .root
+            .join(".agent-collab")
+            .join("server")
+            .join("journal.jsonl");
+        // GlobalState is the only durable registration index available to the
+        // v1 resident process.  A registered project without a resident
+        // reducer remains visible as a route, but cannot be sent to this
+        // project's State/journal until multi-project migration is complete.
+        let st = server.state.lock().unwrap();
+        let resident_app_scope = st
+            .global
+            .lookup_project(&resident_scope)
+            .and_then(|project| {
+                let mut bound_apps = project
+                    .runtime_bindings
+                    .values()
+                    .map(|binding| binding.app_scope_id.as_str().to_owned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                match bound_apps.len() {
+                    1 => bound_apps
+                        .pop_first()
+                        .and_then(|app_scope| project.registrations.get(&app_scope))
+                        .map(|registration| registration.app_scope_id.clone()),
+                    0 if project.registrations.len() == 1 => project
+                        .registrations
+                        .values()
+                        .next()
+                        .map(|registration| registration.app_scope_id.clone()),
+                    _ => None,
+                }
+            });
+        let mut routes = std::collections::BTreeMap::new();
+        for project in st.global.projects.values() {
+            for registration in project.registrations.values() {
+                let project_scope = registration.project_scope.as_str().to_owned();
+                let app_scope = registration.app_scope_id.as_str().to_owned();
+                let owner = if registration.project_scope == resident_scope
+                    && resident_app_scope.as_ref() == Some(&registration.app_scope_id)
+                {
+                    HostRouteOwner::ResidentProject {
+                        root: resident_root.clone(),
+                        journal: resident_journal.clone(),
+                    }
+                } else {
+                    HostRouteOwner::RegisteredNotReady {
+                        root: PathBuf::from(project_scope.clone()),
+                    }
+                };
+                routes.insert((app_scope, project_scope), owner);
+            }
+        }
+        Ok(Self { routes })
+    }
+
+    fn lookup(&self, context: &ProjectContext) -> Option<&HostRouteOwner> {
+        self.routes.get(&(
+            context.app_scope_id.as_str().to_owned(),
+            context.project_scope.as_str().to_owned(),
+        ))
+    }
+}
+
+const MAX_POLL_MS: u64 = 3_600_000;
+const TASK_STATUSES: [&str; 12] = [
+    "assigned",
+    "working",
+    "blocked",
+    "waiting",
+    "verifying",
+    "reviewed",
+    "delivered",
+    "accepted",
+    "rework",
+    "merged",
+    "closed",
+    "cancelled",
+];
+const MAX_WORKTREE_PATH_BYTES: usize = 80;
+/// Lock used by releases before the host-scoped state directory existed.
+/// A new daemon must fence this writer before it replays the project journal;
+/// otherwise an old binary could append concurrently under the new socket.
+const LEGACY_HOST_DAEMON_LOCK_PATH: &str = "/tmp/collab-host.lock";
+
+type AppServerCandidateCheck =
+    dyn Fn(&crate::proto::AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync;
+type AppServerNotificationSink =
+    dyn Fn(&SelectedTransport, &str, &str, bool) -> Result<serde_json::Value, String> + Send + Sync;
+type AppServerThreadStatus =
+    dyn Fn(&SelectedTransport, &str) -> Result<serde_json::Value, String> + Send + Sync;
+type AppServerThreadArchive =
+    dyn Fn(&SelectedTransport, &str) -> Result<serde_json::Value, String> + Send + Sync;
+
+fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
+    Arc::new(|candidate| {
+        crate::client::adapters::verify_candidate(candidate).map_err(|error| error.to_string())
+    })
+}
+
+pub(crate) fn default_appserver_notification_sink() -> Arc<AppServerNotificationSink> {
+    Arc::new(|transport, body, message_id, explicit| {
+        let result = if explicit {
+            crate::client::adapters::immediate_notify(transport, body, message_id)
+        } else {
+            crate::client::adapters::queue_wakeup(transport, body, message_id)
+        };
+        result.map_err(|error| error.to_string())
+    })
+}
+
+fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
+    Arc::new(|transport, thread_id| {
+        let mut status =
+            crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
+                .map_err(|error| error.to_string())?;
+        match crate::client::adapters::codex_app_server::read_latest_turn_status(
+            transport, thread_id,
+        ) {
+            Ok(turns) => {
+                if let Some(data) = turns.get("data").and_then(serde_json::Value::as_array) {
+                    status["thread"]["turns"] = serde_json::Value::Array(data.clone());
+                }
+            }
+            Err(error) => {
+                status["thread"]["turn_status_error"] = json!(error.to_string());
+            }
+        }
+        Ok(status)
+    })
+}
+
+pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> {
+    Arc::new(|transport, thread_id| {
+        crate::client::adapters::codex_app_server::archive_thread(transport, thread_id)
+            .map_err(|error| error.to_string())
+    })
+}
+
+#[cfg(test)]
+static STARTUP_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn startup_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    STARTUP_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Encode an app scope into filesystem components without lossy sanitizing.
+/// AppServerId deliberately accepts any control-free UTF-8 string, so replacing
+/// path punctuation with `_` is not injective (`app/a` and `app:a` would
+/// collide). Hex encodes the original bytes and fixed-size chunks keep every
+/// component below common filesystem name limits even at the 256-byte ID cap.
+fn app_scope_storage_path(root: &Path, app_scope: &str) -> PathBuf {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const CHUNK_BYTES: usize = 96;
+    let bytes = app_scope.as_bytes();
+    let mut path = root.join(".agent-collab").join("server").join("runtimes");
+    for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+        let prefix = if index == 0 {
+            format!("v1-{}-", bytes.len())
+        } else {
+            String::new()
+        };
+        let mut component = String::with_capacity(prefix.len() + chunk.len() * 2);
+        component.push_str(&prefix);
+        for byte in chunk {
+            component.push(HEX[(byte >> 4) as usize] as char);
+            component.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        path.push(component);
+    }
+    path
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum CommandJournalFault {
+    StartAppend = 1,
+    StartSync = 2,
+    CompletionAppend = 3,
+    CompletionSync = 4,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMAND_JOURNAL_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_command_journal_fault(fault: CommandJournalFault) {
+    COMMAND_JOURNAL_FAULT.with(|injected| injected.set(fault as u8));
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SubagentJournalFault {
+    StartAppend = 11,
+    StartSync = 12,
+    CloseFirstAppend = 21,
+    CloseFirstSync = 22,
+    CloseFinalAppend = 31,
+    CloseFinalSync = 32,
+    WorkingAppend = 41,
+    WorkingSync = 42,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SUBAGENT_JOURNAL_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_subagent_journal_fault(fault: SubagentJournalFault) {
+    SUBAGENT_JOURNAL_FAULT.with(|injected| injected.set(fault as u8));
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TaskRegisterJournalFault {
+    Append = 51,
+    Sync = 52,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TASK_REGISTER_JOURNAL_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_task_register_journal_fault(fault: TaskRegisterJournalFault) {
+    TASK_REGISTER_JOURNAL_FAULT.with(|injected| injected.set(fault as u8));
+}
+
+#[cfg(test)]
+thread_local! {
+    static CURRENT_THREAD_ROUTE_JOURNAL_FAULT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_current_thread_route_journal_fault() {
+    CURRENT_THREAD_ROUTE_JOURNAL_FAULT.with(|injected| injected.set(true));
+}
+
+#[derive(Clone, Copy)]
+enum CommandJournalPhase {
+    Start,
+    Business,
+    Completion,
+}
+
+#[cfg(test)]
+const DIRECT_MESSAGE_WAKE_COOLDOWN_MS: i64 = 60_000;
+
+#[derive(Debug)]
+enum NotificationDeliveryError {
+    Journal(notification_contract::JournalError),
+}
+
+impl std::fmt::Display for NotificationDeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Journal(error) => write!(f, "notification delivery commit failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for NotificationDeliveryError {}
+
+fn validate_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    if raw.trim().is_empty() {
+        return Err("worktree path must be non-empty".into());
+    }
+    let path = Path::new(raw);
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("worktree path may not contain '..'".into());
+    }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let relative = raw.strip_prefix("./").unwrap_or(raw);
+        root.join(relative)
+    };
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("project root cannot be canonicalized: {error}"))?;
+    let canonical_playground = canonical_root.join("playground");
+    let mut existing = candidate.as_path();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| "worktree path has no existing parent".to_string())?;
+    }
+    let canonical_existing = existing
+        .canonicalize()
+        .map_err(|error| format!("worktree path cannot be canonicalized: {error}"))?;
+    let suffix = candidate
+        .strip_prefix(existing)
+        .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
+    let canonical_candidate = canonical_existing.join(suffix);
+    if !canonical_candidate.starts_with(&canonical_playground) {
+        return Err("worktree path must be inside ./playground".into());
+    }
+    if raw.as_bytes().len() > MAX_WORKTREE_PATH_BYTES {
+        return Err(format!(
+            "worktree path exceeds {} bytes; use a short slug under ./playground",
+            MAX_WORKTREE_PATH_BYTES
+        ));
+    }
+    let leaf = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default();
+    if leaf.is_empty()
+        || leaf.len() > 32
+        || !leaf
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+    {
+        return Err("worktree basename must be a short slug (ASCII letters, digits, '.', '-' or '_'; max 32 chars)".into());
+    }
+    Ok(canonical_candidate)
+}
+
+fn task_claim_held(status: &str) -> bool {
+    matches!(
+        status,
+        "working"
+            | "blocked"
+            | "verifying"
+            | "reviewed"
+            | "delivered"
+            | "accepted"
+            | "rework"
+            | "merged"
+    )
+}
+
+fn task_transition_allowed(current: &str, next: &str) -> bool {
+    current == next
+        || matches!(
+            (current, next),
+            ("working", "blocked" | "verifying" | "cancelled")
+                | ("blocked", "working" | "cancelled")
+                | (
+                    "verifying",
+                    "working" | "blocked" | "reviewed" | "cancelled"
+                )
+                | ("reviewed", "blocked" | "rework" | "cancelled")
+                | ("rework", "working" | "blocked" | "verifying" | "cancelled")
+                | ("delivered", "accepted" | "rework" | "cancelled")
+                | ("accepted", "merged" | "rework" | "cancelled")
+        )
+}
+
+pub struct Server {
+    pub config: crate::config::Config,
+    pub root: PathBuf,
+    /// Project root used for worktree, identity and configuration checks.
+    ///
+    /// `storage_root` is separate because a host daemon may own more than one
+    /// appserver route for the same project.  Those routes must not share a
+    /// reducer journal or mailbox projection.  The resident route keeps both
+    /// paths equal for backwards compatibility.
+    pub storage_root: PathBuf,
+    pub journal_path: PathBuf,
+    pub state: Mutex<State>,
+    pub journal: Mutex<std::fs::File>,
+    pub appserver_candidate_check: Arc<AppServerCandidateCheck>,
+    pub appserver_notification_sink: Arc<AppServerNotificationSink>,
+    pub appserver_thread_status: Arc<AppServerThreadStatus>,
+    pub appserver_thread_archive: Arc<AppServerThreadArchive>,
+    pub mailbox_notify: Notify,
+}
+
+// Wire admission and the legacy handlers share the state reducer, but the
+// admission check itself cannot hold `State` while a handler runs.  Keep a
+// process-local gate per daemon root so a rebind cannot slip between those
+// two phases.  This mutex is synchronization only; route and generation
+// truth remains in `State`/the journal.
+static WIRE_ROUTE_MUTATION_GATES: OnceLock<
+    Mutex<std::collections::HashMap<PathBuf, Arc<Mutex<()>>>>,
+> = OnceLock::new();
+
+fn wire_route_mutation_gate(server: &Server) -> Arc<Mutex<()>> {
+    let gates = WIRE_ROUTE_MUTATION_GATES.get_or_init(|| Mutex::new(Default::default()));
+    let mut gates = gates.lock().unwrap();
+    gates
+        .entry(server.root.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn record_activity(root: &Path, kind: &str, detail: serde_json::Value) -> Result<(), String> {
+    let path = root.join(".agent-collab/server/events.jsonl");
+    let record = json!({
+        "ts": now_ms(),
+        "kind": kind,
+        "detail": detail,
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("open events: {error}"))?;
+    use std::io::Write;
+    let mut line =
+        serde_json::to_vec(&record).map_err(|error| format!("serialize events: {error}"))?;
+    line.push(b'\n');
+    file.write_all(&line)
+        .map_err(|error| format!("append events: {error}"))
+}
+
+fn request_activity(req: &Req, resp: &Resp) -> serde_json::Value {
+    let mut request = serde_json::to_value(req).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = request.as_object_mut() {
+        obj.remove("token");
+        obj.remove("launch_env");
+    }
+    json!({
+        "op": request.get("op").cloned().unwrap_or(json!("unknown")),
+        "actor": request.get("worker_id").or_else(|| request.get("from")).cloned(),
+        "task_id": request.get("task_id").cloned(),
+        "target": request.get("to").cloned(),
+        "ok": resp.ok,
+        "error": resp.error,
+        "request": request,
+    })
+}
+
+impl Server {
+    pub(crate) fn log_path_for(root: &Path) -> PathBuf {
+        root.join(".agent-collab").join("server").join("log.txt")
+    }
+
+    pub fn log_path(&self) -> PathBuf {
+        Self::log_path_for(&self.storage_root)
+    }
+
+    pub(crate) fn storage_server_dir(&self) -> PathBuf {
+        self.storage_root.join(".agent-collab").join("server")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn typed_register_envelope(
+        &self,
+        worker_id: &str,
+        token: &str,
+        thread_id: &str,
+        worker_cwd: &str,
+    ) -> Result<TypedEnvelope, String> {
+        let transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+            namespace: Some("codex_tui".into()),
+            thread_id: Some(thread_id.to_string()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver transport".into(),
+        };
+        let project_scope = GlobalState::canonical_project_scope(std::path::Path::new(worker_cwd))
+            .map_err(|error| error.to_string())?;
+        self.typed_register_envelope_for_scope(
+            worker_id,
+            token,
+            &transport,
+            project_scope,
+            worker_cwd,
+            AppServerId::new("tui-default").map_err(|error| error.to_string())?,
+            false,
+        )
+    }
+
+    fn typed_register_envelope_for_scope(
+        &self,
+        worker_id: &str,
+        token: &str,
+        transport: &SelectedTransport,
+        project_scope: ProjectScopeId,
+        worker_cwd: &str,
+        app_scope: AppServerId,
+        reuse_existing: bool,
+    ) -> Result<TypedEnvelope, String> {
+        let binding_text = sanitize_identifier(&format!("binding-{worker_id}"));
+        let binding_id = BindingId::new(binding_text.clone()).map_err(|error| error.to_string())?;
+        let transport_identity = transport.thread_id.as_deref().unwrap_or("appserver");
+        let runtime_text = format!(
+            "runtime-{}-{}",
+            transport.kind.as_str(),
+            sanitize_identifier(transport_identity)
+        );
+        let route_scope = RouteScope {
+            app_scope_id: app_scope.clone(),
+            project_scope_id: project_scope.clone(),
+        };
+        let generation = {
+            let st = self.state.lock().unwrap();
+            match st.global.lookup_binding_for(&route_scope, &binding_id) {
+                Some(existing)
+                    if reuse_existing
+                        && existing.agent_id.as_str() == worker_id
+                        && existing.runtime_id.as_str() == runtime_text =>
+                {
+                    existing.endpoint_generation
+                }
+                Some(existing) => existing
+                    .endpoint_generation
+                    .checked_add(1)
+                    .ok_or_else(|| "endpoint generation overflow".to_string())?,
+                None => 1,
+            }
+        };
+        let (registration, registered_ms) = {
+            let st = self.state.lock().unwrap();
+            let registration = st
+                .global
+                .lookup_registration(&project_scope, &app_scope)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    global_state::ProjectRegistration::with_registered_at(
+                        project_scope.clone(),
+                        app_scope.clone(),
+                        now_ms(),
+                    )
+                })
+                .map_err(|error| error.to_string())?;
+            let registered_ms = st
+                .workers
+                .get(worker_id)
+                .map(|worker| worker.registered_ms)
+                .unwrap_or_else(now_ms);
+            (registration, registered_ms)
+        };
+        let agent_id = AgentId::new(worker_id.to_string()).map_err(|error| error.to_string())?;
+        let runtime_id = RuntimeId::new(runtime_text).map_err(|error| error.to_string())?;
+        let native_thread_id = transport
+            .thread_id
+            .as_ref()
+            .map(|value| NativeThreadId::new(value.clone()))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let binding = RuntimeBinding::new(
+            project_scope.clone(),
+            app_scope,
+            agent_id,
+            runtime_id,
+            binding_id.clone(),
+            generation,
+            native_thread_id,
+        )
+        .map_err(|error| error.to_string())?;
+        let command_id = CommandId::new(format!("register-{binding_text}-{generation}"))
+            .map_err(|error| error.to_string())?;
+        let operation_id = OperationId::new(format!("register-op-{binding_text}-{generation}"))
+            .map_err(|error| error.to_string())?;
+        let expected_revision = {
+            let st = self.state.lock().unwrap();
+            st.revision
+        };
+        let envelope = CommandEnvelope::new(
+            command_id,
+            operation_id,
+            binding_id,
+            generation,
+            route_scope,
+            Some(expected_revision),
+            None,
+            None,
+            None,
+        );
+        let worker = WorkerRec {
+            id: worker_id.to_string(),
+            token: token.to_string(),
+            cwd: worker_cwd.to_string(),
+            registered_ms,
+            transport: Some(transport.clone()),
+        };
+        Ok(TypedEnvelope {
+            command: TypedCommand::RegisterWorker {
+                registration,
+                binding,
+                worker,
+            },
+            envelope,
+        })
+    }
+
+    /// Dispatch one typed command through validation, journal append, flush
+    /// and reducer apply. This is the production typed seam above the legacy
+    /// CLI adapters; the legacy v1 call site routes through it.
+    pub fn typed_dispatch(
+        &self,
+        typed: TypedEnvelope,
+    ) -> Result<state::TypedOutcome, notification_contract::JournalError> {
+        typed.envelope.validate().map_err(|error| {
+            notification_contract::JournalError::InvalidCommand(error.to_string())
+        })?;
+        let mut st = self.state.lock().unwrap();
+        self.validate_typed_register(&st, &typed)?;
+        let mut events = Vec::new();
+        for global_event in typed.command.global_events() {
+            match global_event {
+                GlobalEvent::ProjectRegistered { registration } => {
+                    events.push(Event::GlobalProjectRegistered { registration })
+                }
+                GlobalEvent::RuntimeBound { binding } => {
+                    events.push(Event::GlobalRuntimeBound { binding })
+                }
+                GlobalEvent::MigrationCommitEvidence { .. } => {
+                    return Err(notification_contract::JournalError::InvalidCommand(
+                        "migration commit evidence is not part of worker registration".into(),
+                    ))
+                }
+            }
+        }
+        let TypedCommand::RegisterWorker { worker, .. } = &typed.command;
+        events.push(Event::Registered {
+            worker: worker.clone(),
+        });
+        if let Some(transport) = selected_transport_for_worker(worker) {
+            events.extend(default_direct_message_events(
+                &st,
+                &worker.id,
+                &transport,
+                now_ms(),
+            ));
+        }
+        let outcome = serde_json::json!({
+            "command_id": typed.envelope.command_id.as_str(),
+            "operation_id": typed.envelope.operation_id.as_str(),
+            "scope": typed.envelope.scope,
+        });
+        let committed = self.commit_command_locked(
+            &mut st,
+            typed.envelope.command_id.as_str(),
+            typed.envelope.operation_id.as_str(),
+            &events,
+            outcome,
+            typed.envelope.expected_revision,
+        )?;
+        Ok(state::TypedOutcome {
+            receipt: global_state::CommandReceipt {
+                command_id: typed.envelope.command_id.clone(),
+                operation_id: typed.envelope.operation_id.clone(),
+                epoch: global_state::INITIAL_EPOCH,
+                sequence: committed.receipt.sequence,
+                revision: committed.receipt.revision,
+                outcome: committed.outcome,
+            },
+            replayed: committed.replayed,
+        })
+    }
+
+    fn validate_typed_register(
+        &self,
+        st: &State,
+        typed: &TypedEnvelope,
+    ) -> Result<(), notification_contract::JournalError> {
+        let TypedCommand::RegisterWorker {
+            registration,
+            binding,
+            worker,
+        } = &typed.command;
+        if binding.agent_id.as_str() != worker.id {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                "runtime binding agent does not match worker identity".into(),
+            ));
+        }
+        if registration.route_scope() != binding.route_scope() {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                "project registration scope does not match runtime binding scope".into(),
+            ));
+        }
+        if let Some(existing) = st.workers.get(&worker.id) {
+            if existing.token != worker.token {
+                let existing_route_scope =
+                    existing_route_scope(st, &worker.id).map_err(|response| {
+                        notification_contract::JournalError::InvalidCommand(
+                            response
+                                .error
+                                .unwrap_or_else(|| "registration route is unavailable".into()),
+                        )
+                    })?;
+                let same_route = existing_route_scope.as_ref().is_some_and(|route| {
+                    route.project_scope_id == binding.project_scope
+                        && route.app_scope_id == binding.app_scope_id
+                });
+                let existing_binding = existing_route_scope
+                    .as_ref()
+                    .and_then(|route| st.global.lookup_binding_for(route, &binding.binding_id));
+                let same_runtime_thread = existing_binding.is_some_and(|current| {
+                    current.agent_id == binding.agent_id
+                        && current.native_thread_id == binding.native_thread_id
+                });
+                if !same_route || !same_runtime_thread {
+                    return Err(notification_contract::JournalError::InvalidCommand(
+                        "worker token does not belong to the registered runtime identity".into(),
+                    ));
+                }
+            }
+        }
+        if typed.envelope.actor_binding_id != binding.binding_id {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                format!(
+                    "actor binding {} does not match command binding {}",
+                    typed.envelope.actor_binding_id, binding.binding_id
+                ),
+            ));
+        }
+        if typed.envelope.endpoint_generation != binding.endpoint_generation {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                format!(
+                    "envelope generation {} does not match binding generation {}",
+                    typed.envelope.endpoint_generation, binding.endpoint_generation
+                ),
+            ));
+        }
+        if typed.envelope.scope != binding.route_scope() {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                "envelope scope does not match binding route scope".into(),
+            ));
+        }
+        if let Some(project) = st.global.lookup_project(&registration.project_scope) {
+            let bound_apps = project
+                .runtime_bindings
+                .values()
+                .map(|current| current.app_scope_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let ambiguous_existing_owner =
+                bound_apps.len() > 1 || (bound_apps.is_empty() && project.registrations.len() > 1);
+            let different_existing_owner =
+                bound_apps.len() == 1 && !bound_apps.contains(binding.app_scope_id.as_str());
+            if ambiguous_existing_owner || different_existing_owner {
+                return Err(notification_contract::JournalError::InvalidCommand(format!(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: resident project {} already has a different or ambiguous runtime app owner",
+                    registration.project_scope.as_str()
+                )));
+            }
+        }
+        let mut next = st.global.clone();
+        for event in typed.command.global_events() {
+            event.apply(&mut next).map_err(|error| {
+                notification_contract::JournalError::InvalidCommand(error.to_string())
+            })?;
+        }
+        next.validate_binding(binding).map_err(|error| {
+            notification_contract::JournalError::InvalidCommand(error.to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Apply events to memory and persist them atomically-ordered in the journal.
+    pub(crate) fn commit(&self, evs: &[Event]) {
+        let mut st = self.state.lock().unwrap();
+        self.commit_locked(&mut st, evs);
+    }
+
+    /// Fallible reducer entry point used by typed producers. Legacy v1 call
+    /// sites still use `commit`; they retain the fail-closed panic boundary.
+    pub fn commit_checked(
+        &self,
+        evs: &[Event],
+    ) -> Result<notification_contract::CommitReceipt, notification_contract::JournalError> {
+        let mut st = self.state.lock().unwrap();
+        self.commit_locked_checked(&mut st, evs)
+    }
+
+    /// Compatibility entry point for callers that only need a string error.
+    /// The checked reducer remains the single journal/state owner.
+    pub(crate) fn try_commit(&self, evs: &[Event]) -> Result<(), String> {
+        self.commit_checked(evs)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Compatibility entry point for callers holding the state lock.
+    /// This delegates to the typed reducer and never applies state after a
+    /// journal failure.
+    pub(crate) fn try_commit_locked(&self, st: &mut State, evs: &[Event]) -> Result<(), String> {
+        self.commit_locked_checked(st, evs)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Commit one command and its outcome atomically. A retry with the same
+    /// command id returns the recorded outcome without appending another event.
+    /// Reusing a command id for a different operation is rejected explicitly.
+    pub fn commit_command(
+        &self,
+        command_id: &str,
+        operation_id: &str,
+        evs: &[Event],
+        outcome: serde_json::Value,
+    ) -> Result<notification_contract::CommandOutcome, notification_contract::JournalError> {
+        validate_command_id(command_id)?;
+        validate_command_id(operation_id)?;
+        let mut st = self.state.lock().unwrap();
+        self.commit_command_locked(&mut st, command_id, operation_id, evs, outcome, None)
+    }
+
+    fn commit_command_at_revision(
+        &self,
+        command_id: &str,
+        operation_id: &str,
+        evs: &[Event],
+        outcome: serde_json::Value,
+        expected_revision: u64,
+    ) -> Result<notification_contract::CommandOutcome, notification_contract::JournalError> {
+        validate_command_id(command_id)?;
+        validate_command_id(operation_id)?;
+        let mut st = self.state.lock().unwrap();
+        self.commit_command_locked(
+            &mut st,
+            command_id,
+            operation_id,
+            evs,
+            outcome,
+            Some(expected_revision),
+        )
+    }
+
+    fn commit_command_locked(
+        &self,
+        st: &mut State,
+        command_id: &str,
+        operation_id: &str,
+        evs: &[Event],
+        outcome: serde_json::Value,
+        expected_revision: Option<u64>,
+    ) -> Result<notification_contract::CommandOutcome, notification_contract::JournalError> {
+        let typed_command_id = CommandId::new(command_id.to_owned()).map_err(|error| {
+            notification_contract::JournalError::InvalidCommand(error.to_string())
+        })?;
+        if let Some(existing) = st.global.lookup_command_receipt(&typed_command_id) {
+            if existing.operation_id.as_str() != operation_id {
+                return Err(notification_contract::JournalError::InvalidCommand(
+                    format!(
+                        "command_id {command_id} already belongs to operation {}",
+                        existing.operation_id
+                    ),
+                ));
+            }
+            return Ok(notification_contract::CommandOutcome {
+                receipt: notification_contract::CommitReceipt {
+                    sequence: existing.sequence,
+                    revision: existing.revision,
+                },
+                operation_id: existing.operation_id.as_str().to_owned(),
+                outcome: existing.outcome.clone(),
+                replayed: true,
+            });
+        }
+        if let Some(existing) = st.command_receipts.get(command_id) {
+            if existing.operation_id != operation_id {
+                return Err(notification_contract::JournalError::InvalidCommand(
+                    format!(
+                        "command_id {command_id} already belongs to operation {}",
+                        existing.operation_id
+                    ),
+                ));
+            }
+            return Ok(notification_contract::CommandOutcome {
+                receipt: notification_contract::CommitReceipt {
+                    sequence: existing.sequence,
+                    revision: existing.revision,
+                },
+                operation_id: existing.operation_id.clone(),
+                outcome: existing.outcome.clone(),
+                replayed: true,
+            });
+        }
+        if let Some((existing_command_id, _)) =
+            st.global
+                .command_receipts
+                .iter()
+                .find(|(existing_command_id, receipt)| {
+                    *existing_command_id != command_id
+                        && receipt.operation_id.as_str() == operation_id
+                })
+        {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                format!(
+                    "operation_id {operation_id} already belongs to command_id {existing_command_id}"
+                ),
+            ));
+        }
+        if let Some((existing_command_id, _)) =
+            st.command_receipts
+                .iter()
+                .find(|(existing_command_id, receipt)| {
+                    *existing_command_id != command_id && receipt.operation_id == operation_id
+                })
+        {
+            return Err(notification_contract::JournalError::InvalidCommand(
+                format!(
+                    "operation_id {operation_id} already belongs to command_id {existing_command_id}"
+                ),
+            ));
+        }
+        if let Some(expected_revision) = expected_revision {
+            let observed_revision = st.revision;
+            if observed_revision != expected_revision {
+                return Err(notification_contract::JournalError::InvalidCommand(format!(
+                    "compare-and-swap revision mismatch: expected {expected_revision}, observed {observed_revision}"
+                )));
+            }
+        }
+        let event_count = evs.len().checked_add(2).ok_or_else(|| {
+            notification_contract::JournalError::InvalidCommand(
+                "command event count overflow".into(),
+            )
+        })? as u64;
+        let sequence = st.sequence.checked_add(event_count).ok_or_else(|| {
+            notification_contract::JournalError::InvalidCommand("sequence counter overflow".into())
+        })?;
+        let revision = st.revision.checked_add(event_count).ok_or_else(|| {
+            notification_contract::JournalError::InvalidCommand("revision counter overflow".into())
+        })?;
+        let receipt = state::CommandReceipt {
+            operation_id: operation_id.to_owned(),
+            outcome: outcome.clone(),
+            sequence,
+            revision,
+        };
+        let started = Event::CommandStarted {
+            command_id: command_id.to_owned(),
+            operation_id: operation_id.to_owned(),
+        };
+        let completed = Event::CommandCompleted {
+            command_id: command_id.to_owned(),
+            operation_id: operation_id.to_owned(),
+            receipt: receipt.clone(),
+        };
+        self.append_command_phase_locked(
+            st,
+            std::slice::from_ref(&started),
+            CommandJournalPhase::Start,
+        )?;
+        self.append_command_phase_locked(st, evs, CommandJournalPhase::Business)?;
+        self.append_command_phase_locked(
+            st,
+            std::slice::from_ref(&completed),
+            CommandJournalPhase::Completion,
+        )?;
+        let mut events = Vec::with_capacity(evs.len() + 2);
+        events.push(started);
+        events.extend_from_slice(evs);
+        events.push(completed);
+        self.apply_committed_events(st, &events)?;
+        let has_pending_scheduler_admission = events.iter().any(|event| {
+            matches!(
+                event,
+                Event::SchedulerAdmission { admission } if admission.status == "pending"
+            )
+        });
+        let has_succeeded_scheduler_admission = events.iter().any(|event| {
+            let Event::SchedulerAdmissionStatus {
+                request_id, status, ..
+            } = event
+            else {
+                return false;
+            };
+            status == "succeeded"
+                && st
+                    .scheduler_admissions
+                    .get(request_id)
+                    .is_some_and(|admission| {
+                        admission.status == "succeeded"
+                            && st.msgs.get(&admission.message_id).is_some_and(|message| {
+                                message.state == "pending"
+                                    && st.scheduler_message_deliverable(&message.id)
+                            })
+                    })
+        });
+        if (events
+            .iter()
+            .any(|event| matches!(event, Event::Sent { .. }))
+            && !has_pending_scheduler_admission)
+            || has_succeeded_scheduler_admission
+            || events
+                .iter()
+                .any(|event| matches!(event, Event::GlobalRuntimeBound { .. }))
+        {
+            self.mailbox_notify.notify_waiters();
+        }
+        Ok(notification_contract::CommandOutcome {
+            receipt: notification_contract::CommitReceipt { sequence, revision },
+            operation_id: operation_id.to_owned(),
+            outcome,
+            replayed: false,
+        })
+    }
+
+    pub(crate) fn commit_locked(&self, st: &mut State, evs: &[Event]) {
+        self.commit_locked_checked(st, evs)
+            .unwrap_or_else(|error| panic!("collab journal commit failed: {error}"));
+    }
+
+    pub(crate) fn commit_locked_checked(
+        &self,
+        st: &mut State,
+        evs: &[Event],
+    ) -> Result<notification_contract::CommitReceipt, notification_contract::JournalError> {
+        if let Some(error) = &st.journal_poison {
+            return Err(notification_contract::JournalError::Append(error.clone()));
+        }
+        use std::io::Write;
+        // Persist control truth before any state change or external notification.
+        // A failed journal poisons this owner instead of silently resetting budgets.
+        let mut buf = Vec::new();
+        for ev in evs {
+            let line = match serde_json::to_string(ev) {
+                Ok(line) => line,
+                Err(error) => {
+                    let message = error.to_string();
+                    st.journal_poison = Some(message.clone());
+                    return Err(notification_contract::JournalError::Append(message));
+                }
+            };
+            buf.extend_from_slice(line.as_bytes());
+            buf.push(b'\n');
+        }
+        #[cfg(test)]
+        let append_fault = SUBAGENT_JOURNAL_FAULT.with(|injected| {
+            let injected_fault = injected.get();
+            let close_final = injected_fault == SubagentJournalFault::CloseFinalAppend as u8
+                && evs.iter().any(|event| {
+                matches!(event, Event::SubagentUpdated { subagent } if subagent.status == "closed")
+            });
+            if close_final
+                || injected_fault == SubagentJournalFault::StartAppend as u8
+                || injected_fault == SubagentJournalFault::CloseFirstAppend as u8
+                || injected_fault == SubagentJournalFault::WorkingAppend as u8
+            {
+                injected.set(0);
+                true
+            } else {
+                false
+            }
+        });
+        #[cfg(not(test))]
+        let append_fault = false;
+        #[cfg(test)]
+        let (task_register_append_fault, task_register_sync_fault) = TASK_REGISTER_JOURNAL_FAULT
+            .with(|injected| {
+                let injected_fault = injected.get();
+                let has_task_registration = evs
+                    .iter()
+                    .any(|event| matches!(event, Event::TaskCreated { .. }));
+                if !has_task_registration {
+                    return (false, false);
+                }
+                if injected_fault == TaskRegisterJournalFault::Append as u8 {
+                    injected.set(0);
+                    (true, false)
+                } else if injected_fault == TaskRegisterJournalFault::Sync as u8 {
+                    injected.set(0);
+                    (false, true)
+                } else {
+                    (false, false)
+                }
+            });
+        #[cfg(not(test))]
+        let (task_register_append_fault, task_register_sync_fault) = (false, false);
+        #[cfg(test)]
+        let current_thread_route_append_fault =
+            CURRENT_THREAD_ROUTE_JOURNAL_FAULT.with(|injected| {
+                let has_current_thread_route = evs
+                    .iter()
+                    .any(|event| matches!(event, Event::GlobalCurrentThreadRouteSet { .. }));
+                if has_current_thread_route && injected.get() {
+                    injected.set(false);
+                    true
+                } else {
+                    false
+                }
+            });
+        #[cfg(not(test))]
+        let current_thread_route_append_fault = false;
+        if append_fault {
+            let message = "injected subagent journal append failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Append(message));
+        }
+        if current_thread_route_append_fault {
+            let message = "injected current thread route journal append failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Append(message));
+        }
+        if task_register_append_fault {
+            let message = "injected task register journal append failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Append(message));
+        }
+        let mut j = self.journal.lock().unwrap();
+        if let Err(error) = j.write_all(&buf) {
+            let message = error.to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Append(message));
+        }
+        #[cfg(test)]
+        let sync_fault = SUBAGENT_JOURNAL_FAULT.with(|injected| {
+            let injected_fault = injected.get();
+            let close_final = injected_fault == SubagentJournalFault::CloseFinalSync as u8
+                && evs.iter().any(|event| {
+                matches!(event, Event::SubagentUpdated { subagent } if subagent.status == "closed")
+            });
+            if close_final
+                || injected_fault == SubagentJournalFault::StartSync as u8
+                || injected_fault == SubagentJournalFault::CloseFirstSync as u8
+                || injected_fault == SubagentJournalFault::WorkingSync as u8
+            {
+                injected.set(0);
+                true
+            } else {
+                false
+            }
+        });
+        #[cfg(not(test))]
+        let sync_fault = false;
+        if sync_fault {
+            let message = "injected subagent journal sync failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Flush(message));
+        }
+        if task_register_sync_fault {
+            let message = "injected task register journal sync failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Flush(message));
+        }
+        if let Err(error) = j.sync_data() {
+            let message = error.to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Flush(message));
+        }
+        self.apply_committed_events(st, evs)?;
+        let has_pending_scheduler_admission = evs.iter().any(|event| {
+            matches!(
+                event,
+                Event::SchedulerAdmission { admission } if admission.status == "pending"
+            )
+        });
+        let has_succeeded_scheduler_admission = evs.iter().any(|event| {
+            let Event::SchedulerAdmissionStatus {
+                request_id, status, ..
+            } = event
+            else {
+                return false;
+            };
+            status == "succeeded"
+                && st
+                    .scheduler_admissions
+                    .get(request_id)
+                    .is_some_and(|admission| {
+                        admission.status == "succeeded"
+                            && st.msgs.get(&admission.message_id).is_some_and(|message| {
+                                message.state == "pending"
+                                    && st.scheduler_message_deliverable(&message.id)
+                            })
+                    })
+        });
+        if (evs.iter().any(|event| matches!(event, Event::Sent { .. }))
+            && !has_pending_scheduler_admission)
+            || has_succeeded_scheduler_admission
+            || evs
+                .iter()
+                .any(|event| matches!(event, Event::GlobalRuntimeBound { .. }))
+        {
+            self.mailbox_notify.notify_waiters();
+        }
+        Ok(notification_contract::CommitReceipt {
+            sequence: st.sequence,
+            revision: st.revision,
+        })
+    }
+
+    fn append_command_phase_locked(
+        &self,
+        st: &mut State,
+        evs: &[Event],
+        phase: CommandJournalPhase,
+    ) -> Result<(), notification_contract::JournalError> {
+        if let Some(error) = &st.journal_poison {
+            return Err(notification_contract::JournalError::Append(error.clone()));
+        }
+        let mut body = Vec::new();
+        for ev in evs {
+            let line = match serde_json::to_string(ev) {
+                Ok(line) => line,
+                Err(error) => {
+                    let message = error.to_string();
+                    st.journal_poison = Some(message.clone());
+                    return Err(notification_contract::JournalError::Append(message));
+                }
+            };
+            body.extend_from_slice(line.as_bytes());
+            body.push(b'\n');
+        }
+        let mut journal = self.journal.lock().unwrap();
+        #[cfg(test)]
+        let append_fault = COMMAND_JOURNAL_FAULT.with(|injected| {
+            let expected = match phase {
+                CommandJournalPhase::Start => CommandJournalFault::StartAppend as u8,
+                CommandJournalPhase::Completion => CommandJournalFault::CompletionAppend as u8,
+                CommandJournalPhase::Business => 0,
+            };
+            if injected.get() == expected && expected != 0 {
+                injected.set(0);
+                true
+            } else {
+                false
+            }
+        });
+        #[cfg(not(test))]
+        let append_fault = false;
+        #[cfg(not(test))]
+        let _ = phase;
+        if append_fault {
+            let message = "injected command journal append failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Append(message));
+        }
+        if let Err(error) = std::io::Write::write_all(&mut *journal, &body) {
+            let message = error.to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Append(message));
+        }
+        #[cfg(test)]
+        let sync_fault = COMMAND_JOURNAL_FAULT.with(|injected| {
+            let expected = match phase {
+                CommandJournalPhase::Start => CommandJournalFault::StartSync as u8,
+                CommandJournalPhase::Completion => CommandJournalFault::CompletionSync as u8,
+                CommandJournalPhase::Business => 0,
+            };
+            if injected.get() == expected && expected != 0 {
+                injected.set(0);
+                true
+            } else {
+                false
+            }
+        });
+        #[cfg(not(test))]
+        let sync_fault = false;
+        if sync_fault {
+            let message = "injected command journal sync failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Flush(message));
+        }
+        if let Err(error) = journal.sync_data() {
+            let message = error.to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Flush(message));
+        }
+        Ok(())
+    }
+
+    fn apply_committed_events(
+        &self,
+        st: &mut State,
+        evs: &[Event],
+    ) -> Result<(), notification_contract::JournalError> {
+        for ev in evs {
+            if let Err(error) = st.apply_checked(ev) {
+                st.journal_poison.get_or_insert(error.clone());
+                return Err(notification_contract::JournalError::Reducer(error));
+            }
+            if let Err(error) = st.advance_version() {
+                st.journal_poison.get_or_insert(error.clone());
+                return Err(notification_contract::JournalError::Reducer(error));
+            }
+            if let Event::Sent { msg } = ev {
+                if let Err(error) = self.backup_message(msg) {
+                    self.report_mailbox_projection_error(error);
+                }
+            }
+            if let Event::Delivered { ids } = ev {
+                for id in ids {
+                    if let Some(msg) = st.msgs.get(id) {
+                        if let Err(error) = self.backup_message(msg) {
+                            self.report_mailbox_projection_error(error);
+                        }
+                    }
+                }
+            }
+            if let Event::Acked { ids } = ev {
+                for id in ids {
+                    if let Some(msg) = st.msgs.get(id) {
+                        if let Err(error) = self.backup_message(msg) {
+                            self.report_mailbox_projection_error(error);
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(error) = st.global.validate() {
+            let error = format!("global reducer validation failed: {error}");
+            st.journal_poison.get_or_insert(error.clone());
+            return Err(notification_contract::JournalError::Reducer(error));
+        }
+        Ok(())
+    }
+
+    fn report_mailbox_projection_error(&self, error: String) {
+        // Journal truth is already durable. Keep projection failure explicit
+        // and queryable without turning it into a false delivery result.
+        append_log(
+            &self.log_path(),
+            &format!("MAILBOX_JSONL_WRITE_FAILED: {error}"),
+        );
+        if let Err(activity_error) = record_activity(
+            &self.storage_root,
+            "mailbox_projection_error",
+            json!({"exact_error": error, "recoverable": true}),
+        ) {
+            append_log(
+                &self.log_path(),
+                &format!("MAILBOX_PROJECTION_ERROR_RECORD_FAILED: {activity_error}"),
+            );
+        }
+    }
+
+    fn backup_message(&self, msg: &Message) -> Result<(), String> {
+        mailbox::backup_message(&self.storage_root, msg)
+    }
+
+    fn rewrite_journal_locked(
+        &self,
+        st: &State,
+    ) -> Result<(), notification_contract::JournalError> {
+        let path = self.journal_path.clone();
+        let tmp = path.with_file_name("journal.jsonl.tmp");
+        let mut body = String::new();
+        let events = st.snapshot_events();
+        for (index, event) in events.iter().enumerate() {
+            let line = serde_json::to_string(event).map_err(|error| {
+                notification_contract::JournalError::Append(format!("compact serialize: {error}"))
+            })?;
+            body.push_str(&line);
+            let next_is_checkpoint = events
+                .get(index + 1)
+                .is_some_and(|next| matches!(next, Event::ReducerCheckpoint { .. }));
+            if index + 1 != events.len() && !next_is_checkpoint {
+                body.push('\n');
+            }
+        }
+        if events
+            .last()
+            .is_some_and(|event| matches!(event, Event::ReducerCheckpoint { .. }))
+        {
+            body.push('\n');
+        }
+        std::fs::write(&tmp, body).map_err(|error| {
+            notification_contract::JournalError::Append(format!("compact write: {error}"))
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|error| {
+            notification_contract::JournalError::Append(format!("compact rename: {error}"))
+        })?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                notification_contract::JournalError::Append(format!("compact reopen: {error}"))
+            })?;
+        *self.journal.lock().unwrap() = file;
+        Ok(())
+    }
+}
+
+fn validate_transport_candidates(
+    server: &Server,
+    worker_id: &str,
+    candidates: &TransportCandidates,
+) -> Result<SelectedTransport, String> {
+    let Some(candidate) = candidates.appserver.as_ref() else {
+        return Err("TRANSPORT_NONE: server self-check found no App Server candidate".into());
+    };
+    let state = server.state.lock().unwrap();
+    if let Some(owner) = appserver_thread_owner(&state, &candidate.thread_id) {
+        if owner != worker_id {
+            return Err(format!(
+                "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
+                candidate.thread_id, owner
+            ));
+        }
+    }
+    drop(state);
+    match (server.appserver_candidate_check)(candidate) {
+        Ok(transport) => Ok(transport),
+        Err(error) => {
+            append_log(
+                &server.log_path(),
+                &format!(
+                    "APPSERVER_CANDIDATE_REJECTED worker={worker_id} endpoint={} thread_id={} error={error}",
+                    candidate.endpoint, candidate.thread_id
+                ),
+            );
+            Err(format!(
+                "TRANSPORT_NONE: App Server self-check failed: {error}"
+            ))
+        }
+    }
+}
+
+fn appserver_thread_owner(state: &State, thread_id: &str) -> Option<String> {
+    state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| {
+            binding
+                .native_thread_id
+                .as_ref()
+                .is_some_and(|native_thread_id| native_thread_id.as_str() == thread_id)
+        })
+        .map(|binding| binding.agent_id.as_str().to_owned())
+}
+
+type RouteKey = (String, String);
+
+/// A host route is only a small admission record.  The reducer and mailbox
+/// facts belong to the runtime selected by this record, never to the
+/// resident project's journal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostRouteRecord {
+    pub(crate) version: u8,
+    pub(crate) op: String,
+    pub(crate) app_scope_id: String,
+    pub(crate) project_scope: String,
+    pub(crate) canonical_root: String,
+    pub(crate) storage_root: String,
+    pub(crate) registered_ms: i64,
+}
+
+struct RuntimeRoute {
+    root: PathBuf,
+    storage_root: PathBuf,
+    runtime: Option<Arc<Server>>,
+}
+
+/// Owns the single host listener's route table and the independent project
+/// reducers behind it.  The existing handler surface remains unchanged: a
+/// request is first routed here, then dispatched to the selected `Server`.
+struct ProjectRuntimeManager {
+    host: Arc<Server>,
+    host_root: PathBuf,
+    route_journal: PathBuf,
+    routes: Mutex<std::collections::BTreeMap<RouteKey, RuntimeRoute>>,
+    project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
+    register_gate: Mutex<()>,
+    runtime_init_gates: Mutex<std::collections::BTreeMap<RouteKey, Arc<Mutex<()>>>>,
+}
+
+fn storage_owner_path(path: &Path) -> Result<PathBuf, String> {
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut missing_suffix = Vec::new();
+            let mut current = path.to_path_buf();
+            loop {
+                match std::fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        let target = std::fs::read_link(&current).map_err(|error| {
+                            format!("storage owner symlink {}: {error}", current.display())
+                        })?;
+                        let target = if target.is_absolute() {
+                            target
+                        } else {
+                            current
+                                .parent()
+                                .filter(|parent| !parent.as_os_str().is_empty())
+                                .unwrap_or_else(|| Path::new("."))
+                                .join(target)
+                        };
+                        let mut resolved = storage_owner_path(&target)?;
+                        for component in missing_suffix.iter().rev() {
+                            resolved.push(component);
+                        }
+                        return Ok(resolved);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("storage owner path {}: {error}", current.display()));
+                    }
+                }
+                let Some(name) = current.file_name() else {
+                    return Err(format!(
+                        "storage owner path has no resolvable ancestor: {}",
+                        path.display()
+                    ));
+                };
+                missing_suffix.push(name.to_os_string());
+                let parent = current
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                match std::fs::canonicalize(parent) {
+                    Ok(mut resolved) => {
+                        for component in missing_suffix.iter().rev() {
+                            resolved.push(component);
+                        }
+                        return Ok(resolved);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        current = parent.to_path_buf();
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "storage owner path ancestor {}: {error}",
+                            parent.display()
+                        ));
+                    }
+                }
+            }
+        }
+        Err(error) => Err(format!("storage owner path {}: {error}", path.display())),
+    }
+}
+
+fn storage_roots_equal(left: &Path, right: &Path) -> Result<bool, String> {
+    Ok(storage_owner_path(left)? == storage_owner_path(right)?)
+}
+
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
+fn validate_runtime_storage_root(
+    root: &Path,
+    storage_root: &Path,
+    error_prefix: &str,
+) -> Result<PathBuf, String> {
+    if !storage_root.is_absolute() {
+        return Err(format!(
+            "{error_prefix}: runtime storage root must be absolute"
+        ));
+    }
+    let root_owner = storage_owner_path(root)
+        .map_err(|error| format!("{error_prefix}: resolve project storage owner: {error}"))?;
+    let storage_owner = storage_owner_path(storage_root)
+        .map_err(|error| format!("{error_prefix}: resolve runtime storage owner: {error}"))?;
+    if storage_owner == root_owner {
+        return Ok(root_owner);
+    }
+    let expected_parent = root_owner
+        .join(".agent-collab")
+        .join("server")
+        .join("runtimes");
+    if !storage_owner.starts_with(&expected_parent) {
+        return Err(format!(
+            "{error_prefix}: runtime storage root {} resolves outside project runtime storage {}",
+            storage_root.display(),
+            expected_parent.display()
+        ));
+    }
+    Ok(storage_owner)
+}
+
+fn validate_route_owner_table(
+    host: &Arc<Server>,
+    routes: &std::collections::BTreeMap<RouteKey, RuntimeRoute>,
+) -> Result<(), String> {
+    let mut owners = std::collections::BTreeMap::<PathBuf, (String, bool)>::new();
+    owners.insert(
+        storage_owner_path(&host.root)
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+        ("resident host".into(), true),
+    );
+    owners.insert(
+        storage_owner_path(&host.storage_root)
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+        ("resident host".into(), true),
+    );
+
+    for (key, route) in routes {
+        let route_owner = format!("route ({}, {})", key.0, key.1);
+        let is_resident_runtime = route
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, host));
+        let route_storage_root = storage_owner_path(&route.storage_root)
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+        if let Some((owner, is_host)) = owners.get(&route_storage_root) {
+            if is_resident_runtime && *is_host {
+                continue;
+            }
+            return Err(format!(
+                "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by {}",
+                route.storage_root.display(),
+                owner
+            ));
+        }
+        owners.insert(route_storage_root, (route_owner, is_resident_runtime));
+    }
+    Ok(())
+}
+
+impl ProjectRuntimeManager {
+    fn new(host: Arc<Server>, host_paths: &crate::scope::HostPaths) -> Result<Arc<Self>, String> {
+        let host_root = GlobalState::canonical_project_scope(&host.root)
+            .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let mut routes = std::collections::BTreeMap::new();
+
+        // Preserve the resident route discovered from its own reducer.  Old
+        // external registrations are retained as not-ready route metadata so
+        // a client receives an explicit migration error until its project
+        // runtime can be opened.
+        let registry = HostRouteRegistry::for_server(&host)?;
+        for ((app_scope, project_scope), owner) in registry.routes {
+            match owner {
+                HostRouteOwner::ResidentProject { root, .. } => {
+                    routes.insert(
+                        (app_scope, project_scope),
+                        RuntimeRoute {
+                            root: root.clone(),
+                            storage_root: root,
+                            runtime: Some(host.clone()),
+                        },
+                    );
+                }
+                HostRouteOwner::RegisteredNotReady { root } => {
+                    routes
+                        .entry((app_scope, project_scope))
+                        .or_insert(RuntimeRoute {
+                            root: root.clone(),
+                            storage_root: root,
+                            runtime: None,
+                        });
+                }
+            }
+        }
+
+        let mut route_records = Vec::new();
+        for record in load_host_route_records(&route_journal)? {
+            if route_record_is_replayable(&record)? {
+                route_records.push(record);
+            }
+        }
+        // A route record is only usable when its storage path has one owner.
+        // The host resident reducer is an owner even when it has no entry in
+        // routes.jsonl; otherwise replay could admit a second reducer on the
+        // resident journal.
+        for record in &route_records {
+            let key = (record.app_scope_id.clone(), record.project_scope.clone());
+            let storage_root = PathBuf::from(&record.storage_root);
+            if (storage_roots_equal(&storage_root, &host.root)
+                .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
+                || storage_roots_equal(&storage_root, &host.storage_root)
+                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?)
+                && !routes.get(&key).is_some_and(|route| {
+                    route
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|runtime| Arc::ptr_eq(runtime, &host))
+                })
+            {
+                return Err(format!(
+                    "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by resident host",
+                    record.storage_root
+                ));
+            }
+            let mut owner_key = None;
+            for (candidate_key, route) in &routes {
+                if candidate_key != &key
+                    && storage_roots_equal(&route.storage_root, &storage_root)
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
+                {
+                    owner_key = Some(candidate_key.clone());
+                    break;
+                }
+            }
+            if let Some(owner_key) = owner_key {
+                return Err(format!(
+                    "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by route ({}, {})",
+                    record.storage_root, owner_key.0, owner_key.1
+                ));
+            }
+        }
+
+        for record in route_records {
+            let (key, root, storage_root) = validate_host_route_record(&record)?;
+            if key.1 == host_root.as_str()
+                && routes.get(&key).is_some_and(|route| {
+                    route
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|runtime| Arc::ptr_eq(runtime, &host))
+                })
+            {
+                continue;
+            }
+            routes.insert(
+                key,
+                RuntimeRoute {
+                    root,
+                    storage_root,
+                    runtime: None,
+                },
+            );
+        }
+
+        // Legacy registrations may be present in GlobalState while the host
+        // route journal is empty. Validate the merged table before replay can
+        // open any pending runtime; a pending legacy alias of the resident
+        // storage must fail closed instead of creating a second reducer.
+        validate_route_owner_table(&host, &routes)?;
+
+        let manager = Arc::new(Self {
+            host,
+            host_root: PathBuf::from(host_root.as_str()),
+            route_journal,
+            routes: Mutex::new(routes),
+            project_locks: Mutex::new(std::collections::BTreeMap::new()),
+            register_gate: Mutex::new(()),
+            runtime_init_gates: Mutex::new(std::collections::BTreeMap::new()),
+        });
+
+        // Replay every durable route at startup.  A broken external runtime
+        // remains in the route table and is reported as NOT_READY on use;
+        // it must never silently fall back to the resident reducer.
+        let pending = manager
+            .routes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, route)| route.runtime.is_none())
+            .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
+            .collect::<Vec<_>>();
+        for (key, root, storage_root) in pending {
+            let _ = manager.ensure_runtime(&key, &root, &storage_root);
+        }
+        Ok(manager)
+    }
+
+    fn runtimes(&self) -> Vec<Arc<Server>> {
+        let mut result = Vec::new();
+        let routes = self.routes.lock().unwrap();
+        for route in routes.values() {
+            if let Some(runtime) = &route.runtime {
+                // Multiple app scopes may intentionally share the resident
+                // reducer.  The scheduler owns a runtime, not a route key;
+                // ticking once per key would duplicate wakeups and could
+                // consume a timer twice in the same interval.
+                if result.iter().any(|existing| Arc::ptr_eq(existing, runtime)) {
+                    continue;
+                }
+                result.push(runtime.clone());
+            }
+        }
+        if !result
+            .iter()
+            .any(|runtime| Arc::ptr_eq(runtime, &self.host))
+        {
+            result.push(self.host.clone());
+        }
+        result
+    }
+
+    fn resolve_route_by_native_thread(
+        &self,
+        native_thread_id: &str,
+    ) -> Result<RouteResolution, String> {
+        let native_thread_id = NativeThreadId::new(native_thread_id.to_owned())
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        let binding = self
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&native_thread_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id}"
+                )
+            })?;
+        let key = (
+            binding.app_scope_id.as_str().to_owned(),
+            binding.project_scope.as_str().to_owned(),
+        );
+        let (storage_root, runtime) = {
+            let routes = self.routes.lock().unwrap();
+            let route = routes.get(&key).ok_or_else(|| {
+                format!(
+                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} references an unknown route"
+                )
+            })?;
+            let runtime = route.runtime.clone().ok_or_else(|| {
+                format!(
+                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} references an unavailable runtime"
+                )
+            })?;
+            (route.storage_root.clone(), runtime)
+        };
+        let registered = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&binding.route_scope(), &binding.binding_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} references a missing runtime binding"
+                )
+            })?;
+        if registered != binding {
+            return Err(format!(
+                "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} conflicts with its runtime binding"
+            ));
+        }
+        let canonical_root = binding.project_scope.as_str().to_owned();
+        let route = RouteResolution {
+            app_scope_id: binding.app_scope_id,
+            project_scope: binding.project_scope,
+            canonical_root,
+            storage_root: storage_root.to_string_lossy().into_owned(),
+            agent_id: binding.agent_id,
+            binding_id: binding.binding_id,
+            endpoint_generation: binding.endpoint_generation,
+            native_thread_id: binding.native_thread_id.ok_or_else(|| {
+                "ROUTE_RESOLVE_INVALID: current route state has no native App Server thread"
+                    .to_owned()
+            })?,
+        };
+        route
+            .validate()
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        Ok(route)
+    }
+
+    fn commit_current_thread_route(
+        &self,
+        runtime: &Arc<Server>,
+        context: &ProjectContext,
+        worker_id: &str,
+    ) -> Result<(), String> {
+        let route_scope = RouteScope {
+            app_scope_id: context.app_scope_id.clone(),
+            project_scope_id: context.project_scope.clone(),
+        };
+        let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+            .map_err(|error| format!("ROUTE_TRANSITION_INVALID: {error}"))?;
+        let binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&route_scope, &binding_id)
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no matching runtime binding"
+                )
+            })?;
+        let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
+            format!(
+                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
+            )
+        })?;
+        if self
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(native_thread_id)
+            == Some(&binding)
+        {
+            return Ok(());
+        }
+        self.host
+            .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
+            .map(|_| ())
+            .map_err(|error| {
+                format!("ROUTE_TRANSITION_DURABILITY_FAILED: host journal commit failed: {error}")
+            })
+    }
+
+    fn finalize_registration(
+        &self,
+        runtime: Arc<Server>,
+        context: &ProjectContext,
+        worker_id: Option<&str>,
+        response: Resp,
+    ) -> (Arc<Server>, Resp) {
+        let Some(worker_id) = worker_id.filter(|_| response.ok) else {
+            return (runtime, response);
+        };
+        match self.commit_current_thread_route(&runtime, context, worker_id) {
+            Ok(()) => (runtime, response),
+            Err(error) => (runtime, Resp::err(error)),
+        }
+    }
+
+    fn route_key(context: &ProjectContext) -> RouteKey {
+        (
+            context.app_scope_id.as_str().to_owned(),
+            context.project_scope.as_str().to_owned(),
+        )
+    }
+
+    fn has_project_route(&self, project_scope: &str) -> bool {
+        self.routes
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|(_, project)| project == project_scope)
+    }
+
+    fn storage_root_for_new(&self, root: &Path, project_scope: &str, app_scope: &str) -> PathBuf {
+        if self.has_project_route(project_scope) {
+            app_scope_storage_path(root, app_scope)
+        } else {
+            root.to_path_buf()
+        }
+    }
+
+    fn runtime_init_gate(&self, key: &RouteKey) -> Arc<Mutex<()>> {
+        self.runtime_init_gates
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Open and install a pending route exactly once. The double-check after
+    /// acquiring the per-route gate is required because Poll and blocking
+    /// requests can select the same durable pending route concurrently.
+    fn ensure_runtime(
+        &self,
+        key: &RouteKey,
+        root: &Path,
+        storage_root: &Path,
+    ) -> Result<Arc<Server>, String> {
+        let gate = self.runtime_init_gate(key);
+        let _guard = gate.lock().unwrap();
+        if let Some(runtime) = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(key)
+            .and_then(|route| route.runtime.clone())
+        {
+            return Ok(runtime);
+        }
+        let (runtime, project_lock) = self.build_runtime(root, storage_root)?;
+        self.install_runtime(key, runtime.clone(), project_lock);
+        Ok(runtime)
+    }
+
+    fn build_runtime(
+        &self,
+        root: &Path,
+        storage_root: &Path,
+    ) -> Result<(Arc<Server>, Option<std::fs::File>), String> {
+        let root = std::fs::canonicalize(root).map_err(|error| {
+            format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: canonicalize project root: {error}")
+        })?;
+        if !root.join(".agent-collab").is_dir() {
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: project {} is not initialized for Collab",
+                root.display()
+            ));
+        }
+        let storage_root = validate_runtime_storage_root(
+            &root,
+            storage_root,
+            "PROJECT_ROUTE_NOT_READY/UNSUPPORTED",
+        )?;
+        let server_dir = storage_root.join(".agent-collab").join("server");
+        std::fs::create_dir_all(&server_dir).map_err(|error| {
+            format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: create runtime storage: {error}")
+        })?;
+
+        let project_lock = if root == self.host_root {
+            None
+        } else if self.project_locks.lock().unwrap().contains_key(&root) {
+            None
+        } else {
+            Some(
+                acquire_legacy_writer_lock(
+                    &root.join(".agent-collab/server/daemon.lock"),
+                    "project daemon",
+                )
+                .map_err(|error| format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: {error}"))?,
+            )
+        };
+        let journal_path = server_dir.join("journal.jsonl");
+        let state = replay_from_journal(&root, &journal_path).map_err(|error| {
+            format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: runtime journal replay for {}: {error}",
+                root.display()
+            )
+        })?;
+        let journal_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&journal_path)
+            .map_err(|error| {
+                format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: open runtime journal: {error}")
+            })?;
+        let runtime = Arc::new(Server {
+            config: crate::config::load(&root).map_err(|error| {
+                format!("PROJECT_ROUTE_NOT_READY/UNSUPPORTED: load project config: {error}")
+            })?,
+            root,
+            storage_root,
+            journal_path,
+            state: Mutex::new(state),
+            journal: Mutex::new(journal_file),
+            appserver_candidate_check: self.host.appserver_candidate_check.clone(),
+            appserver_notification_sink: self.host.appserver_notification_sink.clone(),
+            appserver_thread_status: self.host.appserver_thread_status.clone(),
+            appserver_thread_archive: self.host.appserver_thread_archive.clone(),
+            mailbox_notify: Notify::new(),
+        });
+        restore_registered_peer_default_leases(&runtime);
+        purge_expired_storage(&runtime, now_ms());
+        Ok((runtime, project_lock))
+    }
+
+    fn install_runtime(
+        &self,
+        key: &RouteKey,
+        runtime: Arc<Server>,
+        project_lock: Option<std::fs::File>,
+    ) {
+        if let Some(lock) = project_lock {
+            self.project_locks
+                .lock()
+                .unwrap()
+                .insert(runtime.root.clone(), lock);
+        }
+        self.routes
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .and_modify(|route| route.runtime = Some(runtime.clone()))
+            .or_insert(RuntimeRoute {
+                root: runtime.root.clone(),
+                storage_root: runtime.storage_root.clone(),
+                runtime: Some(runtime),
+            });
+    }
+
+    fn install_pending_route(&self, key: &RouteKey, root: &Path, storage_root: &Path) {
+        self.routes
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_insert_with(|| RuntimeRoute {
+                root: root.to_path_buf(),
+                storage_root: storage_root.to_path_buf(),
+                runtime: None,
+            });
+    }
+
+    fn storage_owner(
+        &self,
+        storage_root: &Path,
+        records: &[HostRouteRecord],
+    ) -> Result<Option<String>, String> {
+        if storage_roots_equal(&self.host.root, storage_root)?
+            || storage_roots_equal(&self.host.storage_root, storage_root)?
+        {
+            return Ok(Some("resident host".into()));
+        }
+        let route_owner = {
+            let routes = self.routes.lock().unwrap();
+            let mut owner = None;
+            for (key, route) in routes.iter() {
+                if storage_roots_equal(&route.storage_root, storage_root)? {
+                    owner = Some(format!("route ({}, {})", key.0, key.1));
+                    break;
+                }
+            }
+            owner
+        };
+        if route_owner.is_some() {
+            return Ok(route_owner);
+        }
+        for record in records {
+            if storage_roots_equal(Path::new(&record.storage_root), storage_root)? {
+                return Ok(Some(format!(
+                    "route ({}, {})",
+                    record.app_scope_id, record.project_scope
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    fn append_route_record(
+        &self,
+        context: &ProjectContext,
+        storage_root: &Path,
+    ) -> Result<(), String> {
+        let project_root = Path::new(&context.canonical_root);
+        let storage_root = validate_runtime_storage_root(
+            project_root,
+            storage_root,
+            "HOST_ROUTE_DURABILITY_FAILED",
+        )?;
+        self.append_route_record_validated(context, &storage_root, false)
+    }
+
+    fn append_resident_route_record(&self, context: &ProjectContext) -> Result<(), String> {
+        let project_root = Path::new(&context.canonical_root);
+        if !storage_roots_equal(project_root, &self.host_root)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+        {
+            return Err(
+                "HOST_ROUTE_DURABILITY_FAILED: resident route root does not match host root".into(),
+            );
+        }
+        let storage_root = storage_owner_path(&self.host.storage_root)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+        self.append_route_record_validated(context, &storage_root, true)
+    }
+
+    fn append_route_record_validated(
+        &self,
+        context: &ProjectContext,
+        storage_root: &Path,
+        allow_resident_storage: bool,
+    ) -> Result<(), String> {
+        if allow_resident_storage {
+            let project_root = Path::new(&context.canonical_root);
+            let resident_root = storage_roots_equal(project_root, &self.host_root)
+                .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+            let resident_storage = storage_roots_equal(storage_root, &self.host.storage_root)
+                .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?;
+            if !resident_root || !resident_storage {
+                return Err(
+                    "HOST_ROUTE_DURABILITY_FAILED: resident storage exception does not match host"
+                        .into(),
+                );
+            }
+        }
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: context.app_scope_id.as_str().into(),
+            project_scope: context.project_scope.as_str().into(),
+            canonical_root: context.canonical_root.clone(),
+            storage_root: storage_root.to_string_lossy().into_owned(),
+            registered_ms: now_ms(),
+        };
+        let parent = self.route_journal.parent().ok_or_else(|| {
+            "HOST_ROUTE_DURABILITY_FAILED: route journal has no parent directory".to_string()
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("HOST_ROUTE_DURABILITY_FAILED: create route journal directory: {error}")
+        })?;
+        let existing = match std::fs::read(&self.route_journal) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(format!(
+                    "HOST_ROUTE_DURABILITY_FAILED: read route journal: {error}"
+                ))
+            }
+        };
+        let existing_records = load_host_route_records(&self.route_journal).map_err(|error| {
+            format!("HOST_ROUTE_DURABILITY_FAILED: validate route journal: {error}")
+        })?;
+        if existing_records.iter().any(|existing| {
+            existing.app_scope_id == record.app_scope_id
+                && existing.project_scope == record.project_scope
+        }) {
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: route key ({}, {}) is already durable",
+                record.app_scope_id, record.project_scope
+            ));
+        }
+        if let Some(owner) = self
+            .storage_owner(&storage_root, &existing_records)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
+            .filter(|_| !allow_resident_storage)
+        {
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: runtime storage root {} is already owned by {}",
+                record.storage_root, owner
+            ));
+        }
+        if !existing.is_empty() && !existing.ends_with(b"\n") {
+            return Err(
+                "HOST_ROUTE_DURABILITY_FAILED: route journal must end with a newline".into(),
+            );
+        }
+        use std::io::Write;
+        let mut line = serde_json::to_vec(&record)
+            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: serialize route: {error}"))?;
+        line.push(b'\n');
+        let mut body = existing;
+        body.extend_from_slice(&line);
+
+        // Replace the complete JSONL file after syncing a private temporary
+        // file.  A process crash or short write therefore leaves either the
+        // previous valid route set or the complete new route set; it cannot
+        // leave a half JSON object for the next daemon replay.
+        static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self.route_journal.with_file_name(format!(
+            "{}.tmp-{}-{sequence}",
+            self.route_journal
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("routes.jsonl"),
+            std::process::id()
+        ));
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|error| {
+                format!("HOST_ROUTE_DURABILITY_FAILED: create route journal temp: {error}")
+            })?;
+        if let Err(error) = tmp_file.write_all(&body) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: write route journal temp: {error}"
+            ));
+        }
+        if let Err(error) = tmp_file.sync_data() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: flush route journal temp: {error}"
+            ));
+        }
+        drop(tmp_file);
+        if let Err(error) = std::fs::rename(&tmp, &self.route_journal) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: publish route journal: {error}"
+            ));
+        }
+        if let Err(error) = sync_parent_dir(&self.route_journal) {
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: sync route journal directory: {error}"
+            ));
+        }
+        load_host_route_records(&self.route_journal).map_err(|error| {
+            format!("HOST_ROUTE_DURABILITY_FAILED: verify route journal: {error}")
+        })?;
+        Ok(())
+    }
+
+    fn select_runtime(&self, context: &ProjectContext) -> Result<Arc<Server>, String> {
+        context
+            .validate()
+            .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
+        let key = Self::route_key(context);
+        let pending = {
+            let routes = self.routes.lock().unwrap();
+            let Some(route) = routes.get(&key) else {
+                return Err(format!(
+                    "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
+                    context.canonical_root
+                ));
+            };
+            if let Some(runtime) = &route.runtime {
+                return Ok(runtime.clone());
+            }
+            (route.root.clone(), route.storage_root.clone())
+        };
+        self.ensure_runtime(&key, &pending.0, &pending.1)
+    }
+
+    fn verify_cross_project_source(
+        &self,
+        from: &str,
+        from_project: &str,
+        assigned_by: &str,
+        approval: Option<&str>,
+        assigned_ms: i64,
+    ) -> Result<(), String> {
+        let source_root = std::fs::canonicalize(from_project).map_err(|error| {
+            format!("CROSS_PROJECT_SOURCE_REJECTED: canonicalize source project: {error}")
+        })?;
+        if !source_root.join(".agent-collab").is_dir() {
+            return Err(format!(
+                "CROSS_PROJECT_SOURCE_REJECTED: source project {} is not initialized for Collab",
+                source_root.display()
+            ));
+        }
+        let source_scope = GlobalState::canonical_project_scope(&source_root)
+            .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
+        let pending = self
+            .routes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((_, project_scope), _)| project_scope == source_scope.as_str())
+            .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Err(format!(
+                "CROSS_PROJECT_SOURCE_REJECTED: no registered source route for {}",
+                source_scope.as_str()
+            ));
+        }
+
+        let mut matches = Vec::new();
+        for (key, root, storage_root) in pending {
+            let runtime = self
+                .ensure_runtime(&key, &root, &storage_root)
+                .map_err(|error| format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"))?;
+            let state = runtime.state.lock().unwrap();
+            let live_master = match live_master_id(&runtime, &state) {
+                Ok(master) => master,
+                Err(error) => {
+                    return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
+                }
+            };
+            if live_master.as_deref() != Some(from) {
+                continue;
+            }
+            if state.master_assigned_by.as_deref() != Some(assigned_by)
+                || state.master_approval.as_deref() != approval
+                || state.master_assigned_ms != Some(assigned_ms)
+            {
+                return Err(
+                    "CROSS_PROJECT_SOURCE_REJECTED: source master assignment evidence does not match the source reducer"
+                        .into(),
+                );
+            }
+            matches.push(key);
+        }
+
+        match matches.len() {
+            1 => Ok(()),
+            0 => Err(
+                "CROSS_PROJECT_SOURCE_REJECTED: sender is not the live master of the source project"
+                    .into(),
+            ),
+            _ => Err(
+                "CROSS_PROJECT_SOURCE_REJECTED: source master route is ambiguous; use one registered source app scope"
+                    .into(),
+            ),
+        }
+    }
+
+    fn dispatch_cross_project_send(
+        &self,
+        target_context: &ProjectContext,
+        req: Req,
+    ) -> (Arc<Server>, Resp) {
+        let Req::CrossProjectSend {
+            from,
+            from_project,
+            source_master_assigned_by,
+            source_master_approval,
+            source_master_assigned_ms,
+            to,
+            subject,
+            body,
+            in_reply_to,
+        } = req
+        else {
+            unreachable!("cross-project dispatch requires CrossProjectSend");
+        };
+        let target = match self.select_runtime(target_context) {
+            Ok(runtime) => runtime,
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        };
+        if let Err(error) = self.verify_cross_project_source(
+            &from,
+            &from_project,
+            &source_master_assigned_by,
+            source_master_approval.as_deref(),
+            source_master_assigned_ms,
+        ) {
+            return (target, Resp::err(error));
+        }
+        let response = handle_cross_project_send(
+            &target,
+            from,
+            from_project,
+            source_master_assigned_by,
+            source_master_approval,
+            source_master_assigned_ms,
+            to,
+            subject,
+            body,
+            in_reply_to,
+        );
+        (target, response)
+    }
+
+    fn dispatch_sync(
+        &self,
+        project_context: Option<ProjectContext>,
+        req: Req,
+    ) -> (Arc<Server>, Resp) {
+        let Some(context) = project_context else {
+            if matches!(req, Req::Ping) {
+                let response = dispatch_with_route_context(&self.host, req, None);
+                return (self.host.clone(), response);
+            }
+            return (
+                self.host.clone(),
+                Resp::err(
+                    "PROJECT_CONTEXT_REQUIRED: canonical project root and scope are required",
+                ),
+            );
+        };
+        if let Err(error) = context.validate() {
+            return (
+                self.host.clone(),
+                Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")),
+            );
+        }
+        let key = Self::route_key(&context);
+        let is_register = matches!(req, Req::Register { .. });
+        let register_worker_id = match &req {
+            Req::Register { worker_id, .. } => Some(worker_id.clone()),
+            _ => None,
+        };
+        let _register_guard = is_register.then(|| self.register_gate.lock().unwrap());
+        if matches!(req, Req::CrossProjectSend { .. }) {
+            return self.dispatch_cross_project_send(&context, req);
+        }
+
+        if let Some((runtime, _)) = self.routes.lock().unwrap().get(&key).and_then(|route| {
+            route
+                .runtime
+                .as_ref()
+                .map(|runtime| (runtime.clone(), false))
+        }) {
+            let response =
+                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
+                };
+            return self.finalize_registration(
+                runtime,
+                &context,
+                register_worker_id.as_deref(),
+                response,
+            );
+        }
+
+        let pending_route = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|route| (route.root.clone(), route.storage_root.clone()));
+        if let Some((root, storage_root)) = pending_route {
+            let runtime = match self.ensure_runtime(&key, &root, &storage_root) {
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let response =
+                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
+                };
+            return self.finalize_registration(
+                runtime,
+                &context,
+                register_worker_id.as_deref(),
+                response,
+            );
+        }
+
+        // The first route for the daemon's resident project keeps the
+        // backwards-compatible resident reducer.  A second app scope gets a
+        // separate runtime and storage namespace just like any other route.
+        let context_root = PathBuf::from(&context.canonical_root);
+        if context_root == self.host_root
+            && !self.has_project_route(&context.project_scope.as_str())
+        {
+            if let Err(error) = self.append_resident_route_record(&context) {
+                return (self.host.clone(), Resp::err(error));
+            }
+            let response =
+                if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    dispatch_with_route_context(&self.host, req, Some(context.clone()))
+                };
+            if response.ok && is_register {
+                self.install_runtime(&key, self.host.clone(), None);
+            } else if !response.ok {
+                return (self.host.clone(), response);
+            }
+            return self.finalize_registration(
+                self.host.clone(),
+                &context,
+                register_worker_id.as_deref(),
+                response,
+            );
+        }
+
+        let Req::Register { cwd, .. } = &req else {
+            return (
+                self.host.clone(),
+                Resp::err(format!(
+                    "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
+                    context.canonical_root
+                )),
+            );
+        };
+        if let Err(error) = validate_project_registration_cwd(cwd, &context_root) {
+            return (self.host.clone(), Resp::err(error));
+        }
+        let storage_root = self.storage_root_for_new(
+            &context_root,
+            context.project_scope.as_str(),
+            context.app_scope_id.as_str(),
+        );
+        // Admit the project route before opening or mutating its reducer. The
+        // host journal is the durable transaction boundary: if it cannot be
+        // published, this request must not create or mutate a project
+        // journal that would be unreachable after a restart.
+        if let Err(error) = self.append_route_record(&context, &storage_root) {
+            return (self.host.clone(), Resp::err(error));
+        }
+        self.install_pending_route(&key, &context_root, &storage_root);
+        let runtime = match self.ensure_runtime(&key, &context_root, &storage_root) {
+            Ok(runtime) => runtime,
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        };
+        let response = if let Err(error) = validate_request_context(&runtime, &req, Some(&context))
+        {
+            Resp::err(error)
+        } else {
+            dispatch_with_route_context(&runtime, req, Some(context.clone()))
+        };
+        self.finalize_registration(runtime, &context, register_worker_id.as_deref(), response)
+    }
+}
+
+pub(crate) fn load_host_route_records(path: &Path) -> Result<Vec<HostRouteRecord>, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "HOST_ROUTE_REPLAY_FAILED: read route journal: {error}"
+            ))
+        }
+    };
+    if content.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !content.ends_with('\n') {
+        return Err("HOST_ROUTE_REPLAY_FAILED: route journal must end with a newline".into());
+    }
+    let mut records = Vec::new();
+    let mut seen_keys = std::collections::BTreeMap::<RouteKey, usize>::new();
+    let mut seen_storage_roots = std::collections::BTreeMap::<String, (RouteKey, usize)>::new();
+    for (index, chunk) in content.split_inclusive('\n').enumerate() {
+        let line = chunk
+            .strip_suffix('\n')
+            .expect("split_inclusive always returns a newline-terminated chunk");
+        // Accept the conventional JSONL CRLF representation while treating
+        // every other empty/whitespace-only physical line as corruption. A
+        // trailing newline is framing, not an additional blank record.
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.trim().is_empty() {
+            return Err(format!(
+                "HOST_ROUTE_REPLAY_FAILED: empty route journal line {}",
+                index + 1
+            ));
+        }
+        let record = serde_json::from_str::<HostRouteRecord>(line).map_err(|error| {
+            format!(
+                "HOST_ROUTE_REPLAY_FAILED: route journal line {}: {error}",
+                index + 1
+            )
+        })?;
+        let key = (record.app_scope_id.clone(), record.project_scope.clone());
+        if let Some(previous_line) = seen_keys.insert(key.clone(), index + 1) {
+            return Err(format!(
+                "HOST_ROUTE_REPLAY_FAILED: duplicate route key ({}, {}) at lines {} and {}",
+                key.0,
+                key.1,
+                previous_line,
+                index + 1
+            ));
+        }
+        if let Some((previous_key, previous_line)) =
+            seen_storage_roots.insert(record.storage_root.clone(), (key.clone(), index + 1))
+        {
+            return Err(format!(
+                "HOST_ROUTE_REPLAY_FAILED: duplicate runtime storage root {} for routes ({}, {}) and ({}, {}) at lines {} and {}",
+                record.storage_root,
+                previous_key.0,
+                previous_key.1,
+                key.0,
+                key.1,
+                previous_line,
+                index + 1
+            ));
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+pub(crate) fn validate_host_route_record(
+    record: &HostRouteRecord,
+) -> Result<(RouteKey, PathBuf, PathBuf), String> {
+    if record.version != 1 || record.op != "register" {
+        return Err(format!(
+            "HOST_ROUTE_REPLAY_FAILED: unsupported route record version/op {}/{}",
+            record.version, record.op
+        ));
+    }
+    let app_scope = AppServerId::new(record.app_scope_id.clone())
+        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: app scope: {error}"))?;
+    let project_scope = ProjectScopeId::new(record.project_scope.clone())
+        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: project scope: {error}"))?;
+    let root = std::fs::canonicalize(&record.canonical_root).map_err(|error| {
+        format!(
+            "HOST_ROUTE_REPLAY_FAILED: canonical root {}: {error}",
+            record.canonical_root
+        )
+    })?;
+    let expected_root = std::fs::canonicalize(project_scope.as_str()).map_err(|error| {
+        format!(
+            "HOST_ROUTE_REPLAY_FAILED: canonical project scope {}: {error}",
+            project_scope.as_str()
+        )
+    })?;
+    if root != expected_root {
+        return Err(
+            "HOST_ROUTE_REPLAY_FAILED: route project scope does not match canonical root".into(),
+        );
+    }
+    let storage_root = PathBuf::from(&record.storage_root);
+    let storage_root =
+        validate_runtime_storage_root(&root, &storage_root, "HOST_ROUTE_REPLAY_FAILED")?;
+    Ok((
+        (
+            app_scope.as_str().to_owned(),
+            project_scope.as_str().to_owned(),
+        ),
+        root,
+        storage_root,
+    ))
+}
+
+fn route_record_is_replayable(record: &HostRouteRecord) -> Result<bool, String> {
+    match std::fs::canonicalize(&record.canonical_root) {
+        Ok(root) => Ok(root.join(".agent-collab").is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "HOST_ROUTE_REPLAY_FAILED: canonical root {}: {error}",
+            record.canonical_root
+        )),
+    }
+}
+
+fn validate_command_id(value: &str) -> Result<(), notification_contract::JournalError> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(notification_contract::JournalError::InvalidCommand(
+            "command and operation ids must be non-empty, <=256 bytes, and control-free".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn purge_expired_storage(server: &Server, now: i64) -> usize {
+    if server.state.lock().unwrap().admission_frozen() {
+        return 0;
+    }
+    let cutoff = server.config.retention.cutoff_ms(now);
+    let mut st = server.state.lock().unwrap();
+    let expired: Vec<String> = st
+        .msgs
+        .values()
+        .filter(|message| message.created_ms <= cutoff)
+        .map(|message| message.id.clone())
+        .collect();
+    mailbox::purge_message_snapshot_files(&server.storage_root, &expired, &st);
+    if expired.is_empty() {
+        return 0;
+    }
+    for id in &expired {
+        st.drop_message(id);
+    }
+    if let Err(error) = server.rewrite_journal_locked(&st) {
+        st.journal_poison = Some(error.to_string());
+        append_log(
+            &server.log_path(),
+            &format!("JOURNAL_COMPACTION_FAILED: {error}"),
+        );
+    }
+    expired.len()
+}
+
+pub fn gen_msg_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("m{}-{}", now_ms(), n)
+}
+
+fn worktree_binding_for_task(server: &Server, task: &TaskRec) -> Option<WorktreeBinding> {
+    let worktree_root = task.worktree_path.as_ref()?.clone();
+    let owning_project_scope = server.root.to_str()?.to_owned();
+    Some(WorktreeBinding {
+        worktree_root,
+        owning_project_scope,
+        task_id: task.id.clone(),
+        owner_agent_id: task.owner.clone(),
+        binding_id: format!("binding-task-{}", task.id),
+        base_commit: task.base_commit.clone().unwrap_or_default(),
+    })
+}
+
+fn iso(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default()
+}
+
+fn default_direct_message_events(
+    state: &State,
+    worker_id: &str,
+    transport: &SelectedTransport,
+    now: i64,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    let default_id = default_direct_message_id(worker_id);
+    if state
+        .notification_subscriptions
+        .get(&default_id)
+        .is_some_and(|subscription| subscription.status == "cancelled")
+    {
+        return events;
+    }
+    let refresh_after_ms = DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;
+    let mut current_is_fresh = false;
+    for subscription in state.notification_subscriptions.values().filter(|sub| {
+        sub.worker_id == worker_id && sub.event == "direct-message" && sub.status == "armed"
+    }) {
+        if subscription.id == default_id
+            && subscription_matches_transport(subscription, transport)
+            && subscription.expires_ms - now >= refresh_after_ms
+        {
+            current_is_fresh = true;
+            continue;
+        }
+        if subscription.id != default_id {
+            events.push(Event::NotificationStatus {
+                subscription_id: subscription.id.clone(),
+                status: "rebound".into(),
+                updated_ms: now,
+            });
+        }
+    }
+    if current_is_fresh {
+        return events;
+    }
+    let Some(thread_id) = transport.thread_id.as_deref() else {
+        return events;
+    };
+    events.push(Event::NotificationSubscribed {
+        subscription: NotificationSubscription {
+            id: default_id,
+            worker_id: worker_id.into(),
+            event: "direct-message".into(),
+            subject: None,
+            target: thread_id.into(),
+            method: "appserver".into(),
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: now.saturating_add(DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000),
+            status: "armed".into(),
+            created_ms: now,
+            updated_ms: now,
+            status_reason: None,
+        },
+    });
+    events
+}
+
+fn registered_peer_default_events(state: &State, now: i64) -> Vec<Event> {
+    let mut workers = state.workers.values().collect::<Vec<_>>();
+    workers.sort_by_key(|worker| worker.id.as_str());
+    workers
+        .into_iter()
+        .filter_map(|worker| {
+            selected_transport_for_worker(worker).map(|transport| (worker.id.as_str(), transport))
+        })
+        .flat_map(|(worker_id, transport)| {
+            default_direct_message_events(state, worker_id, &transport, now)
+        })
+        .collect()
+}
+
+fn restore_registered_peer_default_leases(server: &Server) {
+    let events = {
+        let state = server.state.lock().unwrap();
+        registered_peer_default_events(&state, now_ms())
+    };
+    if !events.is_empty() {
+        server.commit(&events);
+    }
+}
+
+fn selected_transport_for_worker(worker: &WorkerRec) -> Option<SelectedTransport> {
+    worker.transport.clone()
+}
+
+fn subscription_matches_transport(
+    subscription: &NotificationSubscription,
+    transport: &SelectedTransport,
+) -> bool {
+    subscription.method == "appserver"
+        && transport
+            .thread_id
+            .as_deref()
+            .is_some_and(|thread_id| subscription.target == thread_id)
+}
+
+pub(crate) fn subscription_matches_transport_by_worker(
+    server: &Server,
+    subscription_id: &str,
+    worker_id: &str,
+    transport: &SelectedTransport,
+) -> bool {
+    let state = server.state.lock().unwrap();
+    let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
+        return false;
+    };
+    subscription.worker_id == worker_id
+        && subscription_matches_transport(subscription, transport)
+        && state
+            .workers
+            .get(worker_id)
+            .is_some_and(|worker| selected_transport_for_worker(worker).as_ref() == Some(transport))
+}
+
+fn attempt_appserver_notification_with_at(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    recipient: &str,
+    transport: &SelectedTransport,
+    delay: i64,
+    explicit: bool,
+    now: i64,
+    deliver: &dyn Fn(&SelectedTransport, &str, &str, bool) -> Result<serde_json::Value, String>,
+) -> bool {
+    attempt_appserver_notification_with_retry(
+        server,
+        message_id,
+        subscription_id,
+        recipient,
+        transport,
+        delay,
+        explicit,
+        now,
+        false,
+        deliver,
+    )
+}
+
+fn attempt_appserver_notification_with_retry(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    recipient: &str,
+    transport: &SelectedTransport,
+    delay: i64,
+    explicit: bool,
+    now: i64,
+    allow_retry: bool,
+    deliver: &dyn Fn(&SelectedTransport, &str, &str, bool) -> Result<serde_json::Value, String>,
+) -> bool {
+    let mut state = server.state.lock().unwrap();
+    let Some(seed_id) = state.msgs.get(message_id).map(|message| message.id.clone()) else {
+        return false;
+    };
+    if !state.scheduler_message_deliverable(message_id) {
+        return false;
+    }
+    let unacked_notifications = state
+        .msgs
+        .values()
+        .filter(|message| message.to == recipient && message.state == "delivered")
+        .count();
+    if unacked_notifications >= server.config.notifications.max_unacked as usize {
+        return false;
+    }
+    let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
+        return false;
+    };
+    if subscription.worker_id != recipient
+        || !subscription_matches_transport(subscription, transport)
+    {
+        return false;
+    }
+    let mut batch = state
+        .msgs
+        .values()
+        .filter_map(|message| {
+            let binding = state.wake_bindings.get(&message.id)?;
+            let sub = state.notification_subscriptions.get(binding)?;
+            let message_explicit = is_explicit_notification(&state, message);
+            (message.to == recipient
+                && state.scheduler_message_deliverable(&message.id)
+                && message_explicit == explicit
+                && state
+                    .delivery_modes
+                    .get(&message.id)
+                    .filter(|mode| mode.as_str() == "explicit-notification")
+                    .map(|_| 0)
+                    .unwrap_or_else(|| server.config.notifications.delay_ms(&sub.event))
+                    == delay
+                && message.state == "pending"
+                && (allow_retry || message.wake_attempt_count < MAX_WAKE_ATTEMPTS)
+                && sub.worker_id == recipient
+                && subscription_matches_transport(sub, transport)
+                && sub.status == "armed"
+                && sub.expires_ms > now)
+                .then(|| {
+                    notification_text(message).map(|text| {
+                        (
+                            message.created_ms,
+                            message.id.clone(),
+                            binding.clone(),
+                            sub.event.clone(),
+                            text,
+                        )
+                    })
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    batch.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let Some(window_start_ms) = batch.first().map(|candidate| candidate.0) else {
+        return false;
+    };
+    let (batch, remaining) = mailbox::select_batch(batch, delay, window_start_ms);
+    let Some(first) = batch.first() else {
+        return false;
+    };
+    let last_attempt = state
+        .msgs
+        .values()
+        .filter_map(|message| {
+            let binding = state.wake_bindings.get(&message.id)?;
+            let sub = state.notification_subscriptions.get(binding)?;
+            let message_explicit = is_explicit_notification(&state, message);
+            (message.to == recipient
+                && message_explicit == explicit
+                && (message_explicit || server.config.notifications.delay_ms(&sub.event) == delay)
+                && sub.worker_id == recipient
+                && subscription_matches_transport(sub, transport))
+            .then_some(message.last_wake_attempt_ms)
+        })
+        .max()
+        .unwrap_or(0);
+    if now.saturating_sub(window_start_ms) < delay || now.saturating_sub(last_attempt) < delay {
+        return false;
+    }
+    server.commit_locked(
+        &mut state,
+        &[Event::WakeAttempted {
+            ids: batch.iter().map(|message| message.1.clone()).collect(),
+            attempted_ms: now,
+        }],
+    );
+    drop(state);
+
+    let text = truncate_notification(compose_notification(
+        &first.1,
+        "notification-batch",
+        &batch_notification_text(&batch, remaining),
+    ));
+    match deliver(
+        transport,
+        &text,
+        &format!("collab-notification-{}", first.1),
+        explicit,
+    ) {
+        Ok(receipt) => {
+            append_log(
+                &server.log_path(),
+                &format!(
+                    "APPSERVER_NOTIFICATION_ACCEPTED recipient={recipient} message={} explicit={explicit} receipt={receipt}",
+                    seed_id
+                ),
+            );
+            true
+        }
+        Err(error) => {
+            append_log(
+                &server.log_path(),
+                &format!(
+                    "APPSERVER_NOTIFICATION_REJECTED recipient={recipient} message={} error={error}",
+                    seed_id
+                ),
+            );
+            false
+        }
+    }
+}
+
+fn attempt_notification_with(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    _can_receive: &dyn Fn(&str) -> bool,
+    _deliver: &dyn Fn(&str, &str) -> bool,
+    _owns_transport: &dyn Fn(&str, &str) -> Result<bool, ()>,
+) -> bool {
+    attempt_notification_with_at(server, message_id, subscription_id, now_ms())
+}
+
+fn attempt_notification_with_at(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    now: i64,
+) -> bool {
+    if !server.config.notifications.enabled {
+        return false;
+    }
+    let (recipient, transport, delay, explicit) = {
+        let mut state = server.state.lock().unwrap();
+        let Some(seed) = state.msgs.get(message_id) else {
+            return false;
+        };
+        if !state.scheduler_message_deliverable(message_id) {
+            return false;
+        }
+        let recipient = seed.to.clone();
+        let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
+            return false;
+        };
+        if subscription.worker_id != recipient {
+            return false;
+        }
+        let delay = state
+            .delivery_modes
+            .get(message_id)
+            .filter(|mode| mode.as_str() == "explicit-notification")
+            .map(|_| 0)
+            .unwrap_or_else(|| server.config.notifications.delay_ms(&subscription.event));
+        let worker_transport = state
+            .workers
+            .get(&recipient)
+            .and_then(selected_transport_for_worker);
+        let Some(transport) = worker_transport else {
+            return false;
+        };
+        if !subscription_matches_transport(subscription, &transport) {
+            server.commit_locked(
+                &mut state,
+                &[Event::NotificationStatus {
+                    subscription_id: subscription_id.to_string(),
+                    status: "transport-lost".into(),
+                    updated_ms: now,
+                }],
+            );
+            return false;
+        }
+        let explicit = is_explicit_notification(&state, seed);
+        (recipient, transport, delay, explicit)
+    };
+    attempt_appserver_notification_with_at(
+        server,
+        message_id,
+        subscription_id,
+        &recipient,
+        &transport,
+        delay,
+        explicit,
+        now,
+        &|transport, text, message_id, explicit| {
+            (server.appserver_notification_sink)(transport, text, message_id, explicit)
+        },
+    )
+}
+
+fn attempt_notification(server: &Server, message_id: &str, subscription_id: &str) -> bool {
+    attempt_notification_with_at(server, message_id, subscription_id, now_ms())
+}
+
+fn attempt_scheduler_notification(
+    server: &Server,
+    request_id: &str,
+    message_id: &str,
+    subscription_id: &str,
+) -> SchedulerNotificationAttempt {
+    if !server.config.notifications.enabled {
+        return SchedulerNotificationAttempt::Unavailable;
+    }
+    let claim_ms = {
+        let mut state = server.state.lock().unwrap();
+        let Some(admission) = state.scheduler_admissions.get(request_id) else {
+            return SchedulerNotificationAttempt::Unavailable;
+        };
+        if admission.status == "notifying" {
+            if now_ms().saturating_sub(admission.updated_ms) < state::REQUEST_COOLDOWN_MS {
+                return SchedulerNotificationAttempt::InFlight;
+            }
+        } else if admission.status != "pending" {
+            return SchedulerNotificationAttempt::Unavailable;
+        }
+        let claim_ms = now_ms();
+        server.commit_locked(
+            &mut state,
+            &[Event::SchedulerAdmissionStatus {
+                request_id: request_id.into(),
+                status: "notifying".into(),
+                error: None,
+                updated_ms: claim_ms,
+            }],
+        );
+        claim_ms
+    };
+    let delivery = {
+        let state = server.state.lock().unwrap();
+        state.msgs.get(message_id).and_then(|seed| {
+            let recipient = seed.to.clone();
+            let subscription = state.notification_subscriptions.get(subscription_id)?;
+            if subscription.worker_id != recipient {
+                return None;
+            }
+            let delay = state
+                .delivery_modes
+                .get(message_id)
+                .filter(|mode| mode.as_str() == "explicit-notification")
+                .map(|_| 0)
+                .unwrap_or_else(|| server.config.notifications.delay_ms(&subscription.event));
+            let transport = state
+                .workers
+                .get(&recipient)
+                .and_then(selected_transport_for_worker)?;
+            if !subscription_matches_transport(subscription, &transport) {
+                return None;
+            }
+            Some((
+                recipient,
+                transport,
+                delay,
+                is_explicit_notification(&state, seed),
+            ))
+        })
+    };
+    let Some((recipient, transport, delay, explicit)) = delivery else {
+        clear_scheduler_notification_claim(server, request_id, claim_ms);
+        return SchedulerNotificationAttempt::Rejected;
+    };
+    let notified = attempt_appserver_notification_with_retry(
+        server,
+        message_id,
+        subscription_id,
+        &recipient,
+        &transport,
+        delay,
+        explicit,
+        now_ms(),
+        true,
+        &|transport, text, message_id, explicit| {
+            (server.appserver_notification_sink)(transport, text, message_id, explicit)
+        },
+    );
+    if notified {
+        let mut state = server.state.lock().unwrap();
+        if scheduler_notification_claim_is_current(&state, request_id, claim_ms) {
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.into(),
+                    status: "succeeded".into(),
+                    error: None,
+                    updated_ms: now_ms(),
+                }],
+            );
+        }
+        SchedulerNotificationAttempt::Accepted
+    } else {
+        clear_scheduler_notification_claim(server, request_id, claim_ms);
+        SchedulerNotificationAttempt::Rejected
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerNotificationAttempt {
+    Accepted,
+    Rejected,
+    InFlight,
+    Unavailable,
+}
+
+fn scheduler_notification_claim_is_current(state: &State, request_id: &str, claim_ms: i64) -> bool {
+    state
+        .scheduler_admissions
+        .get(request_id)
+        .is_some_and(|admission| {
+            admission.status == "notifying" && admission.updated_ms == claim_ms
+        })
+}
+
+fn clear_scheduler_notification_claim(server: &Server, request_id: &str, claim_ms: i64) {
+    let mut state = server.state.lock().unwrap();
+    if scheduler_notification_claim_is_current(&state, request_id, claim_ms) {
+        let error = state
+            .scheduler_admissions
+            .get(request_id)
+            .and_then(|admission| admission.error.clone());
+        server.commit_locked(
+            &mut state,
+            &[Event::SchedulerAdmissionStatus {
+                request_id: request_id.into(),
+                status: "pending".into(),
+                error,
+                updated_ms: now_ms(),
+            }],
+        );
+    }
+}
+
+#[cfg(test)]
+mod notification_batch_tests {
+    use super::*;
+    use crate::server::state::{Event, NotificationSubscription, State, WorkerRec};
+    use std::sync::{Arc, Mutex};
+
+    fn test_server() -> (Arc<Server>, std::path::PathBuf) {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "collab-notification-batch-{}-{sequence}",
+            std::process::id()
+        ));
+        let server_dir = root.join(".agent-collab/server");
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let journal = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(server_dir.join("journal.jsonl"))
+            .unwrap();
+        (
+            Arc::new(Server {
+                config: crate::config::Config::default(),
+                root: root.clone(),
+                storage_root: root.clone(),
+                journal_path: root.join(".agent-collab/server/journal.jsonl"),
+                state: Mutex::new(State::default()),
+                journal: Mutex::new(journal),
+                appserver_candidate_check: Arc::new(|candidate| {
+                    Ok(SelectedTransport {
+                        kind: TransportKind::AppServer,
+                        endpoint: Some(candidate.endpoint.clone()),
+                        namespace: Some(candidate.namespace.clone()),
+                        thread_id: Some(candidate.thread_id.clone()),
+                        capabilities: vec!["send_message_to_thread".into()],
+                        self_check: "test appserver".into(),
+                    })
+                }),
+                appserver_notification_sink: Arc::new(|_, _, _, _| {
+                    Ok(serde_json::json!({"accepted": true}))
+                }),
+                appserver_thread_status: Arc::new(|_, thread_id| {
+                    Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+                }),
+                appserver_thread_archive: Arc::new(|_, _| {
+                    Ok(serde_json::json!({"archived": true}))
+                }),
+                mailbox_notify: tokio::sync::Notify::new(),
+            }),
+            root,
+        )
+    }
+
+    fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
+        let now = now_ms();
+        let subscription_id = format!("sub-{worker_id}");
+        server.commit(&[
+            Event::Registered {
+                worker: WorkerRec {
+                    id: worker_id.into(),
+                    token: format!("token-{worker_id}"),
+                    cwd: "/tmp".into(),
+                    registered_ms: now,
+                    transport: Some(SelectedTransport {
+                        kind: TransportKind::AppServer,
+                        endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+                        namespace: Some("codex_tui".into()),
+                        thread_id: Some(format!("thread-{worker_id}")),
+                        capabilities: vec!["send_message_to_thread".into()],
+                        self_check: "test appserver".into(),
+                    }),
+                },
+            },
+            Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: subscription_id.clone(),
+                    worker_id: worker_id.into(),
+                    event: "direct-message".into(),
+                    subject: None,
+                    target: format!("thread-{worker_id}"),
+                    method: "appserver".into(),
+                    trigger_ms: None,
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: None,
+                    repeat_count: 1,
+                    fired_count: 0,
+                    expires_ms: now + 300_000,
+                    status: "armed".into(),
+                    created_ms: now,
+                    updated_ms: now,
+                    status_reason: None,
+                },
+            },
+        ]);
+        subscription_id
+    }
+
+    fn queue_message(
+        server: &Server,
+        worker_id: &str,
+        subscription_id: &str,
+        message_id: &str,
+        created_ms: i64,
+    ) {
+        server.commit(&[
+            Event::Sent {
+                msg: Message {
+                    id: message_id.into(),
+                    from: "peer".into(),
+                    to: worker_id.into(),
+                    mtype: "notify".into(),
+                    subject: Some(format!("topic-{message_id}")),
+                    body: format!("DETAIL-{message_id}"),
+                    in_reply_to: None,
+                    created_ms,
+                    state: "pending".into(),
+                    wake_attempt_count: 0,
+                    last_wake_attempt_ms: 0,
+                },
+            },
+            Event::WakeBound {
+                message_id: message_id.into(),
+                subscription_id: subscription_id.into(),
+            },
+        ]);
+    }
+
+    #[test]
+    fn automatic_batch_does_not_cross_the_first_notice_window() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "old-notice",
+            now - 120_001,
+        );
+        queue_message(&server, "recipient", &subscription_id, "late-notice", now);
+
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        {
+            let delivered = Arc::clone(&delivered);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, text, _, _| {
+                delivered.lock().unwrap().push(text.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+        }
+        assert!(attempt_notification_with_at(
+            &server,
+            "old-notice",
+            &subscription_id,
+            now,
+        ));
+
+        let text = delivered.lock().unwrap().join("\n");
+        assert!(text.contains("old-notice"));
+        assert!(
+            !text.contains("late-notice"),
+            "a notice arriving after the first 120-second window must remain pending"
+        );
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["old-notice"].state, "pending");
+        assert_eq!(state.msgs["old-notice"].wake_attempt_count, 1);
+        assert_eq!(state.msgs["late-notice"].state, "pending");
+        drop(state);
+        let mailbox =
+            std::fs::read_to_string(root.join(".agent-collab/mailbox/recipient-recipient.jsonl"))
+                .unwrap();
+        assert!(mailbox.contains("DETAIL-old-notice"));
+        assert!(mailbox.contains("DETAIL-late-notice"));
+        assert!(
+            !text.contains("DETAIL-old-notice") && !text.contains("DETAIL-late-notice"),
+            "batch wake must carry task summary while full details stay in JSONL"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn four_notice_batch_uses_the_original_window_start_after_capping() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let window_start = 10_000_000;
+        for (index, offset) in [(0, 0), (1, 60_000), (2, 70_000), (3, 80_000)] {
+            queue_message(
+                &server,
+                "recipient",
+                &subscription_id,
+                &format!("backlog-{index}"),
+                window_start + offset,
+            );
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        {
+            let delivered = Arc::clone(&delivered);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, text, _, _| {
+                delivered.lock().unwrap().push(text.to_string());
+                Ok(serde_json::json!({"accepted": true}))
+            });
+        }
+        assert!(attempt_notification_with_at(
+            &server,
+            "backlog-0",
+            &subscription_id,
+            window_start + 120_000,
+        ));
+        let text = delivered.lock().unwrap().join("\n");
+        assert!(!text.contains("backlog-0"));
+        assert!(text.contains("backlog-1"));
+        assert!(text.contains("backlog-2"));
+        assert!(text.contains("backlog-3"));
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["backlog-0"].state, "pending");
+        assert_eq!(state.msgs["backlog-1"].state, "pending");
+        assert_eq!(state.msgs["backlog-1"].wake_attempt_count, 1);
+        assert_eq!(state.msgs["backlog-2"].state, "pending");
+        assert_eq!(state.msgs["backlog-2"].wake_attempt_count, 1);
+        assert_eq!(state.msgs["backlog-3"].state, "pending");
+        assert_eq!(state.msgs["backlog-3"].wake_attempt_count, 1);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_notice_is_immediate_and_isolated_from_automatic_batching() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "automatic-notice",
+            now - 120_001,
+        );
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "explicit-notice",
+            now,
+        );
+        server.commit(&[Event::DeliveryMode {
+            msg_id: "explicit-notice".into(),
+            mode: "explicit-notification".into(),
+        }]);
+
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        {
+            let delivered = Arc::clone(&delivered);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, text, _, explicit| {
+                delivered.lock().unwrap().push((explicit, text.to_string()));
+                Ok(serde_json::json!({"accepted": true}))
+            });
+        }
+        assert!(attempt_notification_with_at(
+            &server,
+            "explicit-notice",
+            &subscription_id,
+            now,
+        ));
+        let delivered_snapshot = delivered.lock().unwrap();
+        assert_eq!(delivered_snapshot.len(), 1);
+        assert!(
+            delivered_snapshot[0].0,
+            "explicit sendmessage must use immediate notify"
+        );
+        let text = &delivered_snapshot[0].1;
+        assert!(text.contains("explicit-notice"));
+        assert!(!text.contains("automatic-notice"));
+        drop(delivered_snapshot);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["explicit-notice"].state, "pending");
+        assert_eq!(state.msgs["explicit-notice"].wake_attempt_count, 1);
+        assert_eq!(state.msgs["automatic-notice"].state, "pending");
+        drop(state);
+        assert!(attempt_notification_with_at(
+            &server,
+            "automatic-notice",
+            &subscription_id,
+            now,
+        ));
+        let delivered = delivered.lock().unwrap();
+        assert!(delivered
+            .iter()
+            .any(|(explicit, text)| { !explicit && text.contains("automatic-notice") }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mailbox_status_reports_a_valid_but_incomplete_projection() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "projection-gap",
+            now_ms(),
+        );
+        std::fs::write(
+            root.join(".agent-collab/mailbox/recipient-recipient.jsonl"),
+            "",
+        )
+        .unwrap();
+
+        let response = dispatch(
+            &server,
+            Req::MailboxRead {
+                all: false,
+                sort: Some("time-asc".into()),
+                worker_id: Some("recipient".into()),
+            },
+        );
+        assert!(response.ok);
+        assert_eq!(response.data["recipient_jsonl"]["status"], "incomplete");
+        assert_eq!(
+            response.data["recipient_jsonl"]["missing_message_ids"],
+            serde_json::json!(["projection-gap"])
+        );
+        assert!(response.data["recipient_jsonl"]["exact_error"]
+            .as_str()
+            .unwrap()
+            .contains("projection-gap"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_reservation_is_durable_and_is_never_replayed() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "reserved-once",
+            now - 120_001,
+        );
+
+        Arc::get_mut(&mut server)
+            .expect("unique test server")
+            .appserver_notification_sink = Arc::new(|_, _, _, _| Err("test sink rejected".into()));
+        assert!(!attempt_notification_with_at(
+            &server,
+            "reserved-once",
+            &subscription_id,
+            now,
+        ));
+        assert_eq!(
+            server.state.lock().unwrap().msgs["reserved-once"].state,
+            "pending"
+        );
+        assert_eq!(
+            server.state.lock().unwrap().msgs["reserved-once"].wake_attempt_count,
+            1
+        );
+        assert!(!attempt_notification_with_at(
+            &server,
+            "reserved-once",
+            &subscription_id,
+            now + 300_000,
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Test helper retained for the App Server-only notification call sites.
+#[cfg(test)]
+pub(crate) fn attempt_notification_with_default(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    can_receive: &dyn Fn(&str) -> bool,
+    deliver: &dyn Fn(&str, &str) -> bool,
+) -> bool {
+    if !server.config.notifications.enabled {
+        return false;
+    }
+    let (recipient, transport, delay, explicit) = {
+        let mut state = server.state.lock().unwrap();
+        let Some(seed) = state.msgs.get(message_id) else {
+            return false;
+        };
+        if !state.scheduler_message_deliverable(message_id) {
+            return false;
+        }
+        let recipient = seed.to.clone();
+        let Some(subscription) = state.notification_subscriptions.get(subscription_id) else {
+            return false;
+        };
+        if subscription.worker_id != recipient {
+            return false;
+        }
+        let delay = state
+            .delivery_modes
+            .get(message_id)
+            .filter(|mode| mode.as_str() == "explicit-notification")
+            .map(|_| 0)
+            .unwrap_or_else(|| server.config.notifications.delay_ms(&subscription.event));
+        let Some(transport) = state
+            .workers
+            .get(&recipient)
+            .and_then(selected_transport_for_worker)
+        else {
+            return false;
+        };
+        if !subscription_matches_transport(subscription, &transport) {
+            return false;
+        }
+        let explicit = is_explicit_notification(&state, seed);
+        (recipient, transport, delay, explicit)
+    };
+    attempt_appserver_notification_with_at(
+        server,
+        message_id,
+        subscription_id,
+        &recipient,
+        &transport,
+        delay,
+        explicit,
+        now_ms(),
+        &|transport, text, _, _| {
+            let target = transport.thread_id.as_deref().unwrap_or("appserver");
+            if !can_receive(target) {
+                return Err("test can_receive returned false".into());
+            }
+            if deliver(target, text) {
+                Ok(json!({"accepted": true}))
+            } else {
+                Err("test deliver returned false".into())
+            }
+        },
+    )
+}
+
+fn handle_notification_subscribe(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    event: String,
+    subject: Option<String>,
+    trigger_ms: Option<i64>,
+    trigger_times_ms: Vec<i64>,
+    interval_ms: Option<i64>,
+    repeat_count: u32,
+    ttl_seconds: u64,
+) -> Resp {
+    if !NOTIFICATION_EVENTS.contains(&event.as_str()) {
+        return Resp::err(format!(
+            "unsupported notification event {}; expected one of {:?}",
+            event, NOTIFICATION_EVENTS
+        ));
+    }
+    if ttl_seconds == 0 || ttl_seconds > MAX_NOTIFICATION_TTL_SECONDS {
+        return Resp::err(format!(
+            "ttl_seconds must be between 1 and {}",
+            MAX_NOTIFICATION_TTL_SECONDS
+        ));
+    }
+    let exact_subject_required = event != "direct-message";
+    if exact_subject_required != subject.as_deref().is_some_and(|value| !value.is_empty()) {
+        return Resp::err(if exact_subject_required {
+            "this notification event requires a non-empty exact subject"
+        } else {
+            "direct-message subscription must not specify a subject"
+        });
+    }
+    if event != "deadline"
+        && event != "master-idle"
+        && (trigger_ms.is_some()
+            || !trigger_times_ms.is_empty()
+            || interval_ms.is_some()
+            || repeat_count != 1)
+    {
+        return Resp::err("schedule options are valid only for deadline subscriptions");
+    }
+    if event == "deadline" && trigger_ms.is_some() && !trigger_times_ms.is_empty() {
+        return Resp::err("use at-ms or trigger-ms, not both");
+    }
+    let goal_deadline = subject
+        .as_deref()
+        .is_some_and(|value| value.starts_with("goal:"));
+    if event == "deadline"
+        && goal_deadline
+        && (interval_ms.is_some()
+            || repeat_count != 1
+            || trigger_times_ms.len() > 1
+            || (trigger_ms.is_none() && trigger_times_ms.is_empty()))
+    {
+        return Resp::err("goal deadline subscriptions are one-shot and require one at-ms trigger");
+    }
+    let now = now_ms();
+    let expires_ms = now.saturating_add((ttl_seconds as i64).saturating_mul(1000));
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify(&state, &worker_id, &token) {
+        return error;
+    }
+    if matches!(event.as_str(), "deadline" | "master-idle") {
+        let live_master = match live_master_id(server, &state) {
+            Ok(master) => master,
+            Err(error) => return Resp::err(error),
+        };
+        if live_master.as_deref() != Some(worker_id.as_str()) {
+            return Resp::err(if event == "master-idle" {
+                "master-idle subscription requires the live registered master"
+            } else if live_master.is_some() {
+                "master authority required for deadline subscriptions"
+            } else {
+                "no live master; deadline subscriptions require an approved live master"
+            });
+        }
+    }
+    if goal_deadline {
+        let requested_key = trigger_ms
+            .or_else(|| trigger_times_ms.first().copied())
+            .and_then(|trigger| {
+                subject
+                    .clone()
+                    .map(|subject| (worker_id.clone(), subject, trigger))
+            });
+        if let Some(existing) = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| {
+                goal_deadline_key(subscription).as_ref() == requested_key.as_ref()
+                    && matches!(subscription.status.as_str(), "armed" | "consumed")
+                    && subscription.expires_ms > now
+            })
+            .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
+            .cloned()
+        {
+            return Resp::data(json!({
+                "subscription": existing,
+                "one_shot": true,
+                "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
+                "deduplicated": true,
+            }));
+        }
+    }
+    let Some(worker) = state.workers.get(&worker_id).cloned() else {
+        return Resp::err("notification subscription requires a registered worker");
+    };
+    let Some(transport) = selected_transport_for_worker(&worker) else {
+        return Resp::err("registered worker has no server-selected transport");
+    };
+    let Some(thread_id) = transport.thread_id.clone() else {
+        return Resp::err("selected App Server transport has no thread_id");
+    };
+    let target = thread_id;
+    let active = state
+        .notification_subscriptions
+        .values()
+        .filter(|s| s.worker_id == worker_id && s.status == "armed")
+        .count();
+    if active >= MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER {
+        return Resp::err("maximum 3 active subscriptions per agent");
+    }
+    if event == "master-idle" {
+        if trigger_ms.is_some() || !trigger_times_ms.is_empty() {
+            return Resp::err("master-idle requires a recurring interval, not an absolute trigger");
+        }
+        if !matches!(interval_ms, Some(900_000 | 3_600_000)) {
+            return Resp::err("master-idle interval must be exactly 900000 or 3600000 ms");
+        }
+        if repeat_count == 0 || repeat_count > crate::server::state::MAX_NOTIFICATION_REPEATS {
+            return Resp::err("repeat_count must be between 1 and 100");
+        }
+    }
+    if event == "deadline" {
+        if interval_ms.is_some() && (!trigger_times_ms.is_empty() || trigger_ms.is_some()) {
+            return Resp::err("periodic schedule cannot include an absolute time list");
+        }
+        if interval_ms.is_none() && trigger_times_ms.is_empty() && trigger_ms.is_none() {
+            return Resp::err("deadline requires at-ms or every-ms");
+        }
+        if repeat_count == 0 || repeat_count > crate::server::state::MAX_NOTIFICATION_REPEATS {
+            return Resp::err("repeat_count must be between 1 and 100");
+        }
+        if interval_ms.is_some_and(|ms| ms <= 0) {
+            return Resp::err("every-ms must be positive");
+        }
+        if interval_ms.is_some()
+            && trigger_times_ms.is_empty()
+            && trigger_ms.is_none()
+            && repeat_count == 1
+        {}
+        if !trigger_times_ms.is_empty() && (interval_ms.is_some() || repeat_count != 1) {
+            return Resp::err(
+                "absolute schedule uses at-ms values and repeat_count is their length",
+            );
+        }
+        let times = if trigger_times_ms.is_empty() {
+            trigger_ms.into_iter().collect()
+        } else {
+            trigger_times_ms.clone()
+        };
+        if times.len() > crate::server::state::MAX_NOTIFICATION_REPEATS as usize {
+            return Resp::err("absolute schedule supports at most 100 times");
+        }
+        if times
+            .iter()
+            .any(|trigger| *trigger <= now || *trigger >= expires_ms)
+        {
+            return Resp::err("absolute trigger times must be in the future and before expiry");
+        }
+        if interval_ms.is_some_and(|ms| now.saturating_add(ms) >= expires_ms) {
+            return Resp::err("every-ms must fire before subscription expiry");
+        }
+    }
+    let id = format!("sub-{}", gen_msg_id());
+    let subscription = NotificationSubscription {
+        id: id.clone(),
+        worker_id,
+        event,
+        subject,
+        target,
+        method: "appserver".into(),
+        trigger_ms,
+        trigger_times_ms,
+        interval_ms,
+        repeat_count,
+        fired_count: 0,
+        expires_ms,
+        status: "armed".into(),
+        created_ms: now,
+        updated_ms: now,
+        status_reason: None,
+    };
+    server.commit_locked(
+        &mut state,
+        &[Event::NotificationSubscribed {
+            subscription: subscription.clone(),
+        }],
+    );
+    Resp::data(
+        json!({"subscription": subscription, "one_shot": goal_deadline, "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS}),
+    )
+}
+
+fn handle_notification_status(server: &Server, worker_id: String, token: String) -> Resp {
+    let state = server.state.lock().unwrap();
+    if let Err(error) = verify(&state, &worker_id, &token) {
+        return error;
+    }
+    let mut subscriptions: Vec<&NotificationSubscription> = state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| subscription.worker_id == worker_id)
+        .collect();
+    subscriptions.sort_by_key(|subscription| (subscription.created_ms, &subscription.id));
+    Resp::data(json!({"subscriptions": subscriptions}))
+}
+
+fn handle_notification_unsubscribe(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    subscription_id: String,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify(&state, &worker_id, &token) {
+        return error;
+    }
+    let Some(subscription) = state.notification_subscriptions.get(&subscription_id) else {
+        return Resp::err(format!(
+            "notification subscription {} not found",
+            subscription_id
+        ));
+    };
+    if subscription.worker_id != worker_id {
+        return Resp::err("only the subscription owner may unsubscribe");
+    }
+    let mut events = vec![Event::NotificationStatus {
+        subscription_id: subscription_id.clone(),
+        status: "cancelled".into(),
+        updated_ms: now_ms(),
+    }];
+    let pending = state
+        .wake_bindings
+        .iter()
+        .filter_map(|(message_id, bound_subscription)| {
+            (bound_subscription == &subscription_id
+                && state
+                    .msgs
+                    .get(message_id)
+                    .is_some_and(|message| message.state == "pending"))
+            .then_some(message_id.clone())
+        })
+        .collect::<Vec<_>>();
+    if !pending.is_empty() {
+        events.push(Event::Superseded { ids: pending });
+    }
+    server.commit_locked(&mut state, &events);
+    Resp::data(json!({"subscription_id": subscription_id, "status": "cancelled"}))
+}
+
+// ---------- handlers ----------
+
+fn verify(state: &State, worker_id: &str, token: &str) -> Result<WorkerRec, Resp> {
+    match state.workers.get(worker_id) {
+        Some(w) if w.token == token => Ok(w.clone()),
+        Some(_) => Err(Resp::err(
+            "token mismatch: identity does not own this worker_id",
+        )),
+        None => Err(Resp::err(format!("worker {} not registered", worker_id))),
+    }
+}
+
+fn migration_issues(server: &Server, state: &State) -> Vec<String> {
+    let mut issues = Vec::new();
+    for worker in state.workers.values() {
+        match worker_identity_presence(server, worker) {
+            IdentityPresence::Present => {}
+            IdentityPresence::Missing => issues.push(format!(
+                "worker {} has no live server-verified App Server transport",
+                worker.id
+            )),
+            IdentityPresence::Unknown => issues.push(format!(
+                "worker {} transport liveness is unknown",
+                worker.id
+            )),
+        }
+    }
+    for task in state.tasks.values() {
+        if task.worktree_path.is_some()
+            && matches!(task.status.as_str(), "merged" | "closed" | "cancelled")
+            && !state.cleanup_receipts.contains_key(&task.id)
+        {
+            issues.push(format!(
+                "TASK_CLEANUP_INCOMPLETE:{}:{}",
+                task.id,
+                task.worktree_path.as_deref().unwrap_or("unknown")
+            ));
+        }
+        if let Some(receipt) = state.cleanup_receipts.get(&task.id) {
+            if receipt.task_id != task.id
+                || receipt.worktree_path != task.worktree_path
+                || receipt.branch != task.branch
+            {
+                issues.push(format!("TASK_CLEANUP_RECEIPT_MISMATCH:{}", task.id));
+            }
+            if let Some(path) = task.worktree_path.as_deref() {
+                let worktree = Path::new(path);
+                let worktree = if worktree.is_absolute() {
+                    worktree.to_path_buf()
+                } else {
+                    server
+                        .root
+                        .join(worktree.strip_prefix("./").unwrap_or(worktree))
+                };
+                if worktree.exists() {
+                    issues.push(format!("TASK_CLEANUP_INCOMPLETE:{}:{}", task.id, path));
+                }
+            }
+        }
+        if task.status == "available" {
+            issues.push(format!(
+                "task {} uses deprecated available/dispatch state and needs an explicit owner decision",
+                task.id
+            ));
+        }
+        if let Some(wait) = task.wait.as_ref() {
+            if task.status != "waiting" {
+                issues.push(format!(
+                    "task {} has wait metadata outside waiting",
+                    task.id
+                ));
+            }
+            if wait.waiter != task.owner || !state.workers.contains_key(&wait.waiter) {
+                issues.push(format!("task {} wait has no valid waiter", task.id));
+            }
+            if wait.responsible_actor.trim().is_empty()
+                || !state.workers.contains_key(&wait.responsible_actor)
+            {
+                issues.push(format!("task {} wait has no responsible actor", task.id));
+            }
+            match state.tasks.get(&wait.waiting_for) {
+                None => issues.push(format!(
+                    "task {} wait points to missing blocking task {}",
+                    task.id, wait.waiting_for
+                )),
+                Some(blocking) => {
+                    if !task_resource_active(&blocking.status) {
+                        issues.push(format!(
+                            "task {} wait points to inactive blocking task {}",
+                            task.id, blocking.id
+                        ));
+                    }
+                    if wait.responsible_actor != blocking.owner {
+                        issues.push(format!(
+                            "task {} wait responsible actor does not own blocking task {}",
+                            task.id, blocking.id
+                        ));
+                    }
+                    let same_feature =
+                        task.feature_id.is_some() && task.feature_id == blocking.feature_id;
+                    let same_worktree = task.worktree_path.is_some()
+                        && task.worktree_path == blocking.worktree_path;
+                    if !same_feature && !same_worktree {
+                        issues.push(format!(
+                            "task {} wait has no matching active resource on blocking task {}",
+                            task.id, blocking.id
+                        ));
+                    }
+                }
+            }
+            if wait.deadline_ms <= now_ms() {
+                issues.push(format!(
+                    "task {} wait deadline is missing or expired",
+                    task.id
+                ));
+            }
+            if wait.resume_on.is_empty() || wait.escalation.trim().is_empty() {
+                issues.push(format!(
+                    "task {} wait has no resume/escalation path",
+                    task.id
+                ));
+            }
+            if wait_cycle(&state.tasks, &task.id, &wait.waiting_for) {
+                issues.push(format!("task {} participates in a wait cycle", task.id));
+            }
+        } else if task.status == "waiting" {
+            issues.push(format!("task {} is waiting without WaitSpec", task.id));
+        }
+    }
+    issues.sort();
+    issues.dedup();
+    issues
+}
+
+fn snapshot_hash(state: &State) -> String {
+    let mut workers: Vec<_> = state
+        .workers
+        .values()
+        .map(|worker| worker.id.clone())
+        .collect();
+    workers.sort();
+    let mut tasks: Vec<_> = state.tasks.values().cloned().collect();
+    tasks.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut messages: Vec<_> = state.msgs.values().cloned().collect();
+    messages.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut delivery_modes: Vec<_> = state
+        .delivery_modes
+        .iter()
+        .map(|(id, mode)| (id.clone(), mode.clone()))
+        .collect();
+    delivery_modes.sort();
+    let bytes = serde_json::to_vec(&(workers, tasks, messages, delivery_modes))
+        .expect("serialize deterministic migration snapshot");
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn migration_peer(state: &State, worker_id: &str, token: &str) -> Result<WorkerRec, Resp> {
+    verify(state, worker_id, token)
+}
+
+fn verify_migration_lease(state: &State, worker_id: &str) -> Result<(), Resp> {
+    if let Some(migration) = state.migration.as_ref().filter(|migration| {
+        migration.operator != worker_id && matches!(migration.phase.as_str(), "planned" | "applied")
+    }) {
+        return Err(Resp::err_data(
+            "MIGRATION_TRANSACTION_HELD_BY_ANOTHER_PEER",
+            json!({
+                "migration": migration,
+                "holder": migration.operator,
+                "requester": worker_id,
+                "admission_frozen": state.admission_frozen(),
+                "retry_allowed": false,
+                "next": "do not retry plan/apply/verify; query collab migrate inspect, then let the holder complete the current migration or coordinate ownership transfer",
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn migration_state_rejection(state: &State, message: &str) -> Resp {
+    Resp::err_data(
+        message,
+        json!({
+            "migration": state.migration,
+            "admission_frozen": state.admission_frozen(),
+            "retry_allowed": false,
+            "next": "run collab migrate inspect; do not create a new migration until the current record is resolved",
+        }),
+    )
+}
+
+fn migration_view(state: &State, issues: Vec<String>) -> serde_json::Value {
+    json!({
+        "migration": state.migration,
+        "admissible": issues.is_empty(),
+        "issues": issues,
+        "state": {
+            "workers": state.workers.len(),
+            "tasks": state.tasks.len(),
+            "messages": state.msgs.len(),
+            "snapshot_hash": snapshot_hash(state),
+        },
+        "deprecated_paths": [
+            "delete .agent-collab",
+            "manual task/claim/journal JSON edits",
+            "clear mailbox",
+            "copy worker tokens",
+            "start a second daemon",
+            "mixed runtime writers",
+            "guess thread identity",
+        ],
+    })
+}
+
+fn handle_migration_inspect(server: &Server, worker_id: String, token: String) -> Resp {
+    let state = server.state.lock().unwrap();
+    if let Err(error) = migration_peer(&state, &worker_id, &token) {
+        return error;
+    }
+    let issues = migration_issues(server, &state);
+    Resp::data(migration_view(&state, issues))
+}
+
+fn handle_migration_plan(server: &Server, worker_id: String, token: String) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = migration_peer(&state, &worker_id, &token) {
+        return error;
+    }
+    if let Err(error) = verify_migration_lease(&state, &worker_id) {
+        return error;
+    }
+    if state.admission_frozen() {
+        return Resp::err("migration admission is already frozen");
+    }
+    let issues = migration_issues(server, &state);
+    let now = now_ms();
+    let migration = MigrationRecord {
+        id: format!("migration-{now}"),
+        from_version: "v1-legacy".into(),
+        to_version: "v1-low-intervention".into(),
+        phase: if issues.is_empty() {
+            "planned".into()
+        } else {
+            "migration_needs_operator".into()
+        },
+        admission_frozen: false,
+        snapshot_hash: None,
+        worker_count: state.workers.len(),
+        task_count: state.tasks.len(),
+        message_count: state.msgs.len(),
+        operator: worker_id,
+        issues: issues.clone(),
+        created_ms: now,
+        updated_ms: now,
+    };
+    server.commit_locked(
+        &mut state,
+        &[Event::MigrationUpdated {
+            migration: migration.clone(),
+        }],
+    );
+    Resp::data(json!({
+        "migration": migration,
+        "admissible": issues.is_empty(),
+        "issues": issues,
+        "next": if state.migration.as_ref().is_some_and(|record| record.phase == "planned") {
+            "collab migrate apply"
+        } else {
+            "resolve every issue, then run collab migrate plan again"
+        },
+    }))
+}
+
+fn handle_migration_apply(server: &Server, worker_id: String, token: String) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = migration_peer(&state, &worker_id, &token) {
+        return error;
+    }
+    if let Err(error) = verify_migration_lease(&state, &worker_id) {
+        return error;
+    }
+    let Some(mut migration) = state.migration.clone() else {
+        return Resp::err("run collab migrate plan before apply");
+    };
+    if migration.phase != "planned" || !migration.issues.is_empty() {
+        return Resp::err("migration plan is not admissible");
+    }
+    let issues = migration_issues(server, &state);
+    if !issues.is_empty() {
+        return Resp::err(format!(
+            "migration admission changed: {}",
+            issues.join("; ")
+        ));
+    }
+    migration.phase = "applied".into();
+    migration.admission_frozen = true;
+    migration.snapshot_hash = Some(snapshot_hash(&state));
+    migration.worker_count = state.workers.len();
+    migration.task_count = state.tasks.len();
+    migration.message_count = state.msgs.len();
+    migration.updated_ms = now_ms();
+    server.commit_locked(
+        &mut state,
+        &[Event::MigrationUpdated {
+            migration: migration.clone(),
+        }],
+    );
+    Resp::data(json!({
+        "migration": migration,
+        "admission_frozen": true,
+        "next": "upgrade/restart the single daemon, rebind existing App Server identities, then run collab migrate verify",
+    }))
+}
+
+fn handle_migration_verify(server: &Server, worker_id: String, token: String) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = migration_peer(&state, &worker_id, &token) {
+        return error;
+    }
+    if let Err(error) = verify_migration_lease(&state, &worker_id) {
+        return error;
+    }
+    let Some(mut migration) = state.migration.clone() else {
+        return migration_state_rejection(&state, "no migration record to verify");
+    };
+    if migration.phase == "verified" && !migration.admission_frozen {
+        let current_snapshot_hash = snapshot_hash(&state);
+        return Resp::data(json!({
+            "migration": migration,
+            "verified": true,
+            "resumed": false,
+            "idempotent": true,
+            "issues": [],
+            "current_snapshot_hash": current_snapshot_hash,
+            "next": "migration already verified; continue task lifecycle; do not rerun plan or apply",
+        }));
+    }
+    if migration.phase != "applied" || !migration.admission_frozen {
+        return migration_state_rejection(
+            &state,
+            "migration must be applied and frozen before verify",
+        );
+    }
+    let mut issues = migration_issues(server, &state);
+    let current_hash = snapshot_hash(&state);
+    if migration.snapshot_hash.as_deref() != Some(current_hash.as_str()) {
+        issues.push("migration snapshot hash mismatch".into());
+    }
+    if migration.worker_count != state.workers.len()
+        || migration.task_count != state.tasks.len()
+        || migration.message_count != state.msgs.len()
+    {
+        issues.push("migration state counts changed during admission freeze".into());
+    }
+    issues.sort();
+    issues.dedup();
+    migration.updated_ms = now_ms();
+    migration.issues = issues.clone();
+    if issues.is_empty() {
+        migration.phase = "verified".into();
+        migration.admission_frozen = false;
+    } else {
+        migration.phase = "migration_needs_operator".into();
+    }
+    server.commit_locked(
+        &mut state,
+        &[Event::MigrationUpdated {
+            migration: migration.clone(),
+        }],
+    );
+    Resp::data(json!({
+        "migration": migration,
+        "verified": issues.is_empty(),
+        "resumed": issues.is_empty(),
+        "issues": issues,
+        "current_snapshot_hash": current_hash,
+    }))
+}
+
+fn register_typed(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    transport: &SelectedTransport,
+    cwd: &str,
+    project_scope: Option<ProjectScopeId>,
+    app_scope: Option<AppServerId>,
+    reuse_existing: bool,
+) -> Resp {
+    let typed = match (project_scope, app_scope) {
+        (Some(project_scope), Some(app_scope)) => server.typed_register_envelope_for_scope(
+            worker_id,
+            token,
+            transport,
+            project_scope,
+            cwd,
+            app_scope,
+            reuse_existing,
+        ),
+        (Some(project_scope), None) => {
+            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string());
+            match app_scope {
+                Ok(app_scope) => server.typed_register_envelope_for_scope(
+                    worker_id,
+                    token,
+                    transport,
+                    project_scope,
+                    cwd,
+                    app_scope,
+                    reuse_existing,
+                ),
+                Err(error) => Err(error),
+            }
+        }
+        (None, Some(app_scope)) => match GlobalState::canonical_project_scope(Path::new(cwd)) {
+            Ok(project_scope) => server.typed_register_envelope_for_scope(
+                worker_id,
+                token,
+                transport,
+                project_scope,
+                cwd,
+                app_scope,
+                reuse_existing,
+            ),
+            Err(error) => Err(error.to_string()),
+        },
+        (None, None) if reuse_existing => {
+            let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+                .map_err(|error| error.to_string());
+            let app_scope = AppServerId::new("tui-default").map_err(|error| error.to_string());
+            match (project_scope, app_scope) {
+                (Ok(project_scope), Ok(app_scope)) => server.typed_register_envelope_for_scope(
+                    worker_id,
+                    token,
+                    transport,
+                    project_scope,
+                    cwd,
+                    app_scope,
+                    true,
+                ),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            }
+        }
+        (None, None) => {
+            Err("collab registration requires an app scope for an App Server transport".into())
+        }
+    };
+    match typed {
+        Ok(typed) => match server.typed_dispatch(typed.clone()) {
+            Ok(outcome) => {
+                let (role_brief, registered_at) = {
+                    let st = server.state.lock().unwrap();
+                    let registered_at = match &typed.command {
+                        TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
+                    };
+                    (role_brief(&st, worker_id), registered_at)
+                };
+                Resp::data(json!({
+                    "worker_id": worker_id,
+                    "identity_kind": "peer",
+                    "transport_selected": transport,
+                    "registered_at": iso(registered_at),
+                    "role_brief": role_brief,
+                    "typed": true,
+                    "command_id": outcome.receipt.command_id.as_str(),
+                    "operation_id": outcome.receipt.operation_id.as_str(),
+                    "sequence": outcome.receipt.sequence,
+                    "revision": outcome.receipt.revision,
+                    "replayed": outcome.replayed,
+                    "command": typed.command,
+                }))
+            }
+            Err(error) => Resp::err(format!("typed registrar rejected registration: {error}")),
+        },
+        Err(error) => Resp::err(format!("typed registrar failed to build command: {error}")),
+    }
+}
+
+pub(crate) fn handle_register_with_app_scope(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    cwd: String,
+    app_scope: Option<AppServerId>,
+    candidates: Option<TransportCandidates>,
+) -> Resp {
+    handle_register_with_app_scope_inner(
+        server, worker_id, token, cwd, app_scope, candidates, false,
+    )
+}
+
+fn handle_register_with_app_scope_inner(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    cwd: String,
+    app_scope: Option<AppServerId>,
+    candidates: Option<TransportCandidates>,
+    recover_existing: bool,
+) -> Resp {
+    let candidates = candidates.unwrap_or_default();
+    let selected = match validate_transport_candidates(server, &worker_id, &candidates) {
+        Ok(selected) => selected,
+        Err(error) => return Resp::err(error),
+    };
+    let st = server.state.lock().unwrap();
+    if st.admission_frozen() && !st.workers.contains_key(&worker_id) {
+        return Resp::err(
+            "MIGRATION_ADMISSION_FROZEN: only an existing App Server identity may rebind",
+        );
+    }
+    if let Some(existing) = st.workers.get(&worker_id).cloned() {
+        let existing_route_scope = match existing_route_scope(&st, &worker_id) {
+            Ok(scope) => scope,
+            Err(error) => return error,
+        };
+        let existing_project_scope = existing_route_scope
+            .as_ref()
+            .map(|route| route.project_scope_id.clone());
+        let app_scope = app_scope.or_else(|| {
+            existing_route_scope
+                .as_ref()
+                .map(|route| route.app_scope_id.clone())
+        });
+        // Transport is a server-selected capability, not a permanent worker
+        // identity. Re-registering the *same* App Server thread is idempotent
+        // and keeps the current generation. A *different* verified thread is a
+        // recovery: it must advance the endpoint generation so every context
+        // bound to the old thread is fenced.
+        let existing_thread = existing_route_scope.as_ref().and_then(|route| {
+            st.global
+                .lookup_binding_for(
+                    route,
+                    &BindingId::new(sanitize_identifier(&format!("binding-{worker_id}"))).ok()?,
+                )
+                .and_then(|binding| binding.native_thread_id.as_ref())
+                .map(|thread| thread.as_str().to_owned())
+        });
+        let same_thread = existing_thread.as_deref() == selected.thread_id.as_deref();
+        if existing.token != token && (!recover_existing || !same_thread) {
+            return Resp::err(format!(
+                "worker_id {} already registered by another token",
+                worker_id
+            ));
+        }
+        let reuse_existing = !recover_existing && same_thread;
+        drop(st);
+        let mut resp = register_typed(
+            server,
+            &worker_id,
+            &token,
+            &selected,
+            &cwd,
+            existing_project_scope,
+            app_scope,
+            reuse_existing,
+        );
+        if resp.ok {
+            if reuse_existing {
+                resp.data["reused"] = json!(true);
+            } else {
+                resp.data["recovered"] = json!(true);
+            }
+        }
+        return resp;
+    }
+    drop(st);
+    register_typed(
+        server, &worker_id, &token, &selected, &cwd, None, app_scope, false,
+    )
+}
+
+/// Compatibility entry point for direct in-process callers.  Wire requests
+/// use `handle_register_with_app_scope` so the app scope comes from their
+/// validated ProjectContext; this adapter retains the historical tui route
+/// only when no wire context exists.
+pub(crate) fn handle_register(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    cwd: String,
+) -> Resp {
+    handle_register_with_app_scope(server, worker_id, token, cwd, None, None)
+}
+
+fn existing_route_scope(state: &State, worker_id: &str) -> Result<Option<RouteScope>, Resp> {
+    let mut found = None;
+    for project in state.global.projects.values() {
+        for binding in project.runtime_bindings.values() {
+            if binding.agent_id.as_str() != worker_id {
+                continue;
+            }
+            let route = binding.route_scope();
+            if found.as_ref().is_some_and(|scope| scope != &route) {
+                return Err(Resp::err(format!(
+                    "worker {} has ambiguous registered route scope",
+                    worker_id
+                )));
+            }
+            found = Some(route);
+        }
+    }
+    Ok(found)
+}
+
+fn role_brief(state: &State, worker_id: &str) -> serde_json::Value {
+    if state.master_worker_id.as_deref() == Some(worker_id) {
+        return json!({
+            "role": "master",
+            "role_task": "Orchestrate the project; implementation is not your primary job.",
+            "responsibilities": [
+                "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
+                "Split work into independent scopes; assign tasks and resources; keep useful worker capacity loaded.",
+                "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
+                "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
+                "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
+            ],
+            "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
+        });
+    }
+    if is_managed_subagent(state, worker_id) {
+        return json!({
+            "role": "managed-subagent",
+            "role_task": "Execute the assigned independent task and return evidence to parent/master.",
+            "responsibilities": [
+                "Stay inside the assigned task, worktree, file scope, delivery conditions, and tests.",
+                "Accept and execute master/parent instructions for this assignment; do not create a global schedule.",
+                "On trouble, investigate first. Send root cause, attempted actions, proposed fix, and any required decision to the live master; copy parent when different.",
+                "Complete implementation, tests, commit, delivery evidence, and resource cleanup; do not stop at code-written or ACK."
+            ],
+            "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
+        });
+    }
+    json!({
+        "role": "worker",
+        "role_task": "Own and complete your independent task; collaborate with the master without abandoning existing ownership.",
+        "responsibilities": [
+            "Execute your registered task end to end within its worktree and file scope: implement, test, commit, deliver evidence, and close resources.",
+            "Evaluate master collaboration requests against current ownership and capacity. Accept ready non-conflicting work; decline or negotiate conflicts explicitly instead of silently ignoring them.",
+            "On trouble, investigate first. Report root cause, attempted actions, proposed fix, and the exact decision needed to the live master.",
+            "Do not wait passively and do not stop on ACK/read/summary; after handling a notification, resume your current task."
+        ],
+        "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
+    })
+}
+
+fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
+    let Some(transport) = selected_transport_for_worker(worker) else {
+        return IdentityPresence::Missing;
+    };
+    let (Some(endpoint), Some(namespace), Some(thread_id)) =
+        (transport.endpoint, transport.namespace, transport.thread_id)
+    else {
+        return IdentityPresence::Missing;
+    };
+    let candidate = crate::proto::AppServerCandidate {
+        endpoint,
+        namespace,
+        thread_id,
+    };
+    match (server.appserver_candidate_check)(&candidate) {
+        Ok(_) => IdentityPresence::Present,
+        Err(error) => {
+            // A positively unavailable route is a dead transport.  Timeouts,
+            // protocol failures, and all other inconclusive errors must not
+            // authorize orphan cleanup or authority changes.
+            if error.starts_with("ADAPTER_ROUTE_UNAVAILABLE:") {
+                IdentityPresence::Missing
+            } else {
+                IdentityPresence::Unknown
+            }
+        }
+    }
+}
+
+fn appserver_agent_view(
+    server: &Server,
+    worker: &WorkerRec,
+) -> (serde_json::Value, serde_json::Value) {
+    let Some(transport) = selected_transport_for_worker(worker) else {
+        return (serde_json::Value::Null, serde_json::Value::Null);
+    };
+    let Some(thread_id) = transport.thread_id.as_deref() else {
+        return (serde_json::Value::Null, serde_json::Value::Null);
+    };
+    let Ok(raw) = (server.appserver_thread_status)(&transport, thread_id) else {
+        return (serde_json::Value::Null, serde_json::Value::Null);
+    };
+    let Some(thread) = raw.get("thread") else {
+        return (serde_json::Value::Null, serde_json::Value::Null);
+    };
+    let Some(status) = thread.get("status").and_then(serde_json::Value::as_object) else {
+        return (serde_json::Value::Null, serde_json::Value::Null);
+    };
+    let Some(thread_state) = status.get("type").and_then(serde_json::Value::as_str) else {
+        return (serde_json::Value::Null, serde_json::Value::Null);
+    };
+    let active_flags = status
+        .get("activeFlags")
+        .and_then(serde_json::Value::as_array)
+        .map(|flags| {
+            flags
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let can_accept_direct_input = thread
+        .get("canAcceptDirectInput")
+        .and_then(serde_json::Value::as_bool);
+    let latest_turn_status = thread
+        .get("turns")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|turns| turns.first())
+        .and_then(|turn| turn.get("status"))
+        .and_then(serde_json::Value::as_str);
+    let latest_turn_error = thread
+        .get("turn_status_error")
+        .and_then(serde_json::Value::as_str);
+    (
+        serde_json::json!({
+            "thread_state": thread_state,
+            "active_flags": active_flags,
+            "can_accept_direct_input": can_accept_direct_input,
+            "latest_turn_status": latest_turn_status,
+            "latest_turn_error": latest_turn_error,
+        }),
+        raw,
+    )
+}
+
+/// Decide whether a new managed child would starve an already registered peer.
+/// The caller must use the returned peer for the scope before creating a child.
+pub(crate) fn registered_idle_peer_for_admission(
+    server: &Server,
+    requester: &str,
+) -> Option<(String, String)> {
+    // Snapshot only state-owned data while holding the mutex. Transport probes
+    // run after the lock is released.
+    let candidates: Vec<WorkerRec> = {
+        let state = server.state.lock().unwrap();
+        let mut workers: Vec<_> = state
+            .workers
+            .values()
+            .filter(|worker| worker.id != requester)
+            .filter(|worker| !is_managed_subagent(&state, &worker.id))
+            .filter(|worker| {
+                !state
+                    .tasks
+                    .values()
+                    .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+            })
+            .cloned()
+            .collect();
+        workers.sort_by(|a, b| a.id.cmp(&b.id));
+        workers
+    };
+
+    let probed: Vec<WorkerRec> = candidates
+        .into_iter()
+        .filter(|worker| {
+            matches!(
+                worker_identity_presence(server, worker),
+                IdentityPresence::Present
+            )
+        })
+        .collect();
+
+    let state = server.state.lock().unwrap();
+    for worker in probed {
+        let Some(current) = state.workers.get(&worker.id) else {
+            continue;
+        };
+        let unchanged = current.id == worker.id
+            && current.token == worker.token
+            && current.cwd == worker.cwd
+            && current.registered_ms == worker.registered_ms;
+        if unchanged
+            && !is_managed_subagent(&state, &worker.id)
+            && !state
+                .tasks
+                .values()
+                .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+        {
+            return Some((
+                worker.id,
+                "live registered peer is idle, owned, and has no actionable task".into(),
+            ));
+        }
+    }
+    None
+}
+
+pub(crate) fn idle_managed_subagent_for_admission(
+    server: &Server,
+    requester: &str,
+) -> Option<(String, String, String)> {
+    let candidates: Vec<(crate::subagent::Record, WorkerRec)> = {
+        let state = server.state.lock().unwrap();
+        let mut candidates = state
+            .subagents
+            .values()
+            .filter(|record| record.parent == requester && record.status == "idle")
+            .filter_map(|record| {
+                state
+                    .workers
+                    .get(&record.peer)
+                    .cloned()
+                    .map(|worker| (record.clone(), worker))
+            })
+            .filter(|(_, worker)| {
+                !state
+                    .tasks
+                    .values()
+                    .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+        candidates
+    };
+
+    let probed: Vec<(crate::subagent::Record, WorkerRec)> = candidates
+        .into_iter()
+        .filter(|(_, worker)| {
+            matches!(
+                worker_identity_presence(server, worker),
+                IdentityPresence::Present
+            )
+        })
+        .collect();
+
+    let state = server.state.lock().unwrap();
+    for (record, worker) in probed {
+        let Some(current) = state.subagents.get(&record.id) else {
+            continue;
+        };
+        let Some(current_worker) = state.workers.get(&worker.id) else {
+            continue;
+        };
+        if current.parent == requester
+            && current.status == "idle"
+            && current.peer == worker.id
+            && current_worker.id == worker.id
+            && current_worker.token == worker.token
+            && current_worker.cwd == worker.cwd
+            && current_worker.registered_ms == worker.registered_ms
+            && !state
+                .tasks
+                .values()
+                .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+        {
+            return Some((
+                record.id,
+                worker.id,
+                "live managed subagent is idle, owned, and has no active task".into(),
+            ));
+        }
+    }
+    None
+}
+
+pub(crate) fn live_master_id(
+    server: &Server,
+    state: &State,
+) -> Result<Option<String>, &'static str> {
+    let Some(worker) = state
+        .master_worker_id
+        .as_ref()
+        .and_then(|id| state.workers.get(id))
+    else {
+        return Ok(None);
+    };
+    match worker_identity_presence(server, worker) {
+        IdentityPresence::Present => Ok(Some(worker.id.clone())),
+        IdentityPresence::Missing => Ok(None),
+        IdentityPresence::Unknown => Err(
+            "master identity is unknown; defer authority changes until transport probes succeed",
+        ),
+    }
+}
+
+fn is_managed_subagent(state: &State, worker_id: &str) -> bool {
+    state
+        .subagents
+        .values()
+        .any(|record| record.peer == worker_id)
+}
+
+/// Admit a Start request to an already registered idle peer when the caller is
+/// the live master. This is shared by the daemon dispatch path and the direct
+/// subagent handler so neither entry point can bypass scheduler admission.
+pub(crate) fn scheduler_admit_subagent_start(
+    server: &Server,
+    worker_id: &str,
+    token: &str,
+    requested_id: Option<&str>,
+    requested_runtime: Option<&str>,
+) -> Result<Option<Resp>, Resp> {
+    if requested_id.is_some_and(|id| !crate::subagent::valid_id(id))
+        || requested_runtime.is_some_and(|runtime| !crate::subagent::valid_runtime(runtime))
+    {
+        return Ok(None);
+    }
+    let authenticated = {
+        let state = server.state.lock().unwrap();
+        verify(&state, worker_id, token).is_ok()
+    };
+    if !authenticated {
+        return Ok(None);
+    }
+
+    if requested_id.is_some_and(|id| server.state.lock().unwrap().subagents.contains_key(id)) {
+        return Ok(None);
+    }
+
+    // Snapshot the master identity, then probe outside the state mutex for the
+    // same reason as registered_idle_peer_for_admission.
+    let Some(master) = ({
+        let state = server.state.lock().unwrap();
+        state
+            .master_worker_id
+            .as_ref()
+            .and_then(|id| state.workers.get(id))
+            .cloned()
+    }) else {
+        return Ok(None);
+    };
+    if master.id != worker_id
+        || worker_identity_presence(server, &master) != IdentityPresence::Present
+    {
+        return Ok(None);
+    }
+
+    let (decision, peer_id, managed_subagent_id, reason) =
+        if let Some((peer_id, reason)) = registered_idle_peer_for_admission(server, worker_id) {
+            ("use-registered-peer", peer_id, None, reason)
+        } else if let Some((id, peer_id, reason)) =
+            idle_managed_subagent_for_admission(server, worker_id)
+        {
+            ("reuse-idle-managed-subagent", peer_id, Some(id), reason)
+        } else {
+            let admission = json!({
+                "decision": "create-managed-subagent",
+                "managed_subagent_id": serde_json::Value::Null,
+                "reason": "no eligible live registered peer or idle managed subagent capacity",
+            });
+            record_scheduler_admission(server, admission)?;
+            return Ok(None);
+        };
+    let managed_subagent = managed_subagent_id
+        .as_ref()
+        .map(|id| json!({"id": id, "worker_id": peer_id}))
+        .unwrap_or(serde_json::Value::Null);
+    let admission = json!({
+        "decision": decision,
+        "worker_id": peer_id,
+        "managed_subagent_id": managed_subagent_id,
+        "reason": reason,
+    });
+    record_scheduler_admission(server, admission.clone())?;
+    Ok(Some(Resp::data(json!({
+        "admission": admission,
+        "managed_subagent": managed_subagent,
+    }))))
+}
+
+fn record_scheduler_admission(server: &Server, admission: serde_json::Value) -> Result<(), Resp> {
+    ensure_scheduler_admission_audit(server, &admission).map(|_| ())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SchedulerAdmissionAuditState {
+    Recorded,
+    Failed(String),
+}
+
+fn scheduler_admission_audit_state(
+    server: &Server,
+    request_id: &str,
+) -> Result<Option<SchedulerAdmissionAuditState>, Resp> {
+    let path = server
+        .storage_root
+        .join(".agent-collab/server/events.jsonl");
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Resp::err(format!(
+                "scheduler admission audit failed: lookup {error}"
+            )))
+        }
+    };
+    for line in content.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record.get("kind").and_then(serde_json::Value::as_str) != Some("scheduler_admission")
+            || record
+                .get("detail")
+                .and_then(|detail| detail.get("request_id"))
+                .and_then(serde_json::Value::as_str)
+                != Some(request_id)
+        {
+            continue;
+        }
+        let detail = record.get("detail").cloned().unwrap_or_else(|| json!({}));
+        if detail.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
+            let error = detail
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("scheduler admission audit failed")
+                .to_string();
+            return Ok(Some(SchedulerAdmissionAuditState::Failed(error)));
+        }
+        return Ok(Some(SchedulerAdmissionAuditState::Recorded));
+    }
+    Ok(None)
+}
+
+fn ensure_scheduler_admission_audit(
+    server: &Server,
+    admission: &serde_json::Value,
+) -> Result<SchedulerAdmissionAuditState, Resp> {
+    if let Some(request_id) = admission
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        if let Some(state) = scheduler_admission_audit_state(server, request_id)? {
+            return Ok(state);
+        }
+    }
+    if let Err(error) = record_activity(
+        &server.storage_root,
+        "scheduler_admission",
+        admission.clone(),
+    ) {
+        append_log(
+            &server.log_path(),
+            &format!("SCHEDULER_ADMISSION_RECORD_FAILED: {error}"),
+        );
+        return Err(Resp::err(format!(
+            "scheduler admission audit failed: {error}"
+        )));
+    }
+    Ok(SchedulerAdmissionAuditState::Recorded)
+}
+
+fn scheduler_admission_audit_error(
+    result: Result<SchedulerAdmissionAuditState, Resp>,
+) -> Option<String> {
+    match result {
+        Ok(SchedulerAdmissionAuditState::Recorded) => None,
+        Ok(SchedulerAdmissionAuditState::Failed(error)) => Some(error),
+        Err(error) => Some(
+            error
+                .error
+                .unwrap_or_else(|| "scheduler admission audit failed".into()),
+        ),
+    }
+}
+
+fn scheduler_admission_failed_response(
+    admission: &crate::server::state::SchedulerAdmissionRecord,
+) -> Resp {
+    let error = admission.error.clone().unwrap_or_else(|| {
+        "scheduler admission audit failed; retry with the same request_id".into()
+    });
+    Resp::err_data(
+        error,
+        json!({
+            "request_id": admission.request_id,
+            "reservation": true,
+            "decision": "audit-failed",
+            "message_id": admission.message_id,
+            "task_id": admission.task_id,
+            "admission": admission,
+        }),
+    )
+}
+
+fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Option<Resp> {
+    let pending = {
+        let mut state = server.state.lock().unwrap();
+        let admission = state.scheduler_admissions.get(request_id)?.clone();
+        if admission.status == "notifying"
+            && now_ms().saturating_sub(admission.updated_ms) >= state::REQUEST_COOLDOWN_MS
+        {
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.into(),
+                    status: "pending".into(),
+                    error: admission.error.clone(),
+                    updated_ms: now_ms(),
+                }],
+            );
+        }
+        state
+            .scheduler_admissions
+            .get(request_id)
+            .filter(|admission| admission.status == "pending")
+            .cloned()?
+    };
+    let (admission, task, subscription) = {
+        let mut state = server.state.lock().unwrap();
+        let Some(task) = state.tasks.get(&pending.task_id).cloned() else {
+            return None;
+        };
+        let message_state = state
+            .msgs
+            .get(&pending.message_id)
+            .map(|message| message.state.as_str())
+            .unwrap_or("missing");
+        if matches!(message_state, "read" | "delivered") {
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.into(),
+                    status: "succeeded".into(),
+                    error: None,
+                    updated_ms: now_ms(),
+                }],
+            );
+            let admission = state.scheduler_admissions.get(request_id).cloned()?;
+            return Some(Resp::data(json!({
+                "request_id": admission.request_id,
+                "decision": admission.decision,
+                "admission": {
+                    "request_id": admission.request_id,
+                    "decision": admission.decision,
+                    "worker_id": admission.worker_id,
+                    "managed_subagent_id": admission.managed_subagent_id,
+                    "message_id": admission.message_id,
+                    "task_id": admission.task_id,
+                    "status": "succeeded",
+                },
+                "message_id": admission.message_id,
+                "task_id": admission.task_id,
+                "target": task.owner,
+                "status": task.status,
+                "managed_subagent_id": admission.managed_subagent_id,
+                "managed_subagent": admission
+                    .managed_subagent_id
+                    .as_ref()
+                    .map(|id| json!({"id": id, "worker_id": task.owner}))
+                    .unwrap_or(serde_json::Value::Null),
+                "notification": "already-consumed",
+                "recovered": true,
+            })));
+        }
+        let admission = state.scheduler_admissions.get(request_id).cloned()?;
+        let subscription = state
+            .matching_subscription(&admission.worker_id, "direct-message", None, now_ms())
+            .cloned();
+        (admission, task, subscription)
+    };
+    let notification_attempt = subscription.as_ref().map(|subscription| {
+        attempt_scheduler_notification(server, request_id, &admission.message_id, &subscription.id)
+    });
+    if notification_attempt == Some(SchedulerNotificationAttempt::InFlight) {
+        return Some(Resp::err_data(
+            "scheduler dispatch notification is already in flight; retry with the same request_id",
+            json!({
+                "request_id": admission.request_id,
+                "reservation": true,
+                "decision": admission.decision,
+                "message_id": admission.message_id,
+                "task_id": admission.task_id,
+            }),
+        ));
+    }
+    let notified = notification_attempt == Some(SchedulerNotificationAttempt::Accepted);
+    if subscription.is_some() && !notified {
+        let error =
+            "scheduler dispatch notification was not accepted by the selected App Server route";
+        return Some(scheduler_notification_failed_response(&admission, error));
+    }
+    Some(Resp::data(json!({
+        "request_id": admission.request_id,
+        "decision": admission.decision,
+        "admission": {
+            "request_id": admission.request_id,
+            "decision": admission.decision,
+            "worker_id": admission.worker_id,
+            "managed_subagent_id": admission.managed_subagent_id,
+            "message_id": admission.message_id,
+            "task_id": admission.task_id,
+            "status": "succeeded",
+        },
+        "message_id": admission.message_id,
+        "task_id": admission.task_id,
+        "target": task.owner,
+        "status": task.status,
+        "managed_subagent_id": admission.managed_subagent_id,
+        "managed_subagent": admission
+            .managed_subagent_id
+            .as_ref()
+            .map(|id| json!({"id": id, "worker_id": task.owner}))
+            .unwrap_or(serde_json::Value::Null),
+        "notification": if subscription.is_none() {
+            "mailbox-only-no-subscription"
+        } else if notified {
+            "sent"
+        } else {
+            "subscribed-not-sent"
+        },
+        "recovered": true,
+    })))
+}
+
+fn scheduler_notification_failed_response(
+    admission: &crate::server::state::SchedulerAdmissionRecord,
+    error: &str,
+) -> Resp {
+    Resp::err_data(
+        error,
+        json!({
+            "request_id": admission.request_id,
+            "reservation": true,
+            "decision": admission.decision,
+            "message_id": admission.message_id,
+            "task_id": admission.task_id,
+            "admission": {
+                "request_id": admission.request_id,
+                "decision": admission.decision,
+                "worker_id": admission.worker_id,
+                "managed_subagent_id": admission.managed_subagent_id,
+                "message_id": admission.message_id,
+                "task_id": admission.task_id,
+                "status": "pending",
+                "error": error,
+            },
+        }),
+    )
+}
+
+fn scheduler_dispatch_deduplicated(
+    server: &Server,
+    worker_id: &str,
+    request_id: &str,
+) -> Option<Resp> {
+    let message_id = format!("scheduler-{request_id}");
+    let task_id = format!("task-{message_id}");
+    let state = server.state.lock().unwrap();
+    if let Some(admission) = state.scheduler_admissions.get(request_id) {
+        if admission.status == "failed" {
+            return Some(scheduler_admission_failed_response(admission));
+        }
+        if admission.status == "pending" {
+            return None;
+        }
+        if admission.status == "notifying" {
+            return Some(Resp::err_data(
+                "scheduler dispatch notification is already in flight; retry with the same request_id",
+                json!({
+                    "request_id": admission.request_id,
+                    "reservation": true,
+                    "decision": admission.decision,
+                    "message_id": admission.message_id,
+                    "task_id": admission.task_id,
+                }),
+            ));
+        }
+    }
+    let (Some(message), Some(task)) = (
+        state.msgs.get(&message_id).cloned(),
+        state.tasks.get(&task_id).cloned(),
+    ) else {
+        return None;
+    };
+    let managed_subagent_id = state
+        .subagents
+        .values()
+        .find(|record| record.parent == worker_id && record.peer == task.owner)
+        .map(|record| record.id.clone());
+    Some(Resp::data(json!({
+        "request_id": request_id,
+        "decision": "deduplicated",
+        "message_id": message.id,
+        "task_id": task.id,
+        "target": task.owner,
+        "status": task.status,
+        "managed_subagent_id": managed_subagent_id,
+        "managed_subagent": managed_subagent_id
+            .as_ref()
+            .map(|id| json!({"id": id, "worker_id": task.owner}))
+            .unwrap_or(serde_json::Value::Null),
+        "deduplicated": true,
+    })))
+}
+
+fn scheduler_assignment_events(
+    message: Message,
+    task: TaskRec,
+    managed_child: Option<crate::subagent::Record>,
+) -> Vec<Event> {
+    let message_id = message.id.clone();
+    let mut events = vec![Event::Sent { msg: message }];
+    events.push(Event::TaskCreated { task });
+    if let Some(mut child) = managed_child {
+        child.status = "assigned".into();
+        child.last_message = Some(message_id);
+        events.push(Event::SubagentUpdated { subagent: child });
+    }
+    events
+}
+
+pub(crate) fn handle_scheduler_dispatch(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    request_id: String,
+    subject: String,
+    body: String,
+    feature_id: Option<String>,
+    mut worktree_path: Option<String>,
+    branch: Option<String>,
+    base_commit: Option<String>,
+    priority: String,
+    next_step: Option<String>,
+) -> Resp {
+    if !crate::subagent::valid_id(&request_id) {
+        return Resp::err("scheduler request_id must be a valid non-empty ID");
+    }
+    if subject.trim().is_empty() || body.trim().is_empty() {
+        return Resp::err("scheduler dispatch requires a non-empty subject and body");
+    }
+    if !matches!(priority.as_str(), "p0" | "p1" | "p2" | "p3" | "p4") {
+        return Resp::err(format!(
+            "invalid priority {}; must be p0, p1, p2, p3, or p4",
+            priority
+        ));
+    }
+    if let Some(path) = &worktree_path {
+        let canonical = match validate_worktree_path(&server.root, path) {
+            Ok(path) => path,
+            Err(error) => return Resp::err(error),
+        };
+        worktree_path = Some(canonical.display().to_string());
+    }
+
+    let authenticated = {
+        let state = server.state.lock().unwrap();
+        verify(&state, &worker_id, &token).is_ok()
+    };
+    if !authenticated {
+        return Resp::err("scheduler dispatch authentication failed");
+    }
+    let Some(master) = ({
+        let state = server.state.lock().unwrap();
+        state
+            .master_worker_id
+            .as_ref()
+            .and_then(|id| state.workers.get(id))
+            .cloned()
+    }) else {
+        return Resp::err("scheduler dispatch requires a live master");
+    };
+    if master.id != worker_id
+        || worker_identity_presence(server, &master) != IdentityPresence::Present
+    {
+        return Resp::err("scheduler dispatch requires the live registered master");
+    }
+
+    let message_id = format!("scheduler-{request_id}");
+    let task_id = format!("task-{message_id}");
+    for _ in 0..3 {
+        if let Some(response) = scheduler_dispatch_recover_pending(server, &request_id) {
+            return response;
+        }
+        if let Some(response) = scheduler_dispatch_deduplicated(server, &worker_id, &request_id) {
+            return response;
+        }
+        let candidate = registered_idle_peer_for_admission(server, &worker_id)
+            .map(|(peer, reason)| (peer, None, reason, "use-registered-peer"))
+            .or_else(|| {
+                idle_managed_subagent_for_admission(server, &worker_id).map(
+                    |(managed_id, peer, reason)| {
+                        (
+                            peer,
+                            Some(managed_id),
+                            reason,
+                            "reuse-idle-managed-subagent",
+                        )
+                    },
+                )
+            });
+        let Some((peer_id, managed_id, reason, decision)) = candidate else {
+            if let Some(response) = scheduler_dispatch_recover_pending(server, &request_id) {
+                return response;
+            }
+            if let Some(response) = scheduler_dispatch_deduplicated(server, &worker_id, &request_id)
+            {
+                return response;
+            }
+            return Resp::err(
+                "scheduler dispatch has no eligible live peer or idle managed subagent capacity",
+            );
+        };
+
+        let mut state = server.state.lock().unwrap();
+        let Some(worker) = state.workers.get(&peer_id).cloned() else {
+            continue;
+        };
+        if state
+            .tasks
+            .values()
+            .any(|task| task.owner == peer_id && task_resource_active(&task.status))
+        {
+            continue;
+        }
+        let mut managed_child = None;
+        if let Some(managed_id) = &managed_id {
+            let Some(child) = state.subagents.get(managed_id).cloned() else {
+                continue;
+            };
+            if child.parent != worker_id || child.peer != peer_id || child.status != "idle" {
+                continue;
+            }
+            managed_child = Some(child);
+        } else if is_managed_subagent(&state, &peer_id) {
+            continue;
+        }
+        if state.msgs.contains_key(&message_id) || state.tasks.contains_key(&task_id) {
+            continue;
+        }
+
+        let now = now_ms();
+        let message = Message {
+            id: message_id.clone(),
+            from: worker_id.clone(),
+            to: peer_id.clone(),
+            mtype: "notify".into(),
+            subject: Some(subject.clone()),
+            body: body.clone(),
+            in_reply_to: None,
+            created_ms: now,
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+        };
+        let task = TaskRec {
+            id: task_id.clone(),
+            owner: peer_id.clone(),
+            created_by: worker_id.clone(),
+            feature_id: feature_id.clone(),
+            worktree_path: worktree_path.clone(),
+            branch: branch.clone(),
+            base_commit: base_commit.clone(),
+            priority: priority.clone(),
+            status: "assigned".into(),
+            next_step: next_step.clone().or_else(|| {
+                Some(format!(
+                    "Read scheduler message {message_id}; mark task working before execution"
+                ))
+            }),
+            wait: None,
+            created_ms: now,
+            updated_ms: now,
+        };
+        let admission_record = crate::server::state::SchedulerAdmissionRecord {
+            request_id: request_id.clone(),
+            decision: decision.into(),
+            worker_id: peer_id.clone(),
+            managed_subagent_id: managed_id.clone(),
+            message_id: message_id.clone(),
+            task_id: task_id.clone(),
+            status: "pending".into(),
+            error: None,
+            created_ms: now,
+            updated_ms: now,
+        };
+        let mut admission = json!({
+            "request_id": request_id,
+            "decision": decision,
+            "worker_id": peer_id,
+            "managed_subagent_id": managed_id,
+            "message_id": message_id,
+            "task_id": task_id,
+            "reason": reason,
+            "status": "pending",
+        });
+        let binding = worktree_binding_for_task(server, &task);
+        let mut events = scheduler_assignment_events(message, task, managed_child);
+        if let Some(binding) = binding {
+            events.push(Event::WorktreeBound { binding });
+        }
+        let subscription = state
+            .matching_subscription(&peer_id, "direct-message", None, now)
+            .cloned();
+        events.push(Event::DeliveryMode {
+            msg_id: message_id.clone(),
+            mode: "explicit-notification".into(),
+        });
+        if let Some(subscription) = &subscription {
+            events.push(Event::WakeBound {
+                message_id: message_id.clone(),
+                subscription_id: subscription.id.clone(),
+            });
+        }
+        events.push(Event::SchedulerAdmission {
+            admission: admission_record,
+        });
+        server.commit_locked(&mut state, &events);
+        if let Some(error) =
+            scheduler_admission_audit_error(ensure_scheduler_admission_audit(server, &admission))
+        {
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.clone(),
+                    status: "failed".into(),
+                    error: Some(error.clone()),
+                    updated_ms: now_ms(),
+                }],
+            );
+            drop(state);
+            admission["status"] = json!("failed");
+            admission["error"] = json!(error.clone());
+            return Resp::err_data(
+                error,
+                json!({
+                    "request_id": request_id,
+                    "reservation": true,
+                    "message_id": message_id,
+                    "task_id": task_id,
+                    "admission": admission,
+                }),
+            );
+        }
+        drop(state);
+        let notification_attempt = subscription.as_ref().map(|subscription| {
+            attempt_scheduler_notification(server, &request_id, &message_id, &subscription.id)
+        });
+        if notification_attempt == Some(SchedulerNotificationAttempt::InFlight) {
+            return Resp::err_data(
+                "scheduler dispatch notification is already in flight; retry with the same request_id",
+                json!({
+                    "request_id": request_id,
+                    "reservation": true,
+                    "decision": decision,
+                    "message_id": message_id,
+                    "task_id": task_id,
+                }),
+            );
+        }
+        let notified = notification_attempt == Some(SchedulerNotificationAttempt::Accepted);
+        if subscription.is_some() && !notified {
+            let admission_record = crate::server::state::SchedulerAdmissionRecord {
+                request_id: request_id.clone(),
+                decision: decision.into(),
+                worker_id: peer_id.clone(),
+                managed_subagent_id: managed_id.clone(),
+                message_id: message_id.clone(),
+                task_id: task_id.clone(),
+                status: "pending".into(),
+                error: None,
+                created_ms: now,
+                updated_ms: now,
+            };
+            return scheduler_notification_failed_response(
+                &admission_record,
+                "scheduler dispatch notification was not accepted by the selected App Server route",
+            );
+        }
+        admission["status"] = json!("succeeded");
+        return Resp::data(json!({
+            "request_id": request_id,
+            "decision": decision,
+            "admission": admission,
+            "message_id": message_id,
+            "task_id": task_id,
+            "target": peer_id,
+            "status": "assigned",
+            "managed_subagent_id": managed_id,
+            "managed_subagent": managed_id
+                .as_ref()
+                .map(|id| json!({"id": id, "worker_id": peer_id}))
+                .unwrap_or(serde_json::Value::Null),
+            "notification": if subscription.is_none() {
+                "mailbox-only-no-subscription"
+            } else if notified {
+                "sent"
+            } else {
+                "subscribed-not-sent"
+            },
+        }));
+    }
+    Resp::err(
+        "scheduler dispatch capacity changed during admission; retry with the same request_id",
+    )
+}
+
+fn verify_master_actor(
+    server: &Server,
+    state: &State,
+    worker_id: &str,
+    token: &str,
+) -> Result<(), Resp> {
+    let Some(worker) = state.workers.get(worker_id) else {
+        return Err(Resp::err(format!("worker {} not registered", worker_id)));
+    };
+    if worker.token != token {
+        return Err(Resp::err(
+            "token mismatch: identity does not own this worker_id",
+        ));
+    }
+    match live_master_id(server, state) {
+        Ok(Some(master)) if master == worker_id => Ok(()),
+        Ok(Some(_)) => Err(Resp::err(
+            "master authority required; ask the registered master to delegate",
+        )),
+        Ok(None) => Err(Resp::err(
+            "no live master; a peer may promote itself only with explicit user approval",
+        )),
+        Err(error) => Err(Resp::err(error)),
+    }
+}
+
+fn handle_master_promote(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    approval: String,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    let Some(worker) = state.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    if approval.trim().is_empty() {
+        return Resp::err("master promotion requires explicit user approval");
+    }
+    match live_master_id(server, &state) {
+        Ok(Some(_)) => {
+            return Resp::err("master already exists; only the registered master may delegate")
+        }
+        Err(error) => return Resp::err(error),
+        Ok(None) => {}
+    }
+    match worker_identity_presence(server, &worker) {
+        IdentityPresence::Present => {}
+        IdentityPresence::Missing => {
+            return Resp::err("master promotion requires a live registered transport")
+        }
+        IdentityPresence::Unknown => return Resp::err(
+            "promotion candidate identity is unknown; defer promotion until transport probes succeed",
+        ),
+    }
+    server.commit_locked(
+        &mut state,
+        &[Event::MasterAssigned {
+            worker_id: worker_id.clone(),
+            assigned_by: worker_id.clone(),
+            approval: Some(approval),
+            assigned_ms: now_ms(),
+        }],
+    );
+    Resp::data(json!({
+        "master": worker_id,
+        "mode": "user_approved_self_promotion",
+        "role_brief": role_brief(&state, &worker_id)
+    }))
+}
+
+fn handle_master_delegate(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    target_id: String,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+        return error;
+    }
+    let Some(target) = state.workers.get(&target_id) else {
+        return Resp::err(format!("target worker {} not registered", target_id));
+    };
+    match worker_identity_presence(server, target) {
+        IdentityPresence::Present => {}
+        IdentityPresence::Missing => {
+            return Resp::err("master delegation requires a live target transport")
+        }
+        IdentityPresence::Unknown => {
+            return Resp::err(
+                "delegation target identity is unknown; defer delegation until transport probes succeed",
+            )
+        }
+    }
+    server.commit_locked(
+        &mut state,
+        &[Event::MasterAssigned {
+            worker_id: target_id.clone(),
+            assigned_by: worker_id.clone(),
+            approval: None,
+            assigned_ms: now_ms(),
+        }],
+    );
+    Resp::data(json!({
+        "master": target_id,
+        "delegated_by": worker_id,
+        "role_brief": role_brief(&state, &target_id)
+    }))
+}
+
+fn handle_worker_close(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    target_id: String,
+    reason: String,
+) -> Resp {
+    let mut state = server.state.lock().unwrap();
+    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+        return error;
+    }
+    if reason.trim().is_empty() {
+        return Resp::err("worker close requires a non-empty --reason");
+    }
+    if target_id == worker_id {
+        return Resp::err("master cannot close itself; delegate first");
+    }
+    let Some(target) = state.workers.get(&target_id).cloned() else {
+        return Resp::err(format!("target worker {} not registered", target_id));
+    };
+
+    // Closing a worker that still owns live work would strand the task and its
+    // worktree. The task lifecycle must be resolved first.
+    let owned: Vec<String> = state
+        .tasks
+        .values()
+        .filter(|task| task.owner == target_id && keepalive::actionable(&task.status))
+        .map(|task| task.id.clone())
+        .collect();
+    if !owned.is_empty() {
+        return Resp::err(format!(
+            "worker {} still owns {}; close or force-close the task first",
+            target_id,
+            owned.join(", ")
+        ));
+    }
+
+    let now = now_ms();
+    server.commit_locked(
+        &mut state,
+        &[Event::WorkerClosed {
+            worker_id: target_id.clone(),
+            closed_by: worker_id.clone(),
+            reason: reason.clone(),
+            at_ms: now,
+        }],
+    );
+    Resp::data(json!({
+        "closed": target_id,
+        "closed_by": worker_id,
+        "reason": reason,
+        "transport": target.transport,
+    }))
+}
+
+fn master_assignment_view(
+    state: &State,
+    worker_id: &str,
+    endpoint_live: bool,
+) -> serde_json::Value {
+    json!({
+        "worker_id": worker_id,
+        "endpoint_live": endpoint_live,
+        "assigned_by": state.master_assigned_by,
+        "approval": state.master_approval,
+        "assigned_ms": state.master_assigned_ms,
+        "master_wake": state.master_wake,
+    })
+}
+
+fn handle_master_status(server: &Server) -> Resp {
+    let state = server.state.lock().unwrap();
+    let live = match live_master_id(server, &state) {
+        Ok(master) => master,
+        Err(error) => {
+            return Resp::err_data(
+                error,
+                json!({"status": "unknown", "recorded_worker_id": state.master_worker_id}),
+            )
+        }
+    };
+    let master = live
+        .as_ref()
+        .map(|id| master_assignment_view(&state, id, true));
+    let recorded = state
+        .master_worker_id
+        .as_ref()
+        .filter(|id| live.as_deref() != Some(id.as_str()))
+        .map(|id| master_assignment_view(&state, id, false));
+    Resp::data(json!({"master": master, "recorded_unusable": recorded}))
+}
+
+pub(crate) fn handle_send(
+    server: &Server,
+    from: String,
+    to: String,
+    mtype: String,
+    subject: Option<String>,
+    body: String,
+    in_reply_to: Option<String>,
+    delivery_mode: String,
+) -> Resp {
+    if mtype != "notify" {
+        return Resp::err("peer messaging requires type notify");
+    }
+    handle_send_with_task(
+        server,
+        from,
+        to,
+        mtype,
+        subject,
+        body,
+        in_reply_to,
+        delivery_mode,
+        false,
+        None,
+    )
+}
+
+fn authoritative_send_binding<'a>(
+    state: &'a State,
+    route_scope: &RouteScope,
+    worker_id: &str,
+) -> Result<&'a RuntimeBinding, &'static str> {
+    let Some(project) = state.global.lookup_project(&route_scope.project_scope_id) else {
+        return Err("SEND_BINDING_REJECTED: authoritative runtime binding is missing");
+    };
+    let mut bindings = project.runtime_bindings.values().filter(|binding| {
+        binding.app_scope_id == route_scope.app_scope_id && binding.agent_id.as_str() == worker_id
+    });
+    let Some(binding) = bindings.next() else {
+        return Err("SEND_BINDING_REJECTED: authoritative runtime binding is missing");
+    };
+    if bindings.next().is_some() {
+        return Err("SEND_BINDING_REJECTED: authoritative runtime binding is ambiguous");
+    }
+    Ok(binding)
+}
+
+fn handle_authenticated_send_with_app_scope(
+    server: &Server,
+    raw_from: String,
+    worker_id: String,
+    token: String,
+    command: Option<crate::proto::CommandEnvelope>,
+    to: String,
+    mtype: String,
+    subject: Option<String>,
+    body: String,
+    in_reply_to: Option<String>,
+    delivery_mode: String,
+    app_scope: Option<AppServerId>,
+) -> Resp {
+    let st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(command) = command else {
+        return Resp::err(
+            "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
+        );
+    };
+    let (runtime, registered_scope) = match app_scope {
+        Some(context_app_scope) => {
+            if command.scope.app_scope_id != context_app_scope {
+                return Resp::err(
+                    "SEND_BINDING_REJECTED: command app scope does not match request context",
+                );
+            }
+            let worker_project_scope =
+                match GlobalState::canonical_project_scope(Path::new(&worker.cwd)) {
+                    Ok(scope) => scope,
+                    Err(error) => return Resp::err(format!("SEND_BINDING_REJECTED: {error}")),
+                };
+            if command.scope.project_scope_id != worker_project_scope {
+                return Resp::err(
+                    "SEND_BINDING_REJECTED: command project scope does not match registered worker cwd",
+                );
+            }
+            let Some(binding) = st
+                .global
+                .lookup_binding_for(&command.scope, &command.actor_binding_id)
+                .cloned()
+            else {
+                return Resp::err(
+                    "SEND_BINDING_REJECTED: authenticated sender binding is not registered for the request route",
+                );
+            };
+            if binding.agent_id.as_str() != worker.id {
+                return Resp::err(
+                    "SEND_BINDING_REJECTED: authenticated sender binding belongs to another worker",
+                );
+            }
+            let runtime = crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                binding_id: binding.binding_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            };
+            (runtime, binding.route_scope())
+        }
+        None => {
+            // Direct in-process callers predate the wire ProjectContext and
+            // are bound to the compatibility tui-default route established by
+            // handle_register. Wire requests never use this branch: they are
+            // admitted with an explicit app scope above.
+            let appserver_id = match crate::identity::AppServerId::new("tui-default") {
+                Ok(id) => id,
+                Err(error) => return Resp::err(error.to_string()),
+            };
+            let registered_scope =
+                match RouteScope::for_registered_project(appserver_id, Path::new(&worker.cwd)) {
+                    Ok(scope) => scope,
+                    Err(error) => return Resp::err(error.to_string()),
+                };
+            let binding = match authoritative_send_binding(&st, &registered_scope, &worker_id) {
+                Ok(binding) => binding.clone(),
+                Err(error) => return Resp::err(error),
+            };
+            if command.actor_binding_id != binding.binding_id {
+                return Resp::err(format!(
+                    "SEND_BINDING_REJECTED: actor binding mismatch: expected {}, observed {}",
+                    binding.binding_id, command.actor_binding_id
+                ));
+            }
+            if command.endpoint_generation != binding.endpoint_generation {
+                return Resp::err(format!(
+                    "SEND_BINDING_REJECTED: stale endpoint generation: expected {}, observed {}",
+                    binding.endpoint_generation, command.endpoint_generation
+                ));
+            }
+            if command.scope != registered_scope {
+                return Resp::err(
+                    "SEND_BINDING_REJECTED: envelope scope does not match authoritative route scope",
+                );
+            }
+            let runtime = crate::identity::RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                binding_id: binding.binding_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            };
+            (runtime, registered_scope)
+        }
+    };
+    if let Err(error) = command.validate_for(&runtime, &registered_scope) {
+        return Resp::err(format!("SEND_BINDING_REJECTED: {error}"));
+    }
+    if raw_from != worker_id {
+        return Resp::err("sender identity is derived from the authenticated binding");
+    }
+    if mtype == "notification" {
+        return Resp::err("peer messaging requires type notify");
+    }
+    drop(st);
+    handle_send_with_task(
+        server,
+        worker_id,
+        to,
+        mtype,
+        subject,
+        body,
+        in_reply_to,
+        delivery_mode,
+        false,
+        None,
+    )
+}
+
+pub(crate) fn handle_send_with_task(
+    server: &Server,
+    from: String,
+    to: String,
+    mtype: String,
+    subject: Option<String>,
+    body: String,
+    in_reply_to: Option<String>,
+    delivery_mode: String,
+    assign_task: bool,
+    managed_subagent_id: Option<&str>,
+) -> Resp {
+    if delivery_mode != "immediate" {
+        return Resp::err(
+            "implicit idle delivery is removed; use an explicit notification subscription",
+        );
+    }
+    let Some(subject) = subject.filter(|subject| !subject.trim().is_empty()) else {
+        return Resp::err("MESSAGE_SUBJECT_REQUIRED: sendmessage requires --subject");
+    };
+    if !MSG_TYPES.contains(&mtype.as_str()) {
+        return Resp::err(format!(
+            "invalid type {}; must be one of {:?}",
+            mtype, MSG_TYPES
+        ));
+    }
+    let mut st = server.state.lock().unwrap();
+    let managed_child = if assign_task {
+        let Some(id) = managed_subagent_id else {
+            return Resp::err("managed task requires an explicit subagent binding");
+        };
+        let Some(child) = st.subagents.get(id).cloned() else {
+            return Resp::err(format!("unknown managed subagent {}", id));
+        };
+        if child.parent != from || child.peer != to {
+            return Resp::err("managed subagent owner mismatch");
+        }
+        if child.status != "idle" {
+            return Resp::err("subagent is not idle; query status instead of resending");
+        }
+        if st
+            .tasks
+            .values()
+            .any(|task| task.owner == child.peer && task_resource_active(&task.status))
+        {
+            return Resp::err("managed subagent already has an active task");
+        }
+        Some(child)
+    } else {
+        if managed_subagent_id.is_some() {
+            return Resp::err("unassigned peer message cannot bind a managed subagent");
+        }
+        None
+    };
+    if from.trim().is_empty() {
+        return Resp::err("sender cannot be empty");
+    }
+    let Some(recipient) = st.workers.get(&to) else {
+        return Resp::err(format!("recipient {} not registered", to));
+    };
+    if worker_identity_presence(server, recipient) == IdentityPresence::Missing {
+        return Resp::err("recipient has no live server-verified transport");
+    }
+    if let Some(ref rid) = in_reply_to {
+        if !st.msgs.contains_key(rid) {
+            return Resp::err(format!("in_reply_to message {} not found", rid));
+        }
+    }
+    if mtype == "request" {
+        if let Some((existing_id, existing)) = st.recent_live_request(&from, &to, now_ms()) {
+            let retry_at = iso(existing.created_ms + state::REQUEST_COOLDOWN_MS);
+            return Resp::err(format!(
+                "request cooldown active: existing_request_id={}, retry_at={}",
+                existing_id, retry_at
+            ));
+        }
+    }
+    let superseded_ids = match (mtype.as_str(), in_reply_to.as_deref()) {
+        ("reply", Some(request_id)) => st.superseded_replies(request_id),
+        _ => Vec::new(),
+    };
+    let msg = Message {
+        id: gen_msg_id(),
+        from: from.clone(),
+        to: to.clone(),
+        mtype: mtype.clone(),
+        subject: Some(subject),
+        body,
+        in_reply_to,
+        created_ms: now_ms(),
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+    };
+    if let Some(existing) = st.msgs.values().find(|m| {
+        m.from == from
+            && m.to == to
+            && m.mtype == mtype
+            && m.subject == msg.subject
+            && m.body == msg.body
+            && m.state == "pending"
+    }) {
+        let managed_duplicate = assign_task
+            && managed_child.as_ref().is_some_and(|child| {
+                child.last_message.as_deref() == Some(existing.id.as_str())
+                    && st
+                        .tasks
+                        .get(&format!("task-{}", existing.id))
+                        .is_some_and(|task| task.owner == child.peer && task.created_by == from)
+            });
+        if !assign_task || managed_duplicate {
+            return Resp::data(json!({"msg_id": existing.id, "deduplicated": true}));
+        }
+    }
+    let mid = msg.id.clone();
+    let task_id = assign_task.then(|| format!("task-{mid}"));
+    let subscription = st
+        .matching_subscription(&to, "direct-message", None, now_ms())
+        .cloned();
+    let mut events = if let Some(task_id) = &task_id {
+        let task = TaskRec {
+            id: task_id.clone(),
+            owner: to.clone(),
+            created_by: from.clone(),
+            feature_id: None,
+            worktree_path: None,
+            branch: None,
+            base_commit: None,
+            priority: "p2".into(),
+            status: "assigned".into(),
+            next_step: Some(format!(
+                "Read collab msg {mid}; accept via subagent working; bind a worktree with task relocate before code edits."
+            )),
+            wait: None,
+            created_ms: now_ms(),
+            updated_ms: now_ms(),
+        };
+        scheduler_assignment_events(
+            msg,
+            task,
+            Some(managed_child.expect("managed child validated above")),
+        )
+    } else {
+        vec![Event::Sent { msg }]
+    };
+    events.push(Event::DeliveryMode {
+        msg_id: mid.clone(),
+        mode: "explicit-notification".into(),
+    });
+    if let Some(subscription) = &subscription {
+        events.push(Event::WakeBound {
+            message_id: mid.clone(),
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    if !superseded_ids.is_empty() {
+        events.push(Event::Superseded {
+            ids: superseded_ids,
+        });
+    }
+    if let Err(error) = server.commit_locked_checked(&mut st, &events) {
+        return Resp::err(format!("SEND_DURABILITY_FAILED: {error}"));
+    }
+    drop(st);
+    let notified = subscription
+        .as_ref()
+        .is_some_and(|subscription| attempt_notification(server, &mid, &subscription.id));
+    Resp::data(json!({
+        "msg_id": mid,
+        "task_id": task_id,
+        "durable": true,
+        "notification": if subscription.is_none() {
+            "mailbox-only-no-subscription"
+        } else if notified {
+            "sent"
+        } else {
+            "subscribed-not-sent"
+        }
+    }))
+}
+
+fn handle_cross_project_send(
+    server: &Server,
+    from: String,
+    from_project: String,
+    source_master_assigned_by: String,
+    source_master_approval: Option<String>,
+    source_master_assigned_ms: i64,
+    to: String,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+) -> Resp {
+    if from_project.trim().is_empty() || source_master_assigned_by.trim().is_empty() {
+        return Resp::err(
+            "cross-project send requires source project and master assignment evidence",
+        );
+    }
+    if source_master_assigned_ms <= 0 {
+        return Resp::err("cross-project send requires source master assignment timestamp");
+    }
+    if source_master_approval
+        .as_deref()
+        .is_none_or(|v| v.trim().is_empty())
+        && source_master_assigned_by == from
+    {
+        return Resp::err(
+            "cross-project send requires user approval evidence for self-promoted source master",
+        );
+    }
+    let mut st = server.state.lock().unwrap();
+    let live_master = match live_master_id(server, &st) {
+        Ok(master) => master,
+        Err(error) => return Resp::err(error),
+    };
+    if live_master.as_deref() != Some(to.as_str()) {
+        return Resp::err("cross-project communication requires the target to be a live master");
+    }
+    let Some(recipient) = st.workers.get(&to) else {
+        return Resp::err(format!("recipient {} not registered", to));
+    };
+    if worker_identity_presence(server, recipient) != IdentityPresence::Present {
+        return Resp::err(
+            "cross-project communication requires a live target identity on its server-selected transport",
+        );
+    }
+    if subject.trim().is_empty() {
+        return Resp::err("MESSAGE_SUBJECT_REQUIRED: cross-project send requires --subject");
+    }
+    let msg = Message {
+        id: gen_msg_id(),
+        from: format!("{}@{}", from, from_project),
+        to: to.clone(),
+        mtype: "notify".into(),
+        subject: Some(subject),
+        body,
+        in_reply_to,
+        created_ms: now_ms(),
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+    };
+    let mid = msg.id.clone();
+    let subscription = st
+        .matching_subscription(&to, "direct-message", None, now_ms())
+        .cloned();
+    let mut events = vec![
+        Event::Sent { msg },
+        Event::DeliveryMode {
+            msg_id: mid.clone(),
+            mode: "explicit-notification".into(),
+        },
+    ];
+    if let Some(subscription) = &subscription {
+        events.push(Event::WakeBound {
+            message_id: mid.clone(),
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    server.commit_locked(&mut st, &events);
+    drop(st);
+    let notified = subscription
+        .as_ref()
+        .is_some_and(|sub| attempt_notification(server, &mid, &sub.id));
+    Resp::data(json!({
+        "msg_id": mid,
+        "durable": true,
+        "cross_project": true,
+        "source_master": from,
+        "target_master": to,
+        "notification": if subscription.is_none() {
+            "mailbox-only-no-subscription"
+        } else if notified {
+            "sent"
+        } else {
+            "subscribed-not-sent"
+        }
+    }))
+}
+
+#[cfg(test)]
+fn handle_task_register(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    owner: Option<String>,
+    feature_id: Option<String>,
+    worktree_path: Option<String>,
+    branch: Option<String>,
+    base_commit: Option<String>,
+    priority: String,
+) -> Resp {
+    handle_task_register_with_next(
+        server,
+        worker_id,
+        token,
+        task_id,
+        owner,
+        feature_id,
+        worktree_path,
+        branch,
+        base_commit,
+        priority,
+        None,
+        None,
+    )
+}
+
+fn handle_task_register_with_next(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    owner: Option<String>,
+    feature_id: Option<String>,
+    mut worktree_path: Option<String>,
+    branch: Option<String>,
+    base_commit: Option<String>,
+    priority: String,
+    next_step: Option<String>,
+    goal_prompt: Option<String>,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    if st.tasks.contains_key(&task_id) {
+        return Resp::err(format!("task {} already registered", task_id));
+    }
+    if goal_prompt.is_some() {
+        return Resp::err(
+            "/goal registration is deferred; register the peer-owned task without --goal-prompt",
+        );
+    }
+    if owner.as_deref().is_some_and(|owner| owner != worker_id) {
+        return Resp::err("peer may register only its own task; omit --owner or use its worker_id");
+    }
+    if !matches!(priority.as_str(), "p0" | "p1" | "p2" | "p3" | "p4") {
+        return Resp::err(format!(
+            "invalid priority {}; must be p0, p1, p2, p3, or p4",
+            priority
+        ));
+    }
+    let task_owner = worker_id.clone();
+    if let Some(path) = &worktree_path {
+        let canonical = match validate_worktree_path(&server.root, path) {
+            Ok(path) => path,
+            Err(error) => return Resp::err(error),
+        };
+        worktree_path = Some(canonical.display().to_string());
+    }
+    if let Some(existing) = st
+        .tasks
+        .values()
+        .find(|task| {
+            task_resource_active(&task.status)
+                && (feature_id.is_some() && task.feature_id == feature_id
+                    || worktree_path.is_some() && task.worktree_path == worktree_path)
+        })
+        .cloned()
+    {
+        let now = now_ms();
+        let blocked_task = TaskRec {
+            id: task_id.clone(),
+            owner: worker_id.clone(),
+            created_by: worker_id.clone(),
+            feature_id: feature_id.clone(),
+            worktree_path: worktree_path.clone(),
+            branch: branch.clone(),
+            base_commit: base_commit.clone(),
+            priority: priority.clone(),
+            status: "blocked".into(),
+            next_step: Some(format!("RESOURCE_CONFLICT={}", existing.id)),
+            wait: None,
+            created_ms: now,
+            updated_ms: now,
+        };
+        if let Err(error) =
+            server.commit_locked_checked(&mut st, &[Event::TaskCreated { task: blocked_task }])
+        {
+            return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
+        }
+        return Resp::err_data(
+            "TASK_RESOURCE_CONFLICT",
+            json!({
+                "requested_task": task_id,
+                "blocking_task": existing.id,
+                "responsible_actor": existing.owner,
+                "status": "blocked",
+                "notification": "none; use explicit sendmessage when coordination is needed",
+            }),
+        );
+    }
+    let now = now_ms();
+    let task = TaskRec {
+        id: task_id.clone(),
+        owner: task_owner,
+        created_by: worker_id,
+        feature_id,
+        worktree_path,
+        branch,
+        base_commit,
+        priority,
+        status: "working".to_string(),
+        next_step,
+        wait: None,
+        created_ms: now,
+        updated_ms: now,
+    };
+    let mut events = vec![Event::TaskCreated { task: task.clone() }];
+    if let Some(binding) = worktree_binding_for_task(server, &task) {
+        events.push(Event::WorktreeBound { binding });
+    }
+    if let Err(error) = server.commit_locked_checked(&mut st, &events) {
+        return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
+    }
+    Resp::data(json!({
+        "task": task.id,
+        "owner": task.owner,
+        "status": task.status,
+        "cleanup": if task.worktree_path.is_some() { "pending" } else { "not_required" },
+    }))
+}
+
+fn handle_task_relocate(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    worktree_path: String,
+    branch: Option<String>,
+    base_commit: Option<String>,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let canonical_worktree = match validate_worktree_path(&server.root, &worktree_path) {
+        Ok(path) => path,
+        Err(error) => return Resp::err(error),
+    };
+    let worktree_path = canonical_worktree.display().to_string();
+    let Some(mut task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.owner != worker_id {
+        return Resp::err("only the task owner may relocate its worktree");
+    }
+    if matches!(task.status.as_str(), "closed" | "cancelled") {
+        return Resp::err("terminal tasks cannot be relocated");
+    }
+    if let Some(existing) = st.tasks.values().find(|other| {
+        other.id != task_id
+            && task_resource_active(&other.status)
+            && other.worktree_path.as_deref() == Some(worktree_path.as_str())
+    }) {
+        return Resp::err(format!(
+            "worktree is already declared by task {}",
+            existing.id
+        ));
+    }
+    let old_worktree = task.worktree_path.clone();
+    task.worktree_path = Some(worktree_path.clone());
+    if branch.is_some() {
+        task.branch = branch;
+    }
+    if base_commit.is_some() {
+        task.base_commit = base_commit;
+    }
+    task.updated_ms = now_ms();
+    let mut events = vec![Event::TaskUpdated { task: task.clone() }];
+    if let Some(binding) = worktree_binding_for_task(server, &task) {
+        events.push(Event::WorktreeBound { binding });
+    }
+    server.commit_locked(&mut st, &events);
+    Resp::data(json!({
+        "task": task.id,
+        "relocated": true,
+        "old_worktree": old_worktree,
+        "worktree": task.worktree_path,
+        "branch": task.branch,
+        "base_commit": task.base_commit,
+        "status": task.status,
+        "next": "verify git worktree list and continue the existing claim; evidence remains attached"
+    }))
+}
+
+fn handle_task_dispatch(server: &Server, worker_id: String, token: String) -> Resp {
+    let st = server.state.lock().unwrap();
+    if let Err(error) = verify(&st, &worker_id, &token) {
+        return error;
+    }
+    Resp::err("central task dispatch is deprecated; each peer registers and owns its task")
+}
+
+fn handle_task_claim(server: &Server, worker_id: String, token: String, task_id: String) -> Resp {
+    let st = server.state.lock().unwrap();
+    if let Err(error) = verify(&st, &worker_id, &token) {
+        return error;
+    }
+    Resp::err(format!(
+        "task claim is deprecated; peer must self-register task {}",
+        task_id
+    ))
+}
+
+fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id: String) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(mut task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.owner != worker_id {
+        return Resp::err("only the task owner may accept its assignment");
+    }
+    let Some(admission) = st
+        .scheduler_admissions
+        .values()
+        .find(|admission| admission.task_id == task.id && admission.status == "succeeded")
+    else {
+        return Resp::err(
+            "task assignment provenance is missing; accept only scheduler assignments",
+        );
+    };
+    if admission.managed_subagent_id.is_some() {
+        return Resp::err("managed assignment must be accepted with collab subagent working");
+    }
+    if task.status == "working" {
+        return Resp::data(json!({
+            "task": task.id,
+            "status": task.status,
+            "owner": task.owner,
+            "accepted": true,
+            "idempotent": true,
+            "notification": "none",
+            "next_action": task.next_step,
+        }));
+    }
+    if task.status != "assigned" {
+        return Resp::err(format!(
+            "task {} is not assigned; current status is {}",
+            task.id, task.status
+        ));
+    }
+    task.status = "working".into();
+    task.wait = None;
+    task.updated_ms = now_ms();
+    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    Resp::data(json!({
+        "task": task.id,
+        "status": task.status,
+        "owner": task.owner,
+        "accepted": true,
+        "notification": "none",
+        "next_action": task.next_step,
+    }))
+}
+
+fn handle_task_update(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    status: Option<String>,
+    next_step: Option<String>,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(mut task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.owner != worker_id {
+        return Resp::err("only the task owner may update its lifecycle");
+    }
+    if let Some(new_status) = status {
+        if !TASK_STATUSES.contains(&new_status.as_str()) {
+            return Resp::err(format!(
+                "invalid status {}; must be one of {:?}",
+                new_status, TASK_STATUSES
+            ));
+        }
+        if new_status == "closed" {
+            return Resp::err("use collab task close after owner merge and cleanup verification");
+        }
+        if new_status == "delivered" {
+            return Resp::err(
+                "use collab task deliver to complete a claim; direct status mutation is rejected",
+            );
+        }
+        if new_status == "working" && task.status == "assigned" {
+            return Resp::err("use collab task accept to accept an assigned task");
+        }
+        // Pre-review producers persisted accepted candidates without a lifecycle
+        // record. Keep their owner-local merge transition replayable while new
+        // review records continue through the evidence-bearing integrated path.
+        let legacy_accepted_merge = new_status == "merged"
+            && task.status == "accepted"
+            && !st.task_lifecycle.contains_key(&task.id);
+        if new_status == "accepted" || (new_status == "merged" && !legacy_accepted_merge) {
+            return Resp::err(
+                "use collab task review/integrated for integration-owned lifecycle transitions",
+            );
+        }
+        if new_status == "waiting" {
+            return Resp::err("use collab task wait so responsibility and deadline are durable");
+        }
+        if new_status == "cancelled" && task.worktree_path.is_some() {
+            return Resp::err(
+                "CLEANUP_REQUIRED_BEFORE_CANCEL: task owns a worktree; close only after merged cleanup",
+            );
+        }
+        if !task_transition_allowed(&task.status, &new_status) {
+            return Resp::err(format!(
+                "invalid task transition {} -> {}",
+                task.status, new_status
+            ));
+        }
+        task.status = new_status.clone();
+        if new_status != "waiting" {
+            task.wait = None;
+        }
+    }
+    if next_step.is_some() {
+        task.next_step = next_step;
+    }
+    task.updated_ms = now_ms();
+    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    Resp::data(json!({
+        "task": task.id,
+        "status": task.status,
+        "owner": task.owner,
+        "notification": "none",
+        "next_action": task.next_step,
+    }))
+}
+
+fn stale_worker_views(
+    st: &State,
+    presence: &dyn Fn(&WorkerRec) -> IdentityPresence,
+) -> Vec<serde_json::Value> {
+    st.workers
+        .values()
+        .filter(|worker| {
+            presence(worker) == IdentityPresence::Missing
+        })
+        .map(|worker| {
+            let active_tasks: Vec<String> = st
+                .tasks
+                .values()
+                .filter(|task| task.owner == worker.id && task_resource_active(&task.status))
+                .map(|task| task.id.clone())
+                .collect();
+            json!({
+                "worker": worker.id,
+                "transport_kind": worker.transport.as_ref().map(|transport| transport.kind.as_str()),
+                "active_tasks": active_tasks,
+                "action": "peer owns cleanup; daemon operator may inspect during migration"
+            })
+        })
+        .collect()
+}
+
+fn close_task_resources(
+    root: &Path,
+    worktree_path: Option<&str>,
+    branch: Option<&str>,
+) -> Result<(), String> {
+    if let Some(branch) = branch {
+        let merged = Command::new("git")
+            .current_dir(root)
+            .args(["merge-base", "--is-ancestor", branch, "HEAD"])
+            .output()
+            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
+        if !merged.status.success() {
+            return Err(format!(
+                "branch {branch} is not merged into HEAD; refusing delete"
+            ));
+        }
+    }
+    if let Some(relative) = worktree_path {
+        let worktree = root.join(relative);
+        let allowed_root = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf())
+            .join("playground");
+        let canonical_worktree = worktree
+            .canonicalize()
+            .map_err(|e| format!("declared worktree {} is missing: {e}", relative))?;
+        if !canonical_worktree.starts_with(allowed_root) {
+            return Err(format!("refusing cleanup outside playground: {}", relative));
+        }
+        let dirty = Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["status", "--porcelain"])
+            .output()
+            .map_err(|e| format!("cannot inspect worktree {}: {e}", relative))?;
+        if !dirty.status.success() {
+            return Err(format!(
+                "cannot verify clean worktree {}: {}",
+                relative,
+                String::from_utf8_lossy(&dirty.stderr).trim()
+            ));
+        }
+        if !dirty.stdout.is_empty() {
+            return Err(format!("worktree {} has uncommitted changes", relative));
+        }
+
+        let removed = Command::new("git")
+            .current_dir(root)
+            .args(["worktree", "remove", &worktree.display().to_string()])
+            .output()
+            .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
+        if !removed.status.success() {
+            return Err(format!(
+                "worktree cleanup failed for {}: {}",
+                relative,
+                String::from_utf8_lossy(&removed.stderr).trim()
+            ));
+        }
+    }
+
+    if let Some(branch) = branch {
+        let deleted = Command::new("git")
+            .current_dir(root)
+            .args(["branch", "-d", branch])
+            .output()
+            .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
+        if !deleted.status.success() {
+            return Err(format!(
+                "branch cleanup failed for {branch}: {}",
+                String::from_utf8_lossy(&deleted.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_receipt_is_reusable(root: &Path, receipt: &CleanupReceipt) -> bool {
+    if let Some(path) = receipt.worktree_path.as_deref() {
+        let worktree = Path::new(path);
+        let worktree = if worktree.is_absolute() {
+            worktree.to_path_buf()
+        } else {
+            root.join(worktree.strip_prefix("./").unwrap_or(worktree))
+        };
+        if worktree.exists() {
+            return false;
+        }
+    }
+    if let Some(branch) = receipt.branch.as_deref() {
+        let branch_exists = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--verify", branch])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if branch_exists {
+            return false;
+        }
+    }
+    true
+}
+
+fn handle_task_deliver(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    evidence: Option<String>,
+    worktree: Option<String>,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(mut task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.owner != worker_id || task.status != "reviewed" {
+        return Resp::err(format!(
+            "task {} must be reviewed by its owner before delivery (current: {})",
+            task_id, task.status
+        ));
+    }
+
+    let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) else {
+        return Resp::err("task deliver requires non-empty --evidence");
+    };
+    let Some(worktree) = worktree.filter(|value| !value.trim().is_empty()) else {
+        return Resp::err("task deliver requires non-empty --worktree");
+    };
+    if task
+        .worktree_path
+        .as_deref()
+        .is_some_and(|registered| registered != worktree)
+    {
+        return Resp::err("task deliver --worktree must match the registered task worktree");
+    }
+    let now = now_ms();
+    task.status = "delivered".to_string();
+    task.wait = None;
+    task.next_step = Some(
+        "task owner or live master reviews delivery with collab task review --accept or --rework"
+            .to_string(),
+    );
+    task.updated_ms = now;
+    let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
+    lifecycle.delivery_evidence = Some(evidence.clone());
+    lifecycle.delivered_ms = Some(now);
+    server.commit_locked(
+        &mut st,
+        &[
+            Event::TaskUpdated { task: task.clone() },
+            Event::TaskLifecycleUpdated {
+                task_id: task.id.clone(),
+                record: lifecycle,
+            },
+        ],
+    );
+
+    Resp::data(json!({
+        "delivered": task.id,
+        "status": task.status,
+        "evidence": evidence,
+        "worktree": worktree,
+        "notification": "none",
+        "next_action": task.next_step,
+        "identity": {"worker_id": worker.id, "kind": "peer"},
+    }))
+}
+
+fn task_integration_authorized(
+    server: &Server,
+    state: &State,
+    task: &TaskRec,
+    worker_id: &str,
+) -> bool {
+    task.owner == worker_id
+        || live_master_id(server, state).ok().flatten().as_deref() == Some(worker_id)
+}
+
+fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--verify", "refs/heads/main^{commit}"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if head.is_empty() {
+                Err(Resp::err_data(
+                    "TASK_INTEGRATION_MAIN_UNRESOLVED",
+                    json!({"root": root, "ref": "refs/heads/main"}),
+                ))
+            } else {
+                Ok(head)
+            }
+        }
+        Ok(output) => {
+            let dirty = Command::new("git")
+                .current_dir(root)
+                .args(["status", "--porcelain", "--untracked-files=all"])
+                .output()
+                .map(|status| status.status.success() && !status.stdout.is_empty())
+                .unwrap_or(false);
+            Err(Resp::err_data(
+                "TASK_INTEGRATION_MAIN_UNRESOLVED",
+                json!({
+                    "root": root,
+                    "dirty": dirty,
+                    "ref": "refs/heads/main",
+                    "detail": String::from_utf8_lossy(&output.stderr).trim(),
+                }),
+            ))
+        }
+        Err(error) => Err(Resp::err_data(
+            "TASK_INTEGRATION_MAIN_UNRESOLVED",
+            json!({"root": root, "ref": "refs/heads/main", "detail": error.to_string()}),
+        )),
+    }
+}
+
+fn handle_task_review(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    accept: bool,
+    rework: bool,
+    evidence: String,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    if let Err(error) = verify(&st, &worker_id, &token) {
+        return error;
+    }
+    if accept == rework {
+        return Resp::err("task review requires exactly one of --accept or --rework");
+    }
+    let evidence = evidence.trim();
+    if evidence.is_empty() {
+        return Resp::err("task review requires non-empty --evidence");
+    }
+    let Some(task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.status != "delivered" {
+        return Resp::err(format!(
+            "task {} must be delivered before review (current: {})",
+            task_id, task.status
+        ));
+    }
+    if !task_integration_authorized(server, &st, &task, &worker_id) {
+        return Resp::err("task review requires task owner or live master authority");
+    }
+    let now = now_ms();
+    let mut reviewed = task;
+    reviewed.status = if accept { "accepted" } else { "rework" }.into();
+    reviewed.next_step = Some(if accept {
+        "integrate the accepted candidate on refs/heads/main, then record collab task integrated"
+            .into()
+    } else {
+        format!("address review evidence: {evidence}")
+    });
+    reviewed.updated_ms = now;
+    let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    lifecycle.review_evidence = Some(evidence.to_owned());
+    lifecycle.reviewer = Some(worker_id.clone());
+    lifecycle.reviewed_ms = Some(now);
+    server.commit_locked(
+        &mut st,
+        &[
+            Event::TaskUpdated {
+                task: reviewed.clone(),
+            },
+            Event::TaskLifecycleUpdated {
+                task_id: task_id.clone(),
+                record: lifecycle,
+            },
+        ],
+    );
+    Resp::data(json!({
+        "task": task_id,
+        "status": reviewed.status,
+        "reviewer": worker_id,
+        "evidence": evidence,
+        "next_action": reviewed.next_step,
+    }))
+}
+
+fn handle_task_integrated(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    commit: String,
+    evidence: String,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    if let Err(error) = verify(&st, &worker_id, &token) {
+        return error;
+    }
+    let commit = commit.trim();
+    let evidence = evidence.trim();
+    if commit.is_empty() || evidence.is_empty() {
+        return Resp::err("task integrated requires non-empty --commit and --evidence");
+    }
+    let Some(task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.status != "accepted" {
+        return Resp::err(format!(
+            "task {} must be accepted before integration (current: {})",
+            task_id, task.status
+        ));
+    }
+    if !task_integration_authorized(server, &st, &task, &worker_id) {
+        return Resp::err("task integrated requires task owner or live master authority");
+    }
+    let head = match resolve_authoritative_main_head(&server.root) {
+        Ok(head) => head,
+        Err(error) => return error,
+    };
+    if commit != head {
+        return Resp::err_data(
+            "TASK_INTEGRATION_COMMIT_MISMATCH",
+            json!({"provided": commit, "main_head": head}),
+        );
+    }
+    let now = now_ms();
+    let mut integrated = task;
+    integrated.status = "merged".into();
+    integrated.next_step = Some("owner cleans the worktree/branch and closes the task".into());
+    integrated.updated_ms = now;
+    let mut lifecycle = st.task_lifecycle.get(&task_id).cloned().unwrap_or_default();
+    lifecycle.integration_commit = Some(commit.to_owned());
+    lifecycle.integration_evidence = Some(evidence.to_owned());
+    lifecycle.integrated_ms = Some(now);
+    server.commit_locked(
+        &mut st,
+        &[
+            Event::TaskUpdated {
+                task: integrated.clone(),
+            },
+            Event::TaskLifecycleUpdated {
+                task_id: task_id.clone(),
+                record: lifecycle,
+            },
+        ],
+    );
+    Resp::data(json!({
+        "task": task_id,
+        "status": integrated.status,
+        "commit": commit,
+        "evidence": evidence,
+        "next_action": integrated.next_step,
+    }))
+}
+
+fn handle_task_close(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    force: bool,
+    reason: Option<String>,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if force {
+        let reason = reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let Some(reason) = reason else {
+            return Resp::err("force close requires a non-empty --reason");
+        };
+        let live_master = match live_master_id(server, &st) {
+            Ok(master) => master,
+            Err(error) => return Resp::err(error),
+        };
+        let owner_identity_live = st.workers.get(&task.owner).is_some_and(|owner| {
+            !matches!(
+                worker_identity_presence(server, owner),
+                IdentityPresence::Missing
+            )
+        });
+        let authorized = live_master.as_deref() == Some(worker_id.as_str())
+            || (live_master.is_none() && (task.owner == worker_id || !owner_identity_live));
+        if !authorized {
+            return Resp::err_data(
+                "manual force close is not authorized for this caller",
+                json!({
+                    "live_master": live_master,
+                    "task_owner": task.owner,
+                    "requester": worker_id,
+                    "rule": "live master may close any task; with no live master, the owner may close its task or a registered peer may close an orphaned task whose owner identity is no longer live",
+                    "owner_identity_live": owner_identity_live,
+                }),
+            );
+        }
+        if task.status == "closed" {
+            if let Some(receipt) = st.cleanup_receipts.get(&task.id).filter(|receipt| {
+                receipt.task_id == task.id
+                    && receipt.worktree_path == task.worktree_path
+                    && receipt.branch == task.branch
+            }) {
+                return Resp::data(json!({
+                    "task": task.id,
+                    "status": task.status,
+                    "owner": task.owner,
+                    "manual": true,
+                    "reason": receipt.manual_reason,
+                    "receipt_id": receipt.id,
+                    "superseded_pending_keepalives": [],
+                    "stale_workers": stale_worker_views(&st, &|worker| {
+                        worker_identity_presence(server, worker)
+                    }),
+                    "idempotent": true,
+                    "next_action": "lifecycle complete; keepalives for this task owner stopped",
+                }));
+            }
+        }
+        let mut closed = task;
+        closed.status = "closed".into();
+        closed.wait = None;
+        closed.next_step = Some(format!("manual close: {reason}"));
+        closed.updated_ms = now_ms();
+        let receipt = CleanupReceipt {
+            id: format!("cleanup-manual-{}-{}", closed.id, closed.updated_ms),
+            task_id: closed.id.clone(),
+            worktree_path: closed.worktree_path.clone(),
+            branch: closed.branch.clone(),
+            verified_ms: closed.updated_ms,
+            manual_reason: Some(reason.clone()),
+        };
+        let superseded: Vec<String> = st
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == closed.owner
+                    && m.mtype == "keepalive"
+                    && matches!(m.state.as_str(), "pending" | "delivered")
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        let mut events: Vec<Event> = vec![
+            Event::CleanupVerified {
+                receipt: receipt.clone(),
+            },
+            Event::TaskUpdated {
+                task: closed.clone(),
+            },
+        ];
+        if !superseded.is_empty() {
+            events.push(Event::Superseded {
+                ids: superseded.clone(),
+            });
+        }
+        let other_actionable = st.tasks.values().any(|t| {
+            t.id != closed.id
+                && t.owner == closed.owner
+                && crate::server::keepalive::actionable(&t.status)
+        });
+        if !other_actionable {
+            if let Some(record) = st.keepalives.get(&closed.owner).cloned() {
+                if record.unacked > 0 || record.last_notice_id.is_some() {
+                    let mut updated = record;
+                    updated.unacked = 0;
+                    updated.last_notice_id = None;
+                    events.push(Event::KeepaliveUpdated {
+                        worker_id: closed.owner.clone(),
+                        record: updated,
+                    });
+                }
+            }
+        }
+        server.commit_locked(&mut st, &events);
+        let stale_workers =
+            stale_worker_views(&st, &|worker| worker_identity_presence(server, worker));
+        drop(st);
+        return Resp::data(json!({
+            "task": closed.id,
+            "status": closed.status,
+            "owner": closed.owner,
+            "manual": true,
+            "reason": reason,
+            "receipt_id": receipt.id,
+            "superseded_pending_keepalives": superseded,
+            "stale_workers": stale_workers,
+            "next_action": "lifecycle complete; keepalives for this task owner stopped",
+        }));
+    }
+    if task.owner != worker_id {
+        return Resp::err("only the task owner may close its lifecycle");
+    }
+    if task.status != "merged" {
+        return Resp::err(format!(
+            "task {} must be merged by its owner before close (current: {})",
+            task_id, task.status
+        ));
+    }
+    let receipt_reusable = st
+        .cleanup_receipts
+        .get(&task.id)
+        .filter(|receipt| {
+            receipt.task_id == task.id
+                && receipt.worktree_path == task.worktree_path
+                && receipt.branch == task.branch
+        })
+        .is_some_and(|receipt| cleanup_receipt_is_reusable(&server.root, receipt));
+    if !receipt_reusable {
+        if let Err(e) = close_task_resources(
+            &server.root,
+            task.worktree_path.as_deref(),
+            task.branch.as_deref(),
+        ) {
+            return Resp::err(e);
+        }
+    }
+    let mut closed = task;
+    closed.status = "closed".to_string();
+    closed.wait = None;
+    closed.next_step = Some("closed after owner merge and cleanup".to_string());
+    closed.updated_ms = now_ms();
+    let receipt = CleanupReceipt {
+        id: format!("cleanup-{}-{}", closed.id, closed.updated_ms),
+        task_id: closed.id.clone(),
+        worktree_path: closed.worktree_path.clone(),
+        branch: closed.branch.clone(),
+        verified_ms: closed.updated_ms,
+        manual_reason: None,
+    };
+    let superseded: Vec<String> = st
+        .msgs
+        .values()
+        .filter(|m| {
+            m.to == closed.owner
+                && m.mtype == "keepalive"
+                && matches!(m.state.as_str(), "pending" | "delivered")
+        })
+        .map(|m| m.id.clone())
+        .collect();
+    let mut close_events: Vec<Event> = vec![
+        Event::CleanupVerified {
+            receipt: receipt.clone(),
+        },
+        Event::TaskUpdated {
+            task: closed.clone(),
+        },
+    ];
+    if !superseded.is_empty() {
+        close_events.push(Event::Superseded { ids: superseded });
+    }
+    let other_actionable = st.tasks.values().any(|t| {
+        t.id != closed.id
+            && t.owner == closed.owner
+            && crate::server::keepalive::actionable(&t.status)
+    });
+    if !other_actionable {
+        if let Some(record) = st.keepalives.get(&closed.owner).cloned() {
+            if record.unacked > 0 || record.last_notice_id.is_some() {
+                let mut updated = record;
+                updated.unacked = 0;
+                updated.last_notice_id = None;
+                close_events.push(Event::KeepaliveUpdated {
+                    worker_id: closed.owner.clone(),
+                    record: updated,
+                });
+            }
+        }
+    }
+    server.commit_locked(&mut st, &close_events);
+
+    let waiting: Vec<TaskRec> = st
+        .tasks
+        .values()
+        .filter(|candidate| {
+            candidate.status == "waiting"
+                && candidate
+                    .wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.waiting_for == closed.id)
+        })
+        .cloned()
+        .collect();
+    let mut subscribed_notifications = Vec::new();
+    for mut waiter_task in waiting {
+        waiter_task.status = "blocked".into();
+        waiter_task.wait = None;
+        waiter_task.next_step = Some(format!(
+            "RESOURCE_RELEASED={} recheck conflicts, then resume only after Server confirms free",
+            closed.id
+        ));
+        waiter_task.updated_ms = now_ms();
+        let waiter = waiter_task.owner.clone();
+        let subscription = st
+            .matching_subscription(&waiter, "resource-released", Some(&closed.id), now_ms())
+            .cloned();
+        let mut events = vec![
+            Event::TaskUpdated { task: waiter_task },
+            Event::MasterWakeSignal {
+                signal: state::MasterWakeSignal::TaskFreed {
+                    task_id: closed.id.clone(),
+                },
+                at_ms: now_ms(),
+            },
+        ];
+        if let Some(subscription) = subscription {
+            let message_id = gen_msg_id();
+            events.extend([
+                Event::Sent {
+                    msg: Message {
+                        id: message_id.clone(),
+                        from: "collab-server".into(),
+                        to: waiter,
+                        mtype: "notification".into(),
+                        subject: Some(format!("released:{}", closed.id)),
+                        body: format!("RESOURCE_RELEASED subject={}", closed.id),
+                        in_reply_to: None,
+                        created_ms: now_ms(),
+                        state: "pending".into(),
+                        wake_attempt_count: 0,
+                        last_wake_attempt_ms: 0,
+                    },
+                },
+                Event::WakeBound {
+                    message_id: message_id.clone(),
+                    subscription_id: subscription.id.clone(),
+                },
+            ]);
+            subscribed_notifications.push((message_id, subscription.id));
+        }
+        server.commit_locked(&mut st, &events);
+    }
+
+    let stale_workers = stale_worker_views(&st, &|worker| worker_identity_presence(server, worker));
+    drop(st);
+    for (message_id, subscription_id) in subscribed_notifications {
+        attempt_notification(server, &message_id, &subscription_id);
+    }
+    Resp::data(json!({
+        "task": closed.id,
+        "status": closed.status,
+        "owner": closed.owner,
+        "cleanup": {
+            "worktree": closed.worktree_path,
+            "branch": closed.branch,
+            "result": "verified",
+            "receipt_id": receipt.id,
+        },
+        "stale_workers": stale_workers,
+        "notification": "subscribed resource waiters only",
+        "next_action": "lifecycle complete",
+    }))
+}
+
+fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
+    let cleanup_required = task.worktree_path.is_some();
+    let cleanup_receipt = state.cleanup_receipts.get(&task.id);
+    let lifecycle = state.task_lifecycle.get(&task.id);
+    json!({
+        "id": task.id,
+        "owner": task.owner,
+        "created_by": task.created_by,
+        "feature_id": task.feature_id,
+        "worktree": task.worktree_path,
+        "branch": task.branch,
+        "base_commit": task.base_commit,
+        "priority": task.priority,
+        "status": task.status,
+        "next_step": task.next_step,
+        "wait": task.wait,
+        "delivery": {
+            "evidence": lifecycle.and_then(|record| record.delivery_evidence.clone()),
+            "at": lifecycle.and_then(|record| record.delivered_ms.map(iso)),
+        },
+        "review": {
+            "evidence": lifecycle.and_then(|record| record.review_evidence.clone()),
+            "reviewer": lifecycle.and_then(|record| record.reviewer.clone()),
+            "at": lifecycle.and_then(|record| record.reviewed_ms.map(iso)),
+        },
+        "integration": {
+            "commit": lifecycle.and_then(|record| record.integration_commit.clone()),
+            "evidence": lifecycle.and_then(|record| record.integration_evidence.clone()),
+            "at": lifecycle.and_then(|record| record.integrated_ms.map(iso)),
+        },
+        "cleanup": {
+            "required": cleanup_required,
+            "status": if !cleanup_required {
+                "not_required"
+            } else if cleanup_receipt.is_some() {
+                "verified"
+            } else {
+                "pending"
+            },
+            "receipt_id": cleanup_receipt.map(|receipt| receipt.id.clone()),
+        },
+        "updated_at": iso(task.updated_ms),
+        "keepalive": keepalive::view(state, &task.owner),
+    })
+}
+
+fn daemon_context_view(server: &Server) -> serde_json::Value {
+    let Ok(host_paths) = HostPaths::resolve() else {
+        return json!({
+            "pid": std::process::id(),
+            "socket": null,
+            "live": true,
+            "reason": "this daemon served the request, but its host state path is unavailable",
+            "storage_root": server.storage_root,
+        });
+    };
+    json!({
+        "pid": std::process::id(),
+        "socket": host_paths.socket_path(),
+        "live": true,
+        "storage_root": server.storage_root,
+    })
+}
+
+fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
+    let st = server.state.lock().unwrap();
+    if let Err(e) = verify(&st, &worker_id, &token) {
+        return e;
+    }
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    let mut tasks: Vec<serde_json::Value> = st
+        .tasks
+        .values()
+        .filter(|task| task.owner == worker_id)
+        .map(|task| task_view(&st, task))
+        .collect();
+    tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    let unread: Vec<&Message> = st.inbox_of(&worker_id);
+    let unread_count = unread.len();
+    let inbox_messages: Vec<serde_json::Value> = unread
+        .iter()
+        .rev()
+        .take(20)
+        .map(|message| {
+            json!({
+                "id": message.id,
+                "from": message.from,
+                "type": message.mtype,
+                "subject": message.subject,
+                "state": message.state,
+                "created_at": iso(message.created_ms),
+                "body": message.body,
+            })
+        })
+        .collect();
+    let managed = is_managed_subagent(&st, &worker_id);
+    let role = if st.master_worker_id.as_deref() == Some(worker_id.as_str()) {
+        "master"
+    } else if managed {
+        "managed-subagent"
+    } else {
+        "worker"
+    };
+    let worktrees: Vec<serde_json::Value> = {
+        let mut worktrees = st
+            .worktree_bindings
+            .values()
+            .filter(|binding| binding.owner_agent_id == worker_id)
+            .map(|binding| {
+                let task = st.tasks.get(&binding.task_id);
+                json!({
+                    "task_id": binding.task_id,
+                    "owner": binding.owner_agent_id,
+                    "branch": task.and_then(|task| task.branch.clone()),
+                    "path": binding.worktree_root,
+                    "base_commit": binding.base_commit,
+                    "status": task.map(|task| task.status.as_str()).unwrap_or("unknown"),
+                    "cleanup": task.map(|task| task_view(&st, task)["cleanup"].clone()),
+                })
+            })
+            .collect::<Vec<_>>();
+        worktrees.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+        worktrees
+    };
+    let subscriptions: Vec<serde_json::Value> = {
+        let mut subscriptions = st
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| subscription.worker_id == worker_id)
+            .collect::<Vec<_>>();
+        subscriptions.sort_by_key(|subscription| (subscription.created_ms, &subscription.id));
+        subscriptions
+            .into_iter()
+            .map(|subscription| {
+                serde_json::to_value(subscription).unwrap_or(serde_json::Value::Null)
+            })
+            .collect()
+    };
+    let mut peer_snapshots: Vec<_> = st
+        .workers
+        .values()
+        .map(|peer| {
+            let peer_role = if st.master_worker_id.as_deref() == Some(peer.id.as_str()) {
+                "master"
+            } else if is_managed_subagent(&st, &peer.id) {
+                "managed-subagent"
+            } else {
+                "worker"
+            };
+            (peer.clone(), peer_role)
+        })
+        .collect();
+    peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+    let master_worker_id = st.master_worker_id.clone();
+    let master_assigned_by = st.master_assigned_by.clone();
+    let master_approval = st.master_approval.clone();
+    let master_assigned_ms = st.master_assigned_ms;
+    let master_wake = st.master_wake.clone();
+    drop(st);
+
+    let presence = worker_identity_presence(server, &worker);
+    let is_appserver = worker
+        .transport
+        .as_ref()
+        .is_some_and(|transport| transport.kind == TransportKind::AppServer);
+    let (agent, _raw) = if is_appserver {
+        appserver_agent_view(server, &worker)
+    } else {
+        (serde_json::Value::Null, serde_json::Value::Null)
+    };
+    let peers: Vec<_> = peer_snapshots
+        .into_iter()
+        .map(|(peer, peer_role)| {
+            let peer_presence = worker_identity_presence(server, &peer);
+            json!({
+                "worker_id": peer.id,
+                "id": peer.id,
+                "role": peer_role,
+                "presence": match peer_presence {
+                    IdentityPresence::Present => "present",
+                    IdentityPresence::Missing => "missing",
+                    IdentityPresence::Unknown => "unknown",
+                },
+                "endpoint_live": peer_presence == IdentityPresence::Present,
+            })
+        })
+        .collect();
+    let transport = worker.transport.as_ref().map(|transport| {
+        json!({
+            "kind": transport.kind.as_str(),
+            "endpoint": transport.endpoint,
+            "namespace": transport.namespace,
+            "thread_id": transport.thread_id,
+            "self_check": transport.self_check,
+        })
+    });
+    let registration = json!({
+        "status": "registered",
+        "project_root": server.root,
+        "worker_id": worker.id,
+        "cwd": worker.cwd,
+        "registered_at": iso(worker.registered_ms),
+    });
+    let master_peer = master_worker_id
+        .as_deref()
+        .and_then(|id| peers.iter().find(|peer| peer["worker_id"] == id));
+    let master_presence = master_peer
+        .and_then(|peer| peer["presence"].as_str())
+        .unwrap_or("missing");
+    let assignment_view = |endpoint_live: bool| {
+        master_worker_id.as_ref().map(|id| {
+            json!({
+                "worker_id": id,
+                "endpoint_live": endpoint_live,
+                "assigned_by": master_assigned_by,
+                "approval": master_approval,
+                "assigned_ms": master_assigned_ms,
+                "master_wake": master_wake,
+            })
+        })
+    };
+    let (master, recorded_unusable) = match (master_worker_id.as_ref(), master_presence) {
+        (None, _) => (serde_json::Value::Null, serde_json::Value::Null),
+        (Some(_), "present") => (
+            assignment_view(true).unwrap_or(serde_json::Value::Null),
+            serde_json::Value::Null,
+        ),
+        (Some(_), "unknown") => (
+            json!({
+                "status": "unknown",
+                "error": "master identity is unknown; defer authority changes until transport probes succeed",
+            }),
+            assignment_view(false).unwrap_or(serde_json::Value::Null),
+        ),
+        (Some(_), _) => (
+            serde_json::Value::Null,
+            assignment_view(false).unwrap_or(serde_json::Value::Null),
+        ),
+    };
+    let mut next_actions: Vec<String> = tasks
+        .iter()
+        .filter_map(|task| {
+            task.get("next_step")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    if next_actions.is_empty() {
+        if master["worker_id"].as_str() == Some(worker_id.as_str()) {
+            next_actions
+                .push("run `appsdk longhorizon show` and keep eligible workers loaded".into());
+        } else {
+            next_actions
+                .push("no assigned task action; remain available for an explicit dispatch".into());
+        }
+    }
+    Resp::data(json!({
+        "schema_version": 1,
+        "registration": registration,
+        "registered": true,
+        "project_root": server.root,
+        "identity": {
+            "worker_id": worker.id,
+            "kind": "peer",
+            "role": role,
+            "transport": transport,
+        },
+        "liveness": {
+            "live": presence == IdentityPresence::Present,
+            "presence": match presence {
+                IdentityPresence::Present => "present",
+                IdentityPresence::Missing => "missing",
+                IdentityPresence::Unknown => "unknown",
+            },
+            "transport_kind": worker.transport.as_ref().map(|transport| transport.kind.as_str()),
+            "endpoint": worker.transport.as_ref().and_then(|transport| transport.endpoint.as_deref()),
+            "self_check": worker.transport.as_ref().map(|transport| transport.self_check.clone()),
+        },
+        "agent": agent,
+        "tasks": tasks,
+        "worktrees": worktrees,
+        "subscriptions": subscriptions,
+        "peers": peers,
+        "inbox": {
+            "unread": unread_count,
+            "messages": inbox_messages,
+        },
+        "daemon": daemon_context_view(server),
+        "next_actions": next_actions,
+        "master": master,
+        "recorded_unusable": recorded_unusable,
+        "authority": {
+            "managed_subagent": managed,
+            "must_obey_master": managed,
+            "may_decline_master_invite": !managed,
+        },
+        "truth": "server journal, mailbox, and live App Server probes; context is read-only",
+    }))
+}
+
+fn poll_messages_with_context(
+    server: &Server,
+    worker_id: &str,
+    token: Option<&str>,
+    project_context: Option<&ProjectContext>,
+) -> Option<Resp> {
+    let ids: Vec<String>;
+    let msgs: Vec<Message>;
+    let mut st = server.state.lock().unwrap();
+    match (token, project_context) {
+        (Some(token), Some(project_context)) => {
+            if let Err(response) = project_route_actor(&st, project_context, worker_id, token) {
+                return Some(response);
+            }
+        }
+        (None, None) => {}
+        _ => return Some(Resp::err(
+            "PROJECT_CONTEXT_REQUIRED: poll runtime admission requires token and project context",
+        )),
+    }
+    let unread = st.inbox_of(worker_id);
+    if unread.is_empty() {
+        return None;
+    }
+    ids = unread.iter().map(|m| m.id.clone()).collect();
+    msgs = unread.into_iter().cloned().collect();
+    // recv is an explicit read operation: deliver and consume the same batch
+    // atomically so a successful read cannot leave a new ACK obligation.
+    let mut events = vec![Event::Delivered { ids: ids.clone() }, Event::Acked { ids }];
+    if let Some(record) = st.keepalives.get(worker_id).cloned() {
+        if record.unacked > 0 || record.last_notice_id.is_some() || record.suspected_offline {
+            let mut updated = record;
+            updated.unacked = 0;
+            updated.last_notice_id = None;
+            updated.suspected_offline = false;
+            updated.activity_ms = now_ms();
+            events.push(Event::KeepaliveUpdated {
+                worker_id: worker_id.to_owned(),
+                record: updated,
+            });
+        }
+    }
+    server.commit_locked(&mut st, &events);
+    Some(Resp::data(json!({
+        "messages": msgs,
+        "count": msgs.len(),
+        "fetched_at": iso(now_ms()),
+    })))
+}
+
+async fn poll_messages_async_with_context(
+    server: Arc<Server>,
+    worker_id: &str,
+    token: Option<String>,
+    project_context: Option<ProjectContext>,
+) -> Option<Resp> {
+    let worker_id = worker_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        poll_messages_with_context(
+            &server,
+            &worker_id,
+            token.as_deref(),
+            project_context.as_ref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|error| Some(Resp::err(format!("poll handler join error: {}", error))))
+}
+
+async fn handle_poll_async(server: Arc<Server>, worker_id: String, timeout_ms: u64) -> Resp {
+    handle_poll_async_with_context(server, worker_id, None, timeout_ms, None).await
+}
+
+async fn handle_poll_async_with_context(
+    server: Arc<Server>,
+    worker_id: String,
+    token: Option<String>,
+    timeout_ms: u64,
+    project_context: Option<ProjectContext>,
+) -> Resp {
+    let timeout_ms = timeout_ms.min(MAX_POLL_MS);
+    let mut notified = Box::pin(server.mailbox_notify.notified());
+    let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
+    tokio::pin!(timeout);
+    loop {
+        notified.as_mut().enable();
+        if let Some(response) = poll_messages_async_with_context(
+            server.clone(),
+            &worker_id,
+            token.clone(),
+            project_context.clone(),
+        )
+        .await
+        {
+            return response;
+        }
+        tokio::select! {
+            _ = notified.as_mut() => {
+                notified.set(server.mailbox_notify.notified());
+            }
+            _ = &mut timeout => {
+                return Resp::data(json!({"messages": [], "count": 0, "timeout": true}));
+            }
+        }
+    }
+}
+
+fn task_conflicts(
+    server: &Server,
+    feature_id: Option<String>,
+    worktree_path: Option<String>,
+) -> Resp {
+    let st = server.state.lock().unwrap();
+    let conflicts: Vec<serde_json::Value> = st
+        .tasks
+        .values()
+        .filter(|task| {
+            task_resource_active(&task.status)
+                && ((feature_id.is_some() && task.feature_id == feature_id)
+                    || (worktree_path.is_some() && task.worktree_path == worktree_path))
+        })
+        .map(|task| task_view(&st, task))
+        .collect();
+    Resp::data(json!({"conflicts": conflicts}))
+}
+
+fn handle_task_wait(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    blocking_task_id: String,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(mut task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.owner != worker_id || !task_claim_held(&task.status) {
+        return Resp::err("only an owned active task may enter waiting");
+    }
+    if matches!(
+        task.status.as_str(),
+        "delivered" | "accepted" | "merged" | "closed" | "cancelled"
+    ) {
+        return Resp::err("terminal or delivered task may not enter waiting");
+    }
+    let Some(blocking) = st.tasks.get(&blocking_task_id).cloned() else {
+        return Resp::err(format!("blocking task {} not found", blocking_task_id));
+    };
+    if task.id == blocking_task_id || wait_cycle(&st.tasks, &task.id, &blocking_task_id) {
+        return Resp::err("WAIT_CYCLE_DETECTED");
+    }
+    let conflict = task_resource_active(&blocking.status)
+        && ((task.feature_id.is_some() && task.feature_id == blocking.feature_id)
+            || (task.worktree_path.is_some() && task.worktree_path == blocking.worktree_path));
+    if !conflict {
+        return Resp::err("blocking task does not hold a matching active resource");
+    }
+    if blocking.owner == worker_id || !st.workers.contains_key(&blocking.owner) {
+        return Resp::err("WAIT_RESPONSIBLE_ACTOR_MISSING");
+    }
+    let responsible_actor = blocking.owner.clone();
+    task.status = "waiting".into();
+    task.next_step = Some(format!("WAITING_FOR={}", blocking_task_id));
+    task.wait = Some(WaitSpec {
+        waiter: worker_id.clone(),
+        waiting_for: blocking_task_id.clone(),
+        responsible_actor: responsible_actor.clone(),
+        reason: "resource_conflict".into(),
+        deadline_ms: now_ms() + 15 * 60 * 1000,
+        resume_on: vec![
+            "resource_released".into(),
+            "rework".into(),
+            "cancelled".into(),
+        ],
+        escalation: "resource_owner_and_waiter_recheck".into(),
+    });
+    task.updated_ms = now_ms();
+    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    Resp::data(json!({
+        "task": task.id,
+        "status": task.status,
+        "waiting_for": blocking_task_id,
+        "responsible_actor": responsible_actor,
+        "deadline_ms": task.wait.as_ref().map(|wait| wait.deadline_ms),
+        "notification": "none; subscribe for release/deadline or use explicit sendmessage",
+    }))
+}
+
+fn worker_status_summary_with_maps(
+    server: &Server,
+    tasks: &std::collections::HashMap<String, TaskRec>,
+    msgs: &std::collections::HashMap<String, Message>,
+    keepalives: &std::collections::HashMap<String, crate::server::keepalive::Record>,
+    w: &WorkerRec,
+) -> serde_json::Value {
+    let active = tasks
+        .values()
+        .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
+    let presence = worker_identity_presence(server, w);
+    let endpoint_live = presence == IdentityPresence::Present;
+    let is_appserver = w
+        .transport
+        .as_ref()
+        .is_some_and(|transport| transport.kind == TransportKind::AppServer);
+    let (ownership, identity_valid, agent_state, appserver) = if is_appserver {
+        let ownership = endpoint_live.then_some(Ok(true));
+        let identity_valid = endpoint_live;
+        let (agent_view, _raw) = appserver_agent_view(server, w);
+        let thread_state = agent_view
+            .get("thread_state")
+            .and_then(serde_json::Value::as_str);
+        let active_flags = agent_view
+            .get("active_flags")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let agent_state = match (presence, thread_state) {
+            (IdentityPresence::Missing, _) => "absent",
+            (IdentityPresence::Unknown, _) => "unknown",
+            (IdentityPresence::Present, Some("active"))
+                if active_flags.iter().any(|flag| flag == "waitingOnApproval") =>
+            {
+                "waiting_approval"
+            }
+            (IdentityPresence::Present, Some("active"))
+                if active_flags.iter().any(|flag| flag == "waitingOnUserInput") =>
+            {
+                "waiting_input"
+            }
+            (IdentityPresence::Present, Some("active")) => "working",
+            (IdentityPresence::Present, Some("idle")) => "idle",
+            (IdentityPresence::Present, Some("systemError")) => "system_error",
+            (IdentityPresence::Present, Some("notLoaded")) => "not_loaded",
+            _ => "unknown",
+        };
+        (ownership, identity_valid, agent_state, agent_view)
+    } else {
+        let ownership = None;
+        let identity_valid = false;
+        let agent_state = "absent";
+        (
+            ownership,
+            identity_valid,
+            agent_state,
+            serde_json::Value::Null,
+        )
+    };
+    let unacked_notifications = msgs
+        .values()
+        .filter(|m| m.to == w.id && m.state == "delivered")
+        .count();
+    let pending_notifications = msgs
+        .values()
+        .filter(|m| m.to == w.id && m.state == "pending")
+        .count();
+    let notifications_paused = false;
+    let keepalive = keepalives.get(&w.id);
+    let suspected_offline = keepalive.map(|k| k.suspected_offline).unwrap_or(false);
+    let unacked_keepalives = keepalive.map(|k| k.unacked).unwrap_or(0);
+    let status = if agent_state == "unknown" {
+        "unknown"
+    } else if !endpoint_live {
+        "lost"
+    } else if !identity_valid {
+        "identity-mismatch"
+    } else if suspected_offline {
+        "offline"
+    } else {
+        agent_state
+    };
+    let diagnostic = if status == "unknown" {
+        None
+    } else if status == "lost" {
+        Some("registered transport is not live; verify App Server route or thread")
+    } else if status == "identity-mismatch" {
+        Some("selected transport is not live or owned by a different identity; verify route")
+    } else if suspected_offline {
+        Some("unresponsive; run snapshot: collab subagent snapshot <id> --lines 40")
+    } else {
+        None
+    };
+    json!({
+        "id": w.id,
+        "transport": w.transport.as_ref().map(|transport| json!({
+            "kind": transport.kind.as_str(),
+            "endpoint": transport.endpoint,
+            "namespace": transport.namespace,
+            "thread_id": transport.thread_id,
+            "self_check": transport.self_check,
+        })),
+        "status": status,
+        "presence": match presence {
+            IdentityPresence::Present => "present",
+            IdentityPresence::Missing => "missing",
+            IdentityPresence::Unknown => "unknown",
+        },
+        "endpoint_live": (presence != IdentityPresence::Unknown).then_some(endpoint_live),
+        "identity_valid": (presence != IdentityPresence::Unknown && ownership != Some(Err(()))).then_some(identity_valid),
+        "agent_state": agent_state,
+        "appserver": appserver,
+        "unacked_notifications": unacked_notifications,
+        "pending_notifications": pending_notifications,
+        "notifications_paused": notifications_paused,
+        "unacked_keepalives": unacked_keepalives,
+        "suspected_offline": suspected_offline,
+        "diagnostic": diagnostic,
+        "active_task": active.map(|task| task.id.as_str()),
+        "active_status": active.map(|task| task.status.as_str()),
+    })
+}
+
+// ---------- dispatch ----------
+
+fn mutation_blocked_during_migration(req: &Req) -> bool {
+    match req {
+        Req::SubagentObserve { .. } => false,
+        Req::Subagent { command, .. } => !matches!(
+            command,
+            crate::subagent::Action::List | crate::subagent::Action::Status { .. }
+        ),
+        Req::Send { .. }
+        | Req::CrossProjectSend { .. }
+        | Req::NotificationSubscribe { .. }
+        | Req::NotificationUnsubscribe { .. }
+        | Req::Poll { .. }
+        | Req::Ack { .. }
+        | Req::TaskRegister { .. }
+        | Req::TaskRelocate { .. }
+        | Req::TaskUpdate { .. }
+        | Req::TaskAccept { .. }
+        | Req::TaskClaim { .. }
+        | Req::TaskWait { .. }
+        | Req::TaskDeliver { .. }
+        | Req::TaskReview { .. }
+        | Req::TaskIntegrated { .. }
+        | Req::TaskClose { .. }
+        | Req::TaskDispatch { .. }
+        | Req::MigrationPlan { .. }
+        | Req::MigrationApply { .. }
+        | Req::MasterPromote { .. }
+        | Req::MasterDelegate { .. }
+        | Req::TransferMaster { .. }
+        | Req::RemoveWorker { .. }
+        | Req::WorkerClose { .. }
+        | Req::ResetBindings { .. } => true,
+        Req::Register { .. }
+        | Req::RouteResolve { .. }
+        | Req::NotificationMethods
+        | Req::NotificationStatus { .. }
+        | Req::Inbox { .. }
+        | Req::Context { .. }
+        | Req::MsgStatus { .. }
+        | Req::TaskStatus { .. }
+        | Req::TaskConflicts { .. }
+        | Req::MigrationInspect { .. }
+        | Req::MigrationVerify { .. }
+        | Req::MasterStatus
+        | Req::Role { .. }
+        | Req::Workers
+        | Req::WorkerStatus { .. }
+        | Req::MasterId
+        | Req::MasterRecover { .. }
+        | Req::Shutdown { .. }
+        | Req::Ping
+        | Req::StatusAll
+        | Req::MailboxRead { .. } => false,
+    }
+}
+
+fn subagent_action_mutates(action: &crate::subagent::Action) -> bool {
+    !matches!(
+        action,
+        crate::subagent::Action::List
+            | crate::subagent::Action::Status { .. }
+            | crate::subagent::Action::Snapshot { .. }
+    )
+}
+
+/// Return the authenticated actor for a request that can mutate the resident
+/// reducer.  Read queries intentionally remain compatible with a context that
+/// carries only the project route; the mutation admission below is the single
+/// place that requires the actor's current runtime binding.
+fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
+    match req {
+        Req::Subagent {
+            worker_id,
+            token,
+            command,
+            ..
+        } if subagent_action_mutates(command) => Some((worker_id, token)),
+        Req::Register {
+            worker_id, token, ..
+        }
+        | Req::Send {
+            worker_id: Some(worker_id),
+            token: Some(token),
+            ..
+        }
+        | Req::NotificationSubscribe {
+            worker_id, token, ..
+        }
+        | Req::NotificationUnsubscribe {
+            worker_id, token, ..
+        }
+        | Req::Poll {
+            worker_id, token, ..
+        }
+        | Req::Ack {
+            worker_id, token, ..
+        }
+        | Req::TaskRegister {
+            worker_id, token, ..
+        }
+        | Req::TaskRelocate {
+            worker_id, token, ..
+        }
+        | Req::TaskUpdate {
+            worker_id, token, ..
+        }
+        | Req::TaskAccept {
+            worker_id, token, ..
+        }
+        | Req::TaskClaim {
+            worker_id, token, ..
+        }
+        | Req::TaskWait {
+            worker_id, token, ..
+        }
+        | Req::TaskDeliver {
+            worker_id, token, ..
+        }
+        | Req::TaskReview {
+            worker_id, token, ..
+        }
+        | Req::TaskIntegrated {
+            worker_id, token, ..
+        }
+        | Req::TaskClose {
+            worker_id, token, ..
+        }
+        | Req::TaskDispatch { worker_id, token }
+        | Req::MigrationPlan { worker_id, token }
+        | Req::MigrationApply { worker_id, token }
+        | Req::MigrationVerify { worker_id, token }
+        | Req::MasterPromote {
+            worker_id, token, ..
+        }
+        | Req::MasterDelegate {
+            worker_id, token, ..
+        }
+        | Req::TransferMaster {
+            worker_id, token, ..
+        }
+        | Req::RemoveWorker {
+            worker_id, token, ..
+        }
+        | Req::WorkerClose {
+            worker_id, token, ..
+        } => Some((worker_id, token)),
+        _ => None,
+    }
+}
+
+fn validate_wire_runtime_binding(
+    server: &Server,
+    req: &Req,
+    project_context: &ProjectContext,
+) -> Result<(), String> {
+    if let Req::Register { worker_id, .. } = req {
+        let state = server.state.lock().unwrap();
+        let already_registered = state.workers.contains_key(worker_id)
+            || state.global.projects.values().any(|project| {
+                project
+                    .runtime_bindings
+                    .values()
+                    .any(|binding| binding.agent_id.as_str() == worker_id)
+            });
+        drop(state);
+        if !already_registered {
+            if project_context.runtime_context.is_some()
+                && !is_provisional_cli_runtime(project_context, worker_id)
+            {
+                return Err(
+                        "RUNTIME_BINDING_REJECTED: first register may carry only the provisional CLI runtime identity"
+                            .into(),
+                    );
+            }
+            return Ok(());
+        }
+
+        if let Req::Register {
+            worker_id,
+            token,
+            candidates,
+            ..
+        } = req
+        {
+            let token_mismatch = {
+                let state = server.state.lock().unwrap();
+                state
+                    .workers
+                    .get(worker_id)
+                    .is_some_and(|worker| worker.token != *token)
+            };
+            // A CLI process may lose its persisted runtime when its App Server
+            // thread is recreated. Permit only that recovery shape or an
+            // authorized same-thread token rotation to bypass the normal actor
+            // check; same-token reconnects remain idempotent.
+            if is_provisional_cli_runtime(project_context, worker_id) || token_mismatch {
+                return validate_cli_register_rebind(
+                    server,
+                    project_context,
+                    worker_id,
+                    token,
+                    candidates,
+                );
+            }
+        }
+    }
+
+    let Some((worker_id, token)) = wire_mutation_principal(req) else {
+        return Ok(());
+    };
+    let state = server.state.lock().unwrap();
+    project_route_actor(&state, project_context, worker_id, token)
+        .map(|_| ())
+        .map_err(|response| {
+            response.error.unwrap_or_else(|| {
+                "RUNTIME_BINDING_REJECTED: runtime binding admission failed".into()
+            })
+        })
+}
+
+fn validate_cli_register_rebind(
+    server: &Server,
+    project_context: &ProjectContext,
+    worker_id: &str,
+    token: &str,
+    candidates: &Option<TransportCandidates>,
+) -> Result<(), String> {
+    let route_scope = RouteScope {
+        app_scope_id: project_context.app_scope_id.clone(),
+        project_scope_id: project_context.project_scope.clone(),
+    };
+    let expected_binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+        .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
+    {
+        let state = server.state.lock().unwrap();
+        let worker = state.workers.get(worker_id).cloned().ok_or_else(|| {
+            "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
+                .to_owned()
+        })?;
+        let Some(project) = state.global.lookup_project_for_route(&route_scope) else {
+            return Err(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker has no registered runtime route"
+                    .into(),
+            );
+        };
+        let bindings = project
+            .runtime_bindings
+            .values()
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .collect::<Vec<_>>();
+        if bindings.len() != 1 {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: authoritative runtime binding is ambiguous".into(),
+            );
+        }
+        let binding = bindings[0];
+        if binding.binding_id != expected_binding_id {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: registered worker binding does not match the CLI route"
+                    .into(),
+            );
+        }
+        if binding.endpoint_generation == 0 {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: authoritative runtime binding has no live endpoint generation"
+                    .into(),
+            );
+        }
+        binding
+            .validate()
+            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
+        if worker.token != token {
+            let Some(candidate) = candidates
+                .as_ref()
+                .and_then(|candidates| candidates.appserver.as_ref())
+            else {
+                return Err(
+                    "RUNTIME_BINDING_REJECTED: CLI rebind requires an App Server candidate"
+                        .to_owned(),
+                );
+            };
+            let same_runtime_thread = is_provisional_cli_runtime(project_context, worker_id)
+                || project_context
+                    .runtime_context
+                    .as_ref()
+                    .is_some_and(|runtime| {
+                        runtime.agent_id == binding.agent_id
+                            && runtime.native_thread_id == binding.native_thread_id
+                    });
+            if appserver_thread_owner(&state, &candidate.thread_id).as_deref() != Some(worker_id)
+                || !same_runtime_thread
+            {
+                return Err(
+                    "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
+                        .to_owned(),
+                );
+            }
+        }
+        let worker_scope =
+            GlobalState::canonical_project_scope(Path::new(&worker.cwd)).map_err(|error| {
+                format!("RUNTIME_BINDING_REJECTED: worker cwd is not a project route: {error}")
+            })?;
+        if worker_scope != route_scope.project_scope_id {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: worker cwd does not match the requested project route"
+                    .into(),
+            );
+        }
+    }
+
+    let candidate = candidates
+        .as_ref()
+        .and_then(|candidates| candidates.appserver.as_ref())
+        .filter(|candidate| !candidate.endpoint.is_empty())
+        .ok_or_else(|| {
+            "RUNTIME_BINDING_REJECTED: CLI rebind requires an App Server candidate".to_owned()
+        })?;
+    if let Some(owner) = appserver_thread_owner(&server.state.lock().unwrap(), &candidate.thread_id)
+    {
+        if owner != worker_id {
+            return Err(format!(
+                "RUNTIME_BINDING_REJECTED: candidate App Server thread {} is already bound to worker {}",
+                candidate.thread_id, owner
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn project_route_actor(
+    state: &State,
+    context: &ProjectContext,
+    worker_id: &str,
+    token: &str,
+) -> Result<WorkerRec, Resp> {
+    context
+        .validate()
+        .map_err(|error| Resp::err(format!("PROJECT_CONTEXT_INVALID: {error}")))?;
+    let route_scope = RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    };
+    let runtime = context.runtime_context.as_ref().ok_or_else(|| {
+        Resp::err(
+            "PROJECT_CONTEXT_REQUIRED: project-scoped mutation requires typed runtime context",
+        )
+    })?;
+    let worker = verify(state, worker_id, token)?;
+    let worker_scope =
+        GlobalState::canonical_project_scope(Path::new(&worker.cwd)).map_err(|error| {
+            Resp::err(format!(
+                "RUNTIME_BINDING_REJECTED: worker cwd is not a project route: {error}"
+            ))
+        })?;
+    if worker_scope != route_scope.project_scope_id {
+        return Err(Resp::err(
+            "RUNTIME_BINDING_REJECTED: worker cwd does not match request project route",
+        ));
+    }
+    let Some(project) = state.global.lookup_project_for_route(&route_scope) else {
+        return Err(Resp::err(
+            "RUNTIME_BINDING_REJECTED: authoritative runtime binding is missing",
+        ));
+    };
+    let mut bindings = project.runtime_bindings.values().filter(|binding| {
+        binding.project_scope == route_scope.project_scope_id
+            && binding.app_scope_id == route_scope.app_scope_id
+            && binding.agent_id.as_str() == worker_id
+    });
+    let Some(binding) = bindings.next() else {
+        return Err(Resp::err(
+            "RUNTIME_BINDING_REJECTED: authoritative runtime binding is missing",
+        ));
+    };
+    if bindings.next().is_some() {
+        return Err(Resp::err(
+            "RUNTIME_BINDING_REJECTED: authoritative runtime binding is ambiguous",
+        ));
+    }
+    if binding.endpoint_generation == 0 {
+        return Err(Resp::err(
+            "RUNTIME_BINDING_REJECTED: authoritative runtime binding has no live endpoint generation",
+        ));
+    }
+    let registered = crate::identity::RuntimeIdentity {
+        agent_id: binding.agent_id.clone(),
+        runtime_id: binding.runtime_id.clone(),
+        appserver_id: binding.app_scope_id.clone(),
+        endpoint_generation: binding.endpoint_generation,
+        binding_id: binding.binding_id.clone(),
+        native_thread_id: binding.native_thread_id.clone(),
+    };
+    registered
+        .validate()
+        .map_err(|error| Resp::err(format!("RUNTIME_BINDING_REJECTED: {error}")))?;
+    crate::identity::validate_binding(&registered, runtime)
+        .map_err(|error| Resp::err(format!("RUNTIME_BINDING_REJECTED: {error}")))?;
+    Ok(worker)
+}
+
+fn dispatch_with_route_context(
+    server: &Arc<Server>,
+    req: Req,
+    project_context: Option<ProjectContext>,
+) -> Resp {
+    if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
+        return Resp::err(
+            "MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed",
+        );
+    }
+    let app_scope = project_context
+        .as_ref()
+        .map(|context| context.app_scope_id.clone());
+    match req {
+        Req::SubagentObserve { id, snapshot_lines } => {
+            match crate::subagent::observe(server, id.as_deref(), snapshot_lines) {
+                Ok(mut value) => {
+                    value["notification_channel"] = json!("none");
+                    value["next_action"] = json!("No push channel for a non-App-Server agent. Check subagent status/mailbox yourself; request snapshot explicitly when useful.");
+                    Resp::data(value)
+                }
+                Err(error) => Resp::err(error.to_string()),
+            }
+        }
+        Req::Subagent {
+            worker_id,
+            token,
+            command,
+            launch_env,
+        } => match app_scope {
+            Some(app_scope) => crate::subagent::handle_with_env_for_app_scope(
+                server, &worker_id, &token, command, app_scope, launch_env,
+            ),
+            None => {
+                crate::subagent::handle_with_env(server, &worker_id, &token, command, launch_env)
+            }
+        },
+        Req::Register {
+            worker_id,
+            token,
+            cwd,
+            candidates,
+        } => {
+            let recover_existing = project_context.as_ref().is_some_and(|context| {
+                is_provisional_cli_runtime(context, &worker_id)
+                    || context.runtime_context.as_ref().is_some_and(|runtime| {
+                        runtime.agent_id.as_str() == worker_id
+                            && server
+                                .state
+                                .lock()
+                                .unwrap()
+                                .workers
+                                .get(&worker_id)
+                                .is_some_and(|worker| worker.token != token)
+                    })
+            });
+            handle_register_with_app_scope_inner(
+                server,
+                worker_id,
+                token,
+                cwd,
+                app_scope,
+                candidates,
+                recover_existing,
+            )
+        }
+        Req::Send {
+            from,
+            worker_id,
+            token,
+            command,
+            to,
+            mtype,
+            subject,
+            body,
+            in_reply_to,
+            delivery,
+        } => {
+            let Some(worker_id) = worker_id else {
+                return Resp::err(
+                    "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
+                );
+            };
+            let Some(token) = token else {
+                return Resp::err(
+                    "LEGACY_SEND_REJECTED: authenticated sender binding and route scope are required",
+                );
+            };
+            handle_authenticated_send_with_app_scope(
+                server,
+                from,
+                worker_id,
+                token,
+                command,
+                to,
+                mtype,
+                subject,
+                body,
+                in_reply_to,
+                delivery,
+                app_scope,
+            )
+        }
+        Req::CrossProjectSend {
+            from,
+            from_project,
+            source_master_assigned_by,
+            source_master_approval,
+            source_master_assigned_ms,
+            to,
+            subject,
+            body,
+            in_reply_to,
+        } => {
+            if project_context.is_some() {
+                Resp::err(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: cross-project wire requests require independently verified source and target route owners",
+                )
+            } else {
+                handle_cross_project_send(
+                    server,
+                    from,
+                    from_project,
+                    source_master_assigned_by,
+                    source_master_approval,
+                    source_master_assigned_ms,
+                    to,
+                    subject,
+                    body,
+                    in_reply_to,
+                )
+            }
+        }
+        Req::NotificationMethods => Resp::data(json!({
+            "methods": ["appserver"],
+            "priority": ["appserver"],
+            "events": NOTIFICATION_EVENTS,
+            "one_shot": false,
+            "max_lifetime_attempts": MAX_WAKE_ATTEMPTS,
+            "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS,
+            "max_active_subscriptions_per_agent": MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER,
+            "max_ttl_seconds": MAX_NOTIFICATION_TTL_SECONDS,
+        })),
+        Req::NotificationSubscribe {
+            worker_id,
+            token,
+            event,
+            subject,
+            trigger_ms,
+            trigger_times_ms,
+            interval_ms,
+            repeat_count,
+            ttl_seconds,
+        } => handle_notification_subscribe(
+            server,
+            worker_id,
+            token,
+            event,
+            subject,
+            trigger_ms,
+            trigger_times_ms,
+            interval_ms,
+            repeat_count,
+            ttl_seconds,
+        ),
+        Req::NotificationStatus { worker_id, token } => {
+            handle_notification_status(server, worker_id, token)
+        }
+        Req::NotificationUnsubscribe {
+            worker_id,
+            token,
+            subscription_id,
+        } => handle_notification_unsubscribe(server, worker_id, token, subscription_id),
+        Req::Poll { .. } => {
+            Resp::err("Poll is only handled by the async daemon connection path; use collab recv")
+        }
+        Req::Ack {
+            worker_id,
+            token,
+            ids,
+        } => {
+            let mut st = server.state.lock().unwrap();
+            if let Err(e) = verify(&st, &worker_id, &token) {
+                return e;
+            }
+            let mut acked = Vec::new();
+            let mut already_acked = Vec::new();
+            let mut not_found = Vec::new();
+            let mut restored_msgs = Vec::new();
+
+            if ids.is_empty() {
+                for m in st.msgs.values() {
+                    if m.to == worker_id {
+                        if m.state == "delivered" || m.state == "pending" {
+                            acked.push(m.id.clone());
+                        } else if m.state == "read" {
+                            already_acked.push(m.id.clone());
+                        }
+                    }
+                }
+            } else {
+                for id in ids {
+                    let in_mem = st.msgs.get(&id).cloned();
+                    let msg = in_mem.or_else(|| {
+                        let path = server
+                            .storage_root
+                            .join(".agent-collab")
+                            .join("mailbox")
+                            .join(format!("{}.json", id));
+                        std::fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<Message>(&s).ok())
+                    });
+                    match msg {
+                        Some(m) if m.to == worker_id => {
+                            if !st.msgs.contains_key(&id) {
+                                restored_msgs.push(m.clone());
+                            }
+                            if m.state == "delivered" || m.state == "pending" {
+                                acked.push(id);
+                            } else {
+                                already_acked.push(id);
+                            }
+                        }
+                        _ => {
+                            not_found.push(id);
+                        }
+                    }
+                }
+            }
+
+            let mut events = Vec::new();
+            for m in restored_msgs {
+                events.push(Event::Sent { msg: m });
+            }
+            if !acked.is_empty() {
+                events.push(Event::Acked { ids: acked.clone() });
+            }
+
+            // An explicit or bulk ACK from an authenticated worker proves
+            // the worker is responsive and active. Clear keepalive unacked counter.
+            if let Some(record) = st.keepalives.get(&worker_id).cloned() {
+                if record.unacked > 0 || record.last_notice_id.is_some() || record.suspected_offline
+                {
+                    let mut updated = record;
+                    let now = crate::server::state::now_ms();
+                    updated.unacked = 0;
+                    updated.last_notice_id = None;
+                    updated.suspected_offline = false;
+                    updated.activity_ms = now;
+                    events.push(Event::KeepaliveUpdated {
+                        worker_id: worker_id.clone(),
+                        record: updated,
+                    });
+                }
+            }
+
+            if !events.is_empty() {
+                server.commit_locked(&mut st, &events);
+            }
+            drop(st);
+            Resp::data(json!({
+                "acked": acked,
+                "already_acked": already_acked,
+                "not_found": not_found,
+            }))
+        }
+        Req::Inbox { worker_id, token } => {
+            let st = server.state.lock().unwrap();
+            if let Err(e) = verify(&st, &worker_id, &token) {
+                return e;
+            }
+            let inbox: Vec<&Message> = st.inbox_of(&worker_id);
+            let items: Vec<serde_json::Value> = inbox
+                .iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id, "from": m.from, "type": m.mtype,
+                        "subject": m.subject,
+                        "state": m.state, "created_at": iso(m.created_ms),
+                        "body": m.body,
+                    })
+                })
+                .collect();
+            Resp::data(json!({"unread": items.len(), "messages": items}))
+        }
+        Req::Context { worker_id, token } => handle_context(server, worker_id, token),
+        Req::RouteResolve { .. } => {
+            Resp::err("RouteResolve is only handled by the host daemon connection path")
+        }
+        Req::MsgStatus { msg_id } => {
+            let st = server.state.lock().unwrap();
+            let in_mem = st.msgs.get(&msg_id).cloned();
+            let msg = in_mem.or_else(|| {
+                let path = server
+                    .storage_root
+                    .join(".agent-collab")
+                    .join("mailbox")
+                    .join(format!("{}.json", msg_id));
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Message>(&s).ok())
+            });
+            let answered = st.answered(&msg_id);
+            drop(st);
+            match msg {
+                Some(m) => Resp::data(json!({
+                    "id": m.id, "from": m.from, "to": m.to, "type": m.mtype,
+                    "subject": m.subject, "body": m.body,
+                    "state": m.state, "wake_attempts": m.wake_attempt_count,
+                    "created_at": iso(m.created_ms), "answered": answered,
+                })),
+                None => Resp::err(format!("message {} not found", msg_id)),
+            }
+        }
+        Req::TaskRegister {
+            worker_id,
+            token,
+            task_id,
+            owner,
+            feature_id,
+            worktree_path,
+            branch,
+            base_commit,
+            priority,
+            next_step,
+            goal_prompt,
+        } => handle_task_register_with_next(
+            server,
+            worker_id,
+            token,
+            task_id,
+            owner,
+            feature_id,
+            worktree_path,
+            branch,
+            base_commit,
+            priority,
+            next_step,
+            goal_prompt,
+        ),
+        Req::TaskRelocate {
+            worker_id,
+            token,
+            task_id,
+            worktree_path,
+            branch,
+            base_commit,
+        } => handle_task_relocate(
+            server,
+            worker_id,
+            token,
+            task_id,
+            worktree_path,
+            branch,
+            base_commit,
+        ),
+        Req::TaskUpdate {
+            worker_id,
+            token,
+            task_id,
+            status,
+            next_step,
+        } => handle_task_update(server, worker_id, token, task_id, status, next_step),
+        Req::TaskAccept {
+            worker_id,
+            token,
+            task_id,
+        } => handle_task_accept(server, worker_id, token, task_id),
+        Req::TaskClaim {
+            worker_id,
+            token,
+            task_id,
+        } => handle_task_claim(server, worker_id, token, task_id),
+        Req::TaskWait {
+            worker_id,
+            token,
+            task_id,
+            blocking_task_id,
+        } => handle_task_wait(server, worker_id, token, task_id, blocking_task_id),
+        Req::TaskDeliver {
+            worker_id,
+            token,
+            task_id,
+            evidence,
+            worktree,
+        } => handle_task_deliver(server, worker_id, token, task_id, evidence, worktree),
+        Req::TaskReview {
+            worker_id,
+            token,
+            task_id,
+            accept,
+            rework,
+            evidence,
+        } => handle_task_review(server, worker_id, token, task_id, accept, rework, evidence),
+        Req::TaskIntegrated {
+            worker_id,
+            token,
+            task_id,
+            commit,
+            evidence,
+        } => handle_task_integrated(server, worker_id, token, task_id, commit, evidence),
+        Req::TaskClose {
+            worker_id,
+            token,
+            task_id,
+            force,
+            reason,
+        } => handle_task_close(server, worker_id, token, task_id, force, reason),
+        Req::TaskDispatch { worker_id, token } => handle_task_dispatch(server, worker_id, token),
+        Req::TaskStatus { task_id } => {
+            let st = server.state.lock().unwrap();
+            match task_id {
+                Some(id) => st
+                    .tasks
+                    .get(&id)
+                    .map(|task| task_view(&st, task))
+                    .map(Resp::data)
+                    .unwrap_or_else(|| Resp::err(format!("task {} not found", id))),
+                None => Resp::data(
+                    json!({"tasks": st.tasks.values().map(|task| task_view(&st, task)).collect::<Vec<_>>() }),
+                ),
+            }
+        }
+        Req::TaskConflicts {
+            feature_id,
+            worktree_path,
+        } => task_conflicts(server, feature_id, worktree_path),
+        Req::MigrationInspect { worker_id, token } => {
+            handle_migration_inspect(server, worker_id, token)
+        }
+        Req::MigrationPlan { worker_id, token } => handle_migration_plan(server, worker_id, token),
+        Req::MigrationApply { worker_id, token } => {
+            handle_migration_apply(server, worker_id, token)
+        }
+        Req::MigrationVerify { worker_id, token } => {
+            handle_migration_verify(server, worker_id, token)
+        }
+        Req::MasterPromote {
+            worker_id,
+            token,
+            approval,
+        } => handle_master_promote(server, worker_id, token, approval),
+        Req::MasterDelegate {
+            worker_id,
+            token,
+            target_id,
+        } => handle_master_delegate(server, worker_id, token, target_id),
+        Req::MasterStatus => handle_master_status(server),
+        Req::Role { worker_id: _ } => {
+            Resp::err("declared roles are removed; use collab who/context for peer identity")
+        }
+        Req::Workers => {
+            let (workers_rec, tasks_map, msgs_map, keepalives_map) = {
+                let st = server.state.lock().unwrap();
+                (
+                    st.workers.values().cloned().collect::<Vec<_>>(),
+                    st.tasks.clone(),
+                    st.msgs.clone(),
+                    st.keepalives.clone(),
+                )
+            };
+            let mut workers: Vec<serde_json::Value> = workers_rec
+                .iter()
+                .map(|w| {
+                    worker_status_summary_with_maps(
+                        server,
+                        &tasks_map,
+                        &msgs_map,
+                        &keepalives_map,
+                        w,
+                    )
+                })
+                .collect();
+            workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+            Resp::data(json!({
+                "workers": workers,
+                "count": workers.len()
+            }))
+        }
+        Req::WorkerClose {
+            worker_id,
+            token,
+            target_id,
+            reason,
+        } => handle_worker_close(server, worker_id, token, target_id, reason),
+        Req::WorkerStatus { worker_id } => {
+            let (workers_rec, tasks_map, msgs_map, keepalives_map) = {
+                let st = server.state.lock().unwrap();
+                (
+                    st.workers.values().cloned().collect::<Vec<_>>(),
+                    st.tasks.clone(),
+                    st.msgs.clone(),
+                    st.keepalives.clone(),
+                )
+            };
+            let mut workers: Vec<serde_json::Value> = workers_rec
+                .iter()
+                .filter(|w| worker_id.as_ref().is_none_or(|id| id == &w.id))
+                .map(|w| {
+                    worker_status_summary_with_maps(
+                        server,
+                        &tasks_map,
+                        &msgs_map,
+                        &keepalives_map,
+                        w,
+                    )
+                })
+                .collect();
+            workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+            Resp::data(json!({
+                "workers": workers,
+                "count": workers.len()
+            }))
+        }
+        Req::MasterId => handle_master_status(server),
+        Req::MasterRecover {
+            worker_id: _,
+            token: _,
+            session: _,
+        } => Resp::err("master recovery is deprecated; re-register the peer identity"),
+        Req::TransferMaster {
+            worker_id: _,
+            token: _,
+            target_id: _,
+        } => Resp::err("master transfer is deprecated; authority is task-scoped"),
+        Req::RemoveWorker {
+            worker_id: _,
+            token: _,
+            target_id: _,
+            force: _,
+        } => Resp::err("remove-worker is deprecated; use task-owner cleanup and migration verify"),
+        Req::ResetBindings { confirm: _ } => Resp::err(
+            "binding reset is deprecated; preserve journal/mailbox and use migration rebind",
+        ),
+        Req::Shutdown { operator } if operator => Resp::data(json!({
+            "authorized": true,
+            "capability": "daemon-operator",
+        })),
+        Req::Shutdown { .. } => Resp::err("shutdown requires an explicit daemon-operator action"),
+        Req::Ping => {
+            let st = server.state.lock().unwrap();
+            Resp::data(json!({
+                "workers": st.workers.len(),
+                "messages": st.msgs.len(),
+                "tasks": st.tasks.len(),
+                "now": iso(now_ms()),
+            }))
+        }
+        Req::StatusAll => {
+            let (
+                workers_rec,
+                tasks,
+                subagents,
+                msgs_len,
+                tasks_map,
+                msgs_map,
+                keepalives_map,
+                master_wake,
+                now,
+            ) = {
+                let st = server.state.lock().unwrap();
+                let workers_rec: Vec<WorkerRec> = st.workers.values().cloned().collect();
+                let mut tasks: Vec<serde_json::Value> =
+                    st.tasks.values().map(|task| task_view(&st, task)).collect();
+                tasks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+                let mut subagents: Vec<crate::subagent::Record> =
+                    st.subagents.values().cloned().collect();
+                subagents.sort_by(|a, b| a.id.cmp(&b.id));
+                let msgs_len = st.msgs.len();
+                let now = now_ms();
+                (
+                    workers_rec,
+                    tasks,
+                    subagents,
+                    msgs_len,
+                    st.tasks.clone(),
+                    st.msgs.clone(),
+                    st.keepalives.clone(),
+                    st.master_wake.clone(),
+                    now,
+                )
+            };
+            let mut workers: Vec<serde_json::Value> = workers_rec
+                .iter()
+                .map(|w| {
+                    worker_status_summary_with_maps(
+                        server,
+                        &tasks_map,
+                        &msgs_map,
+                        &keepalives_map,
+                        w,
+                    )
+                })
+                .collect();
+            workers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+
+            Resp::data(json!({
+                "summary": {
+                    "workers": workers.len(),
+                    "messages": msgs_len,
+                    "tasks": tasks.len(),
+                    "subagents": subagents.len(),
+                    "now": iso(now),
+                },
+                "master_wake": master_wake,
+                "workers": workers,
+                "tasks": tasks,
+                "subagents": subagents,
+            }))
+        }
+        Req::MailboxRead {
+            all,
+            sort,
+            worker_id,
+        } => {
+            let st = server.state.lock().unwrap();
+            let mut msgs: Vec<Message> = st
+                .msgs
+                .values()
+                .filter(|m| {
+                    if all {
+                        true
+                    } else if let Some(wid) = &worker_id {
+                        &m.to == wid || &m.from == wid
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect();
+            let recipient_messages = worker_id.as_deref().map(|recipient| {
+                st.msgs
+                    .values()
+                    .filter(|message| message.to == recipient)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+            let sort_order = sort.as_deref().unwrap_or("time-asc");
+            if sort_order == "time-desc" {
+                msgs.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+            } else {
+                msgs.sort_by(|a, b| a.created_ms.cmp(&b.created_ms));
+            }
+            let count = msgs.len();
+            drop(st);
+            let projection = worker_id.as_deref().and_then(|recipient| {
+                let path = server
+                    .storage_root
+                    .join(".agent-collab/mailbox")
+                    .join(format!("recipient-{recipient}.jsonl"));
+                match read_recipient_mailbox(&path, recipient) {
+                    Ok(read) => {
+                        let missing = missing_recipient_projection_messages(
+                            recipient_messages.as_deref().unwrap_or_default(),
+                            recipient,
+                            &read,
+                        );
+                        let status = if read.partial_tail {
+                            "partial-tail"
+                        } else if !read.recoverable_errors.is_empty() {
+                            "recoverable-error"
+                        } else if missing.is_empty() {
+                            "ok"
+                        } else {
+                            "incomplete"
+                        };
+                        let mut exact_errors = read.recoverable_errors.clone();
+                        if !missing.is_empty() {
+                            exact_errors.push(format!(
+                                "recipient JSONL is missing message records: {}",
+                                missing.join(",")
+                            ));
+                        }
+                        let exact_error =
+                            (!exact_errors.is_empty()).then(|| exact_errors.join(" | "));
+                        Some(json!({
+                            "status": status,
+                            "partial_tail": read.partial_tail,
+                            "recoverable_errors": read.recoverable_errors,
+                            "missing_message_ids": missing,
+                            "exact_error": exact_error,
+                            "records": read.records,
+                        }))
+                    }
+                    Err(error) => Some(json!({
+                        "status": "error",
+                        "exact_error": error,
+                        "records": [],
+                    })),
+                }
+            });
+            let mut response = json!({
+                "count": count,
+                "sort": sort_order,
+                "messages": msgs,
+            });
+            if let Some(projection) = projection {
+                response["recipient_jsonl"] = projection;
+            }
+            Resp::data(response)
+        }
+    }
+}
+
+fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
+    dispatch_with_route_context(server, req, None)
+}
+
+fn request_requires_project_context(req: &Req) -> bool {
+    !matches!(req, Req::Ping | Req::RouteResolve { .. })
+}
+
+enum WireRoutePrincipal<'a> {
+    Authenticated { worker_id: &'a str },
+    Selected { worker_id: &'a str },
+}
+
+fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, String> {
+    match req {
+        Req::Subagent { worker_id, .. }
+        | Req::Register { worker_id, .. }
+        | Req::NotificationSubscribe { worker_id, .. }
+        | Req::NotificationStatus { worker_id, .. }
+        | Req::NotificationUnsubscribe { worker_id, .. }
+        | Req::Poll { worker_id, .. }
+        | Req::Ack { worker_id, .. }
+        | Req::Inbox { worker_id, .. }
+        | Req::Context { worker_id, .. }
+        | Req::TaskRegister { worker_id, .. }
+        | Req::TaskRelocate { worker_id, .. }
+        | Req::TaskUpdate { worker_id, .. }
+        | Req::TaskAccept { worker_id, .. }
+        | Req::TaskClaim { worker_id, .. }
+        | Req::TaskWait { worker_id, .. }
+        | Req::TaskDeliver { worker_id, .. }
+        | Req::TaskReview { worker_id, .. }
+        | Req::TaskIntegrated { worker_id, .. }
+        | Req::TaskClose { worker_id, .. }
+        | Req::TaskDispatch { worker_id, .. }
+        | Req::MigrationInspect { worker_id, .. }
+        | Req::MigrationPlan { worker_id, .. }
+        | Req::MigrationApply { worker_id, .. }
+        | Req::MigrationVerify { worker_id, .. }
+        | Req::MasterPromote { worker_id, .. }
+        | Req::MasterDelegate { worker_id, .. }
+        | Req::WorkerClose { worker_id, .. }
+        | Req::MasterRecover { worker_id, .. }
+        | Req::TransferMaster { worker_id, .. }
+        | Req::RemoveWorker { worker_id, .. } => {
+            Ok(vec![WireRoutePrincipal::Authenticated { worker_id }])
+        }
+        Req::Send {
+            worker_id, token, ..
+        } => match (worker_id.as_deref(), token.as_deref()) {
+            (Some(worker_id), Some(_)) => Ok(vec![WireRoutePrincipal::Authenticated { worker_id }]),
+            (None, None) => Ok(Vec::new()),
+            _ => Err(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: wire send requires worker_id and token together"
+                    .into(),
+            ),
+        },
+        Req::Role { worker_id } => Ok(vec![WireRoutePrincipal::Selected { worker_id }]),
+        Req::WorkerStatus {
+            worker_id: Some(worker_id),
+        }
+        | Req::MailboxRead {
+            worker_id: Some(worker_id),
+            ..
+        } => Ok(vec![WireRoutePrincipal::Selected { worker_id }]),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn validate_wire_route_principals(
+    server: &Server,
+    req: &Req,
+    route_scope: &RouteScope,
+) -> Result<(), String> {
+    let principals = wire_route_principals(req)?;
+    if principals.is_empty() {
+        return Ok(());
+    }
+
+    let state = server.state.lock().unwrap();
+    for principal in principals {
+        let worker_id = match principal {
+            WireRoutePrincipal::Authenticated { worker_id, .. }
+            | WireRoutePrincipal::Selected { worker_id } => worker_id,
+        };
+        let bindings = state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .collect::<Vec<_>>();
+
+        // A new wire Register is the only request allowed to create its first
+        // binding.  A same-named binding in another project remains a route
+        // conflict even when the resident legacy worker projection is absent.
+        if matches!(req, Req::Register { .. }) && state.workers.get(worker_id).is_none() {
+            if bindings.is_empty() {
+                continue;
+            }
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} is already bound to another project route",
+                worker_id
+            ));
+        }
+
+        let mut routes = std::collections::BTreeSet::new();
+        for binding in bindings {
+            routes.insert((
+                binding.app_scope_id.as_str().to_owned(),
+                binding.project_scope.as_str().to_owned(),
+            ));
+        }
+        let Some((app_scope_id, project_scope_id)) = routes.iter().next() else {
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no registered runtime binding",
+                worker_id
+            ));
+        };
+        if routes.len() != 1
+            || app_scope_id != route_scope.app_scope_id.as_str()
+            || project_scope_id != route_scope.project_scope_id.as_str()
+        {
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} runtime binding route does not match request route",
+                worker_id
+            ));
+        }
+
+        let Some(worker) = state.workers.get(worker_id) else {
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} has no resident identity",
+                worker_id
+            ));
+        };
+        let worker_scope =
+            GlobalState::canonical_project_scope(Path::new(&worker.cwd)).map_err(|error| {
+                format!(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} cwd is not a project route: {}",
+                    worker_id, error
+                )
+            })?;
+        if worker_scope != route_scope.project_scope_id {
+            return Err(format!(
+                "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker {} cwd does not match request project route",
+                worker_id
+            ));
+        }
+
+        // Authenticated handlers retain the established token check.  This
+        // admission only binds the worker identity to the incoming route;
+        // direct in-process callers continue to use the legacy handlers.
+    }
+    Ok(())
+}
+
+/// Validate the route carried by a host-daemon request before the legacy
+/// project reducer sees it. Registration is host-wide: an initialized project
+/// may register its exact canonical root with the resident daemon even when it
+/// is not the daemon's startup project. Operations for that route remain
+/// explicitly not-ready until a project reducer/journal owner is available.
+pub(crate) fn validate_request_context(
+    server: &Server,
+    req: &Req,
+    project_context: Option<&ProjectContext>,
+) -> Result<(), String> {
+    let Some(project_context) = project_context else {
+        if request_requires_project_context(req) {
+            return Err(
+                "PROJECT_CONTEXT_REQUIRED: canonical project root and scope are required".into(),
+            );
+        }
+        return Ok(());
+    };
+
+    project_context
+        .validate()
+        .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
+    if matches!(req, Req::Shutdown { operator: true }) {
+        return validate_host_operator_route(server, project_context);
+    }
+    let registry = HostRouteRegistry::for_server(server)?;
+    let route_scope = RouteScope {
+        app_scope_id: project_context.app_scope_id.clone(),
+        project_scope_id: project_context.project_scope.clone(),
+    };
+    match registry.lookup(project_context) {
+        Some(HostRouteOwner::ResidentProject { root, .. }) => {
+            if project_context.canonical_root != root.to_string_lossy() {
+                return Err(format!(
+                    "PROJECT_SCOPE_MISMATCH: route root {} does not match context {}",
+                    root.display(),
+                    project_context.canonical_root
+                ));
+            }
+            if let Req::Register { cwd, .. } = req {
+                validate_register_cwd(cwd, root)?;
+            }
+        }
+        Some(HostRouteOwner::RegisteredNotReady { root }) => {
+            if let Req::Register { cwd, .. } = req {
+                validate_project_registration_cwd(cwd, root)?;
+            } else {
+                return Err(format!(
+                    "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: project route {} is registered but has no migrated reducer/journal owner",
+                    root.display()
+                ));
+            }
+        }
+        None => {
+            // Registration is the one operation that may create the first
+            // app route for any initialized project. It still has to carry an
+            // explicit app scope, use the exact canonical project root, and
+            // prove that the project opted into Collab with its marker.
+            if let Req::Register { cwd, .. } = req {
+                validate_project_registration_cwd(cwd, Path::new(&project_context.canonical_root))?;
+            } else {
+                return Err(format!(
+                    "PROJECT_SCOPE_UNKNOWN: no host route is registered for {}",
+                    project_context.canonical_root
+                ));
+            }
+        }
+    }
+
+    if matches!(req, Req::CrossProjectSend { .. }) {
+        return Err(
+            "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: cross-project wire requests require independently verified source and target route owners".into(),
+        );
+    }
+    validate_wire_route_principals(server, req, &route_scope)?;
+    validate_wire_runtime_binding(server, req, project_context)
+}
+
+/// Validate the explicit project-registration boundary. The marker is the
+/// project owner's opt-in to Collab; without it, an arbitrary canonical path
+/// must not create a durable host route. The cwd remains exact and cannot be
+/// replaced by a daemon cwd, ancestor, or worktree path.
+fn validate_project_registration_cwd(cwd: &str, expected_root: &Path) -> Result<(), String> {
+    if !expected_root.join(".agent-collab").is_dir() {
+        return Err(format!(
+            "PROJECT_SCOPE_UNKNOWN: project {} is not initialized for Collab",
+            expected_root.display()
+        ));
+    }
+    validate_register_cwd(cwd, expected_root)
+}
+
+/// Admit the explicit CLI host operator route independently of project
+/// registration. `collab up` can create a resident daemon before any app
+/// route has registered; the operator still needs a way to stop that daemon.
+/// Keep this path read-only and exact so it cannot become an unknown-route
+/// fallback for project requests or create a peer identity as a side effect.
+fn validate_host_operator_route(
+    server: &Server,
+    project_context: &ProjectContext,
+) -> Result<(), String> {
+    let resident_scope = GlobalState::canonical_project_scope(&server.root)
+        .map_err(|error| format!("PROJECT_SCOPE_UNKNOWN: {error}"))?;
+    if project_context.app_scope_id.as_str() != crate::identity::CLI_APP_SERVER_ID {
+        return Err(format!(
+            "PROJECT_SCOPE_UNKNOWN: host operator route requires app scope {}",
+            crate::identity::CLI_APP_SERVER_ID
+        ));
+    }
+    if project_context.canonical_root != resident_scope.as_str()
+        || project_context.project_scope != resident_scope
+    {
+        return Err(format!(
+            "PROJECT_SCOPE_UNKNOWN: host operator route must target resident project {}",
+            resident_scope.as_str()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_register_cwd(cwd: &str, expected_root: &Path) -> Result<(), String> {
+    let request_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+        .map_err(|error| format!("PROJECT_SCOPE_INVALID: {error}"))?;
+    if request_scope.as_str() != expected_root.to_string_lossy() {
+        return Err(format!(
+            "PROJECT_SCOPE_MISMATCH: register cwd {} is outside {}",
+            cwd,
+            expected_root.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod host_route_registry_tests {
+    use super::*;
+    use crate::identity::RuntimeIdentity;
+    use crate::proto::AppServerCandidate;
+
+    static TEST_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn test_server() -> (Arc<Server>, PathBuf, PathBuf) {
+        let id = TEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("collab-host-route-{id}-{}", std::process::id()));
+        let server_dir = root.join(".agent-collab").join("server");
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let journal_path = server_dir.join("journal.jsonl");
+        let journal = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&journal_path)
+            .unwrap();
+        let server = Arc::new(Server {
+            config: crate::config::Config::default(),
+            root: root.clone(),
+            storage_root: root.clone(),
+            journal_path: journal_path.clone(),
+            state: Mutex::new(State::default()),
+            journal: Mutex::new(journal),
+            appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
+            appserver_notification_sink: Arc::new(|_, _, _, _| {
+                Ok(serde_json::json!({"accepted": true}))
+            }),
+            appserver_thread_status: Arc::new(|_, thread_id| {
+                Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+            }),
+            appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            mailbox_notify: Notify::new(),
+        });
+        (server, root, journal_path)
+    }
+
+    fn with_appserver_check(
+        server: &mut Arc<Server>,
+        check: impl Fn(&AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync + 'static,
+    ) {
+        let server = Arc::get_mut(server).expect("unique test server");
+        server.appserver_candidate_check = Arc::new(check);
+    }
+
+    fn with_appserver_notification_sink(
+        server: &mut Arc<Server>,
+        sink: impl Fn(&SelectedTransport, &str, &str, bool) -> Result<serde_json::Value, String>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        let server = Arc::get_mut(server).expect("unique test server");
+        server.appserver_notification_sink = Arc::new(sink);
+    }
+
+    fn verified_appserver(candidate: &AppServerCandidate) -> SelectedTransport {
+        SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some(candidate.endpoint.clone()),
+            namespace: Some(candidate.namespace.clone()),
+            thread_id: Some(candidate.thread_id.clone()),
+            capabilities: vec![
+                "session_status".into(),
+                "read_thread".into(),
+                "send_message_to_thread".into(),
+            ],
+            self_check: "server verified App Server candidate".into(),
+        }
+    }
+
+    fn test_candidates(thread_id: &str) -> Option<TransportCandidates> {
+        Some(TransportCandidates {
+            appserver: Some(AppServerCandidate {
+                endpoint: format!("unix:///tmp/collab-{thread_id}.sock"),
+                namespace: "codex_tui".into(),
+                thread_id: thread_id.into(),
+            }),
+        })
+    }
+
+    fn context_with_app(root: &Path, app_scope: &str) -> ProjectContext {
+        ProjectContext::for_registered_root_with_app(root, AppServerId::new(app_scope).unwrap())
+            .unwrap()
+    }
+
+    fn context_with_runtime(
+        root: &Path,
+        app_scope: &str,
+        runtime: &RuntimeIdentity,
+    ) -> ProjectContext {
+        let mut context = context_with_app(root, app_scope);
+        context.runtime_context = Some(runtime.clone());
+        context
+    }
+
+    fn write_global_identity(
+        host_paths: &HostPaths,
+        worker_id: &str,
+        token: &str,
+        project_scope: Option<&crate::scope::ProjectScopeId>,
+        runtime: &RuntimeIdentity,
+    ) {
+        let path = host_paths
+            .state_root()
+            .join("identities")
+            .join(worker_id)
+            .join("identity.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut identity = serde_json::json!({
+            "worker_id": worker_id,
+            "token": token,
+            "runtime": runtime,
+        });
+        if let Some(project_scope) = project_scope {
+            identity["project_scope"] = serde_json::json!(project_scope);
+        }
+        std::fs::write(path, serde_json::to_string_pretty(&identity).unwrap()).unwrap();
+    }
+
+    fn runtime_for_registered(
+        server: &Server,
+        root: &Path,
+        worker_id: &str,
+        app_scope: &str,
+    ) -> RuntimeIdentity {
+        let project_scope = GlobalState::canonical_project_scope(root).unwrap();
+        let route_scope = RouteScope {
+            app_scope_id: AppServerId::new(app_scope).unwrap(),
+            project_scope_id: project_scope,
+        };
+        let binding = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &route_scope,
+                &BindingId::new(format!("binding-{worker_id}")).unwrap(),
+            )
+            .cloned()
+            .unwrap();
+        crate::identity::RuntimeIdentity {
+            agent_id: binding.agent_id,
+            runtime_id: binding.runtime_id,
+            appserver_id: binding.app_scope_id,
+            endpoint_generation: binding.endpoint_generation,
+            binding_id: binding.binding_id,
+            native_thread_id: binding.native_thread_id,
+        }
+    }
+
+    fn notification_subscribe_request(worker_id: &str, token: &str) -> Req {
+        Req::NotificationSubscribe {
+            worker_id: worker_id.into(),
+            token: token.into(),
+            event: "direct-message".into(),
+            subject: None,
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            ttl_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn server_selects_the_verified_appserver_candidate() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let appserver = AppServerCandidate {
+            endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+            namespace: "codex_tui".into(),
+            thread_id: "thread-1".into(),
+        };
+        let selected = validate_transport_candidates(
+            &server,
+            "worker-1",
+            &TransportCandidates {
+                appserver: Some(appserver),
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.kind, TransportKind::AppServer);
+        assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appserver_self_check_failure_is_explicit_and_has_no_fallback() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |_| {
+            Err("server self-check rejected App Server candidate".into())
+        });
+        let error = validate_transport_candidates(
+            &server,
+            "worker-1",
+            &TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-missing-appserver.sock".into(),
+                    namespace: "codex_tui".into(),
+                    thread_id: "thread-1".into(),
+                }),
+            },
+        )
+        .unwrap_err();
+        assert!(error.starts_with("TRANSPORT_NONE:"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registration_fails_when_no_server_verified_candidate_exists() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |_| {
+            Err("server self-check rejected App Server candidate".into())
+        });
+        let error = validate_transport_candidates(
+            &server,
+            "worker-1",
+            &TransportCandidates { appserver: None },
+        )
+        .unwrap_err();
+        assert!(error.starts_with("TRANSPORT_NONE:"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registration_allows_server_to_refresh_an_appserver_identity() {
+        let (mut server, root, _) = test_server();
+        let app_scope = AppServerId::new("app-a").unwrap();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let first = handle_register_with_app_scope(
+            &server,
+            "worker-1".into(),
+            "token-1".into(),
+            root.display().to_string(),
+            Some(app_scope.clone()),
+            Some(TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+                    namespace: "codex_tui".into(),
+                    thread_id: "thread-1".into(),
+                }),
+            }),
+        );
+        assert!(first.ok, "{first:?}");
+        assert_eq!(first.data["transport_selected"]["kind"], "appserver");
+
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let second = handle_register_with_app_scope(
+            &server,
+            "worker-1".into(),
+            "token-1".into(),
+            root.display().to_string(),
+            Some(app_scope),
+            Some(TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+                    namespace: "codex_tui".into(),
+                    thread_id: "thread-1".into(),
+                }),
+            }),
+        );
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.data["transport_selected"]["kind"], "appserver");
+        let worker = server.state.lock().unwrap().workers["worker-1"].clone();
+        assert_eq!(
+            worker.transport.as_ref().map(|transport| &transport.kind),
+            Some(&TransportKind::AppServer)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appserver_notification_turn_acceptance_stays_pending_and_unread() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let sink_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sink_called_for_server = sink_called.clone();
+        with_appserver_notification_sink(&mut server, move |_, _, _, _| {
+            sink_called_for_server.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(serde_json::json!({"accepted": true}))
+        });
+        let app_scope = AppServerId::new("app-a").unwrap();
+        let registered = handle_register_with_app_scope(
+            &server,
+            "worker-1".into(),
+            "token-1".into(),
+            root.display().to_string(),
+            Some(app_scope),
+            Some(TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+                    namespace: "codex_tui".into(),
+                    thread_id: "thread-1".into(),
+                }),
+            }),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let subscribed = handle_notification_subscribe(
+            &server,
+            "worker-1".into(),
+            "token-1".into(),
+            "direct-message".into(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            1,
+            60,
+        );
+        assert!(subscribed.ok, "{subscribed:?}");
+        let subscription_id = subscribed.data["subscription"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let message_id = gen_msg_id();
+        server.commit(&[
+            Event::Sent {
+                msg: Message {
+                    id: message_id.clone(),
+                    from: "sender".into(),
+                    to: "worker-1".into(),
+                    mtype: "notify".into(),
+                    subject: Some("queue-only".into()),
+                    body: "must remain pending after queue acceptance".into(),
+                    in_reply_to: None,
+                    created_ms: now_ms(),
+                    state: "pending".into(),
+                    wake_attempt_count: 0,
+                    last_wake_attempt_ms: 0,
+                },
+            },
+            Event::WakeBound {
+                message_id: message_id.clone(),
+                subscription_id: subscription_id.clone(),
+            },
+            Event::DeliveryMode {
+                msg_id: message_id.clone(),
+                mode: "explicit-notification".into(),
+            },
+        ]);
+
+        let selected = {
+            let state = server.state.lock().unwrap();
+            state.workers["worker-1"].transport.clone().unwrap()
+        };
+        let attempted = attempt_appserver_notification_with_at(
+            &server,
+            &message_id,
+            &subscription_id,
+            "worker-1",
+            &selected,
+            0,
+            true,
+            now_ms(),
+            &|transport, text, message_id, explicit| {
+                (server.appserver_notification_sink)(transport, text, message_id, explicit)
+            },
+        );
+        assert!(
+            attempted,
+            "the server-selected endpoint accepted turn/start"
+        );
+        assert!(
+            sink_called.load(std::sync::atomic::Ordering::Relaxed),
+            "the App Server notification sink must be exercised"
+        );
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].state, "pending");
+        assert_eq!(
+            state.msgs[&message_id].wake_attempt_count, 1,
+            "turn/start acceptance records one notification attempt"
+        );
+        assert_ne!(state.msgs[&message_id].state, "delivered");
+        assert_ne!(state.msgs[&message_id].state, "read");
+        assert!(state
+            .inbox_of("worker-1")
+            .iter()
+            .any(|m| m.id == message_id));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appserver_subscription_is_bound_to_the_selected_thread() {
+        let transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+            namespace: Some("codex_tui".into()),
+            thread_id: Some("thread-current".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "server verified".into(),
+        };
+        let mut subscription = NotificationSubscription {
+            id: "subscription-1".into(),
+            worker_id: "worker-1".into(),
+            target: "thread-stale".into(),
+            method: "appserver".into(),
+            event: "direct-message".into(),
+            subject: None,
+            trigger_ms: None,
+            trigger_times_ms: Vec::new(),
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            status: "armed".into(),
+            status_reason: None,
+            created_ms: 0,
+            updated_ms: 0,
+            expires_ms: i64::MAX,
+        };
+        assert!(!subscription_matches_transport(&subscription, &transport));
+        subscription.target = "thread-current".into();
+        assert!(subscription_matches_transport(&subscription, &transport));
+    }
+
+    type MutationSnapshot = (
+        u64,
+        u64,
+        std::collections::HashMap<String, WorkerRec>,
+        Vec<(String, String)>,
+        Vec<(String, String)>,
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+        crate::server::global_state::GlobalState,
+    );
+
+    fn ordered_map_snapshot<T: serde::Serialize>(
+        values: &std::collections::HashMap<String, T>,
+    ) -> Vec<(String, String)> {
+        let mut snapshot = values
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::to_string(value).unwrap()))
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    fn mutation_snapshot(server: &Server) -> MutationSnapshot {
+        let state = server.state.lock().unwrap();
+        (
+            state.revision,
+            state.sequence,
+            state.workers.clone(),
+            ordered_map_snapshot(&state.msgs),
+            ordered_map_snapshot(&state.notification_subscriptions),
+            state.delivery_modes.clone(),
+            state.wake_bindings.clone(),
+            state.global.clone(),
+        )
+    }
+
+    fn directory_snapshot(path: &Path) -> Vec<(String, Vec<u8>)> {
+        let Some(entries) = std::fs::read_dir(path).ok() else {
+            return Vec::new();
+        };
+        let mut snapshot = entries
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(path).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    fn context(root: &Path) -> ProjectContext {
+        context_with_app(root, "tui-default")
+    }
+
+    fn register_known_project(server: &Server, root: &Path) {
+        register_known_project_with_app(server, root, "tui-default");
+    }
+
+    fn register_known_project_with_app(server: &Server, root: &Path, app_scope: &str) {
+        let scope = GlobalState::canonical_project_scope(root).unwrap();
+        let app = AppServerId::new(app_scope).unwrap();
+        let registration = ProjectRegistration::new(scope, app).unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .register_project(registration)
+            .unwrap();
+    }
+
+    #[test]
+    fn raw_ping_keeps_context_free_readiness() {
+        let (server, root, _) = test_server();
+        assert!(validate_request_context(&server, &Req::Ping, None).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_project_context_is_not_reinterpreted_as_unscoped_request() {
+        let line = serde_json::json!({
+            "project_context": {
+                "app_scope_id": "app-wire",
+                "canonical_root": "/tmp",
+                "project_scope": 42
+            },
+            "op": "Ping"
+        })
+        .to_string();
+        let error = parse_wire_request(&line).unwrap_err();
+        assert!(
+            error.starts_with("bad request: invalid project context envelope:"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unknown_project_route_fails_closed() {
+        let (server, root, _) = test_server();
+        let other_root = root.with_file_name(format!(
+            "{}-other",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other_root).unwrap();
+        let error = validate_request_context(&server, &Req::StatusAll, Some(&context(&other_root)))
+            .unwrap_err();
+        assert!(error.starts_with("PROJECT_SCOPE_UNKNOWN:"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[test]
+    fn host_route_replay_requires_framed_unique_jsonl_records() {
+        let (_server, root, _) = test_server();
+        let route_journal = root.join(".agent-collab/server/routes.jsonl");
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: "route-app".into(),
+            project_scope: project_scope.as_str().into(),
+            canonical_root: project_scope.as_str().into(),
+            storage_root: root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        let line = serde_json::to_string(&record).unwrap();
+
+        std::fs::write(&route_journal, &line).unwrap();
+        let missing_final_newline = load_host_route_records(&route_journal).unwrap_err();
+        assert!(
+            missing_final_newline.contains("must end with a newline"),
+            "{missing_final_newline}"
+        );
+
+        std::fs::write(&route_journal, format!("{line}\n\n")).unwrap();
+        let empty_line = load_host_route_records(&route_journal).unwrap_err();
+        assert!(
+            empty_line.contains("empty route journal line 2"),
+            "{empty_line}"
+        );
+
+        std::fs::write(&route_journal, format!("{line}\n{line}\n")).unwrap();
+        let duplicate = load_host_route_records(&route_journal).unwrap_err();
+        assert!(duplicate.contains("duplicate route key"), "{duplicate}");
+        assert!(duplicate.contains("lines 1 and 2"), "{duplicate}");
+
+        std::fs::write(&route_journal, format!("{line}\r\n")).unwrap();
+        let parsed = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].app_scope_id, "route-app");
+
+        let mut colliding_record = record.clone();
+        colliding_record.app_scope_id = "route-app-other".into();
+        let colliding_line = serde_json::to_string(&colliding_record).unwrap();
+        std::fs::write(&route_journal, format!("{line}\n{colliding_line}\n")).unwrap();
+        let duplicate_storage = load_host_route_records(&route_journal).unwrap_err();
+        assert!(
+            duplicate_storage.contains("duplicate runtime storage root"),
+            "{duplicate_storage}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_runtime_list_deduplicates_routes_sharing_one_reducer() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        {
+            let mut routes = manager.routes.lock().unwrap();
+            for app_scope in ["app-a", "app-b"] {
+                routes.insert(
+                    (app_scope.into(), "/shared-project".into()),
+                    RuntimeRoute {
+                        root: root.clone(),
+                        storage_root: root.clone(),
+                        runtime: Some(server.clone()),
+                    },
+                );
+            }
+        }
+
+        let runtimes = manager.runtimes();
+        assert_eq!(runtimes.len(), 1);
+        assert!(Arc::ptr_eq(&runtimes[0], &server));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_thread_route_resolution_returns_one_complete_typed_route() {
+        let (server, root, journal_path) = test_server();
+        let (historical_server, historical_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let registration = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_registration(
+                &GlobalState::canonical_project_scope(&root).unwrap(),
+                &AppServerId::new("app-route").unwrap(),
+            )
+            .is_some();
+        if !registration {
+            register_known_project_with_app(&server, &root, "app-route");
+        }
+        let binding = RuntimeBinding::new(
+            GlobalState::canonical_project_scope(&root).unwrap(),
+            AppServerId::new("app-route").unwrap(),
+            AgentId::new("agent-route").unwrap(),
+            RuntimeId::new("runtime-route").unwrap(),
+            BindingId::new("binding-route").unwrap(),
+            9,
+            Some(NativeThreadId::new("thread-route").unwrap()),
+        )
+        .unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .bind_runtime(binding.clone())
+            .unwrap();
+        server.commit(&[Event::GlobalCurrentThreadRouteSet {
+            binding: binding.clone(),
+        }]);
+        manager.install_runtime(
+            &(
+                binding.app_scope_id.as_str().to_owned(),
+                binding.project_scope.as_str().to_owned(),
+            ),
+            server.clone(),
+            None,
+        );
+        register_known_project_with_app(&historical_server, &historical_root, "app-route");
+        let historical_binding = RuntimeBinding::new(
+            GlobalState::canonical_project_scope(&historical_root).unwrap(),
+            AppServerId::new("app-route").unwrap(),
+            AgentId::new("agent-route").unwrap(),
+            RuntimeId::new("runtime-route").unwrap(),
+            BindingId::new("binding-route").unwrap(),
+            9,
+            Some(NativeThreadId::new("thread-route").unwrap()),
+        )
+        .unwrap();
+        historical_server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .bind_runtime(historical_binding.clone())
+            .unwrap();
+        historical_server.commit(&[Event::Registered {
+            worker: WorkerRec {
+                id: "agent-route".into(),
+                token: "historical-token".into(),
+                cwd: historical_root.to_string_lossy().into_owned(),
+                registered_ms: now_ms(),
+                transport: None,
+            },
+        }]);
+        manager.routes.lock().unwrap().insert(
+            (
+                historical_binding.app_scope_id.as_str().to_owned(),
+                historical_binding.project_scope.as_str().to_owned(),
+            ),
+            RuntimeRoute {
+                root: historical_root.clone(),
+                storage_root: historical_root.clone(),
+                runtime: Some(historical_server),
+            },
+        );
+        let runtime = RuntimeIdentity {
+            agent_id: binding.agent_id.clone(),
+            runtime_id: binding.runtime_id.clone(),
+            appserver_id: binding.app_scope_id.clone(),
+            endpoint_generation: binding.endpoint_generation,
+            binding_id: binding.binding_id.clone(),
+            native_thread_id: binding.native_thread_id.clone(),
+        };
+        write_global_identity(&host_paths, "agent-route", "token-route", None, &runtime);
+        server.commit(&[Event::Registered {
+            worker: WorkerRec {
+                id: "agent-route".into(),
+                token: "token-route".into(),
+                cwd: root.to_string_lossy().into_owned(),
+                registered_ms: now_ms(),
+                transport: None,
+            },
+        }]);
+
+        let state_before = mutation_snapshot(&server);
+        let journal_before = std::fs::read(&journal_path).unwrap();
+        let route = manager
+            .resolve_route_by_native_thread("thread-route")
+            .unwrap();
+        assert_eq!(route.app_scope_id.as_str(), "app-route");
+        assert_eq!(
+            route.canonical_root,
+            root.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(route.storage_root, root.to_string_lossy());
+        assert_eq!(route.agent_id.as_str(), "agent-route");
+        assert_eq!(route.binding_id.as_str(), "binding-route");
+        assert_eq!(route.endpoint_generation, 9);
+        assert_eq!(route.native_thread_id.as_str(), "thread-route");
+        route.validate().unwrap();
+        assert_eq!(mutation_snapshot(&server), state_before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(historical_root).unwrap();
+    }
+
+    #[test]
+    fn native_thread_route_resolution_ignores_history_and_fails_closed_for_invalid_state() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        register_known_project_with_app(&server, &root, "app-route");
+        let scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let current = RuntimeBinding::new(
+            scope.clone(),
+            AppServerId::new("app-route").unwrap(),
+            AgentId::new("agent-current").unwrap(),
+            RuntimeId::new("runtime-current").unwrap(),
+            BindingId::new("binding-current").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-duplicate").unwrap()),
+        )
+        .unwrap();
+        let duplicate = RuntimeBinding::new(
+            scope.clone(),
+            AppServerId::new("app-route").unwrap(),
+            AgentId::new("agent-a").unwrap(),
+            RuntimeId::new("runtime-a").unwrap(),
+            BindingId::new("binding-a").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-duplicate").unwrap()),
+        )
+        .unwrap();
+        let second = RuntimeBinding::new(
+            scope,
+            AppServerId::new("app-route").unwrap(),
+            AgentId::new("agent-b").unwrap(),
+            RuntimeId::new("runtime-b").unwrap(),
+            BindingId::new("binding-b").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-duplicate").unwrap()),
+        )
+        .unwrap();
+        {
+            let mut state = server.state.lock().unwrap();
+            state.global.bind_runtime(current.clone()).unwrap();
+            state.global.bind_runtime(duplicate).unwrap();
+            state.global.bind_runtime(second).unwrap();
+        }
+        server.commit(&[Event::GlobalCurrentThreadRouteSet {
+            binding: current.clone(),
+        }]);
+        manager.install_runtime(
+            &(
+                current.app_scope_id.as_str().to_owned(),
+                current.project_scope.as_str().to_owned(),
+            ),
+            server.clone(),
+            None,
+        );
+        write_global_identity(
+            &host_paths,
+            "agent-current",
+            "token-current",
+            Some(&current.project_scope),
+            &RuntimeIdentity {
+                agent_id: current.agent_id.clone(),
+                runtime_id: current.runtime_id.clone(),
+                appserver_id: current.app_scope_id.clone(),
+                endpoint_generation: current.endpoint_generation,
+                binding_id: current.binding_id.clone(),
+                native_thread_id: current.native_thread_id.clone(),
+            },
+        );
+        server.commit(&[Event::Registered {
+            worker: WorkerRec {
+                id: "agent-current".into(),
+                token: "token-current".into(),
+                cwd: root.to_string_lossy().into_owned(),
+                registered_ms: now_ms(),
+                transport: None,
+            },
+        }]);
+
+        let missing = manager
+            .resolve_route_by_native_thread("thread-missing")
+            .unwrap_err();
+        assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
+        let current = manager
+            .resolve_route_by_native_thread("thread-duplicate")
+            .unwrap();
+        assert_eq!(current.agent_id.as_str(), "agent-current");
+        assert_eq!(current.binding_id.as_str(), "binding-current");
+        write_global_identity(
+            &host_paths,
+            "agent-other",
+            "token-other",
+            None,
+            &RuntimeIdentity {
+                agent_id: AgentId::new("agent-other").unwrap(),
+                runtime_id: RuntimeId::new("runtime-other").unwrap(),
+                appserver_id: AppServerId::new("app-route").unwrap(),
+                endpoint_generation: 1,
+                binding_id: BindingId::new("binding-other").unwrap(),
+                native_thread_id: Some(NativeThreadId::new("thread-duplicate").unwrap()),
+            },
+        );
+        let resolved = manager
+            .resolve_route_by_native_thread("thread-duplicate")
+            .unwrap();
+        assert_eq!(resolved, current);
+        for invalid in ["", "thread\ninvalid"] {
+            let error = manager.resolve_route_by_native_thread(invalid).unwrap_err();
+            assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
+        }
+
+        let corrupt = RuntimeBinding::new(
+            current.project_scope.clone(),
+            current.app_scope_id.clone(),
+            AgentId::new("agent-corrupt").unwrap(),
+            RuntimeId::new("runtime-corrupt").unwrap(),
+            BindingId::new("binding-corrupt").unwrap(),
+            1,
+            Some(current.native_thread_id.clone()),
+        )
+        .unwrap();
+        server.commit(&[Event::GlobalCurrentThreadRouteSet { binding: corrupt }]);
+        let error = manager
+            .resolve_route_by_native_thread("thread-duplicate")
+            .unwrap_err();
+        assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
+        assert!(error.contains("missing runtime binding"), "{error}");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_route_resolution_is_context_free_and_read_only() {
+        let (server, root, journal_path) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        register_known_project_with_app(&server, &root, "app-wire-route");
+        let binding = RuntimeBinding::new(
+            GlobalState::canonical_project_scope(&root).unwrap(),
+            AppServerId::new("app-wire-route").unwrap(),
+            AgentId::new("agent-wire-route").unwrap(),
+            RuntimeId::new("runtime-wire-route").unwrap(),
+            BindingId::new("binding-wire-route").unwrap(),
+            3,
+            Some(NativeThreadId::new("thread-wire-route").unwrap()),
+        )
+        .unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .bind_runtime(binding.clone())
+            .unwrap();
+        server.commit(&[Event::GlobalCurrentThreadRouteSet {
+            binding: binding.clone(),
+        }]);
+        manager.install_runtime(
+            &(
+                binding.app_scope_id.as_str().to_owned(),
+                binding.project_scope.as_str().to_owned(),
+            ),
+            server.clone(),
+            None,
+        );
+        write_global_identity(
+            &host_paths,
+            "agent-wire-route",
+            "token-wire-route",
+            Some(&binding.project_scope),
+            &RuntimeIdentity {
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                appserver_id: binding.app_scope_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                binding_id: binding.binding_id.clone(),
+                native_thread_id: binding.native_thread_id.clone(),
+            },
+        );
+        server.commit(&[Event::Registered {
+            worker: WorkerRec {
+                id: "agent-wire-route".into(),
+                token: "token-wire-route".into(),
+                cwd: root.to_string_lossy().into_owned(),
+                registered_ms: now_ms(),
+                transport: None,
+            },
+        }]);
+
+        assert!(validate_request_context(
+            &server,
+            &Req::RouteResolve {
+                native_thread_id: "thread-wire-route".into(),
+            },
+            None,
+        )
+        .is_ok());
+        let before = mutation_snapshot(&server);
+        let journal_before = std::fs::read(&journal_path).unwrap();
+        let (_, response) = dispatch_wire_routed(
+            manager,
+            None,
+            Req::RouteResolve {
+                native_thread_id: "thread-wire-route".into(),
+            },
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        let route: RouteResolution = serde_json::from_value(response.data).unwrap();
+        assert_eq!(route.native_thread_id.as_str(), "thread-wire-route");
+        assert_eq!(route.app_scope_id.as_str(), "app-wire-route");
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_journal_failure_precedes_external_reducer_mutation() {
+        let (server, root, host_journal) = test_server();
+        let external_root = root.with_file_name(format!(
+            "{}-atomic-register",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(external_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let mut manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let route_journal_blocker = root.join("route-journal-blocker");
+        std::fs::create_dir_all(&route_journal_blocker).unwrap();
+        Arc::get_mut(&mut manager).unwrap().route_journal = route_journal_blocker;
+
+        let context = context_with_app(&external_root, "atomic-register-app");
+        let response = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "atomic-register-worker".into(),
+                token: "token-atomic-register-worker".into(),
+                cwd: external_root.display().to_string(),
+                candidates: test_candidates("thread-atomic-register-worker"),
+            },
+        );
+        assert!(!response.1.ok, "{:?}", response.1);
+        assert!(response
+            .1
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")));
+        assert!(!manager
+            .routes
+            .lock()
+            .unwrap()
+            .contains_key(&ProjectRuntimeManager::route_key(&context)));
+        assert!(
+            !external_root
+                .join(".agent-collab/server/journal.jsonl")
+                .exists(),
+            "route admission failure must not create an unreachable reducer journal"
+        );
+        assert!(std::fs::read(&host_journal).unwrap().is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_thread_route_resolution_uses_latest_cross_project_registration() {
+        let (server, root, host_journal) = test_server();
+        let project_a = root.with_file_name(format!(
+            "{}-current-a",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let project_b = root.with_file_name(format!(
+            "{}-current-b",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        for project in [&project_a, &project_b] {
+            std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+        }
+        let project_a = project_a.canonicalize().unwrap();
+        let project_b = project_b.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let shared_thread = "thread-cross-project-current";
+        let context_a = context_with_app(&project_a, "current-app-a");
+        let context_b = context_with_app(&project_b, "current-app-b");
+
+        let (_, first) = manager.dispatch_sync(
+            Some(context_a.clone()),
+            Req::Register {
+                worker_id: "current-worker-a".into(),
+                token: "token-current-a".into(),
+                cwd: project_a.display().to_string(),
+                candidates: test_candidates(shared_thread),
+            },
+        );
+        assert!(first.ok, "{first:?}");
+        let (_, second) = manager.dispatch_sync(
+            Some(context_b.clone()),
+            Req::Register {
+                worker_id: "current-worker-b".into(),
+                token: "token-current-b".into(),
+                cwd: project_b.display().to_string(),
+                candidates: test_candidates(shared_thread),
+            },
+        );
+        assert!(second.ok, "{second:?}");
+
+        let current = manager
+            .resolve_route_by_native_thread(shared_thread)
+            .unwrap();
+        assert_eq!(
+            current.project_scope.as_str(),
+            context_b.project_scope.as_str()
+        );
+        assert_eq!(current.app_scope_id.as_str(), "current-app-b");
+        assert_eq!(current.agent_id.as_str(), "current-worker-b");
+        assert_eq!(current.binding_id.as_str(), "binding-current-worker-b");
+
+        let (_, rejected) = manager.dispatch_sync(
+            Some(context_b.clone()),
+            Req::Register {
+                worker_id: "rejected-worker".into(),
+                token: "token-rejected-worker".into(),
+                cwd: project_a.display().to_string(),
+                candidates: test_candidates(shared_thread),
+            },
+        );
+        assert!(!rejected.ok, "{rejected:?}");
+        assert_eq!(
+            manager
+                .resolve_route_by_native_thread(shared_thread)
+                .unwrap(),
+            current
+        );
+
+        let host_state = server.state.lock().unwrap();
+        server.rewrite_journal_locked(&host_state).unwrap();
+        drop(host_state);
+        assert!(
+            !std::fs::read(&host_journal).unwrap().is_empty(),
+            "the host current transition must be durable in the host journal"
+        );
+        drop(manager);
+
+        let replayed_host = Arc::new(Server {
+            config: crate::config::Config::default(),
+            root: root.clone(),
+            storage_root: root.clone(),
+            journal_path: host_journal.clone(),
+            state: Mutex::new(replay(&root).unwrap()),
+            journal: Mutex::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&host_journal)
+                    .unwrap(),
+            ),
+            appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
+            appserver_notification_sink: Arc::new(|_, _, _, _| {
+                Ok(serde_json::json!({"accepted": true}))
+            }),
+            appserver_thread_status: Arc::new(|_, thread_id| {
+                Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+            }),
+            appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            mailbox_notify: Notify::new(),
+        });
+        let replayed_manager = ProjectRuntimeManager::new(replayed_host, &host_paths).unwrap();
+        assert_eq!(
+            replayed_manager
+                .resolve_route_by_native_thread(shared_thread)
+                .unwrap(),
+            current
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(project_a).unwrap();
+        std::fs::remove_dir_all(project_b).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_thread_reregistration_retires_the_previous_current_route() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "same-thread-worker";
+        let token = "token-same-thread-worker";
+        let context = context_with_app(&root, app);
+        let shared_thread = "thread-same-worker-old";
+
+        let (_, first) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(shared_thread),
+            },
+        );
+        assert!(first.ok, "{first:?}");
+
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let (_, rebound) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-same-worker-new"),
+            },
+        );
+        assert!(rebound.ok, "{rebound:?}");
+
+        let old = manager
+            .resolve_route_by_native_thread(shared_thread)
+            .unwrap_err();
+        assert!(old.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{old}");
+        let current = manager
+            .resolve_route_by_native_thread("thread-same-worker-new")
+            .unwrap();
+        assert_eq!(current.agent_id.as_str(), worker_id);
+        assert_eq!(current.native_thread_id.as_str(), "thread-same-worker-new");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_current_route_commit_failure_is_explicit() {
+        let (server, root, host_journal) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let context = context_with_app(&root, app);
+        let worker_id = "host-route-failure-worker";
+        let token = "token-host-route-failure-worker";
+
+        let (_, registered) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-host-route-failure-old"),
+            },
+        );
+        assert!(registered.ok, "{registered:?}");
+        let binding = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                &NativeThreadId::new("thread-host-route-failure-old").unwrap(),
+            )
+            .cloned()
+            .unwrap();
+        inject_current_thread_route_journal_fault();
+
+        let (_, response) = manager.dispatch_sync(
+            Some(context_with_runtime(
+                &root,
+                app,
+                &RuntimeIdentity {
+                    agent_id: binding.agent_id.clone(),
+                    runtime_id: binding.runtime_id.clone(),
+                    appserver_id: binding.app_scope_id.clone(),
+                    endpoint_generation: binding.endpoint_generation,
+                    binding_id: binding.binding_id.clone(),
+                    native_thread_id: binding.native_thread_id.clone(),
+                },
+            )),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-host-route-failure-new"),
+            },
+        );
+        assert!(!response.ok, "{response:?}");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:")),
+            "{response:?}"
+        );
+        assert!(!std::fs::read(&host_journal).unwrap().is_empty());
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_current_thread_route(
+                    &NativeThreadId::new("thread-host-route-failure-old").unwrap()
+                )
+                .map(|binding| binding.native_thread_id.as_ref().unwrap().as_str()),
+            Some("thread-host-route-failure-old")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_external_register_is_durable_and_replayed_in_its_runtime() {
+        let (server, root, host_journal) = test_server();
+        let external_root = root.with_file_name(format!(
+            "{}-manager-external",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(external_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let context = context_with_app(&external_root, "manager-external-app");
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        let (runtime, response) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "manager-external-worker".into(),
+                token: "token-manager-external-worker".into(),
+                cwd: external_root.display().to_string(),
+                candidates: test_candidates("thread-manager-external-worker"),
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        assert!(!Arc::ptr_eq(&runtime, &server));
+        assert_eq!(manager.runtimes().len(), 2);
+        assert!(host_journal.as_path().exists());
+        assert!(
+            !std::fs::read(&host_journal).unwrap().is_empty(),
+            "external registration must persist its host current-thread transition"
+        );
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(route_records.len(), 1);
+        assert_eq!(route_records[0].app_scope_id, "manager-external-app");
+        assert!(
+            !std::fs::read(external_root.join(".agent-collab/server/journal.jsonl"))
+                .unwrap()
+                .is_empty()
+        );
+
+        let (_, status) = manager.dispatch_sync(Some(context.clone()), Req::StatusAll);
+        assert!(status.ok, "{status:?}");
+        assert_eq!(status.data["workers"][0]["id"], "manager-external-worker");
+
+        drop(manager);
+        let replayed_manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let (_, replayed_status) = replayed_manager.dispatch_sync(Some(context), Req::StatusAll);
+        assert!(replayed_status.ok, "{replayed_status:?}");
+        assert_eq!(
+            replayed_status.data["workers"][0]["id"],
+            "manager-external-worker"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_routes_project_queries_mutations_and_poll_to_one_runtime() {
+        let (server, root, _) = test_server();
+        let project_root = root.with_file_name(format!(
+            "{}-route-aware",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app_scope = "route-aware-app";
+        let sender_id = "route-aware-sender";
+        let recipient_id = "route-aware-recipient";
+        let sender_token = "token-route-aware-sender";
+        let recipient_token = "token-route-aware-recipient";
+        let context = context_with_app(&project_root, app_scope);
+
+        let (sender_runtime, sender_registration) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: sender_id.into(),
+                token: sender_token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-route-aware-sender"),
+            },
+        );
+        assert!(sender_registration.ok, "{sender_registration:?}");
+        let (recipient_runtime, recipient_registration) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: recipient_id.into(),
+                token: recipient_token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-route-aware-recipient"),
+            },
+        );
+        assert!(recipient_registration.ok, "{recipient_registration:?}");
+        assert!(Arc::ptr_eq(&sender_runtime, &recipient_runtime));
+        assert!(!Arc::ptr_eq(&sender_runtime, &manager.host));
+
+        let sender_identity =
+            runtime_for_registered(&sender_runtime, &project_root, sender_id, app_scope);
+        let recipient_identity =
+            runtime_for_registered(&recipient_runtime, &project_root, recipient_id, app_scope);
+        let sender_context = context_with_runtime(&project_root, app_scope, &sender_identity);
+        let recipient_context = context_with_runtime(&project_root, app_scope, &recipient_identity);
+
+        let (_, status) = manager.dispatch_sync(Some(sender_context.clone()), Req::StatusAll);
+        assert!(status.ok, "{status:?}");
+        assert_eq!(status.data["summary"]["workers"], 2);
+        let worker_ids = status.data["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|worker| worker["id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            worker_ids,
+            std::collections::BTreeSet::from([sender_id, recipient_id])
+        );
+
+        let (_, workers) = manager.dispatch_sync(Some(recipient_context.clone()), Req::Workers);
+        assert!(workers.ok, "{workers:?}");
+        assert_eq!(workers.data["count"], 2);
+
+        let (_, task_registration) = manager.dispatch_sync(
+            Some(sender_context.clone()),
+            Req::TaskRegister {
+                worker_id: sender_id.into(),
+                token: sender_token.into(),
+                task_id: "route-aware-task".into(),
+                owner: None,
+                feature_id: Some("route-aware-feature".into()),
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                next_step: Some("verify route-aware task".into()),
+                goal_prompt: None,
+            },
+        );
+        assert!(task_registration.ok, "{task_registration:?}");
+        let (_, task_status) = manager.dispatch_sync(
+            Some(recipient_context.clone()),
+            Req::TaskStatus {
+                task_id: Some("route-aware-task".into()),
+            },
+        );
+        assert!(task_status.ok, "{task_status:?}");
+        assert_eq!(task_status.data["id"], "route-aware-task");
+        assert_eq!(task_status.data["owner"], sender_id);
+
+        let (_, subscription) = manager.dispatch_sync(
+            Some(recipient_context.clone()),
+            notification_subscribe_request(recipient_id, recipient_token),
+        );
+        assert!(subscription.ok, "{subscription:?}");
+        assert_eq!(subscription.data["subscription"]["worker_id"], recipient_id);
+
+        let scope = GlobalState::canonical_project_scope(&project_root).unwrap();
+        let sender_command = CommandEnvelope::new(
+            CommandId::new("route-aware-send-command").unwrap(),
+            OperationId::new("route-aware-send-operation").unwrap(),
+            sender_identity.binding_id.clone(),
+            sender_identity.endpoint_generation,
+            RouteScope {
+                app_scope_id: AppServerId::new(app_scope).unwrap(),
+                project_scope_id: scope,
+            },
+            None,
+            None,
+            None,
+            None,
+        );
+        let (_, sent) = manager.dispatch_sync(
+            Some(sender_context),
+            Req::Send {
+                from: sender_id.into(),
+                worker_id: Some(sender_id.into()),
+                token: Some(sender_token.into()),
+                command: Some(sender_command),
+                to: recipient_id.into(),
+                mtype: "notify".into(),
+                subject: Some("route-aware message".into()),
+                body: "message must stay in the selected runtime".into(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        );
+        assert!(sent.ok, "{sent:?}");
+        let sent_id = sent.data["msg_id"].as_str().unwrap().to_owned();
+
+        let (_, polled) = dispatch_wire_routed(
+            manager,
+            Some(recipient_context),
+            Req::Poll {
+                worker_id: recipient_id.into(),
+                token: recipient_token.into(),
+                timeout_ms: 0,
+            },
+        )
+        .await;
+        assert!(polled.ok, "{polled:?}");
+        assert_eq!(polled.data["count"], 1);
+        assert_eq!(polled.data["messages"][0]["id"], sent_id);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_isolates_app_and_project_routes_and_replays_each_runtime() {
+        let (server, host_root, host_journal) = test_server();
+        let project_a = host_root.with_file_name(format!(
+            "{}-project-a",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        let project_b = host_root.with_file_name(format!(
+            "{}-project-b",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        for project_root in [&project_a, &project_b] {
+            std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        }
+        let canonical_project_a = project_a.canonicalize().unwrap();
+        let canonical_project_b = project_b.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        let register = |context: ProjectContext, worker_id: &str, token: &str| {
+            let (runtime, response) = manager.dispatch_sync(
+                Some(context),
+                Req::Register {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    cwd: if worker_id == "app-a-worker" || worker_id == "app-b-worker" {
+                        project_a.display().to_string()
+                    } else {
+                        project_b.display().to_string()
+                    },
+                    candidates: test_candidates(&format!("thread-{worker_id}")),
+                },
+            );
+            assert!(response.ok, "registration {worker_id}: {response:?}");
+            runtime
+        };
+
+        // The same project may have two appserver routes. Each route gets a
+        // distinct reducer/storage namespace, so app A cannot observe app B.
+        let app_a_context = context_with_app(&project_a, "app/a");
+        let app_b_context = context_with_app(&project_a, "app:a");
+        let project_b_context = context_with_app(&project_b, "app/a");
+        let app_a_runtime = register(app_a_context.clone(), "app-a-worker", "token-app-a");
+        let app_b_runtime = register(app_b_context.clone(), "app-b-worker", "token-app-b");
+        let project_b_runtime = register(
+            project_b_context.clone(),
+            "project-b-worker",
+            "token-project-b",
+        );
+        assert!(!Arc::ptr_eq(&app_a_runtime, &app_b_runtime));
+        assert!(!Arc::ptr_eq(&app_a_runtime, &project_b_runtime));
+        assert!(!Arc::ptr_eq(&app_b_runtime, &project_b_runtime));
+        assert_ne!(app_a_runtime.storage_root, app_b_runtime.storage_root);
+        assert_ne!(app_a_runtime.storage_root, project_b_runtime.storage_root);
+        assert_ne!(app_b_runtime.storage_root, project_b_runtime.storage_root);
+        assert!(
+            app_a_runtime.storage_root.starts_with(&canonical_project_a),
+            "app-a storage {} is outside project {}",
+            app_a_runtime.storage_root.display(),
+            canonical_project_a.display()
+        );
+        assert!(app_b_runtime
+            .storage_root
+            .starts_with(canonical_project_a.join(".agent-collab/server/runtimes")));
+        assert!(project_b_runtime
+            .storage_root
+            .starts_with(&canonical_project_b));
+
+        let app_a_identity =
+            runtime_for_registered(&app_a_runtime, &project_a, "app-a-worker", "app/a");
+        let app_b_identity =
+            runtime_for_registered(&app_b_runtime, &project_a, "app-b-worker", "app:a");
+        let project_b_identity =
+            runtime_for_registered(&project_b_runtime, &project_b, "project-b-worker", "app/a");
+        let app_a_runtime_context = context_with_runtime(&project_a, "app/a", &app_a_identity);
+        let app_b_runtime_context = context_with_runtime(&project_a, "app:a", &app_b_identity);
+        let project_b_runtime_context =
+            context_with_runtime(&project_b, "app/a", &project_b_identity);
+
+        for (context, runtime, worker_id) in [
+            (
+                app_a_runtime_context.clone(),
+                app_a_runtime.clone(),
+                "app-a-worker",
+            ),
+            (
+                app_b_runtime_context.clone(),
+                app_b_runtime.clone(),
+                "app-b-worker",
+            ),
+            (
+                project_b_runtime_context.clone(),
+                project_b_runtime.clone(),
+                "project-b-worker",
+            ),
+        ] {
+            let (selected, response) = manager.dispatch_sync(Some(context), Req::StatusAll);
+            assert!(response.ok, "{worker_id} status: {response:?}");
+            assert!(Arc::ptr_eq(&selected, &runtime));
+            assert_eq!(response.data["summary"]["workers"], 1);
+            assert_eq!(response.data["workers"][0]["id"], worker_id);
+        }
+
+        let mut subscription_ids = Vec::new();
+        for (context, worker_id, token) in [
+            (app_a_runtime_context.clone(), "app-a-worker", "token-app-a"),
+            (app_b_runtime_context.clone(), "app-b-worker", "token-app-b"),
+            (
+                project_b_runtime_context.clone(),
+                "project-b-worker",
+                "token-project-b",
+            ),
+        ] {
+            let (_, response) = manager.dispatch_sync(
+                Some(context.clone()),
+                Req::TaskRegister {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    task_id: "same-task-id".into(),
+                    owner: None,
+                    feature_id: Some(format!("feature-{worker_id}")),
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: Some(format!("verify {worker_id}")),
+                    goal_prompt: None,
+                },
+            );
+            assert!(response.ok, "{worker_id} task register: {response:?}");
+            let (_, response) = manager.dispatch_sync(
+                Some(context.clone()),
+                notification_subscribe_request(worker_id, token),
+            );
+            assert!(response.ok, "{worker_id} subscription: {response:?}");
+            subscription_ids.push(
+                response.data["subscription"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+
+        let send_command =
+            |identity: &RuntimeIdentity, project_root: &Path, app_scope: &str, suffix: &str| {
+                CommandEnvelope::new(
+                    CommandId::new(format!("route-isolation-command-{suffix}")).unwrap(),
+                    OperationId::new(format!("route-isolation-operation-{suffix}")).unwrap(),
+                    identity.binding_id.clone(),
+                    identity.endpoint_generation,
+                    RouteScope {
+                        app_scope_id: AppServerId::new(app_scope).unwrap(),
+                        project_scope_id: GlobalState::canonical_project_scope(project_root)
+                            .unwrap(),
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+        let sends = [
+            (
+                app_a_runtime_context.clone(),
+                app_a_identity.clone(),
+                "app-a-worker",
+                "token-app-a",
+                &project_a,
+                "app/a",
+                "app-a",
+            ),
+            (
+                app_b_runtime_context.clone(),
+                app_b_identity.clone(),
+                "app-b-worker",
+                "token-app-b",
+                &project_a,
+                "app:a",
+                "app-b",
+            ),
+            (
+                project_b_runtime_context.clone(),
+                project_b_identity.clone(),
+                "project-b-worker",
+                "token-project-b",
+                &project_b,
+                "app/a",
+                "project-b",
+            ),
+        ];
+        let mut message_ids = Vec::new();
+        for (context, identity, worker_id, token, project_root, app_scope, suffix) in sends {
+            let (_, response) = manager.dispatch_sync(
+                Some(context.clone()),
+                Req::Send {
+                    from: worker_id.into(),
+                    worker_id: Some(worker_id.into()),
+                    token: Some(token.into()),
+                    command: Some(send_command(&identity, project_root, app_scope, suffix)),
+                    to: worker_id.into(),
+                    mtype: "notify".into(),
+                    subject: Some(format!("isolated message {suffix}")),
+                    body: format!("body for {suffix}"),
+                    in_reply_to: None,
+                    delivery: "immediate".into(),
+                },
+            );
+            assert!(response.ok, "{worker_id} send: {response:?}");
+            message_ids.push(response.data["msg_id"].as_str().unwrap().to_owned());
+        }
+
+        // A recipient in another app/project route is absent from this
+        // reducer, so cross-route send cannot silently fall back to a resident
+        // or neighboring runtime.
+        let cross_route_send = manager.dispatch_sync(
+            Some(app_a_runtime_context.clone()),
+            Req::Send {
+                from: "app-a-worker".into(),
+                worker_id: Some("app-a-worker".into()),
+                token: Some("token-app-a".into()),
+                command: Some(send_command(
+                    &app_a_identity,
+                    &project_a,
+                    "app/a",
+                    "cross-route",
+                )),
+                to: "app-b-worker".into(),
+                mtype: "notify".into(),
+                subject: Some("must stay isolated".into()),
+                body: "cross-route delivery must fail closed".into(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        );
+        assert!(!cross_route_send.1.ok, "{:?}", cross_route_send.1);
+        assert!(cross_route_send
+            .1
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("recipient app-b-worker not registered")));
+
+        for (context, worker_id, token, message_id, suffix) in [
+            (
+                app_a_runtime_context.clone(),
+                "app-a-worker",
+                "token-app-a",
+                message_ids[0].clone(),
+                "app-a",
+            ),
+            (
+                app_b_runtime_context.clone(),
+                "app-b-worker",
+                "token-app-b",
+                message_ids[1].clone(),
+                "app-b",
+            ),
+            (
+                project_b_runtime_context.clone(),
+                "project-b-worker",
+                "token-project-b",
+                message_ids[2].clone(),
+                "project-b",
+            ),
+        ] {
+            let (_, polled) = dispatch_wire_routed(
+                manager.clone(),
+                Some(context.clone()),
+                Req::Poll {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    timeout_ms: 0,
+                },
+            )
+            .await;
+            assert!(polled.ok, "{suffix} poll: {polled:?}");
+            assert_eq!(polled.data["count"], 1);
+            assert_eq!(polled.data["messages"][0]["id"], message_id);
+            assert!(polled.data["messages"][0]["body"]
+                .as_str()
+                .unwrap()
+                .contains(suffix));
+        }
+
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(route_records.len(), 3);
+        let route_keys = route_records
+            .iter()
+            .map(|record| (record.app_scope_id.clone(), record.project_scope.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(route_keys.len(), 3);
+        assert!(
+            !std::fs::read(&host_journal).unwrap().is_empty(),
+            "successful routed registrations must persist host current-thread transitions"
+        );
+        assert!(std::fs::read(&app_a_runtime.journal_path)
+            .unwrap()
+            .windows(b"app-a-worker".len())
+            .any(|window| window == b"app-a-worker"));
+        assert!(std::fs::read(&app_b_runtime.journal_path)
+            .unwrap()
+            .windows(b"app-b-worker".len())
+            .any(|window| window == b"app-b-worker"));
+        assert!(std::fs::read(&project_b_runtime.journal_path)
+            .unwrap()
+            .windows(b"project-b-worker".len())
+            .any(|window| window == b"project-b-worker"));
+
+        drop(app_a_runtime);
+        drop(app_b_runtime);
+        drop(project_b_runtime);
+        drop(manager);
+        let replayed_manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        assert_eq!(replayed_manager.runtimes().len(), 4);
+
+        for (context, worker_id, message_id, subscription_id, suffix) in [
+            (
+                app_a_runtime_context,
+                "app-a-worker",
+                message_ids[0].clone(),
+                subscription_ids[0].clone(),
+                "app-a",
+            ),
+            (
+                app_b_runtime_context,
+                "app-b-worker",
+                message_ids[1].clone(),
+                subscription_ids[1].clone(),
+                "app-b",
+            ),
+            (
+                project_b_runtime_context,
+                "project-b-worker",
+                message_ids[2].clone(),
+                subscription_ids[2].clone(),
+                "project-b",
+            ),
+        ] {
+            let (selected, status) =
+                replayed_manager.dispatch_sync(Some(context.clone()), Req::StatusAll);
+            assert!(status.ok, "{suffix} replay status: {status:?}");
+            assert_eq!(status.data["summary"]["workers"], 1);
+            assert_eq!(status.data["workers"][0]["id"], worker_id);
+            assert_eq!(status.data["summary"]["tasks"], 1);
+            assert!(Arc::ptr_eq(
+                &selected,
+                &replayed_manager.select_runtime(&context).unwrap()
+            ));
+
+            let (_, task_status) = replayed_manager.dispatch_sync(
+                Some(context.clone()),
+                Req::TaskStatus {
+                    task_id: Some("same-task-id".into()),
+                },
+            );
+            assert!(task_status.ok, "{suffix} replay task: {task_status:?}");
+            assert_eq!(task_status.data["owner"], worker_id);
+
+            let (_, message_status) = replayed_manager
+                .dispatch_sync(Some(context.clone()), Req::MsgStatus { msg_id: message_id });
+            assert!(
+                message_status.ok,
+                "{suffix} replay message: {message_status:?}"
+            );
+            assert_eq!(message_status.data["to"], worker_id);
+
+            let (_, notification_status) = replayed_manager.dispatch_sync(
+                Some(context),
+                Req::NotificationStatus {
+                    worker_id: worker_id.into(),
+                    token: match worker_id {
+                        "app-a-worker" => "token-app-a",
+                        "app-b-worker" => "token-app-b",
+                        "project-b-worker" => "token-project-b",
+                        _ => unreachable!(),
+                    }
+                    .into(),
+                },
+            );
+            assert!(
+                notification_status.ok,
+                "{suffix} replay subscription: {notification_status:?}"
+            );
+            assert!(notification_status.data["subscriptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|subscription| subscription["id"] == subscription_id));
+        }
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_a).unwrap();
+        std::fs::remove_dir_all(project_b).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_cross_project_appserver_masters_send_and_reject_forged_source_evidence() {
+        let (mut server, host_root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        with_appserver_notification_sink(&mut server, |_, _, _, _| Ok(json!({"queued": true})));
+
+        let project_a = host_root.with_file_name(format!(
+            "{}-cross-project-a",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        let project_b = host_root.with_file_name(format!(
+            "{}-cross-project-b",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        for project_root in [&project_a, &project_b] {
+            std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        }
+        let project_a = project_a.canonicalize().unwrap();
+        let project_b = project_b.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+
+        let app_a = "cross-project-app-a";
+        let app_b = "cross-project-app-b";
+        let master_a = "cross-project-master-a";
+        let master_b = "cross-project-master-b";
+        let token_a = "token-cross-project-master-a";
+        let token_b = "token-cross-project-master-b";
+        let appserver_candidate = |thread_id: &str| AppServerCandidate {
+            endpoint: format!("unix:///tmp/collab-{thread_id}.sock"),
+            namespace: "codex_app".into(),
+            thread_id: thread_id.into(),
+        };
+
+        let (source_runtime, source_registration) = manager.dispatch_sync(
+            Some(context_with_app(&project_a, app_a)),
+            Req::Register {
+                worker_id: master_a.into(),
+                token: token_a.into(),
+                cwd: project_a.display().to_string(),
+                candidates: Some(TransportCandidates {
+                    appserver: Some(appserver_candidate("thread-a")),
+                }),
+            },
+        );
+        assert!(source_registration.ok, "{source_registration:?}");
+        assert_eq!(
+            source_registration.data["transport_selected"]["kind"],
+            "appserver"
+        );
+        assert_eq!(
+            source_registration.data["transport_selected"]["thread_id"],
+            "thread-a"
+        );
+
+        let (target_runtime, target_registration) = manager.dispatch_sync(
+            Some(context_with_app(&project_b, app_b)),
+            Req::Register {
+                worker_id: master_b.into(),
+                token: token_b.into(),
+                cwd: project_b.display().to_string(),
+                candidates: Some(TransportCandidates {
+                    appserver: Some(appserver_candidate("thread-b")),
+                }),
+            },
+        );
+        assert!(target_registration.ok, "{target_registration:?}");
+        assert_eq!(
+            target_registration.data["transport_selected"]["kind"],
+            "appserver"
+        );
+        assert_eq!(
+            target_registration.data["transport_selected"]["thread_id"],
+            "thread-b"
+        );
+
+        let source_identity = runtime_for_registered(&source_runtime, &project_a, master_a, app_a);
+        let target_identity = runtime_for_registered(&target_runtime, &project_b, master_b, app_b);
+        let source_context = context_with_runtime(&project_a, app_a, &source_identity);
+        let target_context = context_with_runtime(&project_b, app_b, &target_identity);
+
+        for (context, worker_id, token, approval) in [
+            (
+                source_context.clone(),
+                master_a,
+                token_a,
+                "user approved cross-project-master-a as collab master",
+            ),
+            (
+                target_context.clone(),
+                master_b,
+                token_b,
+                "user approved cross-project-master-b as collab master",
+            ),
+        ] {
+            let (_, promoted) = manager.dispatch_sync(
+                Some(context),
+                Req::MasterPromote {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    approval: approval.into(),
+                },
+            );
+            assert!(promoted.ok, "{worker_id} promotion: {promoted:?}");
+        }
+
+        let (assigned_by, approval, assigned_ms) = {
+            let state = source_runtime.state.lock().unwrap();
+            (
+                state.master_assigned_by.clone().unwrap(),
+                state.master_approval.clone(),
+                state.master_assigned_ms.unwrap(),
+            )
+        };
+        let cross_project_send = |assigned_ms: i64| Req::CrossProjectSend {
+            from: master_a.into(),
+            from_project: project_a.display().to_string(),
+            source_master_assigned_by: assigned_by.clone(),
+            source_master_approval: approval.clone(),
+            source_master_assigned_ms: assigned_ms,
+            to: master_b.into(),
+            subject: "cross-project appserver route".into(),
+            body: "durable cross-project message".into(),
+            in_reply_to: None,
+        };
+
+        let (selected, delivered) = manager.dispatch_sync(
+            Some(target_context.clone()),
+            cross_project_send(assigned_ms),
+        );
+        assert!(Arc::ptr_eq(&selected, &target_runtime));
+        assert!(delivered.ok, "{delivered:?}");
+        assert_eq!(delivered.data["durable"], true);
+        assert_eq!(delivered.data["cross_project"], true);
+        assert_eq!(delivered.data["source_master"], master_a);
+        assert_eq!(delivered.data["target_master"], master_b);
+        let message_id = delivered.data["msg_id"].as_str().unwrap().to_owned();
+        assert!(target_runtime
+            .state
+            .lock()
+            .unwrap()
+            .msgs
+            .contains_key(&message_id));
+
+        let (_, received) = dispatch_wire_routed(
+            manager.clone(),
+            Some(target_context.clone()),
+            Req::Poll {
+                worker_id: master_b.into(),
+                token: token_b.into(),
+                timeout_ms: 0,
+            },
+        )
+        .await;
+        assert!(received.ok, "{received:?}");
+        assert_eq!(received.data["count"], 1);
+        assert_eq!(received.data["messages"][0]["id"], message_id);
+        assert_eq!(received.data["messages"][0]["to"], master_b);
+
+        let target_journal_before = std::fs::read(&target_runtime.journal_path).unwrap();
+        let target_message_count = target_runtime.state.lock().unwrap().msgs.len();
+        let (_, forged) =
+            manager.dispatch_sync(Some(target_context), cross_project_send(assigned_ms + 1));
+        assert!(!forged.ok, "{forged:?}");
+        assert!(forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("CROSS_PROJECT_SOURCE_REJECTED:")));
+        assert!(!forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("PROJECT_ROUTE_NOT_READY")));
+        assert_eq!(
+            std::fs::read(&target_runtime.journal_path).unwrap(),
+            target_journal_before
+        );
+        assert_eq!(
+            target_runtime.state.lock().unwrap().msgs.len(),
+            target_message_count
+        );
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_a).unwrap();
+        std::fs::remove_dir_all(project_b).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nonresident_route_replays_full_query_mutation_and_notification_surface() {
+        let (server, host_root, host_journal) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-full-replay-surface",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app_scope = "full-replay-app";
+        let sender_id = "full-replay-sender";
+        let recipient_id = "full-replay-recipient";
+        let sender_token = "token-full-replay-sender";
+        let recipient_token = "token-full-replay-recipient";
+
+        let (sender_runtime, sender_registration) = manager.dispatch_sync(
+            Some(context_with_app(&project_root, app_scope)),
+            Req::Register {
+                worker_id: sender_id.into(),
+                token: sender_token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-full-replay-sender"),
+            },
+        );
+        assert!(sender_registration.ok, "{sender_registration:?}");
+        let (recipient_runtime, recipient_registration) = manager.dispatch_sync(
+            Some(context_with_app(&project_root, app_scope)),
+            Req::Register {
+                worker_id: recipient_id.into(),
+                token: recipient_token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-full-replay-recipient"),
+            },
+        );
+        assert!(recipient_registration.ok, "{recipient_registration:?}");
+        assert!(Arc::ptr_eq(&sender_runtime, &recipient_runtime));
+        assert!(!Arc::ptr_eq(&sender_runtime, &server));
+
+        let sender_identity =
+            runtime_for_registered(&sender_runtime, &project_root, sender_id, app_scope);
+        let recipient_identity =
+            runtime_for_registered(&recipient_runtime, &project_root, recipient_id, app_scope);
+        let sender_context = context_with_runtime(&project_root, app_scope, &sender_identity);
+        let recipient_context = context_with_runtime(&project_root, app_scope, &recipient_identity);
+
+        let (_, task_registration) = manager.dispatch_sync(
+            Some(sender_context.clone()),
+            Req::TaskRegister {
+                worker_id: sender_id.into(),
+                token: sender_token.into(),
+                task_id: "full-replay-task".into(),
+                owner: None,
+                feature_id: Some("full-replay-feature".into()),
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                next_step: Some("continue after runtime replay".into()),
+                goal_prompt: None,
+            },
+        );
+        assert!(task_registration.ok, "{task_registration:?}");
+        let (_, subscription) = manager.dispatch_sync(
+            Some(recipient_context.clone()),
+            notification_subscribe_request(recipient_id, recipient_token),
+        );
+        assert!(subscription.ok, "{subscription:?}");
+
+        let send_command = |suffix: &str| {
+            CommandEnvelope::new(
+                CommandId::new(format!("full-replay-command-{suffix}")).unwrap(),
+                OperationId::new(format!("full-replay-operation-{suffix}")).unwrap(),
+                sender_identity.binding_id.clone(),
+                sender_identity.endpoint_generation,
+                RouteScope {
+                    app_scope_id: AppServerId::new(app_scope).unwrap(),
+                    project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+                },
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let (_, first_send) = manager.dispatch_sync(
+            Some(sender_context.clone()),
+            Req::Send {
+                from: sender_id.into(),
+                worker_id: Some(sender_id.into()),
+                token: Some(sender_token.into()),
+                command: Some(send_command("before-replay")),
+                to: recipient_id.into(),
+                mtype: "notify".into(),
+                subject: Some("full replay before".into()),
+                body: "message retained across runtime replay".into(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        );
+        assert!(first_send.ok, "{first_send:?}");
+        let first_message_id = first_send.data["msg_id"].as_str().unwrap().to_owned();
+        let runtime_storage = sender_runtime.storage_root.clone();
+        let runtime_journal = sender_runtime.journal_path.clone();
+        let mailbox_path = runtime_storage
+            .join(".agent-collab/mailbox")
+            .join(format!("recipient-{recipient_id}.jsonl"));
+        assert!(mailbox_path.exists());
+        assert!(std::fs::read(&mailbox_path)
+            .unwrap()
+            .windows(first_message_id.len())
+            .any(|window| window == first_message_id.as_bytes()));
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_journal_before_replay = std::fs::read(&route_journal).unwrap();
+        assert!(
+            !std::fs::read(&host_journal).unwrap().is_empty(),
+            "successful routed registrations must persist host current-thread transitions"
+        );
+
+        drop(sender_runtime);
+        drop(recipient_runtime);
+        drop(manager);
+        let replayed_manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let replayed_runtime = replayed_manager.select_runtime(&sender_context).unwrap();
+        assert_eq!(replayed_runtime.storage_root, runtime_storage);
+        assert_eq!(replayed_runtime.journal_path, runtime_journal);
+        assert!(!Arc::ptr_eq(&replayed_runtime, &replayed_manager.host));
+
+        let (selected, status) =
+            replayed_manager.dispatch_sync(Some(sender_context.clone()), Req::StatusAll);
+        assert!(status.ok, "{status:?}");
+        assert!(Arc::ptr_eq(&selected, &replayed_runtime));
+        assert_eq!(status.data["summary"]["workers"], 2);
+        let (_, workers) =
+            replayed_manager.dispatch_sync(Some(recipient_context.clone()), Req::Workers);
+        assert!(workers.ok, "{workers:?}");
+        assert_eq!(workers.data["count"], 2);
+        let (_, task_status) = replayed_manager.dispatch_sync(
+            Some(sender_context.clone()),
+            Req::TaskStatus {
+                task_id: Some("full-replay-task".into()),
+            },
+        );
+        assert!(task_status.ok, "{task_status:?}");
+        assert_eq!(task_status.data["owner"], sender_id);
+        let (_, notification_status) = replayed_manager.dispatch_sync(
+            Some(recipient_context.clone()),
+            Req::NotificationStatus {
+                worker_id: recipient_id.into(),
+                token: recipient_token.into(),
+            },
+        );
+        assert!(notification_status.ok, "{notification_status:?}");
+        assert!(!notification_status.data["subscriptions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let (_, second_send) = replayed_manager.dispatch_sync(
+            Some(sender_context),
+            Req::Send {
+                from: sender_id.into(),
+                worker_id: Some(sender_id.into()),
+                token: Some(sender_token.into()),
+                command: Some(send_command("after-replay")),
+                to: recipient_id.into(),
+                mtype: "notify".into(),
+                subject: Some("full replay after".into()),
+                body: "message sent by the replayed runtime".into(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        );
+        assert!(second_send.ok, "{second_send:?}");
+        let second_message_id = second_send.data["msg_id"].as_str().unwrap().to_owned();
+        let (_, polled) = dispatch_wire_routed(
+            replayed_manager.clone(),
+            Some(recipient_context),
+            Req::Poll {
+                worker_id: recipient_id.into(),
+                token: recipient_token.into(),
+                timeout_ms: 0,
+            },
+        )
+        .await;
+        assert!(polled.ok, "{polled:?}");
+        let polled_ids = polled.data["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(polled_ids.contains(first_message_id.as_str()));
+        assert!(polled_ids.contains(second_message_id.as_str()));
+        assert_eq!(
+            std::fs::read(&route_journal).unwrap(),
+            route_journal_before_replay
+        );
+        assert!(std::fs::read(&mailbox_path)
+            .unwrap()
+            .windows(second_message_id.len())
+            .any(|window| window == second_message_id.as_bytes()));
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_app_scope_storage_encoding_is_collision_free_and_replayed() {
+        let (server, host_root, _) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-encoded-scope",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let canonical_project_root = project_root.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        let register = |context: ProjectContext, worker_id: &str, token: &str| {
+            let (runtime, response) = manager.dispatch_sync(
+                Some(context),
+                Req::Register {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    cwd: project_root.display().to_string(),
+                    candidates: test_candidates(&format!("thread-{worker_id}")),
+                },
+            );
+            assert!(response.ok, "registration {worker_id}: {response:?}");
+            runtime
+        };
+        // A first route owns the project's legacy storage root. The two
+        // colliding sanitized forms are deliberately later routes, where the
+        // encoded namespace is selected.
+        let seed_runtime = register(
+            context_with_app(&project_root, "seed"),
+            "encoded-seed-worker",
+            "token-encoded-seed",
+        );
+        let slash_runtime = register(
+            context_with_app(&project_root, "app/a"),
+            "encoded-slash-worker",
+            "token-encoded-slash",
+        );
+        let colon_runtime = register(
+            context_with_app(&project_root, "app:a"),
+            "encoded-colon-worker",
+            "token-encoded-colon",
+        );
+        let slash_storage = app_scope_storage_path(&canonical_project_root, "app/a");
+        let colon_storage = app_scope_storage_path(&canonical_project_root, "app:a");
+        assert_ne!(slash_storage, colon_storage);
+        assert_eq!(slash_runtime.storage_root, slash_storage);
+        assert_eq!(colon_runtime.storage_root, colon_storage);
+        assert!(!Arc::ptr_eq(&slash_runtime, &colon_runtime));
+
+        let routes = [
+            (
+                context_with_runtime(
+                    &project_root,
+                    "seed",
+                    &runtime_for_registered(
+                        &seed_runtime,
+                        &project_root,
+                        "encoded-seed-worker",
+                        "seed",
+                    ),
+                ),
+                "encoded-seed-worker",
+                "token-encoded-seed",
+            ),
+            (
+                context_with_runtime(
+                    &project_root,
+                    "app/a",
+                    &runtime_for_registered(
+                        &slash_runtime,
+                        &project_root,
+                        "encoded-slash-worker",
+                        "app/a",
+                    ),
+                ),
+                "encoded-slash-worker",
+                "token-encoded-slash",
+            ),
+            (
+                context_with_runtime(
+                    &project_root,
+                    "app:a",
+                    &runtime_for_registered(
+                        &colon_runtime,
+                        &project_root,
+                        "encoded-colon-worker",
+                        "app:a",
+                    ),
+                ),
+                "encoded-colon-worker",
+                "token-encoded-colon",
+            ),
+        ];
+        for (context, worker_id, token) in &routes {
+            let (_selected, status) = manager.dispatch_sync(Some(context.clone()), Req::StatusAll);
+            assert!(status.ok, "{worker_id} status: {status:?}");
+            assert_eq!(status.data["summary"]["workers"], 1);
+            assert_eq!(status.data["workers"][0]["id"], *worker_id);
+            let (_, task) = manager.dispatch_sync(
+                Some(context.clone()),
+                Req::TaskRegister {
+                    worker_id: (*worker_id).into(),
+                    token: (*token).into(),
+                    task_id: "encoded-scope-task".into(),
+                    owner: None,
+                    feature_id: Some(format!("feature-{worker_id}")),
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: Some("verify encoded scope replay".into()),
+                    goal_prompt: None,
+                },
+            );
+            assert!(task.ok, "{worker_id} task: {task:?}");
+        }
+
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(route_records.len(), 3);
+        let storage_roots = route_records
+            .iter()
+            .map(|record| record.storage_root.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(storage_roots.len(), 3);
+
+        drop(seed_runtime);
+        drop(slash_runtime);
+        drop(colon_runtime);
+        drop(manager);
+        let replayed_manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        for (context, worker_id, _token) in routes {
+            let (selected, status) =
+                replayed_manager.dispatch_sync(Some(context.clone()), Req::StatusAll);
+            assert!(status.ok, "{worker_id} replay status: {status:?}");
+            assert_eq!(status.data["summary"]["workers"], 1);
+            assert_eq!(status.data["workers"][0]["id"], worker_id);
+            assert_eq!(status.data["summary"]["tasks"], 1);
+            assert!(Arc::ptr_eq(
+                &selected,
+                &replayed_manager.select_runtime(&context).unwrap()
+            ));
+        }
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prospective_storage_collision_rejects_register_before_route_publish() {
+        let (server, host_root, _) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-prospective-collision",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let canonical_project_root = project_root.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let legacy_app_scope = "v1-3-616263";
+        let candidate_app_scope = "abc";
+        let legacy_storage_root = canonical_project_root
+            .join(".agent-collab/server/runtimes")
+            .join(legacy_app_scope);
+        assert_eq!(
+            legacy_storage_root,
+            app_scope_storage_path(&canonical_project_root, candidate_app_scope)
+        );
+        let project_scope = GlobalState::canonical_project_scope(&canonical_project_root).unwrap();
+        let legacy_record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: legacy_app_scope.into(),
+            project_scope: project_scope.as_str().into(),
+            canonical_root: project_scope.as_str().into(),
+            storage_root: legacy_storage_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        let legacy_line = serde_json::to_string(&legacy_record).unwrap();
+        std::fs::write(&route_journal, format!("{legacy_line}\n")).unwrap();
+        let before_collision = std::fs::read(&route_journal).unwrap();
+
+        // The existing record uses the old lossy path convention. Startup
+        // must replay it, while a new encoded route must be rejected before
+        // the host route journal is replaced.
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let (_runtime, collision_response) = manager.dispatch_sync(
+            Some(context_with_app(&project_root, candidate_app_scope)),
+            Req::Register {
+                worker_id: "prospective-collision-worker".into(),
+                token: "token-prospective-collision".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-prospective-collision-worker"),
+            },
+        );
+        assert!(!collision_response.ok, "{collision_response:?}");
+        assert!(
+            collision_response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("runtime storage root")),
+            "{collision_response:?}"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_collision);
+
+        // The rejected prospective route must not poison the old route that
+        // was successfully replayed from the durable journal.
+        let legacy_context = context_with_app(&project_root, legacy_app_scope);
+        let (_runtime, registration_response) = manager.dispatch_sync(
+            Some(legacy_context.clone()),
+            Req::Register {
+                worker_id: "legacy-replayed-worker".into(),
+                token: "token-legacy-replayed".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-legacy-replayed-worker"),
+            },
+        );
+        assert!(registration_response.ok, "{registration_response:?}");
+        let (_runtime, status_response) =
+            manager.dispatch_sync(Some(legacy_context), Req::StatusAll);
+        assert!(status_response.ok, "{status_response:?}");
+        assert_eq!(
+            status_response.data["workers"][0]["id"],
+            "legacy-replayed-worker"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_collision);
+
+        drop(manager);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resident_storage_collision_rejects_register_before_route_publish() {
+        let (mut server, host_root, _) = test_server();
+        let resident_storage_root = host_root.with_file_name(format!(
+            "{}-resident-storage",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        let resident_server_dir = resident_storage_root.join(".agent-collab/server");
+        std::fs::create_dir_all(&resident_server_dir).unwrap();
+        let resident_storage_root = resident_storage_root.canonicalize().unwrap();
+        let resident_journal_path = resident_server_dir.join("journal.jsonl");
+        let resident_journal = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&resident_journal_path)
+            .unwrap();
+        {
+            let host = Arc::get_mut(&mut server).unwrap();
+            host.storage_root = resident_storage_root.clone();
+            host.journal_path = resident_journal_path;
+            host.journal = Mutex::new(resident_journal);
+        }
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        std::fs::write(&route_journal, b"").unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        // First establish the resident route. Its reducer owns the storage
+        // root and the canonical route is durably published.
+        let resident_context = context_with_app(&host_root, "resident-app");
+        let (_runtime, resident_response) = manager.dispatch_sync(
+            Some(resident_context.clone()),
+            Req::Register {
+                worker_id: "resident-worker".into(),
+                token: "token-resident-worker".into(),
+                cwd: host_root.display().to_string(),
+                candidates: test_candidates("thread-resident-worker"),
+            },
+        );
+        assert!(resident_response.ok, "{resident_response:?}");
+        let after_resident = std::fs::read(&route_journal).unwrap();
+        let resident_records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(resident_records.len(), 1);
+        assert_eq!(resident_records[0].app_scope_id, "resident-app");
+        assert_eq!(
+            resident_records[0].canonical_root,
+            host_root.canonicalize().unwrap().to_string_lossy()
+        );
+
+        // A second project whose storage root equals the resident reducer's
+        // root must fail before a route record or second reducer is created.
+        let collision_context = context_with_app(&resident_storage_root, "collision-app");
+        let (_runtime, collision_response) = manager.dispatch_sync(
+            Some(collision_context.clone()),
+            Req::Register {
+                worker_id: "resident-collision-worker".into(),
+                token: "token-resident-collision".into(),
+                cwd: resident_storage_root.display().to_string(),
+                candidates: test_candidates("thread-resident-collision-worker"),
+            },
+        );
+        assert!(!collision_response.ok, "{collision_response:?}");
+        assert!(
+            collision_response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("owned by resident host")),
+            "{collision_response:?}"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), after_resident);
+        assert!(!manager
+            .routes
+            .lock()
+            .unwrap()
+            .contains_key(&ProjectRuntimeManager::route_key(&collision_context)));
+
+        // The resident route remains the only owner and is still queryable.
+        let (_runtime, status_response) =
+            manager.dispatch_sync(Some(resident_context), Req::StatusAll);
+        assert!(status_response.ok, "{status_response:?}");
+        assert_eq!(status_response.data["workers"][0]["id"], "resident-worker");
+        assert_eq!(std::fs::read(&route_journal).unwrap(), after_resident);
+
+        drop(manager);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(resident_storage_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prospective_nested_project_collision_rejects_register_before_route_publish() {
+        let (server, host_root, _) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-nested-collision",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let canonical_project_root = project_root.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        let (seed_runtime, seed_response) = manager.dispatch_sync(
+            Some(context_with_app(&project_root, "seed")),
+            Req::Register {
+                worker_id: "nested-seed-worker".into(),
+                token: "token-nested-seed".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-nested-seed-worker"),
+            },
+        );
+        assert!(seed_response.ok, "{seed_response:?}");
+        let (app_runtime, app_response) = manager.dispatch_sync(
+            Some(context_with_app(&project_root, "app/a")),
+            Req::Register {
+                worker_id: "nested-app-worker".into(),
+                token: "token-nested-app".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-nested-app-worker"),
+            },
+        );
+        assert!(app_response.ok, "{app_response:?}");
+        assert!(!Arc::ptr_eq(&seed_runtime, &app_runtime));
+
+        let nested_root = app_scope_storage_path(&canonical_project_root, "app/a");
+        assert_eq!(app_runtime.root, canonical_project_root);
+        assert_eq!(app_runtime.storage_root, nested_root);
+        std::fs::create_dir_all(nested_root.join(".agent-collab/server")).unwrap();
+
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let before_collision = std::fs::read(&route_journal).unwrap();
+        let (_runtime, collision_response) = manager.dispatch_sync(
+            Some(context_with_app(&nested_root, "nested-app")),
+            Req::Register {
+                worker_id: "nested-collision-worker".into(),
+                token: "token-nested-collision".into(),
+                cwd: nested_root.display().to_string(),
+                candidates: test_candidates("thread-nested-collision-worker"),
+            },
+        );
+        assert!(!collision_response.ok, "{collision_response:?}");
+        assert!(
+            collision_response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("runtime storage root")),
+            "{collision_response:?}"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_collision);
+
+        // The existing app/a route remains routable after the prospective
+        // nested project was rejected, and its route journal entry is intact.
+        let (_runtime, status_response) = manager.dispatch_sync(
+            Some(context_with_app(&project_root, "app/a")),
+            Req::StatusAll,
+        );
+        assert!(status_response.ok, "{status_response:?}");
+        assert_eq!(
+            status_response.data["workers"][0]["id"],
+            "nested-app-worker"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_collision);
+
+        drop(manager);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_runtime_initialization_is_one_arc_under_concurrent_dispatch() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let context = context_with_app(&root, "pending-concurrent");
+        let key = ProjectRuntimeManager::route_key(&context);
+        let canonical_root = root.canonicalize().unwrap();
+        manager.install_pending_route(&key, &canonical_root, &canonical_root);
+
+        let first_manager = manager.clone();
+        let first_context = context.clone();
+        let second_manager = manager.clone();
+        let second_context = context.clone();
+        let (first, second) = tokio::join!(
+            tokio::task::spawn_blocking(move || first_manager.select_runtime(&first_context)),
+            tokio::task::spawn_blocking(move || second_manager.select_runtime(&second_context)),
+        );
+        let first = first.unwrap().unwrap();
+        let second = second.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        let installed = manager
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .and_then(|route| route.runtime.clone())
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &installed));
+        assert_eq!(manager.runtimes().len(), 2);
+        assert_eq!(
+            first.journal_path,
+            canonical_root.join(".agent-collab/server/journal.jsonl")
+        );
+
+        drop(first);
+        drop(second);
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_registry_admits_only_exact_cli_host_operator_shutdown() {
+        let (server, root, journal_path) = test_server();
+        let resident_context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+
+        let response = dispatch_wire(
+            server.clone(),
+            Some(resident_context.clone()),
+            Req::Shutdown { operator: true },
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        {
+            let state = server.state.lock().unwrap();
+            assert!(state.workers.is_empty());
+            assert!(state.global.projects.is_empty());
+            assert_eq!(state.revision, 0);
+            assert_eq!(state.sequence, 0);
+        }
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+
+        let wrong_root = root.with_file_name(format!(
+            "{}-wrong-root",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&wrong_root).unwrap();
+        let wrong_root_error = validate_request_context(
+            &server,
+            &Req::Shutdown { operator: true },
+            Some(&context_with_app(
+                &wrong_root,
+                crate::identity::CLI_APP_SERVER_ID,
+            )),
+        )
+        .unwrap_err();
+        assert!(wrong_root_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
+
+        let wrong_app_error = validate_request_context(
+            &server,
+            &Req::Shutdown { operator: true },
+            Some(&context_with_app(&root, "other-app")),
+        )
+        .unwrap_err();
+        assert!(wrong_app_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
+
+        let non_operator_error = validate_request_context(
+            &server,
+            &Req::Shutdown { operator: false },
+            Some(&resident_context),
+        )
+        .unwrap_err();
+        assert!(non_operator_error.starts_with("PROJECT_SCOPE_UNKNOWN:"));
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(wrong_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_project_register_is_admitted_and_replayed_from_host_journal() {
+        let (server, root, _) = test_server();
+        let external_root = root.with_file_name(format!(
+            "{}-external",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(external_root.join(".agent-collab").join("server")).unwrap();
+        let context = context_with_app(&external_root, "routecodex-app");
+
+        let response = dispatch_wire(
+            server.clone(),
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "routecodex-master".into(),
+                token: "token-routecodex-master".into(),
+                cwd: external_root.display().to_string(),
+                candidates: test_candidates("thread-routecodex-master"),
+            },
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+
+        let project_scope = GlobalState::canonical_project_scope(&external_root).unwrap();
+        let state = server.state.lock().unwrap();
+        let project = state.global.lookup_project(&project_scope).unwrap();
+        assert!(project
+            .lookup_registration(&AppServerId::new("routecodex-app").unwrap())
+            .is_some());
+        assert!(project
+            .lookup_binding(&BindingId::new("binding-routecodex-master").unwrap())
+            .is_some());
+        drop(state);
+
+        // A route that is not owned by this resident reducer may still be
+        // re-registered through the same explicit route. Reconnect remains
+        // idempotent and does not create a second registration or binding.
+        let runtime = runtime_for_registered(
+            &server,
+            &external_root,
+            "routecodex-master",
+            "routecodex-app",
+        );
+        let repeated = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(
+                &external_root,
+                "routecodex-app",
+                &runtime,
+            )),
+            Req::Register {
+                worker_id: "routecodex-master".into(),
+                token: "token-routecodex-master".into(),
+                cwd: external_root.display().to_string(),
+                candidates: test_candidates("thread-routecodex-master"),
+            },
+        )
+        .await;
+        assert!(repeated.ok, "{repeated:?}");
+        assert_eq!(repeated.data["replayed"], true);
+
+        // The host daemon's single journal is the durable source for a route
+        // registration. A fresh replay must recover the same external route.
+        let replayed = replay(&root).unwrap();
+        let replayed_project = replayed.global.lookup_project(&project_scope).unwrap();
+        assert!(replayed_project
+            .lookup_registration(&AppServerId::new("routecodex-app").unwrap())
+            .is_some());
+        assert!(matches!(
+            HostRouteRegistry::for_server(&server)
+                .unwrap()
+                .lookup(&context),
+            Some(HostRouteOwner::RegisteredNotReady { .. })
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninitialized_external_project_cannot_create_host_route() {
+        let (server, root, journal_path) = test_server();
+        let external_root = root.with_file_name(format!(
+            "{}-uninitialized",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&external_root).unwrap();
+        let context = context_with_app(&external_root, "uninitialized-app");
+        let response = dispatch_wire(
+            server.clone(),
+            Some(context),
+            Req::Register {
+                worker_id: "uninitialized-worker".into(),
+                token: "token-uninitialized-worker".into(),
+                cwd: external_root.display().to_string(),
+                candidates: test_candidates("thread-uninitialized-worker"),
+            },
+        )
+        .await;
+        assert!(!response.ok, "{response:?}");
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("PROJECT_SCOPE_UNKNOWN:")));
+        assert!(server.state.lock().unwrap().global.projects.is_empty());
+        assert!(std::fs::read(&journal_path).unwrap().is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_project_register_requires_exact_registered_root() {
+        let (server, root, journal_path) = test_server();
+        let external_root = root.with_file_name(format!(
+            "{}-exact-root",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let child_root = external_root.join("child");
+        std::fs::create_dir_all(external_root.join(".agent-collab").join("server")).unwrap();
+        std::fs::create_dir_all(child_root.join(".agent-collab").join("server")).unwrap();
+        let context = context_with_app(&external_root, "exact-root-app");
+        let response = dispatch_wire(
+            server.clone(),
+            Some(context),
+            Req::Register {
+                worker_id: "wrong-cwd-worker".into(),
+                token: "token-wrong-cwd-worker".into(),
+                cwd: child_root.display().to_string(),
+                candidates: test_candidates("thread-wrong-cwd-worker"),
+            },
+        )
+        .await;
+        assert!(!response.ok, "{response:?}");
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("PROJECT_SCOPE_MISMATCH:")));
+        assert!(server.state.lock().unwrap().global.projects.is_empty());
+        assert!(std::fs::read(&journal_path).unwrap().is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[test]
+    fn registered_project_without_migrated_reducer_is_explicitly_not_ready() {
+        let (server, root, _) = test_server();
+        let other_root = root.with_file_name(format!(
+            "{}-other",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other_root).unwrap();
+        register_known_project(&server, &other_root);
+        let error = validate_request_context(&server, &Req::StatusAll, Some(&context(&other_root)))
+            .unwrap_err();
+        assert!(
+            error.starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[test]
+    fn context_scope_spoof_is_rejected_before_route_lookup() {
+        let (server, root, _) = test_server();
+        let other_root = root.with_file_name(format!(
+            "{}-other",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other_root).unwrap();
+        let mut spoofed = context(&other_root);
+        spoofed.project_scope = context(&root).project_scope;
+        let error = validate_request_context(&server, &Req::StatusAll, Some(&spoofed)).unwrap_err();
+        assert!(error.starts_with("PROJECT_CONTEXT_INVALID:"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn not_ready_route_does_not_mutate_state_or_primary_journal() {
+        let (server, root, journal_path) = test_server();
+        let other_root = root.with_file_name(format!(
+            "{}-other",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other_root).unwrap();
+        register_known_project(&server, &other_root);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_revision = server.state.lock().unwrap().revision;
+        let response =
+            dispatch_wire(server.clone(), Some(context(&other_root)), Req::StatusAll).await;
+        assert!(!response.ok);
+        assert!(response
+            .error
+            .unwrap()
+            .starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:"));
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(server.state.lock().unwrap().revision, before_revision);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_project_wire_request_is_rejected_without_resident_mutation() {
+        let (server, root, journal_path) = test_server();
+        let project_context = context_with_app(&root, "app-wire");
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(project_context.clone()),
+            Req::Register {
+                worker_id: "target-master".into(),
+                token: "token-target-master".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-target-master"),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let promoted = handle_master_promote(
+            &server,
+            "target-master".into(),
+            "token-target-master".into(),
+            "user approved target-master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+
+        let mailbox_dir = root.join(".agent-collab/mailbox");
+        std::fs::create_dir_all(&mailbox_dir).unwrap();
+        let mailbox_path = mailbox_dir.join("recipient-target-master.jsonl");
+        std::fs::write(&mailbox_path, b"sentinel\n").unwrap();
+        let mailbox_snapshot = |directory: &Path| {
+            let mut entries = std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    (
+                        path.file_name().unwrap().to_string_lossy().into_owned(),
+                        std::fs::read(path).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            entries
+        };
+        let before_mailbox = mailbox_snapshot(&mailbox_dir);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let message_snapshot = |messages: &std::collections::HashMap<String, Message>| {
+            let mut entries = messages
+                .iter()
+                .map(|(id, message)| (id.clone(), serde_json::to_string(message).unwrap()))
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            entries
+        };
+        let before_state = {
+            let state = server.state.lock().unwrap();
+            (
+                state.revision,
+                state.sequence,
+                message_snapshot(&state.msgs),
+                state.delivery_modes.clone(),
+                state.wake_bindings.clone(),
+                state.global.clone(),
+            )
+        };
+
+        let response = dispatch_wire(
+            server.clone(),
+            Some(project_context),
+            Req::CrossProjectSend {
+                from: "source-master".into(),
+                from_project: "/foreign/project".into(),
+                source_master_assigned_by: "source-master".into(),
+                source_master_approval: Some("user approved source-master".into()),
+                source_master_assigned_ms: 1,
+                to: "target-master".into(),
+                subject: "cross-project".into(),
+                body: "must remain outside resident reducer".into(),
+                in_reply_to: None,
+            },
+        )
+        .await;
+        assert!(!response.ok, "{response:?}");
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:")));
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.revision, before_state.0);
+        assert_eq!(state.sequence, before_state.1);
+        assert_eq!(message_snapshot(&state.msgs), before_state.2);
+        assert_eq!(state.delivery_modes, before_state.3);
+        assert_eq!(state.wake_bindings, before_state.4);
+        assert_eq!(state.global, before_state.5);
+        drop(state);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(mailbox_snapshot(&mailbox_dir), before_mailbox);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_registry_builds_do_not_duplicate_or_replace_route_owner() {
+        let (server, root, _) = test_server();
+        register_known_project(&server, &root);
+        let other_root = root.with_file_name(format!(
+            "{}-other",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other_root).unwrap();
+        register_known_project(&server, &other_root);
+        let first = HostRouteRegistry::for_server(&server).unwrap();
+        let second = HostRouteRegistry::for_server(&server).unwrap();
+        assert_eq!(first.routes, second.routes);
+        assert!(matches!(
+            first.lookup(&context(&root)),
+            Some(HostRouteOwner::ResidentProject { .. })
+        ));
+        assert!(matches!(
+            first.lookup(&context(&other_root)),
+            Some(HostRouteOwner::RegisteredNotReady { .. })
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other_root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_requires_its_registered_app_scope() {
+        let (server, root, _) = test_server();
+        register_known_project_with_app(&server, &root, "app-a");
+
+        assert!(validate_request_context(
+            &server,
+            &Req::StatusAll,
+            Some(&context_with_app(&root, "app-a"))
+        )
+        .is_ok());
+        let unknown_app = validate_request_context(
+            &server,
+            &Req::StatusAll,
+            Some(&context_with_app(&root, "app-b")),
+        )
+        .unwrap_err();
+        assert!(
+            unknown_app.starts_with("PROJECT_SCOPE_UNKNOWN:"),
+            "{unknown_app}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_project_secondary_app_is_not_ready_without_a_second_reducer() {
+        let (server, root, _) = test_server();
+        register_known_project_with_app(&server, &root, "app-a");
+        assert!(
+            handle_register_with_app_scope(
+                &server,
+                "resident".into(),
+                "token-resident".into(),
+                root.display().to_string(),
+                Some(AppServerId::new("app-a").unwrap()),
+                test_candidates("thread-resident"),
+            )
+            .ok
+        );
+        register_known_project_with_app(&server, &root, "app-b");
+        let registry = HostRouteRegistry::for_server(&server).unwrap();
+
+        assert!(matches!(
+            registry.lookup(&context_with_app(&root, "app-a")),
+            Some(HostRouteOwner::ResidentProject { .. })
+        ));
+        assert!(matches!(
+            registry.lookup(&context_with_app(&root, "app-b")),
+            Some(HostRouteOwner::RegisteredNotReady { .. })
+        ));
+        let error = validate_request_context(
+            &server,
+            &Req::StatusAll,
+            Some(&context_with_app(&root, "app-b")),
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_multiple_app_routes_fail_replay_before_opening_a_second_reducer() {
+        let (server, root, journal_path) = test_server();
+        register_known_project_with_app(&server, &root, "app-a");
+        assert!(
+            handle_register_with_app_scope(
+                &server,
+                "legacy-resident".into(),
+                "token-legacy-resident".into(),
+                root.display().to_string(),
+                Some(AppServerId::new("app-a").unwrap()),
+                test_candidates("thread-legacy-resident"),
+            )
+            .ok
+        );
+        register_known_project_with_app(&server, &root, "app-b");
+
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        std::fs::write(&route_journal, b"").unwrap();
+        let before_route_journal = std::fs::read(&route_journal).unwrap();
+        let before_resident_journal = std::fs::read(&journal_path).unwrap();
+
+        let error = match ProjectRuntimeManager::new(server.clone(), &host_paths) {
+            Ok(_) => panic!("legacy pending route must not open a second reducer"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("HOST_ROUTE_REPLAY_FAILED:"), "{error}");
+        assert!(error.contains("resident host"), "{error}");
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
+        assert_eq!(
+            std::fs::read(&journal_path).unwrap(),
+            before_resident_journal
+        );
+        assert!(!root.join(".agent-collab/server/runtimes").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_route_root_is_ignored_without_rewriting_route_journal() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let missing_root = root.join("missing-project");
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: "appserver-cli".into(),
+            project_scope: missing_root.to_string_lossy().into_owned(),
+            canonical_root: missing_root.to_string_lossy().into_owned(),
+            storage_root: missing_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        let contents = format!("{}\n", serde_json::to_string(&record).unwrap());
+        std::fs::write(&route_journal, &contents).unwrap();
+
+        let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+
+        assert!(manager.routes.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&route_journal).unwrap(), contents);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uninitialized_route_root_is_ignored_without_rewriting_route_journal() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let uninitialized_root = root.join("uninitialized-project");
+        std::fs::create_dir_all(&uninitialized_root).unwrap();
+        let canonical_root = uninitialized_root.canonicalize().unwrap();
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: "appserver-cli".into(),
+            project_scope: canonical_root.to_string_lossy().into_owned(),
+            canonical_root: canonical_root.to_string_lossy().into_owned(),
+            storage_root: canonical_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        let contents = format!("{}\n", serde_json::to_string(&record).unwrap());
+        std::fs::write(&route_journal, &contents).unwrap();
+
+        let manager = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+
+        assert!(manager.routes.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&route_journal).unwrap(), contents);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_owner_identity_resolves_symlinked_parent_with_missing_tail() {
+        use std::os::unix::fs::symlink;
+
+        let (_server, root, _) = test_server();
+        let real_parent = root.join("real-parent");
+        let alias_parent = root.join("alias-parent");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &alias_parent).unwrap();
+
+        let real_future_path = real_parent.join("future").join("journal");
+        let aliased_future_path = alias_parent.join("future").join("journal");
+        assert_eq!(
+            storage_owner_path(&real_future_path).unwrap(),
+            storage_owner_path(&aliased_future_path).unwrap()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_owner_identity_resolves_dangling_symlink_with_missing_target() {
+        use std::os::unix::fs::symlink;
+
+        let (_server, root, _) = test_server();
+        let missing_parent = root.join("missing-parent");
+        let dangling_parent = root.join("dangling-parent");
+        symlink(&missing_parent, &dangling_parent).unwrap();
+
+        let target_path = missing_parent.join("future").join("journal");
+        let dangling_path = dangling_parent.join("future").join("journal");
+        assert_eq!(
+            storage_owner_path(&target_path).unwrap(),
+            storage_owner_path(&dangling_path).unwrap()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_storage_symlink_escape_rejects_register_before_journal_write() {
+        use std::os::unix::fs::symlink;
+
+        let (server, host_root, _) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-runtime-escape",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server/runtimes")).unwrap();
+        let external_root = host_root.with_file_name(format!(
+            "{}-runtime-escape-target",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&external_root).unwrap();
+        let canonical_project_root = project_root.canonicalize().unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let seed_context = context_with_app(&project_root, "runtime-seed");
+        let (_, seed_response) = manager.dispatch_sync(
+            Some(seed_context),
+            Req::Register {
+                worker_id: "runtime-seed-worker".into(),
+                token: "token-runtime-seed-worker".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-runtime-seed-worker"),
+            },
+        );
+        assert!(seed_response.ok, "{seed_response:?}");
+
+        let escape_context = context_with_app(&project_root, "runtime-escape");
+        let escape_storage_root = app_scope_storage_path(&canonical_project_root, "runtime-escape");
+        symlink(&external_root, &escape_storage_root).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let before_route_journal = std::fs::read(&route_journal).unwrap();
+        let (_, escape_response) = manager.dispatch_sync(
+            Some(escape_context.clone()),
+            Req::Register {
+                worker_id: "runtime-escape-worker".into(),
+                token: "token-runtime-escape-worker".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-runtime-escape-worker"),
+            },
+        );
+
+        assert!(!escape_response.ok, "{escape_response:?}");
+        assert!(
+            escape_response.error.as_deref().is_some_and(|error| {
+                error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")
+                    && error.contains("resolves outside project runtime storage")
+            }),
+            "{escape_response:?}"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
+        assert!(!manager
+            .routes
+            .lock()
+            .unwrap()
+            .contains_key(&ProjectRuntimeManager::route_key(&escape_context)));
+        assert!(!external_root
+            .join(".agent-collab/server/journal.jsonl")
+            .exists());
+
+        let build_error = match manager.build_runtime(&project_root, &escape_storage_root) {
+            Ok(_) => panic!("runtime storage symlink escape must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            build_error.starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:")
+                && build_error.contains("resolves outside project runtime storage"),
+            "{build_error}"
+        );
+        assert!(!external_root
+            .join(".agent-collab/server/journal.jsonl")
+            .exists());
+
+        drop(manager);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_storage_symlink_escape_rejects_replay_before_runtime_creation() {
+        use std::os::unix::fs::symlink;
+
+        let (server, host_root, _) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-replay-runtime-escape",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server/runtimes")).unwrap();
+        let external_root = host_root.with_file_name(format!(
+            "{}-replay-runtime-escape-target",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&external_root).unwrap();
+        let canonical_project_root = project_root.canonicalize().unwrap();
+        let storage_root = app_scope_storage_path(&canonical_project_root, "replay-escape");
+        symlink(&external_root, &storage_root).unwrap();
+        let project_scope = GlobalState::canonical_project_scope(&canonical_project_root).unwrap();
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: "replay-escape".into(),
+            project_scope: project_scope.as_str().into(),
+            canonical_root: project_scope.as_str().into(),
+            storage_root: storage_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::write(
+            &route_journal,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+
+        let replay_error = match ProjectRuntimeManager::new(server, &host_paths) {
+            Ok(_) => panic!("runtime storage symlink escape must fail during replay"),
+            Err(error) => error,
+        };
+        assert!(
+            replay_error.starts_with("HOST_ROUTE_REPLAY_FAILED:")
+                && replay_error.contains("resolves outside project runtime storage"),
+            "{replay_error}"
+        );
+        assert!(!external_root
+            .join(".agent-collab/server/journal.jsonl")
+            .exists());
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_storage_owner_rejects_alias_route_before_journal_write() {
+        use std::os::unix::fs::symlink;
+
+        let (server, root, _) = test_server();
+        let runtimes = root.join(".agent-collab/server/runtimes");
+        let real_parent = runtimes.join("real-parent");
+        let alias_parent = runtimes.join("alias-parent");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &alias_parent).unwrap();
+
+        let real_storage_root = real_parent.join("future");
+        let aliased_storage_root = alias_parent.join("future");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        std::fs::write(&route_journal, b"").unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        manager.routes.lock().unwrap().insert(
+            ("existing-app".into(), "/existing-project".into()),
+            RuntimeRoute {
+                root: root.clone(),
+                storage_root: real_storage_root,
+                runtime: None,
+            },
+        );
+
+        let context = context_with_app(&root, "dangling-alias-app");
+        let before_route_journal = std::fs::read(&route_journal).unwrap();
+        let error = manager
+            .append_route_record(&context, &aliased_storage_root)
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")
+                && error.contains("already owned by route (existing-app, /existing-project)"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&route_journal).unwrap(),
+            before_route_journal,
+            "an alias collision must be rejected before route journal publication"
+        );
+        assert!(!manager.routes.lock().unwrap().contains_key(&(
+            "dangling-alias-app".into(),
+            GlobalState::canonical_project_scope(&root)
+                .unwrap()
+                .as_str()
+                .into(),
+        )));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn storage_owner_permission_error_rejects_register_without_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut server, root, _) = test_server();
+        let blocked_parent = root.with_file_name(format!(
+            "{}-blocked-owner",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&blocked_parent).unwrap();
+        let blocked_storage = blocked_parent.join("future-storage");
+        {
+            let host = Arc::get_mut(&mut server).unwrap();
+            host.storage_root = blocked_storage;
+        }
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let external_root = root.with_file_name(format!(
+            "{}-permission-external",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(external_root.join(".agent-collab/server")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        std::fs::write(&route_journal, b"").unwrap();
+        let before_route_journal = std::fs::read(&route_journal).unwrap();
+
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let context = context_with_app(&external_root, "permission-external-app");
+        let (_runtime, response) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "permission-external-worker".into(),
+                token: "token-permission-external".into(),
+                cwd: external_root.display().to_string(),
+                candidates: test_candidates("thread-permission-external-worker"),
+            },
+        );
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(!response.ok, "{response:?}");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")
+                    && error.contains("Permission denied")),
+            "{response:?}"
+        );
+        assert_eq!(std::fs::read(&route_journal).unwrap(), before_route_journal);
+        assert!(!manager
+            .routes
+            .lock()
+            .unwrap()
+            .contains_key(&ProjectRuntimeManager::route_key(&context)));
+        assert!(!external_root
+            .join(".agent-collab/server/journal.jsonl")
+            .exists());
+
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(external_root).unwrap();
+        std::fs::remove_dir_all(blocked_parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_register_uses_the_explicit_context_app_scope() {
+        let (server, root, journal_path) = test_server();
+        let project_context = context_with_app(&root, "app-wire");
+        let response = dispatch_wire(
+            server.clone(),
+            Some(project_context),
+            Req::Register {
+                worker_id: "wire-worker".into(),
+                token: "token-wire-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-wire-worker"),
+            },
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let grant = {
+            let mut state = server.state.lock().unwrap();
+            let project = state.global.lookup_project(&project_scope).unwrap();
+            let binding = project
+                .lookup_binding(&BindingId::new("binding-wire-worker").unwrap())
+                .unwrap();
+            let grant = crate::server::global_state::MasterGrant::new(
+                project_scope.clone(),
+                AppServerId::new("app-wire").unwrap(),
+                AgentId::new("wire-worker").unwrap(),
+                "route-scoped",
+                "operator",
+                "approved",
+                binding.binding_id.clone(),
+                binding.endpoint_generation,
+                now_ms(),
+            )
+            .unwrap();
+            state.global.grant_master(grant.clone()).unwrap();
+            grant
+        };
+        let runtime = runtime_for_registered(&server, &root, "wire-worker", "app-wire");
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_revision = server.state.lock().unwrap().revision;
+        let repeated = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, "app-wire", &runtime)),
+            Req::Register {
+                worker_id: "wire-worker".into(),
+                token: "token-wire-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-wire-worker"),
+            },
+        )
+        .await;
+        assert!(repeated.ok, "{repeated:?}");
+        assert_eq!(repeated.data["replayed"], true);
+        let state = server.state.lock().unwrap();
+        let project = state.global.lookup_project(&project_scope).unwrap();
+        assert!(project
+            .lookup_registration(&AppServerId::new("app-wire").unwrap())
+            .is_some());
+        assert!(project
+            .lookup_registration(&AppServerId::new("tui-default").unwrap())
+            .is_none());
+        let binding = project
+            .lookup_binding(&BindingId::new("binding-wire-worker").unwrap())
+            .unwrap();
+        assert_eq!(binding.endpoint_generation, grant.endpoint_generation);
+        assert_eq!(
+            project.lookup_master_grant(&binding.binding_id),
+            Some(&grant)
+        );
+        assert_eq!(state.revision, before_revision);
+        drop(state);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delayed_second_app_register_is_rejected_without_resident_mutation() {
+        let (server, root, journal_path) = test_server();
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let first_context = context_with_app(&root, "app-a");
+        let second_context = context_with_app(&root, "app-b");
+        let first_request = Req::Register {
+            worker_id: "worker-a".into(),
+            token: "token-worker-a".into(),
+            cwd: root.display().to_string(),
+            candidates: test_candidates("thread-worker-a"),
+        };
+        let second_request = Req::Register {
+            worker_id: "worker-b".into(),
+            token: "token-worker-b".into(),
+            cwd: root.display().to_string(),
+            candidates: test_candidates("thread-worker-b"),
+        };
+
+        // Both wire requests can pass host admission before either handler
+        // reaches the typed commit boundary.
+        assert!(validate_request_context(&server, &first_request, Some(&first_context)).is_ok());
+        assert!(validate_request_context(&server, &second_request, Some(&second_context)).is_ok());
+
+        let first = server
+            .typed_register_envelope_for_scope(
+                "worker-a",
+                "token-worker-a",
+                &SelectedTransport {
+                    kind: TransportKind::AppServer,
+                    endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+                    namespace: Some("codex_tui".into()),
+                    thread_id: Some("thread-worker-a".into()),
+                    capabilities: vec!["send_message_to_thread".into()],
+                    self_check: "test appserver".into(),
+                },
+                project_scope.clone(),
+                &root.display().to_string(),
+                AppServerId::new("app-a").unwrap(),
+                false,
+            )
+            .unwrap();
+        server.typed_dispatch(first).unwrap();
+
+        let before_second_journal = std::fs::read(&journal_path).unwrap();
+        let before_second_state = {
+            let state = server.state.lock().unwrap();
+            (
+                state.revision,
+                state.sequence,
+                state.workers.clone(),
+                state.global.clone(),
+            )
+        };
+
+        // The delayed handler builds its envelope after app-a committed, so
+        // its expected revision is current and a revision-only CAS cannot
+        // detect the stale route admission.
+        let second = server
+            .typed_register_envelope_for_scope(
+                "worker-b",
+                "token-worker-b",
+                &SelectedTransport {
+                    kind: TransportKind::AppServer,
+                    endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+                    namespace: Some("codex_tui".into()),
+                    thread_id: Some("thread-worker-b".into()),
+                    capabilities: vec!["send_message_to_thread".into()],
+                    self_check: "test appserver".into(),
+                },
+                project_scope.clone(),
+                &root.display().to_string(),
+                AppServerId::new("app-b").unwrap(),
+                false,
+            )
+            .unwrap();
+        let error = server.typed_dispatch(second).unwrap_err().to_string();
+        assert!(
+            error.starts_with("invalid command: PROJECT_ROUTE_NOT_READY/UNSUPPORTED:"),
+            "{error}"
+        );
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.revision, before_second_state.0);
+        assert_eq!(state.sequence, before_second_state.1);
+        assert_eq!(state.workers, before_second_state.2);
+        assert_eq!(state.global, before_second_state.3);
+        drop(state);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_second_journal);
+        assert!(validate_request_context(&server, &Req::StatusAll, Some(&first_context)).is_ok());
+        assert!(!validate_request_context(&server, &Req::StatusAll, Some(&second_context)).is_ok());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn subagent_wire_registration_keeps_parent_app_scope() {
+        let (server, root, _) = test_server();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let context = ProjectContext::for_registered_root_with_app(&root, app.clone()).unwrap();
+        let parent = dispatch_wire(
+            server.clone(),
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "parent".into(),
+                token: "token-parent".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-parent"),
+            },
+        )
+        .await;
+        assert!(parent.ok, "{parent:?}");
+
+        let child = handle_register_with_app_scope(
+            &server,
+            "child".into(),
+            "token-child".into(),
+            root.display().to_string(),
+            Some(app.clone()),
+            test_candidates("thread-child"),
+        );
+        assert!(child.ok, "{child:?}");
+
+        let listed = dispatch_wire(
+            server.clone(),
+            Some(context),
+            Req::Subagent {
+                worker_id: "parent".into(),
+                token: "token-parent".into(),
+                command: crate::subagent::Action::List,
+                launch_env: Default::default(),
+            },
+        )
+        .await;
+        assert!(listed.ok, "{listed:?}");
+
+        let forged = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, "other-app")),
+            Req::Subagent {
+                worker_id: "parent".into(),
+                token: "token-parent".into(),
+                command: crate::subagent::Action::List,
+                launch_env: Default::default(),
+            },
+        )
+        .await;
+        assert!(!forged.ok, "{forged:?}");
+        assert!(forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("PROJECT_SCOPE_UNKNOWN:")));
+
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let state = server.state.lock().unwrap();
+        let project = state.global.lookup_project(&project_scope).unwrap();
+        assert!(project.lookup_registration(&app).is_some());
+        assert!(project
+            .lookup_registration(&AppServerId::new("tui-default").unwrap())
+            .is_none());
+        assert!(project
+            .runtime_bindings
+            .values()
+            .filter(|binding| binding.agent_id.as_str() == "child")
+            .all(|binding| binding.app_scope_id == app));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_notification_mutation_requires_runtime_and_read_status_stays_compatible() {
+        let (server, root, journal_path) = test_server();
+        let app = "app-wire";
+        let worker_id = "notification-worker";
+        let token = "token-notification-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+
+        let mailbox_dir = root.join(".agent-collab/mailbox");
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&mailbox_dir);
+        let missing_runtime = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            notification_subscribe_request(worker_id, token),
+        )
+        .await;
+        assert!(!missing_runtime.ok, "{missing_runtime:?}");
+        assert_eq!(
+            missing_runtime.error.as_deref(),
+            Some(
+                "PROJECT_CONTEXT_REQUIRED: project-scoped mutation requires typed runtime context"
+            )
+        );
+        let after = mutation_snapshot(&server);
+        assert_eq!(after, before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(directory_snapshot(&mailbox_dir), before_mailbox);
+
+        let runtime = runtime_for_registered(&server, &root, worker_id, app);
+        let accepted = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &runtime)),
+            notification_subscribe_request(worker_id, token),
+        )
+        .await;
+        assert!(accepted.ok, "{accepted:?}");
+        let subscription_id = accepted.data["subscription"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let status = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::NotificationStatus {
+                worker_id: worker_id.into(),
+                token: token.into(),
+            },
+        )
+        .await;
+        assert!(status.ok, "{status:?}");
+        assert!(status.data["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|subscription| subscription["id"] == subscription_id));
+
+        let cancelled = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &runtime)),
+            Req::NotificationUnsubscribe {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                subscription_id,
+            },
+        )
+        .await;
+        assert!(cancelled.ok, "{cancelled:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_notification_mutation_rejects_stale_ambiguous_unbound_and_wrong_routes() {
+        async fn register_worker(
+            app: &str,
+        ) -> (
+            Arc<Server>,
+            PathBuf,
+            PathBuf,
+            RuntimeIdentity,
+            String,
+            String,
+        ) {
+            let (server, root, journal_path) = test_server();
+            let worker_id = "route-worker".to_owned();
+            let token = "token-route-worker".to_owned();
+            let response = dispatch_wire(
+                server.clone(),
+                Some(context_with_app(&root, app)),
+                Req::Register {
+                    worker_id: worker_id.clone(),
+                    token: token.clone(),
+                    cwd: root.display().to_string(),
+                    candidates: test_candidates(&format!("thread-{worker_id}")),
+                },
+            )
+            .await;
+            assert!(response.ok, "{response:?}");
+            let runtime = runtime_for_registered(&server, &root, &worker_id, app);
+            (server, root, journal_path, runtime, worker_id, token)
+        }
+
+        {
+            let (server, root, journal_path, runtime, worker_id, token) =
+                register_worker("app-stale").await;
+            let mut stale = runtime.clone();
+            stale.endpoint_generation = runtime.endpoint_generation.saturating_sub(1);
+            let before = mutation_snapshot(&server);
+            let journal = std::fs::read(&journal_path).unwrap();
+            let mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+            let rejected = dispatch_wire(
+                server.clone(),
+                Some(context_with_runtime(&root, "app-stale", &stale)),
+                notification_subscribe_request(&worker_id, &token),
+            )
+            .await;
+            assert!(!rejected.ok, "{rejected:?}");
+            assert!(rejected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+            let after = mutation_snapshot(&server);
+            assert_eq!(after, before);
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+            assert_eq!(
+                directory_snapshot(&root.join(".agent-collab/mailbox")),
+                mailbox
+            );
+
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .projects
+                .values_mut()
+                .next()
+                .unwrap()
+                .runtime_bindings
+                .get_mut(runtime.binding_id.as_str())
+                .unwrap()
+                .endpoint_generation = 0;
+            let before = mutation_snapshot(&server);
+            let journal = std::fs::read(&journal_path).unwrap();
+            let mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+            let rejected = dispatch_wire(
+                server.clone(),
+                Some(context_with_runtime(&root, "app-stale", &runtime)),
+                notification_subscribe_request(&worker_id, &token),
+            )
+            .await;
+            assert!(!rejected.ok, "{rejected:?}");
+            assert!(rejected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+            let after = mutation_snapshot(&server);
+            assert_eq!(after, before);
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+            assert_eq!(
+                directory_snapshot(&root.join(".agent-collab/mailbox")),
+                mailbox
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        {
+            let (server, root, journal_path, runtime, worker_id, token) =
+                register_worker("app-ambiguous").await;
+            let scope = GlobalState::canonical_project_scope(&root).unwrap();
+            let app = AppServerId::new("app-ambiguous").unwrap();
+            let ambiguous = RuntimeBinding::new(
+                scope.clone(),
+                app,
+                AgentId::new(worker_id.clone()).unwrap(),
+                RuntimeId::new("runtime-ambiguous").unwrap(),
+                BindingId::new("binding-ambiguous").unwrap(),
+                runtime.endpoint_generation,
+                None,
+            )
+            .unwrap();
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .projects
+                .get_mut(scope.as_str())
+                .unwrap()
+                .runtime_bindings
+                .insert(ambiguous.binding_id.as_str().into(), ambiguous);
+            let before = mutation_snapshot(&server);
+            let journal = std::fs::read(&journal_path).unwrap();
+            let mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+            let rejected = dispatch_wire(
+                server.clone(),
+                Some(context_with_runtime(&root, "app-ambiguous", &runtime)),
+                notification_subscribe_request(&worker_id, &token),
+            )
+            .await;
+            assert!(!rejected.ok, "{rejected:?}");
+            assert!(rejected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+            let after = mutation_snapshot(&server);
+            assert_eq!(after, before);
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+            assert_eq!(
+                directory_snapshot(&root.join(".agent-collab/mailbox")),
+                mailbox
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        {
+            let (server, root, journal_path, runtime, worker_id, token) =
+                register_worker("app-unbound").await;
+            let scope = GlobalState::canonical_project_scope(&root).unwrap();
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .projects
+                .get_mut(scope.as_str())
+                .unwrap()
+                .runtime_bindings
+                .remove(runtime.binding_id.as_str());
+            let before = mutation_snapshot(&server);
+            let journal = std::fs::read(&journal_path).unwrap();
+            let mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+            let rejected = dispatch_wire(
+                server.clone(),
+                Some(context_with_runtime(&root, "app-unbound", &runtime)),
+                notification_subscribe_request(&worker_id, &token),
+            )
+            .await;
+            assert!(!rejected.ok, "{rejected:?}");
+            assert!(rejected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("PROJECT_ROUTE_NOT_READY/UNSUPPORTED:")));
+            let after = mutation_snapshot(&server);
+            assert_eq!(after, before);
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+            assert_eq!(
+                directory_snapshot(&root.join(".agent-collab/mailbox")),
+                mailbox
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        {
+            let (server, root, journal_path, runtime, worker_id, token) =
+                register_worker("app-route").await;
+            let mut wrong_app_runtime = runtime.clone();
+            wrong_app_runtime.appserver_id = AppServerId::new("app-other").unwrap();
+            let wrong_root = root.with_file_name(format!(
+                "{}-other",
+                root.file_name().unwrap().to_string_lossy()
+            ));
+            std::fs::create_dir_all(&wrong_root).unwrap();
+            let before = mutation_snapshot(&server);
+            let journal = std::fs::read(&journal_path).unwrap();
+            let mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+            let wrong_app = dispatch_wire(
+                server.clone(),
+                Some(context_with_runtime(&root, "app-other", &wrong_app_runtime)),
+                notification_subscribe_request(&worker_id, &token),
+            )
+            .await;
+            assert!(!wrong_app.ok, "{wrong_app:?}");
+            assert!(wrong_app
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("PROJECT_SCOPE_UNKNOWN:")));
+            let wrong_project = dispatch_wire(
+                server.clone(),
+                Some(context_with_runtime(&wrong_root, "app-route", &runtime)),
+                notification_subscribe_request(&worker_id, &token),
+            )
+            .await;
+            assert!(!wrong_project.ok, "{wrong_project:?}");
+            assert!(wrong_project
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("PROJECT_SCOPE_UNKNOWN:")));
+            let after = mutation_snapshot(&server);
+            assert_eq!(after, before);
+            assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
+            assert_eq!(
+                directory_snapshot(&root.join(".agent-collab/mailbox")),
+                mailbox
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            std::fs::remove_dir_all(wrong_root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_send_uses_context_app_scope_and_rejects_forged_scope() {
+        let (server, root, journal_path) = test_server();
+        let app = "app-wire";
+        for worker_id in ["sender", "recipient"] {
+            let response = dispatch_wire(
+                server.clone(),
+                Some(context_with_app(&root, app)),
+                Req::Register {
+                    worker_id: worker_id.into(),
+                    token: format!("token-{worker_id}"),
+                    cwd: root.display().to_string(),
+                    candidates: test_candidates(&format!("thread-{worker_id}")),
+                },
+            )
+            .await;
+            assert!(response.ok, "{response:?}");
+        }
+        let sender_runtime = runtime_for_registered(&server, &root, "sender", app);
+        let context = || context_with_runtime(&root, app, &sender_runtime);
+
+        let scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let binding_generation = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &RouteScope {
+                    app_scope_id: AppServerId::new(app).unwrap(),
+                    project_scope_id: scope.clone(),
+                },
+                &BindingId::new("binding-sender").unwrap(),
+            )
+            .unwrap()
+            .endpoint_generation;
+        let command = |app_scope: &str, command_id: &str| {
+            CommandEnvelope::new(
+                CommandId::new(command_id).unwrap(),
+                OperationId::new(format!("operation-{command_id}")).unwrap(),
+                BindingId::new("binding-sender").unwrap(),
+                binding_generation,
+                RouteScope {
+                    app_scope_id: AppServerId::new(app_scope).unwrap(),
+                    project_scope_id: scope.clone(),
+                },
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let accepted = dispatch_wire(
+            server.clone(),
+            Some(context()),
+            Req::Send {
+                from: "sender".into(),
+                worker_id: Some("sender".into()),
+                token: Some("token-sender".into()),
+                command: Some(command(app, "wire-send-ok")),
+                to: "recipient".into(),
+                mtype: "notify".into(),
+                subject: Some("scope".into()),
+                body: "body".into(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        )
+        .await;
+        assert!(accepted.ok, "{accepted:?}");
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_messages = server.state.lock().unwrap().msgs.len();
+        let forged = dispatch_wire(
+            server.clone(),
+            Some(context()),
+            Req::Send {
+                from: "sender".into(),
+                worker_id: Some("sender".into()),
+                token: Some("token-sender".into()),
+                command: Some(command("app-forged", "wire-send-forged")),
+                to: "recipient".into(),
+                mtype: "notify".into(),
+                subject: Some("scope".into()),
+                body: "body".into(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        )
+        .await;
+        assert!(!forged.ok);
+        assert!(forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("SEND_BINDING_REJECTED:")));
+        assert_eq!(server.state.lock().unwrap().msgs.len(), before_messages);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_cli_recover_rebinds_generation_and_fences_old_context() {
+        let (server, root, journal_path) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "recover-worker";
+        let token = "token-recover-worker";
+        let first = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(first.ok, "{first:?}");
+        let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
+        let old_context = context_with_runtime(&root, app, &old_runtime);
+        let stale_request = notification_subscribe_request(worker_id, token);
+        // The request is valid at admission time.  Rebind must make the
+        // subsequent execution fail closed instead of relying on this stale
+        // preflight result.
+        assert!(validate_request_context(&server, &stale_request, Some(&old_context)).is_ok());
+
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let recovered = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(recovered.ok, "{recovered:?}");
+        let new_runtime = runtime_for_registered(&server, &root, worker_id, app);
+        assert_eq!(
+            new_runtime.endpoint_generation,
+            old_runtime.endpoint_generation + 1
+        );
+        assert_eq!(new_runtime.runtime_id, old_runtime.runtime_id);
+        assert_eq!(
+            recovered.data["command"]["binding"]["endpoint_generation"],
+            new_runtime.endpoint_generation
+        );
+
+        let accepted = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &new_runtime)),
+            notification_subscribe_request(worker_id, token),
+        )
+        .await;
+        assert!(accepted.ok, "{accepted:?}");
+
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let rejected = dispatch_wire(server.clone(), Some(old_context), stale_request).await;
+        assert!(!rejected.ok, "{rejected:?}");
+        assert!(rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_cli_recover_rotates_a_lost_token_for_the_same_thread_and_route() {
+        let (server, root, journal_path) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "lost-token-worker";
+        let old_token = "old-token-lost-token-worker";
+        let new_token = "new-token-lost-token-worker";
+        let first = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: old_token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(first.ok, "{first:?}");
+        let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+
+        let recovered = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: new_token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(recovered.ok, "{recovered:?}");
+        assert_eq!(recovered.data["recovered"], true);
+
+        let new_runtime = runtime_for_registered(&server, &root, worker_id, app);
+        assert_eq!(
+            new_runtime.endpoint_generation,
+            old_runtime.endpoint_generation + 1
+        );
+        assert_eq!(new_runtime.runtime_id, old_runtime.runtime_id);
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get(worker_id)
+                .unwrap()
+                .token,
+            new_token
+        );
+        assert!(!std::fs::read(&journal_path).unwrap().is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_worker_recover_rotates_a_lost_token_with_the_persisted_runtime() {
+        let (server, root, _) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "worker-recover-worker";
+        let old_token = "old-token-worker-recover-worker";
+        let new_token = "new-token-worker-recover-worker";
+        let first = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: old_token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(first.ok, "{first:?}");
+        let persisted_runtime = runtime_for_registered(&server, &root, worker_id, app);
+
+        let recovered = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &persisted_runtime)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: new_token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(recovered.ok, "{recovered:?}");
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get(worker_id)
+                .unwrap()
+                .token,
+            new_token
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_cli_recover_rejects_forged_token_thread_and_route() {
+        let (server, root, journal_path) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "recover-negative-worker";
+        let token = "token-recover-negative-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let runtime = runtime_for_registered(&server, &root, worker_id, app);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let wrong_token = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: "forged-token".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-forged-token"),
+            },
+        )
+        .await;
+        assert!(!wrong_token.ok, "{wrong_token:?}");
+        assert!(wrong_token
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+
+        let other = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: "other-worker".into(),
+                token: "token-other-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: Some(TransportCandidates {
+                    appserver: Some(AppServerCandidate {
+                        endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+                        namespace: "codex_tui".into(),
+                        thread_id: "thread-another-worker".into(),
+                    }),
+                }),
+            },
+        )
+        .await;
+        assert!(other.ok, "{other:?}");
+
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let wrong_thread = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: Some(TransportCandidates {
+                    appserver: Some(AppServerCandidate {
+                        endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+                        namespace: "codex_tui".into(),
+                        thread_id: "thread-another-worker".into(),
+                    }),
+                }),
+            },
+        )
+        .await;
+        assert!(!wrong_thread.ok, "{wrong_thread:?}");
+        assert!(wrong_thread
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+
+        let wrong_root = root.with_file_name(format!(
+            "{}-wrong-route",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&wrong_root).unwrap();
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let wrong_route = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&wrong_root, app, &provisional)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: wrong_root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(!wrong_route.ok, "{wrong_route:?}");
+        assert!(wrong_route
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("PROJECT_SCOPE_UNKNOWN:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+
+        let forged_worker = "forged-worker";
+        let forged_context = context_with_runtime(&root, app, &runtime);
+        let before = mutation_snapshot(&server);
+        let before_journal = std::fs::read(&journal_path).unwrap();
+        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
+        let forged = dispatch_wire(
+            server.clone(),
+            Some(forged_context),
+            Req::Register {
+                worker_id: forged_worker.into(),
+                token: "token-forged-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-forged-worker"),
+            },
+        )
+        .await;
+        assert!(!forged.ok, "{forged:?}");
+        assert!(forged
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert_eq!(mutation_snapshot(&server), before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        assert_eq!(
+            directory_snapshot(&root.join(".agent-collab/mailbox")),
+            before_mailbox
+        );
+
+        assert_eq!(runtime.endpoint_generation, 1);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(wrong_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wire_poll_rechecks_generation_before_delivering_after_rebind() {
+        let (server, root, _) = test_server();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "poll-recover-worker";
+        let token = "token-poll-recover-worker";
+        let registered = dispatch_wire(
+            server.clone(),
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(&format!("thread-{worker_id}")),
+            },
+        )
+        .await;
+        assert!(registered.ok, "{registered:?}");
+        let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
+        let old_context = context_with_runtime(&root, app, &old_runtime);
+        let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let recovery_context = context_with_runtime(&root, app, &provisional);
+        let poll_server = server.clone();
+        let rebind_server = server.clone();
+        let rebind_root = root.clone();
+        let poll = dispatch_wire(
+            poll_server,
+            Some(old_context),
+            Req::Poll {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                timeout_ms: 1_000,
+            },
+        );
+        let rebind = async move {
+            let response = dispatch_wire(
+                rebind_server.clone(),
+                Some(recovery_context),
+                Req::Register {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    cwd: rebind_root.display().to_string(),
+                    candidates: test_candidates(&format!("thread-{worker_id}")),
+                },
+            )
+            .await;
+            assert!(response.ok, "{response:?}");
+            rebind_server.commit(&[Event::Sent {
+                msg: Message {
+                    id: "poll-rebind-message".into(),
+                    from: "sender".into(),
+                    to: worker_id.into(),
+                    mtype: "notify".into(),
+                    subject: Some("rebind".into()),
+                    body: "must remain pending".into(),
+                    in_reply_to: None,
+                    created_ms: now_ms(),
+                    state: "pending".into(),
+                    wake_attempt_count: 0,
+                    last_wake_attempt_ms: 0,
+                },
+            }]);
+            response
+        };
+        let (poll_result, rebind_result) = tokio::join!(poll, rebind);
+        assert!(!poll_result.ok, "{poll_result:?}");
+        assert!(poll_result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+        assert!(rebind_result.ok, "{rebind_result:?}");
+        let state = server.state.lock().unwrap();
+        let message = state.msgs.get("poll-rebind-message").unwrap();
+        assert_eq!(message.state, "pending");
+        assert_eq!(message.wake_attempt_count, 0);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn parse_wire_request(line: &str) -> Result<(Option<ProjectContext>, Req), String> {
+    match serde_json::from_str::<RequestEnvelope>(line) {
+        Ok(envelope) => Ok(envelope.into_parts()),
+        Err(envelope_error) => {
+            // An invalid project_context must not be reinterpreted as a
+            // legacy unscoped request merely because serde ignores unknown
+            // fields when decoding Req.  That would turn a forged envelope
+            // into a context-free Ping or a later default route.
+            let has_project_context = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| object.contains_key("project_context"))
+                })
+                .unwrap_or(false);
+            if has_project_context {
+                return Err(format!(
+                    "bad request: invalid project context envelope: {envelope_error}"
+                ));
+            }
+            serde_json::from_str::<Req>(line)
+                .map(|request| (None, request))
+                .map_err(|request_error| {
+                    format!("bad request: {request_error}; wire envelope parse: {envelope_error}")
+                })
+        }
+    }
+}
+
+async fn dispatch_wire(
+    server: Arc<Server>,
+    project_context: Option<ProjectContext>,
+    req: Req,
+) -> Resp {
+    match req {
+        Req::Poll {
+            worker_id,
+            token,
+            timeout_ms,
+        } => {
+            let poll_req = Req::Poll {
+                worker_id: worker_id.clone(),
+                token: token.clone(),
+                timeout_ms,
+            };
+            if let Err(error) =
+                validate_request_context(&server, &poll_req, project_context.as_ref())
+            {
+                return Resp::err(error);
+            }
+            let admission = {
+                let check = server.state.lock().unwrap();
+                if let Err(error) = verify(&check, &worker_id, &token) {
+                    Some(error)
+                } else if check.admission_frozen() {
+                    Some(Resp::err("MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"))
+                } else {
+                    None
+                }
+            };
+            match admission {
+                Some(response) => response,
+                None => {
+                    handle_poll_async_with_context(
+                        server,
+                        worker_id,
+                        Some(token),
+                        timeout_ms,
+                        project_context,
+                    )
+                    .await
+                }
+            }
+        }
+        req => tokio::task::spawn_blocking(move || {
+            let route_gate = if mutation_blocked_during_migration(&req)
+                || wire_mutation_principal(&req).is_some()
+            {
+                Some(wire_route_mutation_gate(&server))
+            } else {
+                None
+            };
+            let _route_gate_guard = route_gate.as_ref().map(|gate| gate.lock().unwrap());
+            if let Err(error) = validate_request_context(&server, &req, project_context.as_ref()) {
+                return Resp::err(error);
+            }
+            dispatch_with_route_context(&server, req, project_context)
+        })
+        .await
+        .unwrap_or_else(|e| Resp::err(format!("handler join error: {}", e))),
+    }
+}
+
+/// Route a host-daemon connection to the reducer that owns its exact
+/// `(app_scope_id, project_scope_id)` pair.  Registration is handled inside a
+/// blocking transaction so the route table is published only after the target
+/// journal has committed the identity binding.
+async fn dispatch_wire_routed(
+    manager: Arc<ProjectRuntimeManager>,
+    project_context: Option<ProjectContext>,
+    req: Req,
+) -> (Arc<Server>, Resp) {
+    match req {
+        Req::RouteResolve { native_thread_id } => {
+            let response = match manager.resolve_route_by_native_thread(&native_thread_id) {
+                Ok(route) => match serde_json::to_value(route) {
+                    Ok(value) => Resp::data(value),
+                    Err(error) => {
+                        Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
+                    }
+                },
+                Err(error) => Resp::err(error),
+            };
+            (manager.host.clone(), response)
+        }
+        Req::Poll {
+            worker_id,
+            token,
+            timeout_ms,
+        } => {
+            let Some(context) = project_context else {
+                return (
+                    manager.host.clone(),
+                    Resp::err(
+                        "PROJECT_CONTEXT_REQUIRED: canonical project root and scope are required",
+                    ),
+                );
+            };
+            let poll_req = Req::Poll {
+                worker_id: worker_id.clone(),
+                token: token.clone(),
+                timeout_ms,
+            };
+            let server = match manager.select_runtime(&context) {
+                Ok(server) => server,
+                Err(error) => return (manager.host.clone(), Resp::err(error)),
+            };
+            if let Err(error) = validate_request_context(&server, &poll_req, Some(&context)) {
+                return (server, Resp::err(error));
+            }
+            let admission = {
+                let check = server.state.lock().unwrap();
+                if let Err(error) = verify(&check, &worker_id, &token) {
+                    Some(error)
+                } else if check.admission_frozen() {
+                    Some(Resp::err("MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed"))
+                } else {
+                    None
+                }
+            };
+            let response = match admission {
+                Some(response) => response,
+                None => {
+                    handle_poll_async_with_context(
+                        server.clone(),
+                        worker_id,
+                        Some(token),
+                        timeout_ms,
+                        Some(context),
+                    )
+                    .await
+                }
+            };
+            (server, response)
+        }
+        req => {
+            let result = tokio::task::spawn_blocking({
+                let manager = manager.clone();
+                move || manager.dispatch_sync(project_context, req)
+            })
+            .await;
+            match result {
+                Ok(result) => result,
+                Err(error) => (
+                    manager.host.clone(),
+                    Resp::err(format!("handler join error: {error}")),
+                ),
+            }
+        }
+    }
+}
+
+async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let resp = match parse_wire_request(&line) {
+            Ok((project_context, req)) => {
+                let activity_req = req.clone();
+                let resp = dispatch_wire(server.clone(), project_context, req).await;
+                let _ = record_activity(
+                    &server.storage_root,
+                    "request",
+                    request_activity(&activity_req, &resp),
+                );
+                resp
+            }
+            Err(error) => {
+                let resp = Resp::err(error);
+                let _ = record_activity(
+                    &server.storage_root,
+                    "protocol_error",
+                    json!({"error": resp.error}),
+                );
+                resp
+            }
+        };
+        let mut out = serde_json::to_string(&resp).expect("serialize resp");
+        out.push('\n');
+        if writer.write_all(out.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn conn_task_routed(manager: Arc<ProjectRuntimeManager>, stream: tokio::net::UnixStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let resp = match parse_wire_request(&line) {
+            Ok((project_context, req)) => {
+                let activity_req = req.clone();
+                let (runtime, resp) =
+                    dispatch_wire_routed(manager.clone(), project_context, req).await;
+                let _ = record_activity(
+                    &runtime.storage_root,
+                    "request",
+                    request_activity(&activity_req, &resp),
+                );
+                resp
+            }
+            Err(error) => {
+                let resp = Resp::err(error);
+                let _ = record_activity(
+                    &manager.host.storage_root,
+                    "protocol_error",
+                    json!({"error": resp.error}),
+                );
+                resp
+            }
+        };
+        let mut out = serde_json::to_string(&resp).expect("serialize resp");
+        out.push('\n');
+        if writer.write_all(out.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn apply_replayed_event(st: &mut State, event: &Event, line: usize) -> anyhow::Result<()> {
+    st.apply_checked(event)
+        .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}"))?;
+    match event {
+        Event::ReducerCheckpoint { sequence, revision } => st
+            .set_checkpoint_version(*sequence, *revision)
+            .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}"))
+            .and_then(|_| {
+                st.global.validate().map_err(|error| {
+                    anyhow::anyhow!(
+                        "journal replay failed at line {line}: global state validation: {error}"
+                    )
+                })
+            }),
+        _ => st
+            .advance_version()
+            .map_err(|error| anyhow::anyhow!("journal replay failed at line {line}: {error}")),
+    }
+}
+
+fn replay(root: &Path) -> anyhow::Result<State> {
+    replay_from_journal(root, &root.join(".agent-collab/server/journal.jsonl"))
+}
+
+/// Replay a project reducer from the journal selected by its runtime owner.
+/// The project root remains the semantic scope used by worktree and identity
+/// validation; the journal path may be an appserver-specific runtime store.
+fn replay_from_journal(_root: &Path, journal: &Path) -> anyhow::Result<State> {
+    let mut st = State::default();
+    if !journal.exists() {
+        return Ok(st);
+    }
+    let content = std::fs::read_to_string(&journal)?;
+    let mut events = Vec::new();
+    let mut pending_command: Option<(String, String, Vec<Event>)> = None;
+    let mut seen_command_ids = std::collections::HashSet::new();
+    let mut seen_operation_ids = std::collections::HashMap::new();
+    let mut convert_root = false;
+    let mut saw_current_thread_route = false;
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let line_events = decode_journal_line(trimmed).map_err(|error| {
+            anyhow::anyhow!(
+                "journal replay failed at line {}: {}; manual journal edits are unsupported",
+                index + 1,
+                error
+            )
+        })?;
+        if line_events.len() > 1
+            && !line_events
+                .iter()
+                .any(|event| matches!(event, Event::ReducerCheckpoint { .. }))
+        {
+            convert_root = true;
+        }
+        for event in line_events {
+            if matches!(event, Event::GlobalCurrentThreadRouteSet { .. }) {
+                saw_current_thread_route = true;
+            }
+            if let Event::CommandStarted {
+                command_id,
+                operation_id,
+            } = &event
+            {
+                if !seen_command_ids.insert(command_id.clone()) {
+                    anyhow::bail!(
+                        "journal replay failed at line {}: duplicate command {}",
+                        index + 1,
+                        command_id
+                    );
+                }
+                if let Some(existing_command_id) =
+                    seen_operation_ids.insert(operation_id.clone(), command_id.clone())
+                {
+                    anyhow::bail!(
+                        "journal replay failed at line {}: operation {} already belongs to command {}",
+                        index + 1,
+                        operation_id,
+                        existing_command_id
+                    );
+                }
+                if pending_command.is_some() {
+                    anyhow::bail!(
+                        "journal replay failed at line {}: nested command {}",
+                        index + 1,
+                        command_id
+                    );
+                }
+                pending_command = Some((
+                    command_id.clone(),
+                    operation_id.clone(),
+                    vec![event.clone()],
+                ));
+                continue;
+            }
+            if let Some((command_id, operation_id, pending)) = pending_command.as_mut() {
+                match &event {
+                    Event::CommandCompleted {
+                        command_id: completed_id,
+                        operation_id: completed_operation,
+                        receipt,
+                    } => {
+                        if completed_id != command_id || completed_operation != operation_id {
+                            anyhow::bail!(
+                                "journal replay failed at line {}: command completion does not match start",
+                                index + 1
+                            );
+                        }
+                        if receipt.operation_id != *operation_id {
+                            anyhow::bail!(
+                                "journal replay failed at line {}: command receipt operation does not match start",
+                                index + 1
+                            );
+                        }
+                        pending.push(event.clone());
+                        let committed = std::mem::take(pending);
+                        pending_command = None;
+                        for event in committed {
+                            apply_replayed_event(&mut st, &event, index + 1)?;
+                            events.push(event);
+                        }
+                    }
+                    Event::CommandStarted { .. } => unreachable!(),
+                    _ => pending.push(event.clone()),
+                }
+                continue;
+            }
+            if matches!(event, Event::CommandCompleted { .. }) {
+                anyhow::bail!(
+                    "journal replay failed at line {}: command completion without start",
+                    index + 1
+                );
+            }
+            if matches!(event, Event::MasterAssigned { .. })
+                && (line.contains("\"ev\":\"RootAssigned\"")
+                    || line.contains("\"ev\": \"RootAssigned\""))
+            {
+                convert_root = true;
+            }
+            apply_replayed_event(&mut st, &event, index + 1)?;
+            events.push(event);
+        }
+    }
+    if let Some((command_id, _, _)) = pending_command {
+        anyhow::bail!(
+            "journal replay failed: incomplete command {command_id}; completion marker missing"
+        );
+    }
+    if !saw_current_thread_route {
+        st.restore_unique_current_thread_routes_from_bindings()
+            .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
+    }
+    st.global.validate().map_err(|error| {
+        anyhow::anyhow!("journal replay failed: global state validation: {error}")
+    })?;
+    if convert_root {
+        let mut body = String::new();
+        for event in events {
+            body.push_str(&serde_json::to_string(&event)?);
+            body.push('\n');
+        }
+        let tmp = journal.with_file_name("journal.jsonl.tmp");
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, &journal)?;
+    }
+    Ok(st)
+}
+
+fn decode_journal_line(line: &str) -> Result<Vec<Event>, notification_contract::JournalError> {
+    let mut events = Vec::new();
+    let mut stream = serde_json::Deserializer::from_str(line).into_iter::<Event>();
+    while let Some(item) = stream.next() {
+        events.push(
+            item.map_err(|error| notification_contract::JournalError::Replay(error.to_string()))?,
+        );
+    }
+    let offset = stream.byte_offset();
+    if offset < line.len() && !line[offset..].trim().is_empty() {
+        return Err(notification_contract::JournalError::Replay(
+            "trailing characters".into(),
+        ));
+    }
+    if events.is_empty() {
+        return Err(notification_contract::JournalError::Replay(
+            "empty event".into(),
+        ));
+    }
+    Ok(events)
+}
+
+fn acquire_daemon_lock(lock_path: &Path, socket_path: &Path) -> anyhow::Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)?;
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(file);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => anyhow::bail!(
+            "server already running at {}: {}",
+            socket_path.display(),
+            error
+        ),
+        Some(code) if code == libc::EPERM => anyhow::bail!(
+            "cannot acquire daemon lock at {}: flock is unavailable or denied; refusing PID fallback: {}",
+            lock_path.display(),
+            error
+        ),
+        _ => Err(error.into()),
+    }
+}
+
+/// Acquire the same host writer lock used by the resident daemon. Offline
+/// maintenance commands use this to prove no daemon writer exists before they
+/// mutate durable state.
+pub(crate) fn acquire_reset_lock(
+    lock_path: &Path,
+    socket_path: &Path,
+) -> anyhow::Result<std::fs::File> {
+    acquire_daemon_lock(lock_path, socket_path)
+}
+
+fn acquire_legacy_writer_lock(
+    lock_path: &Path,
+    description: &str,
+) -> anyhow::Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_path)?;
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(file);
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK
+    ) {
+        anyhow::bail!(
+            "DAEMON_MIGRATION_REQUIRED: legacy {description} lock is held at {}; stop or migrate the legacy writer before starting the host daemon",
+            lock_path.display()
+        );
+    }
+    Err(error.into())
+}
+
+fn legacy_host_daemon_lock_path(host_paths: &HostPaths) -> PathBuf {
+    legacy_host_daemon_lock_path_for(host_paths.state_root(), &default_state_root())
+}
+
+fn legacy_host_daemon_lock_path_for(state_root: &Path, default_root: &Path) -> PathBuf {
+    if state_root == default_root {
+        PathBuf::from(LEGACY_HOST_DAEMON_LOCK_PATH)
+    } else {
+        state_root.join("legacy-host.lock")
+    }
+}
+
+fn default_state_root() -> PathBuf {
+    std::env::var_os(crate::scope::HOME_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".collab"))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent/collab-state"))
+}
+
+fn probe_legacy_socket(socket_path: &Path) -> anyhow::Result<bool> {
+    match crate::client::connect(socket_path) {
+        Ok(stream) => {
+            drop(stream);
+            Ok(true)
+        }
+        Err(error) if crate::client::stale_socket_error(&error) => Ok(false),
+        Err(error) => Err(anyhow::Error::new(error)),
+    }
+}
+
+pub(crate) struct LegacyWriterFence {
+    // These guards intentionally stay alive for the complete daemon lifetime.
+    // The legacy binary does not know the new host lock, so a one-shot probe is
+    // insufficient to prevent it from opening the same journal after startup.
+    _host_lock: Option<std::fs::File>,
+    _project_lock: Option<std::fs::File>,
+}
+
+/// Reject a reachable pre-host-endpoint socket after all compatible legacy
+/// locks are held. A stale socket is safe to classify as absent only for the
+/// platform's explicit stale-socket errors; any other probe error is unknown
+/// and fails closed.
+fn ensure_legacy_socket_absent(scope: &Scope, host_paths: &HostPaths) -> anyhow::Result<()> {
+    let project_server_dir = scope.server_dir();
+    let legacy_socket = project_server_dir.join("server.sock");
+    if legacy_socket != host_paths.socket_path() && probe_legacy_socket(&legacy_socket)? {
+        anyhow::bail!(
+            "DAEMON_MIGRATION_REQUIRED: legacy project daemon is reachable at {}; stop or migrate it before starting the host daemon",
+            legacy_socket.display()
+        );
+    }
+    Ok(())
+}
+
+/// Hold every lock understood by the pre-host-endpoint daemon until the new
+/// daemon exits.  Acquiring these locks before replay/journal open closes the
+/// check-to-open race: an old writer can neither start after the check nor
+/// acquire the same project lock while this process owns the journal.
+pub(crate) fn acquire_legacy_writer_fence(
+    scope: &Scope,
+    host_paths: &HostPaths,
+) -> anyhow::Result<LegacyWriterFence> {
+    let legacy_host_lock = legacy_host_daemon_lock_path(host_paths);
+    let project_server_dir = scope.server_dir();
+    let host_lock = if legacy_host_lock != host_paths.lock_path() {
+        Some(acquire_legacy_writer_lock(
+            &legacy_host_lock,
+            "host daemon",
+        )?)
+    } else {
+        None
+    };
+
+    let legacy_project_lock = project_server_dir.join("daemon.lock");
+    let project_lock = if legacy_project_lock != host_paths.lock_path()
+        && legacy_project_lock != legacy_host_lock
+        && project_server_dir.is_dir()
+    {
+        Some(acquire_legacy_writer_lock(
+            &legacy_project_lock,
+            "project daemon",
+        )?)
+    } else {
+        None
+    };
+
+    ensure_legacy_socket_absent(scope, host_paths)?;
+    Ok(LegacyWriterFence {
+        _host_lock: host_lock,
+        _project_lock: project_lock,
+    })
+}
+
+fn is_provisional_cli_runtime(project_context: &ProjectContext, worker_id: &str) -> bool {
+    project_context
+        .runtime_context
+        .as_ref()
+        .is_some_and(|runtime| {
+            crate::identity::RuntimeIdentity::cli_adapter(worker_id)
+                .is_ok_and(|provisional| runtime == &provisional)
+        })
+}
+
+fn same_inode(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+fn prepare_socket_path(sock_path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let before = match std::fs::symlink_metadata(sock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !before.file_type().is_socket() {
+        anyhow::bail!(
+            "server socket path is occupied by {}; refusing to remove it",
+            sock_path.display()
+        );
+    }
+    match crate::client::connect(sock_path) {
+        Ok(_) => anyhow::bail!("server already running at {}", sock_path.display()),
+        Err(error) if crate::client::stale_socket_error(&error) => {}
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "cannot determine whether stale server socket {} can be removed",
+                sock_path.display()
+            )))
+        }
+    }
+    let after = match std::fs::symlink_metadata(sock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !same_inode(&before, &after) {
+        anyhow::bail!(
+            "server socket changed while checking {}; refusing to remove it",
+            sock_path.display()
+        );
+    }
+    std::fs::remove_file(sock_path)?;
+    Ok(())
+}
+
+fn remove_listener_socket(sock_path: &Path, captured: &std::fs::Metadata) -> anyhow::Result<()> {
+    let current = match std::fs::symlink_metadata(sock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if same_inode(captured, &current) {
+        std::fs::remove_file(sock_path)?;
+    }
+    Ok(())
+}
+
+pub async fn run(scope: Scope) -> anyhow::Result<()> {
+    let host_paths = scope.host_paths()?;
+    run_with_host_paths(scope, host_paths).await
+}
+
+async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Result<()> {
+    host_paths.ensure_root()?;
+    let sock_path = host_paths.socket_path();
+    let project_server_dir = scope.server_dir();
+    std::fs::create_dir_all(&project_server_dir)?;
+
+    // The host lock is the only writable daemon admission gate.  Project
+    // roots still select their own journal/reducer storage, but never another
+    // socket or a second host writer.
+    let _lock_file = acquire_daemon_lock(&host_paths.lock_path(), &sock_path)?;
+
+    // Keep every legacy writer lock through the journal writer lifetime. If
+    // the compatibility fixture uses the legacy path as its host path, the
+    // normal duplicate-daemon error remains authoritative; a real host-path
+    // migration reaches this persistent fence because its locks are distinct.
+    let _legacy_writer_fence = acquire_legacy_writer_fence(&scope, &host_paths)?;
+
+    prepare_socket_path(&sock_path)?;
+
+    let state = replay(&scope.root)?;
+    let journal_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(project_server_dir.join("journal.jsonl"))?;
+
+    append_log(&host_paths.log_path(), "server starting");
+
+    let server = Arc::new(Server {
+        config: crate::config::load(&scope.root)?,
+        root: scope.root.clone(),
+        storage_root: scope.root.clone(),
+        journal_path: project_server_dir.join("journal.jsonl"),
+        state: Mutex::new(state),
+        journal: Mutex::new(journal_file),
+        appserver_candidate_check: default_appserver_candidate_check(),
+        appserver_notification_sink: default_appserver_notification_sink(),
+        appserver_thread_status: default_appserver_thread_status(),
+        appserver_thread_archive: default_appserver_thread_archive(),
+        mailbox_notify: Notify::new(),
+    });
+    restore_registered_peer_default_leases(&server);
+    purge_expired_storage(&server, now_ms());
+    let runtime_manager = ProjectRuntimeManager::new(server.clone(), &host_paths)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let listener = UnixListener::bind(&sock_path)?;
+    let socket_metadata = std::fs::symlink_metadata(&sock_path)?;
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(error) = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))
+    {
+        let cleanup = remove_listener_socket(&sock_path, &socket_metadata);
+        return match cleanup {
+            Ok(()) => Err(error.into()),
+            Err(cleanup_error) => Err(anyhow::Error::new(error).context(format!(
+                "failed to clean up startup socket: {cleanup_error}"
+            ))),
+        };
+    }
+    std::fs::write(host_paths.pid_path(), std::process::id().to_string()).map_err(|error| {
+        match remove_listener_socket(&sock_path, &socket_metadata) {
+            Ok(()) => anyhow::Error::new(error),
+            Err(cleanup_error) => anyhow::Error::new(error).context(format!(
+                "failed to clean up startup socket: {cleanup_error}"
+            )),
+        }
+    })?;
+    let _ = record_activity(
+        &scope.root,
+        "daemon_start",
+        json!({"pid": std::process::id()}),
+    );
+
+    // Background scheduler: bounded waits and explicitly registered notifications.
+    let sched = runtime_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            sched.host.config.timers.tick_interval_ms,
+        ));
+        loop {
+            interval.tick().await;
+            for runtime in sched.runtimes() {
+                tokio::task::spawn_blocking(move || crate::server::timers::tick(&runtime))
+                    .await
+                    .ok();
+            }
+        }
+    });
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let manager = runtime_manager.clone();
+                tokio::spawn(conn_task_routed(manager, stream));
+            }
+            Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod reducer_binding_tests {
+    use super::*;
+
+    #[test]
+    fn migration_commit_evidence_survives_journal_replay_and_checkpoint() {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "collab-migration-evidence-replay-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let server_dir = root.join(".agent-collab/server");
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let journal = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(server_dir.join("journal.jsonl"))
+            .unwrap();
+        let server = Server {
+            config: crate::config::Config::default(),
+            root: root.clone(),
+            storage_root: root.clone(),
+            journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            state: Mutex::new(State::default()),
+            journal: Mutex::new(journal),
+            appserver_candidate_check: Arc::new(|candidate| {
+                Ok(SelectedTransport {
+                    kind: TransportKind::AppServer,
+                    endpoint: Some(candidate.endpoint.clone()),
+                    namespace: Some(candidate.namespace.clone()),
+                    thread_id: Some(candidate.thread_id.clone()),
+                    capabilities: vec!["send_message_to_thread".into()],
+                    self_check: "test appserver".into(),
+                })
+            }),
+            appserver_notification_sink: Arc::new(|_, _, _, _| {
+                Ok(serde_json::json!({"accepted": true}))
+            }),
+            appserver_thread_status: Arc::new(|_, thread_id| {
+                Ok(serde_json::json!({"thread": {"id": thread_id, "status": "idle"}}))
+            }),
+            appserver_thread_archive: Arc::new(|_, _| Ok(serde_json::json!({"archived": true}))),
+            mailbox_notify: Notify::new(),
+        };
+        let repeated_events = (0..99)
+            .map(|_| Event::KeepaliveUpdated {
+                worker_id: "worker".into(),
+                record: crate::server::keepalive::Record::default(),
+            })
+            .collect::<Vec<_>>();
+        server.commit_checked(&repeated_events).unwrap();
+
+        let evidence = crate::server::global_state::MigrationCommitEvidence::new(
+            "migration-1",
+            "project-1",
+            1,
+            "sha256:source",
+            OperationId::new("migration-op-1").unwrap(),
+            None,
+            7,
+            100,
+        )
+        .unwrap();
+
+        server
+            .commit_checked(&[Event::GlobalMigrationCommitEvidence {
+                evidence: evidence.clone(),
+            }])
+            .unwrap();
+        let snapshot = server.state.lock().unwrap().snapshot_events();
+        assert!(snapshot.iter().any(|event| {
+            matches!(
+                event,
+                Event::GlobalMigrationCommitEvidence { evidence: observed }
+                    if observed == &evidence
+            )
+        }));
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .migration_commit_evidence
+                .len(),
+            1
+        );
+
+        let replayed = replay(&root).unwrap();
+        assert_eq!(
+            replayed
+                .global
+                .migration_commit_evidence
+                .get("migration-op-1"),
+            Some(&evidence)
+        );
+        replayed.global.validate().unwrap();
+
+        let mut checkpointed = State::default();
+        for (line, event) in snapshot.iter().enumerate() {
+            apply_replayed_event(&mut checkpointed, event, line + 1).unwrap();
+        }
+        assert_eq!(
+            checkpointed
+                .global
+                .migration_commit_evidence
+                .get("migration-op-1"),
+            Some(&evidence)
+        );
+        checkpointed.global.validate().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_register_wires_worktree_binding_and_replays_it() {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::path::PathBuf::from(format!(
+            "/tmp/collab-r2-binding-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let server_dir = root.join(".agent-collab/server");
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let journal = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(server_dir.join("journal.jsonl"))
+            .unwrap();
+        let server = Server {
+            config: crate::config::Config::default(),
+            root: root.clone(),
+            storage_root: root.clone(),
+            journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            state: Mutex::new(State::default()),
+            journal: Mutex::new(journal),
+            appserver_candidate_check: Arc::new(|candidate| {
+                Ok(peer_tests::test_appserver_transport(&candidate.thread_id))
+            }),
+            appserver_notification_sink: default_appserver_notification_sink(),
+            appserver_thread_status: default_appserver_thread_status(),
+            appserver_thread_archive: default_appserver_thread_archive(),
+            mailbox_notify: tokio::sync::Notify::new(),
+        };
+        peer_tests::register(&server, "worker", "thread-worker");
+        let worktree = "playground/task-1".to_string();
+        let registered = handle_task_register(
+            &server,
+            "worker".into(),
+            "token-worker".into(),
+            "task-1".into(),
+            None,
+            None,
+            Some(worktree.clone()),
+            Some("feature/branch".into()),
+            Some("abc123".into()),
+            "p2".into(),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let canonical_worktree = server
+            .root
+            .canonicalize()
+            .unwrap()
+            .join("playground/task-1")
+            .to_string_lossy()
+            .into_owned();
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(
+                state.worktree_bindings["binding-task-task-1"].task_id,
+                "task-1"
+            );
+            assert_eq!(
+                state.worktree_bindings["binding-task-task-1"].worktree_root,
+                canonical_worktree
+            );
+        }
+        let replayed = replay(&root).unwrap();
+        assert_eq!(
+            replayed.worktree_bindings["binding-task-task-1"].task_id,
+            "task-1"
+        );
+        assert_eq!(
+            replayed.worktree_bindings["binding-task-task-1"].worktree_root,
+            canonical_worktree
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_register_journal_failures_are_explicit_and_read_only_after_normal_write() {
+        use TaskRegisterJournalFault::{Append, Sync};
+
+        for fault in [Append, Sync] {
+            let (server, root) = peer_tests::test_server();
+            assert!(peer_tests::register(&server, "worker", "%worker").ok);
+            let mailbox_dir = root.join(".agent-collab/mailbox");
+            std::fs::create_dir_all(&mailbox_dir).unwrap();
+            let mailbox_sentinel = mailbox_dir.join("sentinel");
+            std::fs::write(&mailbox_sentinel, b"unchanged").unwrap();
+            let journal_path = root.join(".agent-collab/server/journal.jsonl");
+            let journal_before = std::fs::read(&journal_path).unwrap();
+            let (sequence_before, revision_before) = {
+                let state = server.state.lock().unwrap();
+                (state.sequence, state.revision)
+            };
+            let server = Arc::new(server);
+
+            inject_task_register_journal_fault(fault);
+            let response = handle_task_register(
+                server.as_ref(),
+                "worker".into(),
+                "token-worker".into(),
+                "task-register-fault".into(),
+                None,
+                Some("feature-register-fault".into()),
+                None,
+                None,
+                None,
+                "p2".into(),
+            );
+            assert!(!response.ok, "{fault:?}: {response:?}");
+            assert!(response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("TASK_DURABILITY_FAILED: journal ")));
+
+            let state = server.state.lock().unwrap();
+            assert!(!state.tasks.contains_key("task-register-fault"));
+            assert_eq!(state.sequence, sequence_before);
+            assert_eq!(state.revision, revision_before);
+            assert!(state
+                .journal_poison
+                .as_deref()
+                .is_some_and(|error| error.contains("injected task register journal")));
+            drop(state);
+            assert_eq!(std::fs::read(&mailbox_sentinel).unwrap(), b"unchanged");
+            if matches!(fault, Append) {
+                assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+            }
+
+            let read_only = dispatch(&server, Req::TaskStatus { task_id: None });
+            assert!(read_only.ok, "{fault:?}: {read_only:?}");
+            assert_eq!(read_only.data["tasks"].as_array().unwrap().len(), 0);
+
+            let retry = handle_task_register(
+                server.as_ref(),
+                "worker".into(),
+                "token-worker".into(),
+                "task-register-retry".into(),
+                None,
+                Some("feature-register-retry".into()),
+                None,
+                None,
+                None,
+                "p2".into(),
+            );
+            assert!(!retry.ok, "{fault:?}: poisoned writes must fail closed");
+            assert!(retry
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("TASK_DURABILITY_FAILED: journal ")));
+            assert_eq!(std::fs::read(&mailbox_sentinel).unwrap(), b"unchanged");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn task_register_journal_failures_are_explicit_and_preserve_resource_holder() {
+        use TaskRegisterJournalFault::{Append, Sync};
+
+        for fault in [Append, Sync] {
+            let (server, root) = peer_tests::test_server();
+            assert!(peer_tests::register(&server, "holder", "%holder").ok);
+            assert!(peer_tests::register(&server, "waiter", "%waiter").ok);
+            let holder = handle_task_register(
+                &server,
+                "holder".into(),
+                "token-holder".into(),
+                "held-task".into(),
+                None,
+                Some("shared-resource".into()),
+                None,
+                None,
+                None,
+                "p2".into(),
+            );
+            assert!(holder.ok, "{holder:?}");
+            let mailbox_dir = root.join(".agent-collab/mailbox");
+            std::fs::create_dir_all(&mailbox_dir).unwrap();
+            let mailbox_sentinel = mailbox_dir.join("sentinel");
+            std::fs::write(&mailbox_sentinel, b"unchanged").unwrap();
+            let journal_path = root.join(".agent-collab/server/journal.jsonl");
+            let journal_before = std::fs::read(&journal_path).unwrap();
+            let (sequence_before, revision_before) = {
+                let state = server.state.lock().unwrap();
+                (state.sequence, state.revision)
+            };
+            let server = Arc::new(server);
+
+            inject_task_register_journal_fault(fault);
+            let response = handle_task_register(
+                server.as_ref(),
+                "waiter".into(),
+                "token-waiter".into(),
+                "blocked-task".into(),
+                None,
+                Some("shared-resource".into()),
+                None,
+                None,
+                None,
+                "p2".into(),
+            );
+            assert!(!response.ok, "{fault:?}: {response:?}");
+            assert!(response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("TASK_DURABILITY_FAILED: journal ")));
+
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.tasks.len(), 1);
+            assert_eq!(state.tasks["held-task"].status, "working");
+            assert!(!state.tasks.contains_key("blocked-task"));
+            assert_eq!(state.sequence, sequence_before);
+            assert_eq!(state.revision, revision_before);
+            assert!(state
+                .journal_poison
+                .as_deref()
+                .is_some_and(|error| error.contains("injected task register journal")));
+            drop(state);
+            if matches!(fault, Append) {
+                assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+            }
+            assert_eq!(std::fs::read(&mailbox_sentinel).unwrap(), b"unchanged");
+
+            let read_only = dispatch(
+                &server,
+                Req::TaskConflicts {
+                    feature_id: Some("shared-resource".into()),
+                    worktree_path: None,
+                },
+            );
+            assert!(read_only.ok, "{fault:?}: {read_only:?}");
+            assert_eq!(read_only.data["conflicts"].as_array().unwrap().len(), 1);
+            assert_eq!(read_only.data["conflicts"][0]["id"], "held-task");
+
+            let retry = handle_task_register(
+                server.as_ref(),
+                "waiter".into(),
+                "token-waiter".into(),
+                "blocked-retry".into(),
+                None,
+                Some("another-resource".into()),
+                None,
+                None,
+                None,
+                "p2".into(),
+            );
+            assert!(!retry.ok, "{fault:?}: poisoned writes must fail closed");
+            assert!(retry
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("TASK_DURABILITY_FAILED: journal ")));
+            assert_eq!(std::fs::read(&mailbox_sentinel).unwrap(), b"unchanged");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = PathBuf::from(format!(
+            "/tmp/collab-startup-{name}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(root.join(".agent-collab/server"))
+            .expect("create startup test root");
+        root
+    }
+
+    #[test]
+    fn legacy_host_fence_is_isolated_with_a_custom_state_root() {
+        let root = test_root("legacy-fence-path");
+        let default_root = root.join(".collab");
+        let custom_root = root.join("host-state");
+        assert_eq!(
+            legacy_host_daemon_lock_path_for(&custom_root, &default_root),
+            custom_root.join("legacy-host.lock")
+        );
+        assert_eq!(
+            legacy_host_daemon_lock_path_for(&default_root, &default_root),
+            PathBuf::from(LEGACY_HOST_DAEMON_LOCK_PATH)
+        );
+
+        std::fs::remove_dir_all(root).expect("remove custom state root");
+    }
+
+    #[tokio::test]
+    async fn pid_publication_failure_removes_the_owned_socket() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("pid-failure");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        std::fs::create_dir(host_paths.pid_path()).expect("occupy pid path");
+
+        let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
+            .await
+            .expect_err("a directory at server.pid must fail startup");
+        assert!(error.to_string().contains("directory"), "{error:#}");
+        assert!(
+            !host_paths.socket_path().exists(),
+            "startup failure must remove the socket it just published"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_a_reachable_legacy_project_daemon() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("legacy-socket");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let legacy_socket = root.join(".agent-collab/server/server.sock");
+        let listener = UnixListener::bind(&legacy_socket).expect("bind legacy socket");
+
+        let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
+            .await
+            .expect_err("a reachable legacy daemon must be fenced");
+        assert!(error.to_string().contains("DAEMON_MIGRATION_REQUIRED"));
+        assert!(error.to_string().contains("legacy project daemon"));
+        assert!(!host_paths.socket_path().exists());
+        assert!(legacy_socket.exists());
+
+        drop(listener);
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_a_held_legacy_project_lock() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("legacy-lock");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let legacy_lock = root.join(".agent-collab/server/daemon.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&legacy_lock)
+            .expect("open legacy lock");
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "test must hold the legacy lock");
+
+        let error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
+            .await
+            .expect_err("a held legacy writer lock must be fenced");
+        assert!(error.to_string().contains("DAEMON_MIGRATION_REQUIRED"));
+        assert!(error.to_string().contains("legacy project daemon lock"));
+        assert!(!host_paths.socket_path().exists());
+
+        drop(lock_file);
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn running_host_daemon_holds_legacy_writer_fence() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("legacy-fence");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let legacy_host_lock = legacy_host_daemon_lock_path(&host_paths);
+        let socket = host_paths.socket_path();
+        let running = tokio::spawn(run_with_host_paths(
+            Scope { root: root.clone() },
+            host_paths.clone(),
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && !crate::client::alive(&socket) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            crate::client::alive(&socket),
+            "host daemon did not publish an accepting socket"
+        );
+
+        let legacy_socket = root.join(".agent-collab/server/server.sock");
+        let legacy_project_lock = root.join(".agent-collab/server/daemon.lock");
+        let journal = root.join(".agent-collab/server/journal.jsonl");
+        let journal_before =
+            std::fs::read(&journal).expect("host daemon must open project journal");
+
+        let old_host_attempt = acquire_daemon_lock(&legacy_host_lock, &legacy_socket);
+        assert!(old_host_attempt
+            .expect_err("old writer must not reacquire its host lock")
+            .to_string()
+            .contains("server already running"));
+        let old_project_attempt = acquire_daemon_lock(&legacy_project_lock, &legacy_socket);
+        assert!(old_project_attempt
+            .expect_err("old writer must not reacquire its project lock")
+            .to_string()
+            .contains("server already running"));
+        assert_eq!(journal_before, std::fs::read(&journal).unwrap());
+
+        running.abort();
+        let _ = running.await;
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[test]
+    fn cleanup_preserves_a_replacement_socket_path() {
+        let root = test_root("replacement");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let socket = host_paths.socket_path();
+        let original = UnixListener::bind(&socket).expect("bind original socket");
+        let captured = std::fs::symlink_metadata(&socket).expect("capture socket metadata");
+        drop(original);
+        std::fs::remove_file(&socket).expect("remove original socket path");
+        let replacement = UnixListener::bind(&socket).expect("bind replacement socket");
+        let current = std::fs::symlink_metadata(&socket).expect("read replacement metadata");
+        assert!(!same_inode(&captured, &current));
+
+        remove_listener_socket(&socket, &captured).expect("replacement cleanup check");
+        assert!(
+            socket.exists(),
+            "cleanup must not unlink a replacement socket"
+        );
+
+        drop(replacement);
+        std::fs::remove_file(&socket).ok();
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn retry_after_pid_failure_succeeds_once_the_path_is_fixed() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("retry");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let pid_path = host_paths.pid_path();
+        std::fs::create_dir(&pid_path).expect("occupy pid path");
+        let first_error = run_with_host_paths(Scope { root: root.clone() }, host_paths.clone())
+            .await
+            .expect_err("first startup must fail");
+        assert!(first_error.to_string().contains("directory"));
+        assert!(!host_paths.socket_path().exists());
+        std::fs::remove_dir(&pid_path).expect("remove pid directory");
+
+        let socket = host_paths.socket_path();
+        let running = tokio::spawn(run_with_host_paths(
+            Scope { root: root.clone() },
+            host_paths.clone(),
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            let socket = socket.clone();
+            let status = tokio::task::spawn_blocking(move || crate::client::daemon_status(&socket))
+                .await
+                .expect("readiness probe task must complete");
+            if status == crate::client::DaemonAvailability::Alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let socket = socket.clone();
+        let status = tokio::task::spawn_blocking(move || crate::client::daemon_status(&socket))
+            .await
+            .expect("readiness probe task must complete");
+        assert_eq!(status, crate::client::DaemonAvailability::Alive);
+        assert!(pid_path.is_file());
+
+        running.abort();
+        let _ = running.await;
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod peer_tests;
+
+#[cfg(test)]
+mod scheduler_admission_tests {
+    use super::*;
+    use crate::server::peer_tests::{register, test_server};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Condvar, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn start_admits_registered_idle_peer_before_managed_child_without_duplicates() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "idle-peer", "%idle-peer");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let server = Arc::new(server);
+
+        let start = |id: &str, token: &str| {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: token.into(),
+                    command: crate::subagent::Action::Start {
+                        id: Some(id.into()),
+                        runtime: Some("codex".into()),
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+        let first = start("unneeded-child", "token-master");
+        assert!(first.ok, "{first:?}");
+        assert_eq!(first.data["admission"]["decision"], "use-registered-peer");
+        assert_eq!(first.data["admission"]["worker_id"], "idle-peer");
+        let second = start("unneeded-child-2", "token-master");
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.data["admission"], first.data["admission"]);
+        let direct = crate::subagent::handle_with_env(
+            &server,
+            "master",
+            "token-master",
+            crate::subagent::Action::Start {
+                id: Some("direct-child".into()),
+                runtime: Some("codex".into()),
+            },
+            Default::default(),
+        );
+        assert!(direct.ok, "{direct:?}");
+        assert_eq!(direct.data["admission"], first.data["admission"]);
+        let state = server.state.lock().unwrap();
+        assert!(state.subagents.is_empty());
+        assert!(state.tasks.is_empty());
+        assert!(state.msgs.is_empty());
+        drop(state);
+        assert_eq!(
+            std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
+                .unwrap()
+                .matches("scheduler_admission")
+                .count(),
+            3
+        );
+
+        let denied = start("denied-child", "wrong-token");
+        assert!(!denied.ok);
+        assert!(denied.error.unwrap().contains("authentication failed"));
+        let state = server.state.lock().unwrap();
+        assert!(state.subagents.is_empty());
+        assert!(state.tasks.is_empty());
+        assert!(state.msgs.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admission_excludes_active_unknown_and_managed_capacity() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.commit(&[Event::TaskCreated {
+            task: TaskRec {
+                id: "active-peer-task".into(),
+                owner: "peer".into(),
+                created_by: "master".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                status: "assigned".into(),
+                next_step: None,
+                wait: None,
+                created_ms: now_ms(),
+                updated_ms: now_ms(),
+            },
+        }]);
+        assert!(registered_idle_peer_for_admission(&server, "master").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "managed-peer", "%managed-peer");
+        server.commit(&[Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "existing-child".into(),
+                parent: "master".into(),
+                peer: "managed-peer".into(),
+                status: "idle".into(),
+                thread_id: Some("thread-managed-peer".into()),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
+            },
+        }]);
+        assert!(registered_idle_peer_for_admission(&server, "master").is_none());
+        assert_eq!(
+            idle_managed_subagent_for_admission(&server, "master")
+                .map(|(id, _, _)| id)
+                .as_deref(),
+            Some("existing-child")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_idle_capacity_is_reused_and_existing_start_semantics_are_preserved() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "managed-peer", "%managed-peer");
+        server.commit(&[
+            Event::MasterAssigned {
+                worker_id: "master".into(),
+                assigned_by: "operator".into(),
+                approval: Some("scheduler test".into()),
+                assigned_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "existing-child".into(),
+                    parent: "master".into(),
+                    peer: "managed-peer".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-managed-peer".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: 0,
+                    last_message: None,
+                    error: None,
+                    probe_failures: Vec::new(),
+                    runtime: Some("codex".into()),
+                },
+            },
+        ]);
+        let server = Arc::new(server);
+        let reused = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Start {
+                    id: Some("new-child".into()),
+                    runtime: Some("codex".into()),
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(reused.ok, "{reused:?}");
+        assert_eq!(
+            reused.data["admission"]["decision"],
+            "reuse-idle-managed-subagent"
+        );
+        assert_eq!(reused.data["managed_subagent"]["id"], "existing-child");
+
+        let existing = crate::subagent::handle_with_env(
+            &server,
+            "master",
+            "token-master",
+            crate::subagent::Action::Start {
+                id: Some("existing-child".into()),
+                runtime: Some("codex".into()),
+            },
+            Default::default(),
+        );
+        assert!(existing.ok, "{existing:?}");
+        assert_eq!(existing.data["reused"], true);
+
+        let invalid_id = crate::subagent::handle_with_env(
+            &server,
+            "master",
+            "token-master",
+            crate::subagent::Action::Start {
+                id: Some("invalid id".into()),
+                runtime: Some("codex".into()),
+            },
+            Default::default(),
+        );
+        assert!(!invalid_id.ok);
+        assert!(invalid_id.error.unwrap().contains("invalid subagent ID"));
+        let invalid_runtime = crate::subagent::handle_with_env(
+            &server,
+            "master",
+            "token-master",
+            crate::subagent::Action::Start {
+                id: Some("existing-child".into()),
+                runtime: Some("unknown".into()),
+            },
+            Default::default(),
+        );
+        assert!(!invalid_runtime.ok);
+        assert!(invalid_runtime
+            .error
+            .unwrap()
+            .contains("runtime must be codex"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admission_audit_failure_is_explicit_and_does_not_create_child() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "idle-peer", "%idle-peer");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let events = root.join(".agent-collab/server/events.jsonl");
+        std::fs::create_dir(&events).unwrap();
+        let server = Arc::new(server);
+        let result = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Start {
+                    id: Some("audit-failure-child".into()),
+                    runtime: Some("codex".into()),
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(!result.ok);
+        assert!(result
+            .error
+            .unwrap()
+            .contains("scheduler admission audit failed"));
+        assert!(server.state.lock().unwrap().subagents.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_capacity_records_explicit_create_admission() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let decision = scheduler_admit_subagent_start(
+            &server,
+            "master",
+            "token-master",
+            Some("new-child"),
+            Some("codex"),
+        )
+        .unwrap();
+        assert!(decision.is_none());
+        let audit =
+            std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl")).unwrap();
+        assert!(audit.contains("create-managed-subagent"));
+        assert!(audit.contains("no eligible live registered peer"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_assigns_ordinary_peer_and_deduplicates_request() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let server = Arc::new(server);
+        let dispatch_request = |subject: &str, body: &str| {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-ordinary-1".into(),
+                        subject: subject.into(),
+                        body: body.into(),
+                        feature_id: Some("feature-1".into()),
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p1".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+        assert_eq!(
+            registered_idle_peer_for_admission(&server, "master")
+                .map(|(id, _)| id)
+                .as_deref(),
+            Some("peer")
+        );
+        let first = dispatch_request("Implement feature", "Do the work");
+        assert!(first.ok, "{first:?}");
+        assert_eq!(first.data["decision"], "use-registered-peer");
+        assert_eq!(first.data["target"], "peer");
+        assert_eq!(first.data["status"], "assigned");
+        let second = dispatch_request("different retry text", "ignored by request key");
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.data["decision"], "deduplicated");
+        assert_eq!(second.data["task_id"], first.data["task_id"]);
+        assert_eq!(second.data["message_id"], first.data["message_id"]);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(state.tasks["task-scheduler-req-ordinary-1"].owner, "peer");
+        let message_id = first.data["message_id"].as_str().unwrap();
+        let subscription_id = state.wake_bindings.get(message_id).unwrap();
+        assert_eq!(state.delivery_modes[message_id], "explicit-notification");
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].worker_id,
+            "peer"
+        );
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].event,
+            "direct-message"
+        );
+        drop(state);
+        let rejected_update = dispatch(
+            &server,
+            Req::TaskUpdate {
+                worker_id: "peer".into(),
+                token: "token-peer".into(),
+                task_id: "task-scheduler-req-ordinary-1".into(),
+                status: Some("working".into()),
+                next_step: None,
+            },
+        );
+        assert!(!rejected_update.ok, "{rejected_update:?}");
+        assert!(rejected_update.error.unwrap().contains("task accept"));
+        let accepted = dispatch(
+            &server,
+            Req::TaskAccept {
+                worker_id: "peer".into(),
+                token: "token-peer".into(),
+                task_id: "task-scheduler-req-ordinary-1".into(),
+            },
+        );
+        assert!(accepted.ok, "{accepted:?}");
+        assert_eq!(accepted.data["status"], "working");
+        let retry = dispatch(
+            &server,
+            Req::TaskAccept {
+                worker_id: "peer".into(),
+                token: "token-peer".into(),
+                task_id: "task-scheduler-req-ordinary-1".into(),
+            },
+        );
+        assert!(retry.ok, "{retry:?}");
+        assert_eq!(retry.data["idempotent"], true);
+        let replayed = replay(&root).unwrap();
+        assert_eq!(
+            replayed.tasks["task-scheduler-req-ordinary-1"].status,
+            "working"
+        );
+        assert_eq!(
+            replayed.scheduler_admissions["req-ordinary-1"].status,
+            "succeeded"
+        );
+        let replayed_subscription_id = replayed
+            .wake_bindings
+            .get(first.data["message_id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            replayed.notification_subscriptions[replayed_subscription_id].worker_id,
+            "peer"
+        );
+        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("scheduler_admission") && line.contains("req-ordinary-1"))
+            .count();
+        assert_eq!(audit_count, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_notification_rejection_keeps_retryable_reservation() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let reject_once = Arc::new(AtomicBool::new(true));
+        let reject_once_for_sink = reject_once.clone();
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _| {
+            if reject_once_for_sink.swap(false, Ordering::SeqCst) {
+                Err("ADAPTER_UNKNOWN: rpc unknown: thread not found".into())
+            } else {
+                Ok(json!({"accepted": true}))
+            }
+        });
+        let server = Arc::new(server);
+        let request = || {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-notify-rejected-1".into(),
+                        subject: "Rejected notification".into(),
+                        body: "Must not be assigned".into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p0".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+
+        let first = request();
+        assert!(!first.ok, "{first:?}");
+        assert_eq!(first.data["reservation"], true);
+        assert_eq!(first.data["admission"]["status"], "pending");
+        assert!(first
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("notification was not accepted"));
+
+        let accepted = dispatch(
+            &server,
+            Req::TaskAccept {
+                worker_id: "peer".into(),
+                token: "token-peer".into(),
+                task_id: first.data["task_id"].as_str().unwrap().into(),
+            },
+        );
+        assert!(!accepted.ok, "{accepted:?}");
+        assert!(accepted
+            .error
+            .unwrap_or_default()
+            .contains("provenance is missing"));
+
+        let retry = request();
+        assert!(retry.ok, "{retry:?}");
+        assert_eq!(retry.data["recovered"], true);
+        assert_eq!(retry.data["task_id"], first.data["task_id"]);
+        assert_eq!(retry.data["message_id"], first.data["message_id"]);
+        assert_eq!(retry.data["admission"]["status"], "succeeded");
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.scheduler_admissions["req-notify-rejected-1"].status,
+            "succeeded"
+        );
+        assert_eq!(
+            state.scheduler_admissions["req-notify-rejected-1"]
+                .error
+                .as_deref(),
+            None
+        );
+        assert_eq!(
+            state.tasks["task-scheduler-req-notify-rejected-1"].status,
+            "assigned"
+        );
+        assert_eq!(
+            state.msgs["scheduler-req-notify-rejected-1"].wake_attempt_count,
+            2
+        );
+        drop(state);
+
+        let accepted = dispatch(
+            &server,
+            Req::TaskAccept {
+                worker_id: "peer".into(),
+                token: "token-peer".into(),
+                task_id: first.data["task_id"].as_str().unwrap().into(),
+            },
+        );
+        assert!(accepted.ok, "{accepted:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_reuses_managed_child_and_deduplicates_request() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "managed-peer", "%managed-peer");
+        server.commit(&[
+            Event::MasterAssigned {
+                worker_id: "master".into(),
+                assigned_by: "operator".into(),
+                approval: Some("scheduler test".into()),
+                assigned_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "managed-child".into(),
+                    parent: "master".into(),
+                    peer: "managed-peer".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-managed-peer".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: 0,
+                    last_message: None,
+                    error: None,
+                    probe_failures: Vec::new(),
+                    runtime: Some("codex".into()),
+                },
+            },
+        ]);
+        let server = Arc::new(server);
+        let request = || {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-managed-1".into(),
+                        subject: "Managed task".into(),
+                        body: "Use existing child".into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p2".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+        let first = request();
+        assert!(first.ok, "{first:?}");
+        assert_eq!(first.data["decision"], "reuse-idle-managed-subagent");
+        assert_eq!(first.data["managed_subagent_id"], "managed-child");
+        let second = request();
+        assert!(second.ok, "{second:?}");
+        assert_eq!(second.data["decision"], "deduplicated");
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(state.subagents["managed-child"].status, "assigned");
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_audit_failure_is_stable_on_request_retry() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let activity_path = root.join(".agent-collab/server/events.jsonl");
+        std::fs::create_dir_all(activity_path.parent().unwrap()).unwrap();
+        std::fs::create_dir(&activity_path).unwrap();
+        let server = Arc::new(server);
+        let request = |body: &str| {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-audit-failure-1".into(),
+                        subject: "Audit failure task".into(),
+                        body: body.into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p2".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+        let first = request("first body");
+        assert!(!first.ok, "{first:?}");
+        let first_error = first.error.clone().unwrap();
+        assert!(first_error.contains("scheduler admission audit failed"));
+        assert_eq!(first.data["reservation"], true);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs["scheduler-req-audit-failure-1"].state, "pending");
+        assert_eq!(
+            state.msgs["scheduler-req-audit-failure-1"].wake_attempt_count,
+            0
+        );
+        drop(state);
+        *server.state.lock().unwrap() = replay(&root).unwrap();
+        let second = request("retry body is ignored");
+        assert!(!second.ok, "{second:?}");
+        assert_eq!(second.error.as_deref(), Some(first_error.as_str()));
+        assert_eq!(second.data["reservation"], true);
+        assert_eq!(second.data["message_id"], first.data["message_id"]);
+        assert_eq!(second.data["task_id"], first.data["task_id"]);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(
+            state.scheduler_admissions["req-audit-failure-1"].status,
+            "failed"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_audit_failure_cannot_be_accepted_by_managed_child() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "managed-peer", "%managed-peer");
+        server.commit(&[
+            Event::MasterAssigned {
+                worker_id: "master".into(),
+                assigned_by: "operator".into(),
+                approval: Some("scheduler test".into()),
+                assigned_ms: now_ms(),
+            },
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "managed-child-failed-audit".into(),
+                    parent: "master".into(),
+                    peer: "managed-peer".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-managed-peer".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: 0,
+                    last_message: None,
+                    error: None,
+                    probe_failures: Vec::new(),
+                    runtime: Some("codex".into()),
+                },
+            },
+        ]);
+        std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
+        let server = Arc::new(server);
+        let dispatch_result = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Dispatch {
+                    request_id: "req-managed-failed-audit-1".into(),
+                    subject: "Failed managed task".into(),
+                    body: "Must not execute".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p2".into(),
+                    next_step: None,
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(!dispatch_result.ok, "{dispatch_result:?}");
+        let working = crate::subagent::handle_with_env(
+            &server,
+            "managed-peer",
+            "token-managed-peer",
+            crate::subagent::Action::Working {
+                id: "managed-child-failed-audit".into(),
+            },
+            Default::default(),
+        );
+        assert!(!working.ok, "{working:?}");
+        assert!(working
+            .error
+            .unwrap_or_default()
+            .contains("scheduler assignment admission is failed"));
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.scheduler_admissions["req-managed-failed-audit-1"].status,
+            "failed"
+        );
+        assert_eq!(
+            state.subagents["managed-child-failed-audit"].status,
+            "assigned"
+        );
+        assert_eq!(
+            state.tasks["task-scheduler-req-managed-failed-audit-1"].status,
+            "assigned"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_audit_failure_does_not_wake_long_poll_or_recv() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
+        let server = Arc::new(server);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (poll_result, dispatch_result) = runtime.block_on(async {
+            let poll = handle_poll_async(Arc::clone(&server), "peer".into(), 100);
+            let dispatch_server = Arc::clone(&server);
+            let dispatch = tokio::task::spawn_blocking(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                dispatch(
+                    &dispatch_server,
+                    Req::Subagent {
+                        worker_id: "master".into(),
+                        token: "token-master".into(),
+                        command: crate::subagent::Action::Dispatch {
+                            request_id: "req-long-poll-failed-audit-1".into(),
+                            subject: "Failed long poll task".into(),
+                            body: "Must not be consumed".into(),
+                            feature_id: None,
+                            worktree_path: None,
+                            branch: None,
+                            base_commit: None,
+                            priority: "p2".into(),
+                            next_step: None,
+                        },
+                        launch_env: Default::default(),
+                    },
+                )
+            });
+            let (poll_result, dispatch_result) = tokio::join!(poll, dispatch);
+            (poll_result, dispatch_result.unwrap())
+        });
+        assert!(poll_result.ok, "{poll_result:?}");
+        assert_eq!(poll_result.data["count"], 0);
+        assert_eq!(poll_result.data["timeout"], true);
+        assert!(!dispatch_result.ok, "{dispatch_result:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.msgs["scheduler-req-long-poll-failed-audit-1"].wake_attempt_count,
+            0
+        );
+        assert_eq!(state.inbox_of("peer").len(), 0);
+        assert_eq!(
+            state.scheduler_admissions["req-long-poll-failed-audit-1"].status,
+            "failed"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_success_wakes_long_poll() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .notification_subscriptions
+            .contains_key("sub-default-direct-message-peer"));
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let server = Arc::new(server);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (poll_result, dispatch_result) = runtime.block_on(async {
+            let poll = handle_poll_async(Arc::clone(&server), "peer".into(), 5_000);
+            let dispatch_server = Arc::clone(&server);
+            let dispatch = tokio::task::spawn_blocking(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                dispatch(
+                    &dispatch_server,
+                    Req::Subagent {
+                        worker_id: "master".into(),
+                        token: "token-master".into(),
+                        command: crate::subagent::Action::Dispatch {
+                            request_id: "req-long-poll-success-1".into(),
+                            subject: "Successful long poll task".into(),
+                            body: "Must wake recv".into(),
+                            feature_id: None,
+                            worktree_path: None,
+                            branch: None,
+                            base_commit: None,
+                            priority: "p2".into(),
+                            next_step: None,
+                        },
+                        launch_env: Default::default(),
+                    },
+                )
+            });
+            let (poll_result, dispatch_result) = tokio::join!(poll, dispatch);
+            (poll_result, dispatch_result.unwrap())
+        });
+        assert!(poll_result.ok, "{poll_result:?}");
+        assert_eq!(poll_result.data["count"], 1);
+        assert!(!poll_result.data["timeout"].as_bool().unwrap_or(false));
+        assert_eq!(
+            poll_result.data["messages"][0]["id"],
+            "scheduler-req-long-poll-success-1"
+        );
+        assert!(dispatch_result.ok, "{dispatch_result:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.scheduler_admissions["req-long-poll-success-1"].status,
+            "succeeded"
+        );
+        assert_eq!(
+            state.msgs["scheduler-req-long-poll-success-1"].state,
+            "read"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_recovers_pending_reservation_without_duplicates() {
+        // Simulate a process interruption after the reservation and audit write,
+        // but before the durable succeeded status commit.
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        server.commit(&[
+            Event::MasterAssigned {
+                worker_id: "master".into(),
+                assigned_by: "operator".into(),
+                approval: Some("scheduler test".into()),
+                assigned_ms: now_ms(),
+            },
+            Event::Sent {
+                msg: Message {
+                    id: "scheduler-req-pending-recovery-1".into(),
+                    from: "master".into(),
+                    to: "peer".into(),
+                    mtype: "notify".into(),
+                    subject: Some("Pending recovery".into()),
+                    body: "Reuse reservation".into(),
+                    in_reply_to: None,
+                    created_ms: now_ms(),
+                    state: "pending".into(),
+                    wake_attempt_count: 0,
+                    last_wake_attempt_ms: 0,
+                },
+            },
+            Event::TaskCreated {
+                task: TaskRec {
+                    id: "task-scheduler-req-pending-recovery-1".into(),
+                    owner: "peer".into(),
+                    created_by: "master".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p2".into(),
+                    status: "assigned".into(),
+                    next_step: Some("accept".into()),
+                    wait: None,
+                    created_ms: now_ms(),
+                    updated_ms: now_ms(),
+                },
+            },
+            Event::DeliveryMode {
+                msg_id: "scheduler-req-pending-recovery-1".into(),
+                mode: "explicit-notification".into(),
+            },
+            Event::WakeBound {
+                message_id: "scheduler-req-pending-recovery-1".into(),
+                subscription_id: "sub-default-direct-message-peer".into(),
+            },
+            Event::SchedulerAdmission {
+                admission: crate::server::state::SchedulerAdmissionRecord {
+                    request_id: "req-pending-recovery-1".into(),
+                    decision: "use-registered-peer".into(),
+                    worker_id: "peer".into(),
+                    managed_subagent_id: None,
+                    message_id: "scheduler-req-pending-recovery-1".into(),
+                    task_id: "task-scheduler-req-pending-recovery-1".into(),
+                    status: "pending".into(),
+                    error: None,
+                    created_ms: now_ms(),
+                    updated_ms: now_ms(),
+                },
+            },
+        ]);
+        record_scheduler_admission(
+            &server,
+            json!({
+                "request_id": "req-pending-recovery-1",
+                "decision": "use-registered-peer",
+                "worker_id": "peer",
+                "message_id": "scheduler-req-pending-recovery-1",
+                "task_id": "task-scheduler-req-pending-recovery-1",
+                "status": "pending",
+            }),
+        )
+        .unwrap();
+        let audit_path = root.join(".agent-collab/server/events.jsonl");
+        let original_mode = std::fs::metadata(&audit_path).unwrap().permissions().mode();
+        let mut read_only = std::fs::metadata(&audit_path).unwrap().permissions();
+        read_only.set_mode(original_mode & !0o222);
+        std::fs::set_permissions(&audit_path, read_only).unwrap();
+        let server = Arc::new(server);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (poll_result, recovered) = runtime.block_on(async {
+            let poll = handle_poll_async(Arc::clone(&server), "peer".into(), 1_000);
+            let recovery_server = Arc::clone(&server);
+            let recovery = tokio::task::spawn_blocking(move || {
+                dispatch(
+                    &recovery_server,
+                    Req::Subagent {
+                        worker_id: "master".into(),
+                        token: "token-master".into(),
+                        command: crate::subagent::Action::Dispatch {
+                            request_id: "req-pending-recovery-1".into(),
+                            subject: "Changed subject is ignored".into(),
+                            body: "Changed body is ignored".into(),
+                            feature_id: None,
+                            worktree_path: None,
+                            branch: None,
+                            base_commit: None,
+                            priority: "p2".into(),
+                            next_step: None,
+                        },
+                        launch_env: Default::default(),
+                    },
+                )
+            });
+            let (poll_result, recovered) = tokio::join!(poll, recovery);
+            (poll_result, recovered.unwrap())
+        });
+        let mut restored = std::fs::metadata(&audit_path).unwrap().permissions();
+        restored.set_mode(original_mode);
+        std::fs::set_permissions(&audit_path, restored).unwrap();
+        assert!(poll_result.ok, "{poll_result:?}");
+        assert_eq!(poll_result.data["count"], 1);
+        assert!(!poll_result.data["timeout"].as_bool().unwrap_or(false));
+        assert_eq!(
+            poll_result.data["messages"][0]["id"],
+            "scheduler-req-pending-recovery-1"
+        );
+        assert!(recovered.ok, "{recovered:?}");
+        assert_eq!(recovered.data["recovered"], true);
+        assert_eq!(recovered.data["decision"], "use-registered-peer");
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(
+            state.scheduler_admissions["req-pending-recovery-1"].status,
+            "succeeded"
+        );
+        drop(state);
+        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.contains("scheduler_admission") && line.contains("req-pending-recovery-1")
+            })
+            .count();
+        assert_eq!(audit_count, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_concurrent_same_request_reserves_once() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let server = Arc::new(server);
+        let barrier = Arc::new(Barrier::new(2));
+        let request = |server: Arc<Server>, barrier: Arc<Barrier>| {
+            thread::spawn(move || {
+                barrier.wait();
+                dispatch(
+                    &server,
+                    Req::Subagent {
+                        worker_id: "master".into(),
+                        token: "token-master".into(),
+                        command: crate::subagent::Action::Dispatch {
+                            request_id: "req-concurrent-1".into(),
+                            subject: "Concurrent task".into(),
+                            body: "Reserve exactly once".into(),
+                            feature_id: None,
+                            worktree_path: None,
+                            branch: None,
+                            base_commit: None,
+                            priority: "p2".into(),
+                            next_step: None,
+                        },
+                        launch_env: Default::default(),
+                    },
+                )
+            })
+        };
+        let first = request(Arc::clone(&server), Arc::clone(&barrier));
+        let second = request(Arc::clone(&server), Arc::clone(&barrier));
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        let completed = [&first, &second].into_iter().filter(|resp| resp.ok).count();
+        assert_eq!(
+            completed, 1,
+            "one request must complete the assignment: {first:?} {second:?}"
+        );
+        let in_flight = [&first, &second]
+            .into_iter()
+            .find(|resp| !resp.ok)
+            .expect("one request must observe the in-flight claim");
+        assert!(
+            in_flight
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already in flight")),
+            "{in_flight:?}"
+        );
+        assert_eq!(in_flight.data["reservation"], true);
+        assert_eq!(first.data["task_id"], second.data["task_id"]);
+        assert_eq!(first.data["message_id"], second.data["message_id"]);
+        assert!(["use-registered-peer", "deduplicated"]
+            .contains(&first.data["decision"].as_str().unwrap()));
+        assert!(["use-registered-peer", "deduplicated"]
+            .contains(&second.data["decision"].as_str().unwrap()));
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(
+            state.tasks["task-scheduler-req-concurrent-1"].status,
+            "assigned"
+        );
+        assert_eq!(
+            state.scheduler_admissions["req-concurrent-1"].status,
+            "succeeded"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_concurrent_retry_notifies_once() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let sink_calls = Arc::new(AtomicUsize::new(0));
+        let sink_calls_for_sink = Arc::clone(&sink_calls);
+        let sink_gate = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let sink_gate_for_sink = Arc::clone(&sink_gate);
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _| {
+            let call = sink_calls_for_sink.fetch_add(1, Ordering::SeqCst) + 1;
+            let (lock, ready) = &*sink_gate_for_sink;
+            let mut entered = lock.lock().unwrap();
+            *entered = (*entered).max(call);
+            if call == 1 {
+                let _ = ready
+                    .wait_timeout_while(entered, Duration::from_millis(500), |seen| *seen < 2)
+                    .unwrap();
+            } else {
+                ready.notify_all();
+            }
+            Ok(json!({"accepted": true}))
+        });
+        let server = Arc::new(server);
+        let barrier = Arc::new(Barrier::new(2));
+        let request = |server: Arc<Server>, barrier: Arc<Barrier>| {
+            thread::spawn(move || {
+                barrier.wait();
+                dispatch(
+                    &server,
+                    Req::Subagent {
+                        worker_id: "master".into(),
+                        token: "token-master".into(),
+                        command: crate::subagent::Action::Dispatch {
+                            request_id: "req-concurrent-notify-1".into(),
+                            subject: "Concurrent notification".into(),
+                            body: "Notify exactly once".into(),
+                            feature_id: None,
+                            worktree_path: None,
+                            branch: None,
+                            base_commit: None,
+                            priority: "p1".into(),
+                            next_step: None,
+                        },
+                        launch_env: Default::default(),
+                    },
+                )
+            })
+        };
+        let first = request(Arc::clone(&server), Arc::clone(&barrier));
+        let second = request(Arc::clone(&server), Arc::clone(&barrier));
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+
+        assert_eq!(
+            sink_calls.load(Ordering::SeqCst),
+            1,
+            "concurrent retry must trigger exactly one AppServer notification sink call"
+        );
+        let completed = [&first, &second].into_iter().filter(|resp| resp.ok).count();
+        assert_eq!(
+            completed, 1,
+            "one request must own the notification: {first:?} {second:?}"
+        );
+        let in_flight = [&first, &second]
+            .into_iter()
+            .find(|resp| !resp.ok)
+            .expect("one request must observe the in-flight claim");
+        assert!(
+            in_flight
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already in flight")),
+            "{in_flight:?}"
+        );
+        assert_eq!(in_flight.data["reservation"], true);
+        assert_eq!(first.data["task_id"], second.data["task_id"]);
+        assert_eq!(first.data["message_id"], second.data["message_id"]);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(
+            state.scheduler_admissions["req-concurrent-notify-1"].status,
+            "succeeded"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_rejection_clears_claim_without_deadlock() {
+        let (server, root) = test_server();
+        register(&server, "peer", "%peer");
+        server.commit(&[Event::TaskCreated {
+            task: TaskRec {
+                id: "task-scheduler-req-rejection-deadlock".into(),
+                owner: "peer".into(),
+                created_by: "master".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                status: "assigned".into(),
+                next_step: None,
+                wait: None,
+                created_ms: now_ms(),
+                updated_ms: now_ms(),
+            },
+        }]);
+        server.commit(&[Event::SchedulerAdmission {
+            admission: crate::server::state::SchedulerAdmissionRecord {
+                request_id: "req-rejection-deadlock".into(),
+                decision: "use-registered-peer".into(),
+                worker_id: "peer".into(),
+                managed_subagent_id: None,
+                message_id: "scheduler-req-rejection-deadlock".into(),
+                task_id: "task-scheduler-req-rejection-deadlock".into(),
+                status: "pending".into(),
+                error: None,
+                created_ms: now_ms(),
+                updated_ms: now_ms(),
+            },
+        }]);
+        let response = scheduler_dispatch_recover_pending(&server, "req-rejection-deadlock")
+            .expect("pending reservation must be recovered");
+        assert!(!response.ok, "{response:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.scheduler_admissions["req-rejection-deadlock"].status,
+            "pending"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_notifying_claim_recovers_after_cooldown() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let server = Arc::new(server);
+        let first = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Dispatch {
+                    request_id: "req-stale-notifying".into(),
+                    subject: "Recover stale claim".into(),
+                    body: "Retry after cooldown".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: None,
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(first.ok, "{first:?}");
+        {
+            let mut state = server.state.lock().unwrap();
+            let stale_ms = now_ms() - state::REQUEST_COOLDOWN_MS;
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: "req-stale-notifying".into(),
+                    status: "notifying".into(),
+                    error: None,
+                    updated_ms: stale_ms,
+                }],
+            );
+        }
+        let retry = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Dispatch {
+                    request_id: "req-stale-notifying".into(),
+                    subject: "Recover stale claim".into(),
+                    body: "Retry after cooldown".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: None,
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(retry.ok, "{retry:?}");
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.scheduler_admissions["req-stale-notifying"].status,
+            "succeeded"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_attempt_cannot_clear_newer_notification_claim() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        server.commit(&[Event::MasterAssigned {
+            worker_id: "master".into(),
+            assigned_by: "operator".into(),
+            approval: Some("scheduler test".into()),
+            assigned_ms: now_ms(),
+        }]);
+        let server = Arc::new(server);
+        let first = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Dispatch {
+                    request_id: "req-stale-owner".into(),
+                    subject: "Stale owner".into(),
+                    body: "Old attempt must not clear a newer claim".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: None,
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(first.ok, "{first:?}");
+
+        let old_claim = now_ms() - state::REQUEST_COOLDOWN_MS - 1;
+        {
+            let mut state = server.state.lock().unwrap();
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: "req-stale-owner".into(),
+                    status: "notifying".into(),
+                    error: None,
+                    updated_ms: old_claim,
+                }],
+            );
+        }
+        {
+            let mut state = server.state.lock().unwrap();
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: "req-stale-owner".into(),
+                    status: "notifying".into(),
+                    error: None,
+                    updated_ms: old_claim + 1,
+                }],
+            );
+        }
+        clear_scheduler_notification_claim(&server, "req-stale-owner", old_claim);
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.scheduler_admissions["req-stale-owner"].status,
+            "notifying"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -1,0 +1,1007 @@
+use serde::{Deserialize, Serialize};
+
+use crate::identity::{
+    validate_binding, AgentId, AppServerId, BindingId, CommandId, DispatchId, MessageId,
+    NativeThreadId, OperationId, RuntimeIdentity, TurnId,
+};
+use crate::scope::{ProjectScopeId, RouteScope};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransportKind {
+    #[serde(rename = "appserver")]
+    AppServer,
+}
+
+impl TransportKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AppServer => "appserver",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppServerCandidate {
+    pub endpoint: String,
+    pub namespace: String,
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportCandidates {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appserver: Option<AppServerCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedTransport {
+    pub kind: TransportKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub capabilities: Vec<String>,
+    pub self_check: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandEnvelope {
+    pub command_id: CommandId,
+    pub operation_id: OperationId,
+    pub actor_binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub scope: RouteScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<DispatchId>,
+}
+
+impl CommandEnvelope {
+    pub fn new(
+        command_id: CommandId,
+        operation_id: OperationId,
+        actor_binding_id: BindingId,
+        endpoint_generation: u64,
+        scope: RouteScope,
+        expected_revision: Option<u64>,
+        turn_id: Option<TurnId>,
+        message_id: Option<MessageId>,
+        dispatch_id: Option<DispatchId>,
+    ) -> Self {
+        Self {
+            command_id,
+            operation_id,
+            actor_binding_id,
+            endpoint_generation,
+            scope,
+            expected_revision,
+            turn_id,
+            message_id,
+            dispatch_id,
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        crate::identity::validate_id_for_protocol(self.command_id.as_str())?;
+        crate::identity::validate_id_for_protocol(self.operation_id.as_str())?;
+        crate::identity::validate_id_for_protocol(self.actor_binding_id.as_str())?;
+        self.scope.validate()?;
+        for id in [
+            self.turn_id.as_ref().map(TurnId::as_str),
+            self.message_id.as_ref().map(MessageId::as_str),
+            self.dispatch_id.as_ref().map(DispatchId::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            crate::identity::validate_id_for_protocol(id)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_for(
+        &self,
+        registered: &RuntimeIdentity,
+        registered_scope: &RouteScope,
+    ) -> anyhow::Result<()> {
+        registered.validate()?;
+        self.validate()?;
+        registered_scope.validate()?;
+        let incoming = RuntimeIdentity {
+            agent_id: registered.agent_id.clone(),
+            runtime_id: registered.runtime_id.clone(),
+            appserver_id: registered.appserver_id.clone(),
+            endpoint_generation: self.endpoint_generation,
+            binding_id: self.actor_binding_id.clone(),
+            native_thread_id: registered.native_thread_id.clone(),
+        };
+        validate_binding(registered, &incoming)?;
+        self.scope.validate_same_route(registered_scope)?;
+        if self.scope.app_scope_id != registered.appserver_id {
+            anyhow::bail!("command app scope does not match actor AppServer identity");
+        }
+        Ok(())
+    }
+}
+
+/// The two-level project identity carried by every project-scoped wire
+/// request. The app scope identifies the real appserver route; the root and
+/// project scope identify the registered filesystem context used by checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectContext {
+    pub app_scope_id: AppServerId,
+    pub canonical_root: String,
+    pub project_scope: ProjectScopeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_context: Option<RuntimeIdentity>,
+}
+
+/// The daemon-owned route selected by one native App Server thread.
+///
+/// This is the only production route selector for thread-backed commands.
+/// The daemon returns the route and binding identity; callers must not
+/// reconstruct them from cwd or `routes.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteResolution {
+    pub app_scope_id: AppServerId,
+    pub project_scope: ProjectScopeId,
+    pub canonical_root: String,
+    pub storage_root: String,
+    pub agent_id: AgentId,
+    pub binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub native_thread_id: NativeThreadId,
+}
+
+impl RouteResolution {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        crate::identity::validate_id_for_protocol(self.app_scope_id.as_str())?;
+        self.project_scope.validate()?;
+        crate::identity::validate_id_for_protocol(self.agent_id.as_str())?;
+        crate::identity::validate_id_for_protocol(self.binding_id.as_str())?;
+        crate::identity::validate_id_for_protocol(self.native_thread_id.as_str())?;
+        for (name, value) in [
+            ("canonical root", self.canonical_root.as_str()),
+            ("storage root", self.storage_root.as_str()),
+        ] {
+            if value.is_empty()
+                || value.chars().any(char::is_control)
+                || !std::path::Path::new(value).is_absolute()
+            {
+                anyhow::bail!("route resolution {name} must be an absolute path");
+            }
+        }
+        if self.project_scope.as_str() != self.canonical_root {
+            anyhow::bail!("route resolution project scope does not match canonical root");
+        }
+        if self.endpoint_generation == 0 {
+            anyhow::bail!("route resolution endpoint generation must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+impl ProjectContext {
+    /// The pre-route-context constructor cannot safely select an appserver.
+    /// Keep it as a source-compatible, fail-closed API for old callers; use
+    /// `for_registered_root_with_app` or `for_registered_route` for a project
+    /// request.
+    pub fn for_registered_root(root: &std::path::Path) -> anyhow::Result<Self> {
+        let _ = root;
+        anyhow::bail!(
+            "project context requires an explicit appserver identity; use for_registered_root_with_app"
+        )
+    }
+
+    pub fn for_registered_root_with_app(
+        root: &std::path::Path,
+        app_scope_id: AppServerId,
+    ) -> anyhow::Result<Self> {
+        crate::identity::validate_id_for_protocol(app_scope_id.as_str())?;
+        let canonical = std::fs::canonicalize(root)?;
+        let canonical_root = canonical.to_str().ok_or_else(|| {
+            anyhow::anyhow!("registered project root must be valid UTF-8 for the wire context")
+        })?;
+        let project_scope = ProjectScopeId::new(canonical_root.to_owned())?;
+        Ok(Self {
+            app_scope_id,
+            canonical_root: canonical_root.to_owned(),
+            project_scope,
+            runtime_context: None,
+        })
+    }
+
+    pub fn for_registered_route(
+        root: &std::path::Path,
+        identity: &RuntimeIdentity,
+    ) -> anyhow::Result<Self> {
+        identity.validate()?;
+        let mut context = Self::for_registered_root_with_app(root, identity.appserver_id.clone())?;
+        context.runtime_context = Some(identity.clone());
+        Ok(context)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        crate::identity::validate_id_for_protocol(self.app_scope_id.as_str())?;
+        if self.canonical_root.is_empty() {
+            anyhow::bail!("project context canonical root must not be empty");
+        }
+        if self.canonical_root.chars().any(char::is_control) {
+            anyhow::bail!("project context canonical root must not contain control characters");
+        }
+        if !std::path::Path::new(&self.canonical_root).is_absolute() {
+            anyhow::bail!("project context canonical root must be an absolute path");
+        }
+        let expected_scope = ProjectScopeId::new(self.canonical_root.clone())?;
+        if self.project_scope != expected_scope {
+            anyhow::bail!("project context scope does not match its canonical root");
+        }
+        if let Some(runtime) = &self.runtime_context {
+            runtime.validate()?;
+            if runtime.appserver_id != self.app_scope_id {
+                anyhow::bail!(
+                    "project context app scope mismatch: expected {}, observed runtime {}",
+                    self.app_scope_id,
+                    runtime.appserver_id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_registered_root(&self, root: &std::path::Path) -> anyhow::Result<()> {
+        self.validate()?;
+        let expected = Self::for_registered_root_with_app(root, self.app_scope_id.clone())?;
+        if self.canonical_root != expected.canonical_root
+            || self.project_scope != expected.project_scope
+        {
+            anyhow::bail!(
+                "project context does not match registered project root {}",
+                root.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op")]
+pub enum Req {
+    SubagentObserve {
+        id: Option<String>,
+        snapshot_lines: Option<usize>,
+    },
+    Subagent {
+        worker_id: String,
+        token: String,
+        command: crate::subagent::Action,
+        #[serde(default)]
+        launch_env: std::collections::BTreeMap<String, String>,
+    },
+    Register {
+        worker_id: String,
+        token: String,
+        cwd: String,
+        #[serde(default)]
+        candidates: Option<TransportCandidates>,
+    },
+    Send {
+        from: String,
+        #[serde(default)]
+        worker_id: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        command: Option<CommandEnvelope>,
+        to: String,
+        #[serde(rename = "type")]
+        mtype: String,
+        #[serde(default)]
+        subject: Option<String>,
+        body: String,
+        in_reply_to: Option<String>,
+        #[serde(default = "default_delivery_mode")]
+        delivery: String,
+    },
+    CrossProjectSend {
+        from: String,
+        from_project: String,
+        source_master_assigned_by: String,
+        source_master_approval: Option<String>,
+        source_master_assigned_ms: i64,
+        to: String,
+        subject: String,
+        body: String,
+        in_reply_to: Option<String>,
+    },
+    NotificationMethods,
+    NotificationSubscribe {
+        worker_id: String,
+        token: String,
+        event: String,
+        subject: Option<String>,
+        trigger_ms: Option<i64>,
+        #[serde(default)]
+        trigger_times_ms: Vec<i64>,
+        #[serde(default)]
+        interval_ms: Option<i64>,
+        #[serde(default = "crate::server::state::default_repeat_count")]
+        repeat_count: u32,
+        ttl_seconds: u64,
+    },
+    NotificationStatus {
+        worker_id: String,
+        token: String,
+    },
+    NotificationUnsubscribe {
+        worker_id: String,
+        token: String,
+        subscription_id: String,
+    },
+    Poll {
+        worker_id: String,
+        token: String,
+        #[serde(default = "default_poll_timeout")]
+        timeout_ms: u64,
+    },
+    Ack {
+        worker_id: String,
+        token: String,
+        ids: Vec<String>,
+    },
+    Inbox {
+        worker_id: String,
+        token: String,
+    },
+    Context {
+        worker_id: String,
+        token: String,
+    },
+    /// Resolve the unique registered project route for one native App Server
+    /// thread. This is a daemon-owned read-only lookup: callers must not
+    /// select a route by cwd or by reading routes.jsonl directly.
+    RouteResolve {
+        native_thread_id: String,
+    },
+    MsgStatus {
+        msg_id: String,
+    },
+    TaskRegister {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        owner: Option<String>,
+        feature_id: Option<String>,
+        worktree_path: Option<String>,
+        branch: Option<String>,
+        base_commit: Option<String>,
+        #[serde(default = "crate::server::state::default_priority")]
+        priority: String,
+        next_step: Option<String>,
+        #[serde(default)]
+        goal_prompt: Option<String>,
+    },
+    TaskRelocate {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        worktree_path: String,
+        branch: Option<String>,
+        base_commit: Option<String>,
+    },
+    TaskUpdate {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        status: Option<String>,
+        next_step: Option<String>,
+    },
+    TaskAccept {
+        worker_id: String,
+        token: String,
+        task_id: String,
+    },
+    TaskClaim {
+        worker_id: String,
+        token: String,
+        task_id: String,
+    },
+    TaskWait {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        blocking_task_id: String,
+    },
+    TaskDeliver {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        evidence: Option<String>,
+        worktree: Option<String>,
+    },
+    TaskReview {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        accept: bool,
+        rework: bool,
+        evidence: String,
+    },
+    TaskIntegrated {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        commit: String,
+        evidence: String,
+    },
+    TaskClose {
+        worker_id: String,
+        token: String,
+        task_id: String,
+        force: bool,
+        reason: Option<String>,
+    },
+    TaskDispatch {
+        worker_id: String,
+        token: String,
+    },
+    TaskStatus {
+        task_id: Option<String>,
+    },
+    TaskConflicts {
+        feature_id: Option<String>,
+        worktree_path: Option<String>,
+    },
+    MigrationInspect {
+        worker_id: String,
+        token: String,
+    },
+    MigrationPlan {
+        worker_id: String,
+        token: String,
+    },
+    MigrationApply {
+        worker_id: String,
+        token: String,
+    },
+    MigrationVerify {
+        worker_id: String,
+        token: String,
+    },
+    #[serde(alias = "RootPromote")]
+    MasterPromote {
+        worker_id: String,
+        token: String,
+        approval: String,
+    },
+    #[serde(alias = "RootDelegate")]
+    MasterDelegate {
+        worker_id: String,
+        token: String,
+        target_id: String,
+    },
+    #[serde(alias = "RootStatus")]
+    MasterStatus,
+    Role {
+        worker_id: String,
+    },
+    Workers,
+    WorkerStatus {
+        worker_id: Option<String>,
+    },
+    /// Live master retires a worker registration.
+    WorkerClose {
+        worker_id: String,
+        token: String,
+        target_id: String,
+        reason: String,
+    },
+    MasterId,
+    MasterRecover {
+        worker_id: String,
+        token: String,
+        session: String,
+    },
+    TransferMaster {
+        worker_id: String,
+        token: String,
+        target_id: String,
+    },
+    RemoveWorker {
+        worker_id: String,
+        token: String,
+        target_id: String,
+        #[serde(default)]
+        force: bool,
+    },
+    ResetBindings {
+        confirm: bool,
+    },
+    Shutdown {
+        operator: bool,
+    },
+    Ping,
+    StatusAll,
+    MailboxRead {
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        sort: Option<String>,
+        #[serde(default)]
+        worker_id: Option<String>,
+    },
+}
+
+/// Wire envelope for the resident host daemon.  The request body keeps the
+/// v1 tagged operation shape so existing command names remain compatible;
+/// project context is an additive top-level field.  A missing context is
+/// accepted only for the context-free Ping readiness probe and is rejected by
+/// the server for every project-scoped operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_context: Option<ProjectContext>,
+    #[serde(flatten)]
+    pub request: Req,
+}
+
+impl RequestEnvelope {
+    pub fn new(request: Req, project_context: Option<ProjectContext>) -> Self {
+        Self {
+            project_context,
+            request,
+        }
+    }
+
+    pub fn with_context(request: Req, project_context: ProjectContext) -> Self {
+        Self::new(request, Some(project_context))
+    }
+
+    pub fn into_parts(self) -> (Option<ProjectContext>, Req) {
+        (self.project_context, self.request)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(project_context) = &self.project_context {
+            project_context.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn default_delivery_mode() -> String {
+    "immediate".into()
+}
+
+fn default_poll_timeout() -> u64 {
+    600_000
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Resp {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(flatten)]
+    pub data: serde_json::Value,
+}
+
+impl Resp {
+    pub fn data(v: serde_json::Value) -> Self {
+        Resp {
+            ok: true,
+            error: None,
+            data: v,
+        }
+    }
+    pub fn err(msg: impl Into<String>) -> Self {
+        let m = msg.into();
+        eprintln!("collab: error: {}", m);
+        Resp {
+            ok: false,
+            error: Some(m),
+            data: serde_json::Value::Null,
+        }
+    }
+
+    pub fn err_data(msg: impl Into<String>, data: serde_json::Value) -> Self {
+        let m = msg.into();
+        eprintln!("collab: error: {}", m);
+        Resp {
+            ok: false,
+            error: Some(m),
+            data,
+        }
+    }
+}
+
+pub const MSG_TYPES: [&str; 3] = ["notify", "request", "reply"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{
+        AgentId, AppServerId, BindingId, BindingValidationError, CommandId, NativeThreadId,
+        OperationId, RuntimeId,
+    };
+    use crate::scope::RouteScope;
+    use std::path::Path;
+
+    fn registered_identity() -> RuntimeIdentity {
+        RuntimeIdentity {
+            agent_id: AgentId::new("agent-1").unwrap(),
+            runtime_id: RuntimeId::new("runtime-1").unwrap(),
+            appserver_id: AppServerId::new("appserver-1").unwrap(),
+            endpoint_generation: 7,
+            binding_id: BindingId::new("binding-1").unwrap(),
+            native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
+        }
+    }
+
+    fn registered_route() -> RouteResolution {
+        let root = env!("CARGO_MANIFEST_DIR");
+        RouteResolution {
+            app_scope_id: AppServerId::new("appserver-1").unwrap(),
+            project_scope: ProjectScopeId::new(root).unwrap(),
+            canonical_root: root.into(),
+            storage_root: root.into(),
+            agent_id: AgentId::new("agent-1").unwrap(),
+            binding_id: BindingId::new("binding-1").unwrap(),
+            endpoint_generation: 7,
+            native_thread_id: NativeThreadId::new("thread-1").unwrap(),
+        }
+    }
+
+    fn registered_scope() -> RouteScope {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        RouteScope::for_registered_project(AppServerId::new("appserver-1").unwrap(), root).unwrap()
+    }
+
+    fn envelope(scope: RouteScope) -> CommandEnvelope {
+        CommandEnvelope::new(
+            CommandId::new("command-1").unwrap(),
+            OperationId::new("operation-1").unwrap(),
+            BindingId::new("binding-1").unwrap(),
+            7,
+            scope,
+            Some(12),
+            Some(TurnId::new("turn-1").unwrap()),
+            Some(MessageId::new("message-1").unwrap()),
+            Some(DispatchId::new("dispatch-1").unwrap()),
+        )
+    }
+
+    #[test]
+    fn command_envelope_round_trips_all_wire_fields() {
+        let command = envelope(registered_scope());
+        let encoded = serde_json::to_value(&command).unwrap();
+        assert_eq!(encoded["command_id"], "command-1");
+        assert_eq!(encoded["operation_id"], "operation-1");
+        assert_eq!(encoded["actor_binding_id"], "binding-1");
+        assert_eq!(encoded["endpoint_generation"], 7);
+        assert_eq!(encoded["scope"]["app_scope_id"], "appserver-1");
+        assert_eq!(
+            encoded["scope"]["project_scope_id"],
+            env!("CARGO_MANIFEST_DIR")
+        );
+        assert_eq!(encoded["expected_revision"], 12);
+        assert_eq!(encoded["turn_id"], "turn-1");
+        assert_eq!(encoded["message_id"], "message-1");
+        assert_eq!(encoded["dispatch_id"], "dispatch-1");
+        assert_eq!(
+            serde_json::from_value::<CommandEnvelope>(encoded).unwrap(),
+            command
+        );
+    }
+
+    #[test]
+    fn route_resolution_round_trips_complete_typed_route() {
+        let route = registered_route();
+        let encoded = serde_json::to_value(&route).unwrap();
+        assert_eq!(encoded["app_scope_id"], "appserver-1");
+        assert_eq!(encoded["project_scope"], env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(encoded["canonical_root"], env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(encoded["storage_root"], env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(encoded["agent_id"], "agent-1");
+        assert_eq!(encoded["binding_id"], "binding-1");
+        assert_eq!(encoded["endpoint_generation"], 7);
+        assert_eq!(encoded["native_thread_id"], "thread-1");
+        let decoded: RouteResolution = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, route);
+        decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn route_resolution_accepts_long_registered_project_scope() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-long-route-resolution-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut long_root = root.clone();
+        for index in 0..24 {
+            long_root = long_root.join(format!("segment-{index:02}-abcdef"));
+        }
+        std::fs::create_dir_all(&long_root).unwrap();
+        let canonical_root = long_root.canonicalize().unwrap();
+        let project_scope =
+            ProjectScopeId::new(canonical_root.to_string_lossy().into_owned()).unwrap();
+        assert!(project_scope.as_str().len() > 256);
+
+        let mut route = registered_route();
+        route.project_scope = project_scope;
+        route.canonical_root = canonical_root.to_string_lossy().into_owned();
+        route.validate().unwrap();
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn route_resolution_rejects_malformed_identity_fields() {
+        let mut route = registered_route();
+        route.project_scope = ProjectScopeId::new("/other-project").unwrap();
+        assert!(route.validate().is_err());
+
+        let mut route = registered_route();
+        route.storage_root = "relative/storage".into();
+        assert!(route.validate().is_err());
+
+        let mut route = registered_route();
+        route.endpoint_generation = 0;
+        assert!(route.validate().is_err());
+    }
+
+    #[test]
+    fn command_envelope_accepts_matching_binding_and_scope() {
+        let identity = registered_identity();
+        let scope = registered_scope();
+        let command = envelope(scope.clone());
+        let before_command = command.clone();
+        let before_identity = identity.clone();
+        let before_scope = scope.clone();
+
+        command.validate_for(&identity, &scope).unwrap();
+        assert_eq!(command, before_command);
+        assert_eq!(identity, before_identity);
+        assert_eq!(scope, before_scope);
+    }
+
+    #[test]
+    fn command_envelope_rejects_stale_generation_without_mutation() {
+        let identity = registered_identity();
+        let scope = registered_scope();
+        let mut command = envelope(scope.clone());
+        command.endpoint_generation = 6;
+        let before_command = command.clone();
+        let before_identity = identity.clone();
+        let before_scope = scope.clone();
+
+        assert!(command.validate_for(&identity, &scope).is_err());
+        assert_eq!(command, before_command);
+        assert_eq!(identity, before_identity);
+        assert_eq!(scope, before_scope);
+    }
+
+    #[test]
+    fn command_envelope_rejects_wrong_binding_without_mutation() {
+        let identity = registered_identity();
+        let scope = registered_scope();
+        let mut command = envelope(scope.clone());
+        command.actor_binding_id = BindingId::new("binding-other").unwrap();
+        let before_command = command.clone();
+        let before_identity = identity.clone();
+        let before_scope = scope.clone();
+
+        assert!(command.validate_for(&identity, &scope).is_err());
+        assert_eq!(command, before_command);
+        assert_eq!(identity, before_identity);
+        assert_eq!(scope, before_scope);
+    }
+
+    #[test]
+    fn command_envelope_rejects_wrong_app_scope_without_mutation() {
+        let identity = registered_identity();
+        let registered_scope = registered_scope();
+        let wrong_scope = RouteScope::for_registered_project(
+            AppServerId::new("appserver-other").unwrap(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .unwrap();
+        let command = envelope(wrong_scope);
+        let before_command = command.clone();
+        let before_identity = identity.clone();
+        let before_scope = registered_scope.clone();
+
+        assert!(command.validate_for(&identity, &registered_scope).is_err());
+        assert_eq!(command, before_command);
+        assert_eq!(identity, before_identity);
+        assert_eq!(registered_scope, before_scope);
+    }
+
+    #[test]
+    fn command_envelope_rejects_scope_identity_mismatch_without_mutation() {
+        let identity = registered_identity();
+        let registered_scope = registered_scope();
+        let scope = RouteScope::for_registered_project(
+            AppServerId::new("appserver-other").unwrap(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .unwrap();
+        let command = envelope(scope);
+        let before_command = command.clone();
+        let before_identity = identity.clone();
+        let before_scope = registered_scope.clone();
+
+        assert!(command.validate_for(&identity, &registered_scope).is_err());
+        assert_eq!(command, before_command);
+        assert_eq!(identity, before_identity);
+        assert_eq!(registered_scope, before_scope);
+    }
+
+    #[test]
+    fn command_envelope_rejects_invalid_wire_identifier_without_mutation() {
+        let identity = registered_identity();
+        let scope = registered_scope();
+        let mut command = envelope(scope.clone());
+        command.command_id = serde_json::from_value(serde_json::json!("")).unwrap();
+        let before_command = command.clone();
+        let before_identity = identity.clone();
+        let before_scope = scope.clone();
+
+        assert!(command.validate_for(&identity, &scope).is_err());
+        assert_eq!(command, before_command);
+        assert_eq!(identity, before_identity);
+        assert_eq!(scope, before_scope);
+    }
+
+    #[test]
+    fn command_envelope_preserves_typed_binding_error_chain() {
+        let identity = registered_identity();
+        let scope = registered_scope();
+        let mut command = envelope(scope.clone());
+        command.endpoint_generation = 6;
+
+        let error = command.validate_for(&identity, &scope).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<BindingValidationError>(),
+            Some(BindingValidationError::StaleGeneration {
+                expected: 7,
+                observed: 6
+            })
+        ));
+    }
+
+    #[test]
+    fn command_envelope_accepts_long_registered_cwd() {
+        let mut root = std::env::temp_dir().join(format!(
+            "collab-long-envelope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for index in 0..24 {
+            root = root.join(format!("segment-{index:02}-abcdef"));
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let scope =
+            RouteScope::for_registered_project(AppServerId::new("appserver-1").unwrap(), &root)
+                .unwrap();
+        assert!(scope.project_scope_id.as_str().len() > 256);
+        let command = envelope(scope.clone());
+        command
+            .validate_for(&registered_identity(), &scope)
+            .unwrap();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn wire_request_carries_canonical_project_context() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-proto-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ProjectContext::for_registered_root_with_app(
+            &root,
+            AppServerId::new("appserver-1").unwrap(),
+        )
+        .unwrap();
+        let request = RequestEnvelope::new(Req::Ping, Some(context.clone()));
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["project_context"]["app_scope_id"], "appserver-1");
+        assert_eq!(
+            encoded["project_context"]["canonical_root"],
+            context.canonical_root
+        );
+        assert_eq!(
+            encoded["project_context"]["project_scope"],
+            context.project_scope.as_str()
+        );
+        assert_eq!(encoded["op"], "Ping");
+        let decoded = serde_json::from_value::<RequestEnvelope>(encoded).unwrap();
+        assert_eq!(decoded.project_context, request.project_context);
+        assert_eq!(
+            serde_json::to_value(decoded.request).unwrap(),
+            serde_json::json!({"op": "Ping"})
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn project_context_requires_explicit_app_scope() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let error = ProjectContext::for_registered_root(root).unwrap_err();
+        assert!(error.to_string().contains("explicit appserver identity"));
+    }
+
+    #[test]
+    fn project_context_uses_runtime_appserver_identity() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let context = ProjectContext::for_registered_route(root, &registered_identity()).unwrap();
+        assert_eq!(context.app_scope_id.as_str(), "appserver-1");
+        context.validate_registered_root(root).unwrap();
+    }
+
+    #[test]
+    fn project_context_rejects_invalid_app_scope_and_root_shapes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut context = ProjectContext::for_registered_root_with_app(
+            root,
+            AppServerId::new("appserver-1").unwrap(),
+        )
+        .unwrap();
+        context.app_scope_id = serde_json::from_value(serde_json::json!("bad\napp")).unwrap();
+        assert!(context.validate().is_err());
+
+        context.app_scope_id = AppServerId::new("appserver-1").unwrap();
+        context.canonical_root = "relative/project".into();
+        assert!(context.validate().is_err());
+
+        context.canonical_root = env!("CARGO_MANIFEST_DIR").into();
+        context.project_scope =
+            serde_json::from_value(serde_json::json!("relative/project")).unwrap();
+        assert!(context.validate().is_err());
+
+        context.canonical_root = format!("{}\n", env!("CARGO_MANIFEST_DIR"));
+        assert!(context.validate().is_err());
+    }
+
+    #[test]
+    fn old_project_context_json_without_app_scope_fails_closed() {
+        let old = serde_json::json!({
+            "project_context": {
+                "canonical_root": env!("CARGO_MANIFEST_DIR"),
+                "project_scope": env!("CARGO_MANIFEST_DIR")
+            },
+            "op": "Register",
+            "worker_id": "worker-1",
+            "token": "token-1",
+            "candidates": null,
+            "cwd": env!("CARGO_MANIFEST_DIR")
+        });
+        assert!(serde_json::from_value::<RequestEnvelope>(old).is_err());
+    }
+
+    #[test]
+    fn invalid_utf8_wire_context_is_rejected_before_decode() {
+        let mut bytes = br#"{"project_context":{"app_scope_id":"appserver-1","canonical_root":"/tmp","project_scope":"/tmp"},"op":"Ping"}"#.to_vec();
+        bytes.push(0xff);
+        assert!(serde_json::from_slice::<RequestEnvelope>(&bytes).is_err());
+    }
+}

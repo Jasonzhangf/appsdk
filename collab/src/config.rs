@@ -1,0 +1,629 @@
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub keepalive: Keepalive,
+    pub notifications: Notifications,
+    pub timers: Timers,
+    pub subagent: Subagent,
+    pub retention: Retention,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            keepalive: Keepalive::default(),
+            notifications: Notifications::default(),
+            timers: Timers::default(),
+            subagent: Subagent::default(),
+            retention: Retention::default(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Keepalive {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub max_unacked: u8,
+}
+impl Default for Keepalive {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_seconds: 900,
+            max_unacked: 3,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notifications {
+    pub enabled: bool,
+    pub mode: String,
+    pub batch_window_seconds: u64,
+    pub submit_enter: bool,
+    pub max_unacked: u32,
+    pub events: BTreeMap<String, EventPolicy>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventPolicy {
+    pub mode: String,
+}
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: "batch".into(),
+            batch_window_seconds: 120,
+            submit_enter: true,
+            max_unacked: 3,
+            events: BTreeMap::from([(
+                "deadline".into(),
+                EventPolicy {
+                    mode: "immediate".into(),
+                },
+            )]),
+        }
+    }
+}
+impl Notifications {
+    pub fn delay_ms(&self, event: &str) -> i64 {
+        let key = event.replace('-', "_");
+        let mode = self
+            .events
+            .get(&key)
+            .map(|p| p.mode.as_str())
+            .filter(|s| *s != "inherit")
+            .unwrap_or(&self.mode);
+        if mode == "immediate" {
+            0
+        } else {
+            self.batch_window_seconds as i64 * 1000
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Timers {
+    pub enabled: bool,
+    pub tick_interval_ms: u64,
+}
+impl Default for Timers {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tick_interval_ms: 1000,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Retention {
+    pub ttl_days: u64,
+}
+impl Default for Retention {
+    fn default() -> Self {
+        Self { ttl_days: 7 }
+    }
+}
+impl Retention {
+    pub fn cutoff_ms(&self, now_ms: i64) -> i64 {
+        now_ms.saturating_sub((self.ttl_days as i64).saturating_mul(86_400_000))
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Subagent {
+    pub runtime: String,
+    pub profile_priority: Vec<String>,
+    pub persistent: bool,
+    pub close_on_task_complete: bool,
+    pub profiles: BTreeMap<String, Profile>,
+    pub health: Health,
+    pub startup: Startup,
+    pub name_template: String,
+}
+impl Default for Subagent {
+    fn default() -> Self {
+        Self {
+            runtime: "codex".into(),
+            profile_priority: vec!["gcm".into(), "oauth".into()],
+            persistent: true,
+            close_on_task_complete: false,
+            profiles: BTreeMap::from([
+                (
+                    "gcm".into(),
+                    Profile {
+                        codex_profile: "gcm".into(),
+                        model: None,
+                    },
+                ),
+                (
+                    "oauth".into(),
+                    Profile {
+                        codex_profile: "oauth".into(),
+                        model: Some("gpt-5.6-luna".into()),
+                    },
+                ),
+            ]),
+            health: Health::default(),
+            startup: Startup::default(),
+            name_template: "{cwd_name}-subagent-{short_id}".into(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    #[serde(default)]
+    pub codex_profile: String,
+    pub model: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Health {
+    pub timeout_seconds: u64,
+    pub attempts_per_profile: u64,
+    pub expected_response: String,
+}
+impl Default for Health {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: 90,
+            attempts_per_profile: 1,
+            expected_response: "OK".into(),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Startup {
+    pub ready_timeout_seconds: u64,
+}
+impl Default for Startup {
+    fn default() -> Self {
+        Self {
+            ready_timeout_seconds: 90,
+        }
+    }
+}
+pub fn path() -> Result<PathBuf> {
+    Ok(
+        PathBuf::from(std::env::var_os("HOME").context("HOME unavailable")?)
+            .join(".appsdk/config.toml"),
+    )
+}
+
+pub fn ensure_written() -> Result<()> {
+    let path = path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&path, toml::to_string_pretty(&Config::default())?)?;
+            Ok(())
+        }
+        Ok(text) => {
+            if let Some(updated) = remove_retired_transport_config(&text) {
+                std::fs::write(&path, updated)?;
+                return Ok(());
+            }
+            if let Some(updated) = insert_subagent_runtime(&text) {
+                std::fs::write(&path, updated)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn remove_retired_transport_config(text: &str) -> Option<String> {
+    let mut document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let changed = remove_retired_transport_fields(document.as_table_mut());
+    changed.then(|| document.to_string())
+}
+
+fn remove_retired_transport_fields(table: &mut toml_edit::Table) -> bool {
+    let mut changed = false;
+    if let Some(notifications) = table.get_mut("notifications") {
+        match notifications {
+            toml_edit::Item::Table(notifications) => {
+                changed |= remove_notifications_transport(notifications);
+            }
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(notifications)) => {
+                changed |= remove_notifications_transport_inline(notifications);
+            }
+            _ => {}
+        }
+    }
+    if let Some(subagent) = table.get_mut("subagent") {
+        match subagent {
+            toml_edit::Item::Table(subagent) => {
+                changed |= subagent.remove("tmux").is_some();
+            }
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(subagent)) => {
+                changed |= subagent.remove("tmux").is_some();
+            }
+            _ => {}
+        }
+    }
+    if let Some(projects) = table.get_mut("projects") {
+        match projects {
+            toml_edit::Item::ArrayOfTables(projects) => {
+                for project in projects.iter_mut() {
+                    changed |= remove_retired_transport_fields(project);
+                }
+            }
+            toml_edit::Item::Value(toml_edit::Value::Array(projects)) => {
+                for project in projects.iter_mut() {
+                    if let toml_edit::Value::InlineTable(project) = project {
+                        changed |= remove_retired_transport_inline_fields(project);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn remove_notifications_transport(table: &mut toml_edit::Table) -> bool {
+    table.remove("transport").is_some()
+}
+
+fn remove_notifications_transport_inline(table: &mut toml_edit::InlineTable) -> bool {
+    table.remove("transport").is_some()
+}
+
+fn remove_retired_transport_inline_fields(table: &mut toml_edit::InlineTable) -> bool {
+    let mut changed = false;
+    if let Some(toml_edit::Value::InlineTable(notifications)) = table.get_mut("notifications") {
+        changed |= remove_notifications_transport_inline(notifications);
+    }
+    if let Some(toml_edit::Value::InlineTable(subagent)) = table.get_mut("subagent") {
+        changed |= subagent.remove("tmux").is_some();
+    }
+    if let Some(toml_edit::Value::Array(projects)) = table.get_mut("projects") {
+        for project in projects.iter_mut() {
+            if let toml_edit::Value::InlineTable(project) = project {
+                changed |= remove_retired_transport_inline_fields(project);
+            }
+        }
+    }
+    changed
+}
+
+fn insert_subagent_runtime(text: &str) -> Option<String> {
+    let parsed: toml::Value = toml::from_str(text).ok()?;
+    if parsed
+        .get("subagent")
+        .and_then(|table| table.get("runtime"))
+        .is_some()
+    {
+        return None;
+    }
+    if let Some(idx) = text.match_indices("[subagent]").find_map(|(idx, _)| {
+        match text.as_bytes().get(idx + "[subagent]".len()) {
+            Some(b'.') => None,
+            _ => Some(idx),
+        }
+    }) {
+        let insert_at = idx + "[subagent]".len();
+        let (head, tail) = text.split_at(insert_at);
+        let mut out = String::from(head);
+        out.push('\n');
+        out.push_str("runtime = \"codex\"");
+        if !tail.starts_with('\n') && !tail.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(tail);
+        return Some(out);
+    }
+    let mut out = text.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n[subagent]\nruntime = \"codex\"\n");
+    Some(out)
+}
+fn merge(base: &mut toml::Value, overlay: toml::Value) {
+    if let (Some(base), Some(overlay)) = (base.as_table_mut(), overlay.as_table()) {
+        for (key, value) in overlay {
+            if let Some(old) = base.get_mut(key) {
+                merge(old, value.clone());
+            } else {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    } else {
+        *base = overlay;
+    }
+}
+pub fn parse(text: &str, root: &Path) -> Result<Config> {
+    let mut input: toml::Value = toml::from_str(text).context("invalid ~/.appsdk/config.toml")?;
+    let projects = input
+        .as_table_mut()
+        .context("config must be a table")?
+        .remove("projects");
+    let mut merged = toml::Value::try_from(Config::default())?;
+    merge(&mut merged, input);
+    if let Some(projects) = projects {
+        let mut matches = Vec::new();
+        for project in projects
+            .as_array()
+            .context("projects must be an array of tables")?
+        {
+            let mut project = project.clone();
+            let table = project
+                .as_table_mut()
+                .context("project override must be a table")?;
+            let path = table
+                .remove("root")
+                .and_then(|v| v.as_str().map(PathBuf::from))
+                .context("project root is required")?;
+            if !path.is_absolute() {
+                bail!("project override root must be absolute");
+            }
+            let path = path.canonicalize().unwrap_or(path);
+            if root.starts_with(&path) {
+                matches.push((path, project));
+            }
+        }
+        matches.sort_by_key(|(path, _)| path.components().count());
+        for pair in matches.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                bail!("duplicate project override root");
+            }
+        }
+        for (_, project) in matches {
+            merge(&mut merged, project);
+        }
+    }
+    let config: Config = merged.try_into()?;
+    config.validate()?;
+    Ok(config)
+}
+impl Config {
+    fn validate(&self) -> Result<()> {
+        if !(900..=86400).contains(&self.keepalive.interval_seconds)
+            || !(1..=3).contains(&self.keepalive.max_unacked)
+        {
+            bail!("keepalive requires interval_seconds=900..86400 and max_unacked=1..3");
+        }
+        let n = &self.notifications;
+        if !matches!(n.mode.as_str(), "immediate" | "batch")
+            || !(1..=3600).contains(&n.batch_window_seconds)
+            || !(1..=5).contains(&n.max_unacked)
+        {
+            bail!("invalid notification mode/window");
+        }
+        if !n.submit_enter {
+            bail!("notifications.submit_enter must remain true for App Server delivery");
+        }
+        for (event, policy) in &n.events {
+            if ![
+                "direct_message",
+                "resource_released",
+                "async_result",
+                "deadline",
+            ]
+            .contains(&event.as_str())
+                || !["inherit", "immediate", "batch"].contains(&policy.mode.as_str())
+            {
+                bail!("invalid notification event policy: {event}");
+            }
+        }
+        if !(100..=60000).contains(&self.timers.tick_interval_ms) {
+            bail!("timer tick must be 100..60000ms");
+        }
+        if !(1..=365).contains(&self.retention.ttl_days) {
+            bail!("retention ttl_days must be 1..365");
+        }
+        let s = &self.subagent;
+        if !s.persistent || s.close_on_task_complete {
+            bail!("subagents currently require persistent=true and close_on_task_complete=false");
+        }
+        if s.health.attempts_per_profile != 1
+            || !(1..=180).contains(&s.health.timeout_seconds)
+            || s.health.expected_response.trim().is_empty()
+        {
+            bail!("health probe requires one attempt per profile and timeout 1..180s");
+        }
+        if !(1..=600).contains(&s.startup.ready_timeout_seconds)
+            || !s.name_template.contains("{short_id}")
+        {
+            bail!("invalid startup timeout or subagent name template");
+        }
+        if s.runtime != "codex" {
+            bail!("subagent.runtime must be codex");
+        }
+        if s.profile_priority.is_empty() || s.profile_priority.len() > 4 {
+            bail!("configure 1..4 profiles");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for name in &s.profile_priority {
+            let p = s
+                .profiles
+                .get(name)
+                .context("profile_priority names an undefined profile")?;
+            if !seen.insert(name) {
+                bail!("invalid or duplicate profile");
+            }
+            if p.codex_profile.trim().is_empty() || p.codex_profile.starts_with('-') {
+                bail!("invalid or duplicate profile");
+            }
+        }
+        Ok(())
+    }
+}
+pub fn load(root: &Path) -> Result<Config> {
+    let path = path()?;
+    let mut text = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(updated) = remove_retired_transport_config(&text) {
+        std::fs::write(&path, &updated)?;
+        text = updated;
+    }
+    let root = root.canonicalize()?;
+    let git = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(&root)
+        .output()?;
+    let owner = if git.status.success() {
+        let p = PathBuf::from(String::from_utf8_lossy(&git.stdout).trim());
+        if p.file_name().is_some_and(|s| s == ".git") {
+            p.parent().unwrap().to_path_buf()
+        } else {
+            root.clone()
+        }
+    } else {
+        root.clone()
+    };
+    let top = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&root)
+        .output()?;
+    let resolved = if top.status.success() {
+        let top = PathBuf::from(String::from_utf8_lossy(&top.stdout).trim());
+        owner.join(root.strip_prefix(top).unwrap_or(Path::new("")))
+    } else {
+        owner
+    };
+    parse(&text, &resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_defaults_and_project_override() {
+        let c = parse("", Path::new("/project")).unwrap();
+        assert_eq!(c.retention.ttl_days, 7);
+        assert_eq!(c.subagent.runtime, "codex");
+        assert_eq!(c.subagent.health.timeout_seconds, 90);
+        assert_eq!(c.notifications.delay_ms("direct-message"), 120000);
+        assert_eq!(c.notifications.delay_ms("deadline"), 0);
+        let c = parse("[[projects]]\nroot='/project'\n[projects.notifications]\nmode='immediate'\n[projects.subagent]\nprofile_priority=['oauth']", Path::new("/project")).unwrap();
+        assert_eq!(c.notifications.delay_ms("direct-message"), 0);
+        assert_eq!(c.subagent.profile_priority, vec!["oauth"]);
+        assert_eq!(
+            c.subagent.profiles["oauth"].model.as_deref(),
+            Some("gpt-5.6-luna")
+        );
+    }
+    #[test]
+    fn rejects_unsafe_and_unknown_policy() {
+        for s in [
+            "[notifications]\nsubmit_enter=false",
+            "[subagent.health]\nattempts_per_profile=99",
+            "[notifications]\nmode='typo'",
+            "[timers]\ntick_interval_ms=0",
+            "[subagent]\nruntime='claude'",
+            "[retention]\nttl_days=0",
+        ] {
+            assert!(parse(s, Path::new("/project")).is_err());
+        }
+    }
+    #[test]
+    fn writes_default_runtime_into_subagent_table() {
+        let added = insert_subagent_runtime("[subagent]\npersistent = true\n").unwrap();
+        assert!(added.contains("runtime = \"codex\""));
+        assert!(insert_subagent_runtime("[subagent]\nruntime = \"codex\"\n").is_none());
+    }
+
+    #[test]
+    fn removes_retired_transport_configuration_without_touching_unrelated_settings() {
+        let updated = remove_retired_transport_config(
+            r#"
+[notifications]
+transport = "tmux"
+submit_enter = true
+
+[subagent]
+runtime = "codex"
+persistent = true
+
+[subagent.tmux]
+session = "legacy"
+
+[[projects]]
+root = "/project"
+
+[projects.notifications]
+transport = "tmux"
+
+[projects.subagent.tmux]
+session = "legacy-project"
+"#,
+        )
+        .unwrap();
+        let parsed = updated.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(parsed["notifications"].get("transport").is_none());
+        assert!(parsed["subagent"].get("tmux").is_none());
+        assert!(parsed["projects"][0]["notifications"]
+            .get("transport")
+            .is_none());
+        assert!(parsed["projects"][0].get("subagent").is_none());
+        assert_eq!(parsed["subagent"]["runtime"].as_str(), Some("codex"));
+    }
+
+    #[test]
+    fn retired_config_migration_preserves_comments_order_and_unrelated_text() {
+        let updated = remove_retired_transport_config(
+            r#"# top comment
+[subagent]
+runtime = "codex" # keep runtime
+
+[subagent.tmux]
+session = "legacy"
+
+[notifications]
+# keep notification comment
+transport = "tmux"
+submit_enter = true
+"#,
+        )
+        .unwrap();
+        assert!(updated.contains("# top comment"));
+        assert!(updated.contains("runtime = \"codex\" # keep runtime"));
+        assert!(updated.contains("submit_enter = true"));
+        assert!(!updated.contains("[subagent.tmux]"));
+        assert!(!updated.contains("transport ="));
+    }
+
+    #[test]
+    fn retired_config_migration_handles_inline_tables() {
+        let updated = remove_retired_transport_config(
+            r#"notifications = { transport = "tmux", submit_enter = true }
+subagent = { runtime = "codex", tmux = { session = "legacy" } }
+projects = [
+  { root = "/project", notifications = { transport = "tmux" }, subagent = { runtime = "codex", tmux = { session = "legacy" } } },
+]
+"#,
+        )
+        .unwrap();
+        let parsed = updated.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(parsed["notifications"].get("transport").is_none());
+        assert!(parsed["subagent"].get("tmux").is_none());
+        assert!(parsed["projects"][0]["notifications"]
+            .get("transport")
+            .is_none());
+        assert!(parsed["projects"][0]["subagent"].get("tmux").is_none());
+        assert_eq!(
+            parsed["projects"][0]["subagent"]["runtime"].as_str(),
+            Some("codex")
+        );
+    }
+}

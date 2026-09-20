@@ -1,6 +1,6 @@
 # App Server loaded-admission verification evidence
 
-Base: `89f6cabf7f3c7471d7d6154cebdc90fac7eea597`
+Base: `456c76fd95d576722614f5f0f165cfe5b878b4e8`
 Environment: macOS arm64, Codex CLI `0.154.0`, Cargo `1.97.1`
 
 The review scope binds this evidence to the exact candidate commit and tree.
@@ -46,12 +46,20 @@ COLLAB_APPSERVER_SOCKET=<isolated.sock> \
 COLLAB_APPSERVER_NAMESPACE=codex_app \
 CODEX_THREAD_ID=<loaded-thread> \
 cargo test --manifest-path collab/Cargo.toml \
-  client::adapters::codex_app_server::tests::live_immediate_notify_resumes_not_loaded_thread \
+  client::adapters::codex_app_server::tests::live_immediate_notify_accepts_loaded_thread \
   -- --ignored --nocapture
 ```
 
 Result: `1 passed`; `turn/start` accepted the bounded explicit notification
 against the real isolated App Server thread.
+
+## Not-loaded notification rejection
+
+`immediate_notify` rejects a persisted but not-loaded thread with
+`RouteUnavailable` before issuing `thread/resume` or `turn/start`. The focused
+adapter test `immediate_notify_rejects_not_loaded_thread_without_resume_or_turn_start`
+asserts that no second App Server method is sent for `notLoaded` metadata,
+`thread not loaded`, or `thread not found` responses.
 
 ## Focused source checks
 

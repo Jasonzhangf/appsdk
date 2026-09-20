@@ -468,15 +468,14 @@ pub fn immediate_notify(
     })?;
     let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
     client.initialize()?;
-    let (thread, status) = match thread_metadata(&mut client, thread_id.as_str()) {
-        Ok(thread) => {
-            let status = thread_status_from_metadata(&thread)?;
-            (Some(thread), status)
-        }
+    let status = match thread_metadata(&mut client, thread_id.as_str()) {
+        Ok(thread) => thread_status_from_metadata(&thread)?,
         Err(AdapterError::Unknown { operation, detail })
             if is_not_loaded_thread_error(&operation, &detail, thread_id.as_str()) =>
         {
-            (None, "notLoaded".to_owned())
+            return Err(AdapterError::RouteUnavailable {
+                detail: format!("thread {thread_id} is persisted but not loaded by the App Server"),
+            });
         }
         Err(error) => return Err(error),
     };
@@ -485,22 +484,8 @@ pub fn immediate_notify(
         _ => None,
     };
     let action = notification_action(&status, active_turn_id)?;
-    if matches!(action, NotificationAction::Resume) {
-        let exclude_turns = thread
-            .as_ref()
-            .and_then(|thread| thread.get("historyMode"))
-            .and_then(Value::as_str)
-            .is_some_and(|history_mode| history_mode == "paginated");
-        client.call(
-            "thread/resume",
-            json!({
-                "threadId": thread_id.as_str(),
-                "excludeTurns": exclude_turns,
-            }),
-        )?;
-    }
     match action {
-        NotificationAction::Resume | NotificationAction::Start => {
+        NotificationAction::Start => {
             let receipt = client.call(
                 "turn/start",
                 json!({
@@ -812,7 +797,6 @@ fn active_turn_id_from_page(page: &Value) -> Result<Option<String>, AdapterError
 #[derive(Debug, PartialEq, Eq)]
 enum NotificationAction {
     Start,
-    Resume,
     Steer(String),
 }
 
@@ -826,7 +810,9 @@ fn notification_action(
             None => NotificationAction::Start,
         }),
         "idle" => Ok(NotificationAction::Start),
-        "notLoaded" => Ok(NotificationAction::Resume),
+        "notLoaded" => Err(AdapterError::RouteUnavailable {
+            detail: "thread is persisted but not loaded by the App Server".into(),
+        }),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -1814,9 +1800,10 @@ mod tests {
             notification_action("idle", None).unwrap(),
             NotificationAction::Start
         );
-        assert_eq!(
-            notification_action("notLoaded", None).unwrap(),
-            NotificationAction::Resume
+        let error = notification_action("notLoaded", None).unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
         );
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
@@ -2144,448 +2131,70 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_resumes_not_loaded_thread_before_turn_start() {
-        let socket = temp_socket("notify-resume-not-loaded");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "notLoaded"}
-                        }
+    fn immediate_notify_rejects_not_loaded_thread_without_resume_or_turn_start() {
+        for response in [
+            json!({
+                "result": {
+                    "thread": {
+                        "id": "thread-1",
+                        "status": {"type": "notLoaded"}
                     }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            assert_eq!(request["params"]["threadId"], "thread-1");
-            assert_eq!(request["params"]["input"], json!([]));
-            assert_eq!(
-                request["params"]["toolOutput"]["name"],
-                "send_message_to_thread"
-            );
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
+                }
+            }),
+            json!({
+                "error": {
+                    "code": -32602,
+                    "message": "thread not loaded: thread-1"
+                }
+            }),
+            json!({
+                "error": {
+                    "code": -32602,
+                    "message": "thread not found: thread-1"
+                }
+            }),
+            json!({
+                "error": {
+                    "code": -32602,
+                    "message": "thread not found"
+                }
+            }),
+        ] {
+            let socket = temp_socket("notify-not-loaded-reject");
+            let Some(listener) = bind_test_socket(&socket) else {
+                return;
+            };
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                handshake(&mut stream);
+                initialize(&mut stream);
+                let read_id = next_request_id(&mut stream);
+                let mut response = response;
+                response["id"] = json!(read_id);
+                respond(&mut stream, response);
+                let mut byte = [0_u8; 1];
+                assert_eq!(
+                    stream.read(&mut byte).unwrap(),
+                    0,
+                    "not-loaded admission must not issue another App Server method"
+                );
+                stream.shutdown(Shutdown::Both).ok();
+            });
 
-        immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn immediate_notify_starts_thread_when_read_reports_not_loaded_error() {
-        let socket = temp_socket("notify-read-not-loaded-error");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "error": {
-                        "code": -32602,
-                        "message": "thread not loaded: thread-1"
-                    }
-                }),
+            let error = immediate_notify(
+                &selected_transport(&socket),
+                "sender-thread",
+                "notify body",
+                "message-start",
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, AdapterError::RouteUnavailable { .. }),
+                "{error}"
             );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            assert_eq!(request["params"]["threadId"], "thread-1");
-            assert_eq!(request["params"]["input"], json!([]));
-            assert_eq!(
-                request["params"]["toolOutput"]["name"],
-                "send_message_to_thread"
-            );
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn immediate_notify_starts_thread_when_read_reports_thread_not_found() {
-        let socket = temp_socket("notify-read-not-found-error");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "error": {
-                        "code": -32602,
-                        "message": "thread not found: thread-1"
-                    }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            assert_eq!(request["params"]["threadId"], "thread-1");
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn immediate_notify_starts_thread_when_read_reports_thread_not_found_without_id() {
-        let socket = temp_socket("notify-read-not-found-no-id");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "error": {
-                        "code": -32602,
-                        "message": "thread not found"
-                    }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn immediate_notify_resume_includes_paginated_history_when_requested() {
-        let socket = temp_socket("notify-resume-paginated");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "notLoaded"},
-                            "historyMode": "paginated"
-                        }
-                    }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], true);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn immediate_notify_resume_omits_paginated_history_for_legacy_threads() {
-        let socket = temp_socket("notify-resume-legacy");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "notLoaded"},
-                            "historyMode": "legacy"
-                        }
-                    }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "thread-1");
-            assert_eq!(resume["params"]["excludeTurns"], false);
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap();
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn immediate_notify_preserves_resume_active_writer_error() {
-        let socket = temp_socket("notify-resume-active-writer");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "notLoaded"},
-                            "historyMode": "paginated"
-                        }
-                    }
-                }),
-            );
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "error": {
-                        "code": -32600,
-                        "message": "thread thread-1 already has an active writer"
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        let error = immediate_notify(
-            &selected_transport(&socket),
-            "sender-thread",
-            "notify body",
-            "message-start",
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("thread thread-1 already has an active writer"));
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
+            server.join().unwrap();
+            std::fs::remove_file(socket).ok();
+        }
     }
 
     #[test]
@@ -2598,7 +2207,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn live_immediate_notify_starts_not_loaded_thread() {
+    fn live_immediate_notify_accepts_loaded_thread() {
         let Some(candidate) = candidate_from_env().unwrap() else {
             panic!("CODEX_THREAD_ID is required");
         };

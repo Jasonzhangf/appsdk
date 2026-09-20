@@ -14703,6 +14703,10 @@ fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool)
             || (Some(canonical_target) != declared.get("target_digest")
                 && explicit_custom_target
                 && !(bundle_transition
+                    && sdk_map_migration_checks_live_target(step)
+                    && canonical_target.as_str().is_some_and(valid_bundle_digest)
+                    && Some(canonical_target) != declared.get("target_digest"))
+                && !(bundle_transition
                     && Some(canonical_target) == entry.get("target_digest")
                     && canonical_target.as_str().is_some_and(valid_bundle_digest)))
             || entry.get("snapshot_path").and_then(Value::as_str)

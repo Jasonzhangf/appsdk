@@ -9538,6 +9538,91 @@ fn pin_lock_accepts_chained_previous_bundle_witness_without_rewriting_migration_
 }
 
 #[test]
+fn pin_lock_accepts_all_materialized_migration_bundle_witnesses() {
+    let root = temp_root("pin-lock-all-materialized-bundle-witnesses");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (first_record, first_bundle_digest) = install_previous_bundle_migration_record(&root);
+    let second_root = root.join(".appsdk/migrations/0.1.6-to-0.1.7");
+    fs::create_dir_all(second_root.join("maps")).unwrap();
+    let second_bundle_digest = format!("sha256:{}", "3".repeat(64));
+    let mut maps = Vec::new();
+    for (name, source, target) in [
+        (
+            "resource-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/resource-map.json"),
+            include_str!("../../contracts/maps/resource-map.json"),
+        ),
+        (
+            "function-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/function-map.json"),
+            include_str!("../../contracts/maps/function-map.json"),
+        ),
+        (
+            "mainline-call-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+            include_str!("../../contracts/maps/mainline-call-map.json"),
+        ),
+        (
+            "verification-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+            include_str!("../../contracts/maps/verification-map.json"),
+        ),
+    ] {
+        fs::write(second_root.join("maps").join(name), source).unwrap();
+        maps.push(serde_json::json!({
+            "name": name,
+            "source_digest": digest(source),
+            "target_digest": digest(target),
+            "snapshot_path": format!(".appsdk/migrations/0.1.6-to-0.1.7/maps/{}", name)
+        }));
+    }
+    let second_record = serde_json::json!({
+        "schema_version": 1,
+        "migration_id": "appsdk-0.1.6-to-0.1.7",
+        "source_version": "0.1.6",
+        "target_version": "0.1.7",
+        "bundle_digest": second_bundle_digest,
+        "maps": maps,
+        "frozen_reviews": [],
+        "legacy_reconciled_reviews": [],
+        "created_at": "2026-01-02T00:00:00Z"
+    });
+    let second_record = serde_json::to_string_pretty(&second_record).unwrap() + "\n";
+    fs::write(second_root.join("record.json"), &second_record).unwrap();
+
+    let migrated = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let lock: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
+    let witnesses = lock["previous_bundle_digests"].as_array().unwrap();
+    assert!(witnesses
+        .iter()
+        .any(|digest| digest.as_str() == Some(first_bundle_digest.as_str())));
+    assert!(witnesses
+        .iter()
+        .any(|digest| digest == &format!("sha256:{}", "3".repeat(64))));
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json")).unwrap(),
+        first_record
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/migrations/0.1.6-to-0.1.7/record.json")).unwrap(),
+        second_record
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_rejects_invalid_chained_bundle_witness_without_overwrite() {
     let root = temp_root("pin-lock-invalid-chained-witness");
     let root_text = root.to_str().unwrap();
@@ -9726,6 +9811,9 @@ fn pin_lock_preserves_historical_custom_maps_with_bundle_witness() {
     let lock_path = root.join(".appsdk/sdk.lock");
     let valid_lock = fs::read_to_string(&lock_path).unwrap();
     let mut lock: Value = serde_json::from_str(&valid_lock).unwrap();
+    lock.as_object_mut()
+        .unwrap()
+        .remove("previous_bundle_digests");
     lock.as_object_mut()
         .unwrap()
         .remove("previous_bundle_digest");

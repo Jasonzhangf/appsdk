@@ -2605,6 +2605,18 @@ fn assert_sdk_lock(root: &Path, project: &Value) {
             }
         }
     }
+    if let Some(digests) = lock.get("previous_bundle_digests") {
+        let digests = digests
+            .as_array()
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_DIGEST"));
+        if digests.iter().any(|digest| {
+            digest
+                .as_str()
+                .is_none_or(|digest| !valid_bundle_digest(digest))
+        }) {
+            fail("INVALID_SDK_BUNDLE_DIGEST");
+        }
+    }
     if let Some(resources) = lock.get("bundle_resources") {
         if !resources.is_object() {
             fail("INVALID_SDK_BUNDLE_RESOURCES");
@@ -13377,22 +13389,25 @@ fn write_current_sdk_lock(root: &Path) {
                 && value[7..].chars().all(|c| c.is_ascii_hexdigit())
                 && value != current_bundle_digest
         };
-        // Keep the historical migration witness if the lock already records one.
-        // Overwriting it with the immediate bundle severs the historical
-        // witness chain and makes admission reject the lock.
-        let existing_bundle = existing.get("bundle_digest").and_then(Value::as_str);
-        let previous_bundle = existing
-            .get("previous_bundle_digest")
+        let mut witnesses = sdk_migration_bundle_witnesses(root);
+        if let Some(existing_bundle) = existing
+            .get("bundle_digest")
             .and_then(Value::as_str)
             .filter(|value| valid_bundle(value))
-            .or_else(|| existing_bundle.filter(|value| valid_bundle(value)));
-        if let Some(value) = previous_bundle {
-            if value.len() == 71
-                && value.starts_with("sha256:")
-                && value[7..].chars().all(|c| c.is_ascii_hexdigit())
-            {
-                lock.insert("previous_bundle_digest".into(), Value::String(value.into()));
+        {
+            if !witnesses.iter().any(|known| known == existing_bundle) {
+                witnesses.push(existing_bundle.to_string());
             }
+        }
+        if let Some(previous_bundle_digest) = witnesses.first() {
+            lock.insert(
+                "previous_bundle_digest".into(),
+                Value::String(previous_bundle_digest.clone()),
+            );
+            lock.insert(
+                "previous_bundle_digests".into(),
+                Value::Array(witnesses.into_iter().map(Value::String).collect::<Vec<_>>()),
+            );
         }
     }
     atomic_write_json(&target, &Value::Object(lock), "SDK_LOCK_WRITE_FAILED");
@@ -14410,15 +14425,88 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
         .get("bundle_digest")
         .and_then(Value::as_str)
         .filter(|digest| valid_bundle_digest(digest))?;
-    let lock_previous_bundle = lock.get("previous_bundle_digest").and_then(Value::as_str);
+    let lock_previous_bundles = lock
+        .get("previous_bundle_digests")
+        .and_then(Value::as_array)
+        .map(|digests| {
+            digests
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            lock.get("previous_bundle_digest")
+                .and_then(Value::as_str)
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        });
     let current_bundle = sdk_bundle_digest();
     if record_bundle == current_bundle {
         return None;
     }
-    if lock_bundle == record_bundle || lock_previous_bundle == Some(record_bundle) {
+    if lock_bundle == record_bundle
+        || lock_previous_bundles
+            .iter()
+            .any(|known| known == record_bundle)
+    {
         return Some(record_bundle.to_string());
     }
     None
+}
+
+fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {
+    let lock_path = root.join(".appsdk/sdk.lock");
+    if !lock_path.is_file() {
+        return Vec::new();
+    }
+    let lock: Value = serde_json::from_str(
+        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("INVALID_SDK_LOCK")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+    let mut witnesses = lock
+        .get("previous_bundle_digests")
+        .and_then(Value::as_array)
+        .map(|digests| {
+            digests
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|digest| valid_bundle_digest(digest))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if witnesses.is_empty() {
+        if let Some(digest) = lock
+            .get("previous_bundle_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| valid_bundle_digest(digest))
+        {
+            witnesses.push(digest.to_string());
+        }
+    }
+    for step in SDK_MAP_MIGRATION_STEPS {
+        let record_path = sdk_map_migration_root(root, step).join("record.json");
+        if !record_path.is_file() {
+            continue;
+        }
+        let record: Value = serde_json::from_str(
+            &fs::read_to_string(&record_path)
+                .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
+        )
+        .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
+        if let Some(digest) = record
+            .get("bundle_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| valid_bundle_digest(digest))
+        {
+            if digest != sdk_bundle_digest() && !witnesses.iter().any(|known| known == digest) {
+                witnesses.push(digest.to_string());
+            }
+        }
+    }
+    witnesses
 }
 
 fn sdk_map_migration_manifest_versions(manifest: &Value) -> (&str, &str) {
@@ -14667,7 +14755,7 @@ fn install_governance_maps(root: &Path, step: &str, force: bool) {
     }
 }
 
-fn migrate_governance_maps(root: &Path, project: &Value, step: &str) {
+fn migrate_governance_maps(root: &Path, project: &Value, step: &str, pin_witness: bool) {
     let migration_root = sdk_map_migration_root(root, step);
     if migration_root.join("record.json").is_file() {
         let manifest = sdk_map_migration_manifest(step);
@@ -14694,7 +14782,7 @@ fn migrate_governance_maps(root: &Path, project: &Value, step: &str) {
             .and_then(Value::as_str)
             .is_some_and(|digest| digest != sdk_bundle_digest());
         let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
-        if bundle_changed && !bundle_transition {
+        if bundle_changed && !bundle_transition && !pin_witness {
             fail("SDK_MIGRATION_BUNDLE_WITNESS_REQUIRED");
         }
         let has_custom_map_binding = record
@@ -17332,19 +17420,7 @@ fn pin_lock(root: &Path, binary: &Path) {
             project_version, SDK_VERSION
         ));
     }
-    let previous_bundle_digest = {
-        let record_path = sdk_map_migration_root(root, "0.1.5-to-0.1.6").join("record.json");
-        if !record_path.is_file() {
-            None
-        } else {
-            let record: Value = serde_json::from_str(
-                &fs::read_to_string(&record_path)
-                    .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD")),
-            )
-            .unwrap_or_else(|_| fail("INVALID_SDK_MIGRATION_RECORD"));
-            migration_bundle_transition_digest(root, &record)
-        }
-    };
+    let previous_bundle_digests = sdk_migration_bundle_witnesses(root);
     let binary = binary
         .canonicalize()
         .unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
@@ -17364,16 +17440,16 @@ fn pin_lock(root: &Path, binary: &Path) {
     }
     if matches!(project_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
         let migrated_project = read_project(root);
-        migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6");
+        migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6", true);
         project = migrated_project;
         project["sdk"]["version"] = Value::String("0.1.6".into());
         write_project(root, &project);
     } else {
         let current_project = read_project(root);
-        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6");
+        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6", true);
     }
     let migrated_project = read_project(root);
-    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.7");
+    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.7", true);
     install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());
@@ -17401,10 +17477,19 @@ fn pin_lock(root: &Path, binary: &Path) {
             .cloned()
             .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE")),
     );
-    if let Some(previous_bundle_digest) = previous_bundle_digest {
+    if let Some(previous_bundle_digest) = previous_bundle_digests.first() {
         lock.insert(
             "previous_bundle_digest".into(),
-            Value::String(previous_bundle_digest),
+            Value::String(previous_bundle_digest.clone()),
+        );
+        lock.insert(
+            "previous_bundle_digests".into(),
+            Value::Array(
+                previous_bundle_digests
+                    .into_iter()
+                    .map(Value::String)
+                    .collect::<Vec<_>>(),
+            ),
         );
     }
     let pinned_binary = root.join(".appsdk/sdk.bin");

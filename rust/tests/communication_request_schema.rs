@@ -67,6 +67,61 @@ fn schema_rejects_unknown_status_value() {
 }
 
 #[test]
+fn schema_accepts_update_bug_snake_case_alias() {
+    let v = validator();
+    let request = json!({
+        "op": "update_bug",
+        "bug_id": "bug-1",
+        "status": "active",
+        "actor": address()
+    });
+    assert!(v.is_valid(&request));
+}
+
+#[test]
+fn schema_accepts_advance_loop_snake_case_alias() {
+    let v = validator();
+    let request = json!({
+        "op": "advance_loop",
+        "loop_id": "loop-1",
+        "complete": false
+    });
+    assert!(v.is_valid(&request));
+}
+
+#[test]
+fn schema_accepts_record_error_snake_case_loop_alias() {
+    let v = validator();
+    let request = json!({
+        "op": "record_error",
+        "code": "boom",
+        "message": "failed",
+        "loop_id": "loop-1"
+    });
+    assert!(v.is_valid(&request));
+}
+
+#[test]
+fn schema_rejects_update_bug_without_identifier() {
+    let v = validator();
+    let request = json!({
+        "op": "update_bug",
+        "status": "active",
+        "actor": address()
+    });
+    assert!(!v.is_valid(&request));
+}
+
+#[test]
+fn schema_rejects_advance_loop_without_identifier() {
+    let v = validator();
+    assert!(!v.is_valid(&json!({
+        "op": "advance_loop",
+        "complete": false
+    })));
+}
+
+#[test]
 fn schema_rejects_string_message_for_send() {
     let v = validator();
     assert!(!v.is_valid(&json!({

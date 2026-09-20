@@ -13131,6 +13131,18 @@ fn worktree_schema_requires_triage_only_for_non_legacy_issue_ids() {
         triage["matched_issue_id"]["type"],
         serde_json::json!(["string", "null"])
     );
+    let triage_required = triage_required(&properties["bug_triage"]);
+    assert!(triage_required.iter().any(|value| *value == "query_result"));
+}
+
+fn triage_required(triage: &Value) -> Vec<&str> {
+    let required = triage["required"]
+        .as_array()
+        .expect("bug_triage required must be an array");
+    required
+        .iter()
+        .map(|value| value.as_str().expect("bug_triage requirement must be a string"))
+        .collect()
 }
 
 #[test]

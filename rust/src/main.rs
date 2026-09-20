@@ -14457,28 +14457,32 @@ fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<Str
 }
 
 fn lock_migration_bundle_witnesses(lock: &Value) -> Vec<String> {
-    let mut witnesses = lock
-        .get("previous_bundle_digests")
-        .and_then(Value::as_array)
-        .map(|digests| {
-            digests
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|digest| valid_bundle_digest(digest))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if witnesses.is_empty() {
-        if let Some(digest) = lock
-            .get("previous_bundle_digest")
-            .and_then(Value::as_str)
-            .filter(|digest| valid_bundle_digest(digest))
-        {
-            witnesses.push(digest.to_string());
-        }
+    if let Some(digests) = lock.get("previous_bundle_digests") {
+        return digests
+            .as_array()
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_DIGEST"))
+            .iter()
+            .map(|digest| {
+                let digest = digest
+                    .as_str()
+                    .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_DIGEST"));
+                if !valid_bundle_digest(digest) {
+                    fail("INVALID_SDK_BUNDLE_DIGEST");
+                }
+                digest.to_string()
+            })
+            .collect();
     }
-    witnesses
+    if let Some(digest) = lock.get("previous_bundle_digest") {
+        let digest = digest
+            .as_str()
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_DIGEST"));
+        if !valid_bundle_digest(digest) {
+            fail("INVALID_SDK_BUNDLE_DIGEST");
+        }
+        return vec![digest.to_string()];
+    }
+    Vec::new()
 }
 
 fn sdk_migration_bundle_witnesses(root: &Path) -> Vec<String> {

@@ -9720,6 +9720,41 @@ fn pin_lock_requires_lock_anchor_for_materialized_migration_bundle_witnesses() {
 }
 
 #[test]
+fn pin_lock_rejects_malformed_plural_bundle_witnesses_without_overwrite() {
+    let root = temp_root("pin-lock-malformed-plural-bundle-witnesses");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (original_record, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
+    let record_path = root.join(".appsdk/migrations/0.1.5-to-0.1.6/record.json");
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let original_lock = fs::read_to_string(&lock_path).unwrap();
+    let mut lock: Value = serde_json::from_str(&original_lock).unwrap();
+    lock["previous_bundle_digest"] = Value::String(previous_bundle_digest);
+
+    for malformed in [
+        serde_json::json!("not-an-array"),
+        serde_json::json!([7]),
+        serde_json::json!(["sha256:not-a-digest"]),
+    ] {
+        lock["previous_bundle_digests"] = malformed;
+        let malformed_lock = serde_json::to_string_pretty(&lock).unwrap() + "\n";
+        fs::write(&lock_path, &malformed_lock).unwrap();
+        let rejected = run(&[
+            "pin-lock",
+            root_text,
+            "--binary",
+            binary().to_str().unwrap(),
+        ]);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("INVALID_SDK_BUNDLE_DIGEST"));
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), malformed_lock);
+        assert_eq!(fs::read_to_string(&record_path).unwrap(), original_record);
+    }
+    fs::write(&lock_path, original_lock).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_rejects_invalid_chained_bundle_witness_without_overwrite() {
     let root = temp_root("pin-lock-invalid-chained-witness");
     let root_text = root.to_str().unwrap();

@@ -62,13 +62,48 @@
       "required": ["peer_to_peer", "peer_to_master", "master_to_peer", "master_to_master", "daemon_to_peer", "daemon_to_master", "restart_replay"],
       "additionalProperties": false,
       "properties": {
-        "peer_to_peer": {"$ref": "#/$defs/path_receipt"},
-        "peer_to_master": {"$ref": "#/$defs/path_receipt"},
-        "master_to_peer": {"$ref": "#/$defs/path_receipt"},
-        "master_to_master": {"$ref": "#/$defs/path_receipt"},
-        "daemon_to_peer": {"$ref": "#/$defs/path_receipt"},
-        "daemon_to_master": {"$ref": "#/$defs/path_receipt"},
-        "restart_replay": {"$ref": "#/$defs/path_receipt"}
+        "peer_to_peer": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "peer"}, "receiver": {"const": "peer"}}}
+          ]
+        },
+        "peer_to_master": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "peer"}, "receiver": {"const": "master"}}}
+          ]
+        },
+        "master_to_peer": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "master"}, "receiver": {"const": "peer"}}}
+          ]
+        },
+        "master_to_master": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "master"}, "receiver": {"const": "master"}}}
+          ]
+        },
+        "daemon_to_peer": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "daemon"}, "receiver": {"const": "peer"}}}
+          ]
+        },
+        "daemon_to_master": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "daemon"}, "receiver": {"const": "master"}}}
+          ]
+        },
+        "restart_replay": {
+          "allOf": [
+            {"$ref": "#/$defs/path_receipt"},
+            {"properties": {"sender": {"const": "daemon"}, "receiver": {"const": "peer"}}}
+          ]
+        }
       }
     },
     "created_at": {"type": "string"}

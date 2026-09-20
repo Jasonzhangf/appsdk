@@ -10119,6 +10119,94 @@ fn pin_lock_preserves_historical_custom_maps_with_bundle_witness() {
 }
 
 #[test]
+fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
+    let root = temp_root("pin-lock-historical-custom-target");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let (_, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
+    let migration_root = root.join(".appsdk/migrations/0.1.6-to-0.1.7");
+    fs::create_dir_all(migration_root.join("maps")).unwrap();
+    let manifest: Value = serde_json::from_str(include_str!(
+        "../../contracts/migrations/sdk-0.1.6-to-0.1.7.json"
+    ))
+    .unwrap();
+    let mut maps = Vec::new();
+    let mut preserved = Vec::new();
+    for (name, source) in [
+        (
+            "resource-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/resource-map.json"),
+        ),
+        (
+            "function-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/function-map.json"),
+        ),
+        (
+            "mainline-call-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+        ),
+        (
+            "verification-map.json",
+            include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+        ),
+    ] {
+        let declared = manifest["maps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap();
+        let live = root.join(".appsdk/maps").join(name);
+        let snapshot = migration_root.join("maps").join(name);
+        let custom = fs::read_to_string(&live).unwrap() + "\n";
+        fs::write(&live, &custom).unwrap();
+        fs::write(&snapshot, source).unwrap();
+        preserved.push((live, snapshot, custom.clone()));
+        maps.push(serde_json::json!({
+            "name": name,
+            "source_digest": digest(source),
+            "target_digest": digest(&custom),
+            "canonical_source_digest": declared["source_digest"].clone(),
+            "canonical_target_digest": format!("sha256:{}", "f".repeat(64)),
+            "snapshot_path": format!(".appsdk/migrations/0.1.6-to-0.1.7/maps/{}", name)
+        }));
+    }
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "migration_id": "appsdk-0.1.6-to-0.1.7",
+        "source_version": "0.1.6",
+        "target_version": "0.1.7",
+        "bundle_digest": previous_bundle_digest,
+        "maps": maps,
+        "frozen_reviews": [],
+        "legacy_reconciled_reviews": [],
+        "created_at": "2026-01-02T00:00:00Z"
+    });
+    let historical_record = serde_json::to_string_pretty(&record).unwrap() + "\n";
+    let record_path = migration_root.join("record.json");
+    fs::write(&record_path, &historical_record).unwrap();
+
+    let result = run(&[
+        "pin-lock",
+        root_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_to_string(&record_path).unwrap(), historical_record);
+    for (live, snapshot, custom) in &preserved {
+        assert_eq!(&fs::read_to_string(live).unwrap(), custom);
+        assert!(snapshot.is_file());
+    }
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_rejects_custom_map_record_from_bundle_reconciliation() {
     let root = temp_root("pin-lock-custom-map-record");
     let root_text = root.to_str().unwrap();

@@ -5113,8 +5113,8 @@ pub(crate) fn registered_idle_peer_for_admission(
             {
                 return true;
             }
-            appserver_agent_view(server, worker)
-                .0
+            let (_, agent_view, _) = appserver_agent_view(server, worker);
+            agent_view
                 .get("can_accept_direct_input")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)

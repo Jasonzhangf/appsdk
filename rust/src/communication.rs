@@ -1329,7 +1329,10 @@ impl CommunicationStore {
                     }
                     None => {
                         self.require_scope(&record.scope_id)?;
-                        self.commit("agent.registered", json!({ "agent": record }))?;
+                        self.commit(
+                            "agent.registered",
+                            serde_json::to_value(record).expect("agent record is serializable"),
+                        )?;
                     }
                     Some(existing) if existing == record => {}
                     Some(_) => {

@@ -87,6 +87,76 @@
     },
     {
       "if": {
+        "properties": {"kind": {"const": "scope.registered"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/scopeRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "scope.unregistered"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/scopeUnregisteredEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "adapter.registered"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/adapterRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "agent.registered"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/agentRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "agent.refreshed"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/agentRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "agent.state"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/agentStateEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "message.created"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/messageRecord"}
+        }
+      }
+    },
+    {
+      "if": {
         "properties": {"kind": {"const": "discovery.pending"}}
       },
       "then": {
@@ -197,6 +267,46 @@
     },
     {
       "if": {
+        "properties": {"kind": {"const": "wakeup.updated"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/wakeupRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "wakeup.reminder"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/wakeupReminderEvent"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "bug.reported"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/bugRecord"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "bug.updated"}}
+      },
+      "then": {
+        "properties": {
+          "data": {"$ref": "#/$defs/bugUpdatedEvent"}
+        }
+      }
+    },
+    {
+      "if": {
         "properties": {"kind": {"const": "error.recorded"}}
       },
       "then": {
@@ -248,6 +358,14 @@
       },
       "additionalProperties": false
     },
+    "scopeUnregisteredEvent": {
+      "type": "object",
+      "required": ["scopeId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
     "agentRecord": {
       "type": "object",
       "required": [
@@ -281,6 +399,16 @@
         "state": {"enum": ["working", "idle"]},
         "lastStateAt": {"type": "string", "format": "date-time"},
         "runtimeId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "agentStateEvent": {
+      "type": "object",
+      "required": ["address", "state", "at"],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "state": {"enum": ["working", "idle"]},
+        "at": {"type": "string", "format": "date-time"}
       },
       "additionalProperties": false
     },
@@ -511,6 +639,30 @@
         "message": {"type": "string", "minLength": 1},
         "context": {},
         "at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "adapterRecord": {
+      "type": "object",
+      "required": [
+        "adapterId",
+        "kind",
+        "target",
+        "enabled",
+        "execute",
+        "recipient",
+        "registeredAt"
+      ],
+      "properties": {
+        "adapterId": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["mailbox", "appserver"]},
+        "target": {"type": ["string", "null"]},
+        "enabled": {"type": "boolean"},
+        "execute": {"type": "boolean"},
+        "recipient": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]
+        },
+        "registeredAt": {"type": "string", "minLength": 1}
       },
       "additionalProperties": false
     },
@@ -876,6 +1028,118 @@
         "route": {"$ref": "#/$defs/routeRecord"},
         "lastError": {
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/errorRecord"}]
+        }
+      },
+      "additionalProperties": false
+    },
+    "wakeupRecord": {
+      "type": "object",
+      "required": [
+        "address",
+        "idleSince",
+        "remindersSent",
+        "nextDueAt",
+        "stopped",
+        "lastReminderAt"
+      ],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "idleSince": {"type": ["string", "null"], "format": "date-time"},
+        "remindersSent": {"type": "integer", "minimum": 0, "maximum": 3},
+        "nextDueAt": {"type": ["string", "null"], "format": "date-time"},
+        "stopped": {"type": "boolean"},
+        "lastReminderAt": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "wakeupReminderEvent": {
+      "type": "object",
+      "required": [
+        "wakeup",
+        "message",
+        "notificationKey",
+        "notification",
+        "attemptId",
+        "receipt"
+      ],
+      "properties": {
+        "wakeup": {"$ref": "#/$defs/wakeupRecord"},
+        "message": {"$ref": "#/$defs/messageRecord"},
+        "notificationKey": {"type": "string", "minLength": 1},
+        "notification": {"$ref": "#/$defs/notificationRecord"},
+        "attemptId": {"type": ["string", "null"], "minLength": 1},
+        "receipt": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/transportReceipt"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "bugRecord": {
+      "type": "object",
+      "required": [
+        "bugId",
+        "scopeId",
+        "title",
+        "priority",
+        "description",
+        "reporter",
+        "status",
+        "worktreeId",
+        "loopId",
+        "createdAt",
+        "updatedAt",
+        "resolutionEvidence"
+      ],
+      "properties": {
+        "bugId": {"type": "string", "minLength": 1},
+        "scopeId": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+        "description": {"type": "string", "minLength": 1},
+        "reporter": {"$ref": "#/$defs/address"},
+        "status": {"enum": ["active", "resolved", "closed"]},
+        "worktreeId": {"type": ["string", "null"]},
+        "loopId": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "resolutionEvidence": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/bugResolutionEvidence"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "bugResolutionEvidence": {
+      "type": "object",
+      "required": ["fix", "verification", "merge"],
+      "properties": {
+        "fix": {"$ref": "#/$defs/evidenceValue"},
+        "verification": {"$ref": "#/$defs/evidenceValue"},
+        "merge": {"$ref": "#/$defs/evidenceValue"}
+      },
+      "additionalProperties": true
+    },
+    "bugUpdatedEvent": {
+      "type": "object",
+      "required": ["bug", "loop", "evidence"],
+      "properties": {
+        "bug": {"$ref": "#/$defs/bugRecord"},
+        "loop": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/loopRecord"}
+          ]
+        },
+        "evidence": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/bugResolutionEvidence"}
+          ]
         }
       },
       "additionalProperties": false

@@ -945,6 +945,7 @@ mod tests {
         server.commit(&[Event::DeliveryMode {
             msg_id: id.clone(),
             mode: "explicit-notification".into(),
+            source_thread_id: None,
         }]);
         let calls = std::cell::Cell::new(0);
         assert!(super::super::attempt_notification_with_default(
@@ -1179,6 +1180,7 @@ mod tests {
         server.commit(&[Event::DeliveryMode {
             msg_id: message_id.clone(),
             mode: "explicit-notification".into(),
+            source_thread_id: None,
         }]);
 
         {
@@ -1260,6 +1262,7 @@ mod tests {
             server.commit(&[Event::DeliveryMode {
                 msg_id: explicit_id.clone(),
                 mode: "explicit-notification".into(),
+                source_thread_id: None,
             }]);
 
             assert!(super::super::attempt_notification_with_at(

@@ -369,6 +369,25 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             }
         }
     }
+    let requires_resume = response
+        .pointer("/thread/status/type")
+        .and_then(Value::as_str)
+        == Some("notLoaded");
+    let resume_thread = if !requires_resume {
+        false
+    } else {
+        method_exists(
+            &mut client,
+            "thread/resume",
+            json!({"threadId": "", "excludeTurns": false}),
+        )?
+    };
+    if requires_resume && !resume_thread {
+        return Err(AdapterError::CapabilityUnavailable {
+            endpoint: EndpointKind::Tui,
+            operation: "thread/resume",
+        });
+    }
     // Item history is a diagnostic capability, not a registration or wake
     // requirement. Some App Server builds expose thread/read and notification
     // methods but return method-not-found for items/list; that must not block peer
@@ -444,15 +463,21 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         endpoint: Some(format!("unix://{}", socket_path.display())),
         namespace: Some(candidate.namespace.clone()),
         thread_id: Some(thread_id.to_string()),
-        capabilities: vec![
+        capabilities: {
+            let mut capabilities = vec![
             "session_status".into(),
             "read_thread".into(),
             "send_message_to_thread".into(),
             "wait_reply".into(),
             "queue_wakeup".into(),
-        ],
+            ];
+            if resume_thread {
+                capabilities.push("resume_thread".into());
+            }
+            capabilities
+        },
         self_check:
-            "initialize, thread/loaded/list/read identity, turn/start, turn/steer, thread/turns/list, and thread/queue/add method probes passed"
+            "initialize, thread/loaded/list/read identity, conditional thread/resume, turn/start, turn/steer, thread/turns/list, and thread/queue/add method probes passed"
                 .into(),
     })
 }
@@ -492,12 +517,15 @@ pub fn immediate_notify(
     })?;
     let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
     client.initialize()?;
-    let status = match thread_metadata(&mut client, thread_id.as_str()) {
-        Ok(thread) => thread_status_from_metadata(&thread)?,
+    let (thread, status) = match thread_metadata(&mut client, thread_id.as_str()) {
+        Ok(thread) => {
+            let status = thread_status_from_metadata(&thread)?;
+            (Some(thread), status)
+        }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            "notLoaded".into()
+            (None, "notLoaded".into())
         }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
@@ -511,8 +539,23 @@ pub fn immediate_notify(
         _ => None,
     };
     let action = notification_action(&status, active_turn_id)?;
+    if matches!(action, NotificationAction::Resume) {
+        let exclude_turns = thread
+            .as_ref()
+            .and_then(|thread| thread.get("historyMode"))
+            .and_then(Value::as_str)
+            .is_some_and(|history_mode| history_mode == "paginated");
+        let receipt = client.call(
+            "thread/resume",
+            json!({
+                "threadId": thread_id.as_str(),
+                "excludeTurns": exclude_turns,
+            }),
+        )?;
+        validate_resume_receipt(&receipt, thread_id.as_str())?;
+    }
     match action {
-        NotificationAction::Start => {
+        NotificationAction::Resume | NotificationAction::Start => {
             let receipt = client.call(
                 "turn/start",
                 json!({
@@ -552,7 +595,10 @@ fn is_thread_not_loaded_error(operation: &str, detail: &str, thread_id: &str) ->
 
 fn is_thread_not_found_error(operation: &str, detail: &str, thread_id: &str) -> bool {
     operation == "rpc"
-        && (detail == "thread not found" || detail == format!("thread not found: {thread_id}"))
+        && (detail == "thread not found"
+            || detail == format!("thread not found: {thread_id}")
+            || detail == "rpc unknown: thread not found"
+            || detail == format!("rpc unknown: thread not found: {thread_id}"))
 }
 
 /// Queue one background wake through a server-selected App Server transport.
@@ -865,6 +911,7 @@ fn active_turn_id_from_page(page: &Value) -> Result<Option<String>, AdapterError
 #[derive(Debug, PartialEq, Eq)]
 enum NotificationAction {
     Start,
+    Resume,
     Steer(String),
 }
 
@@ -877,7 +924,8 @@ fn notification_action(
             Some(turn_id) => NotificationAction::Steer(turn_id),
             None => NotificationAction::Start,
         }),
-        "idle" | "notLoaded" => Ok(NotificationAction::Start),
+        "idle" => Ok(NotificationAction::Start),
+        "notLoaded" => Ok(NotificationAction::Resume),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -936,6 +984,26 @@ fn validate_immediate_receipt(receipt: &Value) -> Result<(), AdapterError> {
         return Err(AdapterError::Unknown {
             operation: "turn/start",
             detail: "response returned an invalid turn.id".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_resume_receipt(receipt: &Value, expected_thread_id: &str) -> Result<(), AdapterError> {
+    let observed_thread_id = receipt
+        .pointer("/thread/id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AdapterError::Unknown {
+            operation: "thread/resume",
+            detail: "response is missing thread.id".into(),
+        })?;
+    if observed_thread_id != expected_thread_id {
+        return Err(AdapterError::Unknown {
+            operation: "thread/resume",
+            detail: format!(
+                "thread identity mismatch: expected {expected_thread_id}, observed {observed_thread_id}"
+            ),
         });
     }
     Ok(())
@@ -1563,6 +1631,13 @@ mod tests {
                     }
                 }),
             );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "");
+            respond(
+                &mut stream,
+                json!({"id": resume["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            );
             let items = next_request(&mut stream);
             assert_eq!(items["method"], "thread/items/list");
             respond(
@@ -1910,7 +1985,7 @@ mod tests {
         );
         assert_eq!(
             notification_action("notLoaded", None).unwrap(),
-            NotificationAction::Start
+            NotificationAction::Resume
         );
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
@@ -2238,8 +2313,8 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_starts_not_loaded_thread() {
-        let socket = temp_socket("notify-not-loaded-start");
+    fn immediate_notify_resumes_not_loaded_thread_before_turn_start() {
+        let socket = temp_socket("notify-not-loaded-resume");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -2258,6 +2333,17 @@ mod tests {
                             "status": {"type": "notLoaded"}
                         }
                     }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], false);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {"thread": {"id": "thread-1", "status": {"type": "idle"}}}
                 }),
             );
             let request = next_request(&mut stream);
@@ -2292,8 +2378,8 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_starts_thread_read_not_loaded_error() {
-        let socket = temp_socket("notify-read-not-loaded-start");
+    fn immediate_notify_resumes_thread_read_not_loaded_error() {
+        let socket = temp_socket("notify-read-not-loaded-resume");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -2310,6 +2396,17 @@ mod tests {
                         "code": -32602,
                         "message": "thread not loaded: thread-1"
                     }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], false);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {"thread": {"id": "thread-1", "status": {"type": "idle"}}}
                 }),
             );
             let request = next_request(&mut stream);
@@ -2390,6 +2487,79 @@ mod tests {
             server.join().unwrap();
             std::fs::remove_file(socket).ok();
         }
+    }
+
+    #[test]
+    fn immediate_notify_rejects_wrapped_missing_thread_without_turn_start() {
+        let socket = temp_socket("notify-wrapped-missing-thread");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "error": {
+                        "code": -32602,
+                        "message": "rpc unknown: thread not found"
+                    }
+                }),
+            );
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "missing route must not issue another App Server method"
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let error = immediate_notify(
+            &selected_transport(&socket),
+            "sender-thread",
+            "notify body",
+            "message-start",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, AdapterError::RouteUnavailable { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "ADAPTER_ROUTE_UNAVAILABLE: rpc unknown: thread not found"
+        );
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn wrapped_missing_thread_error_is_route_unavailable() {
+        for detail in [
+            "thread not found: thread-1",
+            "rpc unknown: thread not found",
+            "rpc unknown: thread not found: thread-1",
+        ] {
+            assert!(is_thread_not_found_error("rpc", detail, "thread-1"));
+        }
+        for detail in [
+            "thread not found: other-thread",
+            "rpc unknown: thread not found: other-thread",
+            "thread not loaded: thread-1",
+            "rpc unknown: thread not loaded: thread-1",
+        ] {
+            assert!(!is_thread_not_found_error("rpc", detail, "thread-1"));
+        }
+        assert!(!is_thread_not_found_error(
+            "thread/read",
+            "rpc unknown: thread not found: thread-1",
+            "thread-1"
+        ));
     }
 
     #[test]

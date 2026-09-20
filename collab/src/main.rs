@@ -11,11 +11,68 @@ mod subagent;
 
 use clap::{Parser, Subcommand};
 use identity::{AppServerId, CommandId, Identity, OperationId, RuntimeIdentity};
-use proto::{ProjectContext, Req, Resp};
+use proto::{ProjectContext, Req, Resp, SelectedTransport, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashSet;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const LIVE_CLOSURE_TIMEOUT_MS_ENV: &str = "COLLAB_LIVE_CLOSURE_TIMEOUT_MS";
+const DEFAULT_LIVE_CLOSURE_TIMEOUT_MS: u64 = 180_000;
+const MAX_LIVE_CLOSURE_TIMEOUT_MS: u64 = 3_600_000;
+
+fn live_closure_timeout_from_value(value: Option<&str>) -> anyhow::Result<Duration> {
+    let milliseconds = match value {
+        None => DEFAULT_LIVE_CLOSURE_TIMEOUT_MS,
+        Some(value) => value.parse::<u64>().map_err(|error| {
+            anyhow::anyhow!(
+                "COLLAB_LIVE_CLOSURE_TIMEOUT_INVALID:{LIVE_CLOSURE_TIMEOUT_MS_ENV}:{error}"
+            )
+        })?,
+    };
+    if milliseconds == 0 || milliseconds > MAX_LIVE_CLOSURE_TIMEOUT_MS {
+        anyhow::bail!(
+            "COLLAB_LIVE_CLOSURE_TIMEOUT_INVALID:{LIVE_CLOSURE_TIMEOUT_MS_ENV}:must_be_between_1_and_{MAX_LIVE_CLOSURE_TIMEOUT_MS}_milliseconds"
+        );
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn live_closure_timeout() -> anyhow::Result<Duration> {
+    live_closure_timeout_from_value(std::env::var(LIVE_CLOSURE_TIMEOUT_MS_ENV).ok().as_deref())
+}
+
+fn live_closure_receipt_consumed(
+    receipt: &serde_json::Value,
+    message_id: &str,
+    challenge: &str,
+) -> bool {
+    receipt.get("id").and_then(serde_json::Value::as_str) == Some(message_id)
+        && receipt.get("state").and_then(serde_json::Value::as_str) == Some("read")
+        && receipt.get("body").and_then(serde_json::Value::as_str) == Some(challenge)
+}
+
+fn wait_live_closure_receipt<F>(
+    mut read: F,
+    deadline: Instant,
+    message_id: &str,
+    challenge: &str,
+) -> anyhow::Result<serde_json::Value>
+where
+    F: FnMut() -> anyhow::Result<serde_json::Value>,
+{
+    loop {
+        let receipt = read()?;
+        if live_closure_receipt_consumed(&receipt, message_id, challenge) {
+            return Ok(receipt);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("COLLAB_LIVE_CLOSURE_RECEIPT_NOT_CONSUMED");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -72,6 +129,11 @@ enum Cmd {
     Route {
         #[command(subcommand)]
         command: RouteCmd,
+    },
+    /// Run one bounded, authenticated live-closure path probe.
+    LiveClosure {
+        #[command(subcommand)]
+        command: LiveClosureCmd,
     },
     /// Hidden alias: previous collab root commands are collab master
     #[command(hide = true)]
@@ -372,6 +434,40 @@ enum RouteCmd {
 }
 
 #[derive(Subcommand)]
+enum LiveClosureCmd {
+    /// Send one challenge-bound message and observe target execution/consume.
+    /// The command fails closed unless native target history and the durable
+    /// message receipt bind to the same challenge and message ID.
+    Probe {
+        #[arg(long)]
+        closure_id: String,
+        #[arg(long)]
+        source_commit: String,
+        #[arg(long)]
+        artifact_hash: String,
+        #[arg(long)]
+        environment_id: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        to: String,
+        /// Explicit target project for the independently authenticated master
+        /// in a cross-project master-to-master probe.
+        #[arg(long)]
+        to_project: Option<std::path::PathBuf>,
+    },
+    /// Read one authenticated target route and observe its native execution.
+    Observe {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        challenge: String,
+        #[arg(long)]
+        message_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkerCmd {
     /// Re-register the current App Server thread without changing task ownership
     Recover,
@@ -577,6 +673,798 @@ fn call_project<T: DeserializeOwned>(
 ) -> anyhow::Result<T> {
     let runtime = runtime_for_request(ident)?;
     client::call_with_runtime_identity_at_root(&scope.sock_path(), request, &scope.root, runtime)
+}
+
+fn live_closure_target_transport(worker: &serde_json::Value) -> anyhow::Result<SelectedTransport> {
+    let transport = worker
+        .get("transport")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TRANSPORT_MISSING"))?;
+    let endpoint = transport
+        .get("endpoint")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_ENDPOINT_MISSING"))?;
+    let namespace = transport
+        .get("namespace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_NAMESPACE_MISSING"))?;
+    let thread_id = transport
+        .get("thread_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_THREAD_MISSING"))?;
+    Ok(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some(endpoint.to_owned()),
+        namespace: Some(namespace.to_owned()),
+        thread_id: Some(thread_id.to_owned()),
+        capabilities: vec!["read_thread".into(), "thread/turns/list".into()],
+        self_check: "daemon-verified-live-closure-target-route".into(),
+    })
+}
+
+fn live_closure_item_contains_challenge(item: &serde_json::Value, challenge: &str) -> bool {
+    let payload = live_closure_item_payload(item);
+    let item_type = payload.get("type").and_then(serde_json::Value::as_str);
+    if !matches!(item_type, Some("userMessage") | Some("user_message")) {
+        return false;
+    }
+    let Some(content) = payload.get("content").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    content.len() == 1
+        && content[0].get("type").and_then(serde_json::Value::as_str) == Some("text")
+        && content[0].get("text").and_then(serde_json::Value::as_str) == Some(challenge)
+}
+
+fn live_closure_item_payload(item: &serde_json::Value) -> &serde_json::Value {
+    item.get("item").unwrap_or(item)
+}
+
+fn live_closure_item_turn_id(item: &serde_json::Value) -> Option<&str> {
+    let turn_id = item
+        .get("turnId")
+        .or_else(|| item.get("turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if turn_id.is_some() {
+        return turn_id;
+    }
+    let payload = item.get("item")?;
+    payload
+        .get("turnId")
+        .or_else(|| payload.get("turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn live_closure_item_message_id(item: &serde_json::Value) -> Option<&str> {
+    let payload = live_closure_item_payload(item);
+    payload
+        .get("clientUserMessageId")
+        .or_else(|| payload.get("clientId"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.strip_prefix("collab-notification-").or(Some(value)))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn live_closure_function_call_output_fields(item: &serde_json::Value) -> Option<(&str, &str)> {
+    let payload = live_closure_item_payload(item);
+    if payload.get("type").and_then(serde_json::Value::as_str) != Some("functionCallOutput")
+        || payload.get("name").and_then(serde_json::Value::as_str) != Some("send_message_to_thread")
+    {
+        return None;
+    }
+    live_closure_item_turn_id(item)?;
+    let output = payload.get("output").and_then(serde_json::Value::as_str)?;
+    let mut lines = output.lines();
+    if lines.next()? != "<codex_delegation>" {
+        return None;
+    }
+    let source_thread_id = lines
+        .next()?
+        .strip_prefix("  <source_thread_id>")?
+        .strip_suffix("</source_thread_id>")?;
+    if source_thread_id.is_empty()
+        || source_thread_id.trim() != source_thread_id
+        || source_thread_id.contains('<')
+        || source_thread_id.contains('>')
+        || source_thread_id.contains('&')
+    {
+        return None;
+    }
+    let client_message_id = lines
+        .next()?
+        .strip_prefix("  <client_message_id>")?
+        .strip_suffix("</client_message_id>")?;
+    let client_message_id = client_message_id
+        .strip_prefix("collab-notification-")
+        .unwrap_or(client_message_id);
+    if client_message_id.is_empty()
+        || client_message_id.trim() != client_message_id
+        || client_message_id.contains('<')
+        || client_message_id.contains('>')
+        || client_message_id.contains('&')
+    {
+        return None;
+    }
+    let challenge = lines
+        .next()?
+        .strip_prefix("  <input>")?
+        .strip_suffix("</input>")?;
+    if challenge.is_empty() || challenge.trim() != challenge {
+        return None;
+    }
+    if lines.next()? != "</codex_delegation>" || lines.next().is_some() {
+        return None;
+    }
+    Some((client_message_id, challenge))
+}
+
+fn live_closure_item_matches_input(
+    item: &serde_json::Value,
+    challenge: &str,
+    message_id: &str,
+) -> bool {
+    live_closure_item_turn_id(item).is_some()
+        && (live_closure_item_message_id(item) == Some(message_id)
+            && live_closure_item_contains_challenge(item, challenge)
+            || live_closure_function_call_output_fields(item).is_some_and(
+                |(observed_message_id, observed)| {
+                    observed_message_id == message_id
+                        && observed
+                            == client::adapters::codex_app_server::escape_delegated_text(challenge)
+                },
+            ))
+}
+
+fn live_closure_page_cursor(page: &serde_json::Value) -> anyhow::Result<Option<String>> {
+    for key in ["backwardsCursor", "nextCursor"] {
+        let Some(value) = page.get(key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let cursor = value
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_PAGE_CURSOR_INVALID:{key}"))?;
+        if !cursor.trim().is_empty() {
+            return Ok(Some(cursor.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn read_live_closure_pages<F>(mut read_page: F) -> anyhow::Result<Vec<serde_json::Value>>
+where
+    F: FnMut(Option<&str>) -> anyhow::Result<serde_json::Value>,
+{
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut values = Vec::new();
+    loop {
+        let page = read_page(cursor.as_deref())?;
+        let data = page
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_ITEMS_INVALID"))?;
+        values.extend(data.iter().cloned());
+        let Some(next_cursor) = live_closure_page_cursor(&page)? else {
+            return Ok(values);
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            // Some App Server versions keep the backwards cursor anchored to
+            // the same ordinal while returning the next slice. Keep the
+            // current page, then stop this scan; the outer observation retry
+            // remains bounded and still requires exact native correlation.
+            return Ok(values);
+        }
+        cursor = Some(next_cursor);
+    }
+}
+
+fn live_closure_turn_items(turns: &[serde_json::Value]) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut items = Vec::new();
+    for (turn_index, turn) in turns.iter().enumerate() {
+        let turn_id = turn
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TURN_ID_MISSING:data[{turn_index}]")
+            })?;
+        let turn_items = turn
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TURN_ITEMS_INVALID:data[{turn_index}]")
+            })?;
+        for (item_index, item) in turn_items.iter().enumerate() {
+            let mut item = item.clone();
+            let nested_payload = item.get("item");
+            if nested_payload.is_some_and(|payload| !payload.is_object()) {
+                anyhow::bail!(
+                    "COLLAB_LIVE_CLOSURE_TARGET_ITEM_INVALID:data[{turn_index}].items[{item_index}]"
+                );
+            }
+            for (field, value) in [
+                ("turnId", item.get("turnId")),
+                ("turn_id", item.get("turn_id")),
+                (
+                    "item.turnId",
+                    nested_payload.and_then(|payload| payload.get("turnId")),
+                ),
+                (
+                    "item.turn_id",
+                    nested_payload.and_then(|payload| payload.get("turn_id")),
+                ),
+            ] {
+                let Some(value) = value else {
+                    continue;
+                };
+                let observed_turn_id = value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "COLLAB_LIVE_CLOSURE_TARGET_ITEM_TURN_ID_INVALID:data[{turn_index}].items[{item_index}].{field}"
+                        )
+                    })?;
+                if observed_turn_id != turn_id {
+                    anyhow::bail!(
+                        "COLLAB_LIVE_CLOSURE_TARGET_ITEM_TURN_MISMATCH:data[{turn_index}].items[{item_index}]"
+                    );
+                }
+            }
+            let object = item.as_object_mut().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "COLLAB_LIVE_CLOSURE_TARGET_ITEM_INVALID:data[{turn_index}].items[{item_index}]"
+                )
+            })?;
+            object.insert("turnId".into(), json!(turn_id));
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
+fn live_closure_turns_read_error(error: client::adapters::AdapterError) -> anyhow::Error {
+    if matches!(
+        &error,
+        client::adapters::AdapterError::Unknown { operation: "rpc", detail }
+            if detail.as_str() == "list_turns is not supported yet"
+    ) {
+        return anyhow::anyhow!(
+            "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:fresh_thread_materialization:{error}"
+        );
+    }
+    anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TURNS_READ:{error}")
+}
+
+fn wait_live_closure_fresh_thread_materialization<F>(
+    mut observe: F,
+    deadline: Instant,
+    retry_delay: Duration,
+) -> anyhow::Result<serde_json::Value>
+where
+    F: FnMut() -> anyhow::Result<serde_json::Value>,
+{
+    loop {
+        match observe() {
+            Ok(execution) => return Ok(execution),
+            Err(error)
+                if error.to_string().starts_with(
+                    "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:fresh_thread_materialization:",
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_TIMEOUT:fresh_thread_materialization"
+                    );
+                }
+                std::thread::sleep(retry_delay);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn observe_live_closure_target(
+    transport: &SelectedTransport,
+    challenge: &str,
+    message_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let thread_id = transport
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_THREAD_MISSING"))?;
+    let turns = read_live_closure_pages(|cursor| {
+        client::adapters::codex_app_server::read_thread_turns_with_items_page(
+            transport, thread_id, cursor,
+        )
+        .map_err(live_closure_turns_read_error)
+    })?;
+    let items = live_closure_turn_items(&turns)?;
+    let input = items
+        .iter()
+        .find(|item| live_closure_item_matches_input(item, challenge, message_id));
+    let Some(input) = input else {
+        anyhow::bail!(
+            "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:challenge_or_message_not_observed"
+        );
+    };
+    let completed_turn = turns.iter().find(|turn| {
+        turn.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+            && turn
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| {
+                    live_closure_item_turn_id(input).is_some_and(|input_turn| input_turn == id)
+                })
+    });
+    let Some(completed_turn) = completed_turn else {
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:turn_not_completed");
+    };
+    let turn_id = completed_turn
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TURN_ID_MISSING"))?;
+    let result_item = items.iter().rev().find(|item| {
+        let payload = live_closure_item_payload(item);
+        let item_type = payload.get("type").and_then(serde_json::Value::as_str);
+        payload
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+            && item_type != Some("userMessage")
+            && item_type != Some("user_message")
+            && live_closure_item_turn_id(item).is_some_and(|item_turn| item_turn == turn_id)
+    });
+    let Some(result_item) = result_item else {
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:result_item_not_observed");
+    };
+    let result_item_id = live_closure_item_payload(result_item)
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_RESULT_ID_MISSING"))?;
+    Ok(json!({
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "status": "completed",
+        "challenge": challenge,
+        "message_id": message_id,
+        "result_item_id": result_item_id,
+        "observed_at": chrono::Utc::now().to_rfc3339(),
+        "source": "thread/turns/list(itemsView=full)"
+    }))
+}
+
+fn live_closure_observe(
+    scope: &Scope,
+    to: String,
+    challenge: String,
+    message_id: String,
+) -> anyhow::Result<()> {
+    for (name, value) in [
+        ("to", &to),
+        ("challenge", &challenge),
+        ("message_id", &message_id),
+    ] {
+        if value.trim().is_empty() {
+            anyhow::bail!("COLLAB_LIVE_CLOSURE_OBSERVE_MISSING:{name}");
+        }
+    }
+    let ident = me(scope, None)?;
+    let workers: serde_json::Value = call_project(scope, &ident, &Req::Workers)?;
+    let target = workers
+        .get("workers")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|worker| {
+                worker.get("id").and_then(serde_json::Value::as_str) == Some(to.as_str())
+                    && worker
+                        .get("endpoint_live")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && worker
+                        .get("identity_valid")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            })
+        })
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE:{to}"))?;
+    let transport = live_closure_target_transport(target)?;
+    let observation_deadline = Instant::now() + live_closure_timeout()?;
+    let target_execution = wait_live_closure_fresh_thread_materialization(
+        || observe_live_closure_target(&transport, &challenge, &message_id),
+        observation_deadline,
+        Duration::from_millis(500),
+    )?;
+    let receipt: serde_json::Value = call_project(
+        scope,
+        &ident,
+        &Req::MsgStatus {
+            msg_id: message_id.clone(),
+        },
+    )?;
+    if receipt.get("id").and_then(serde_json::Value::as_str) != Some(message_id.as_str())
+        || receipt.get("state").and_then(serde_json::Value::as_str) != Some("read")
+        || receipt.get("body").and_then(serde_json::Value::as_str) != Some(challenge.as_str())
+    {
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_RECEIPT_NOT_CONSUMED");
+    }
+    out(&json!({
+        "status": "target_execution_observed",
+        "closure_claim": false,
+        "target_worker_id": to,
+        "target_execution": target_execution,
+        "receipt": receipt,
+        "source": "target App Server thread/turns/list(itemsView=full) + collab msg status"
+    }));
+    Ok(())
+}
+
+fn live_closure_probe(
+    scope: &Scope,
+    closure_id: String,
+    source_commit: String,
+    artifact_hash: String,
+    environment_id: String,
+    path: String,
+    to: String,
+    to_project: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    const PATHS: [&str; 7] = [
+        "peer_to_peer",
+        "peer_to_master",
+        "master_to_peer",
+        "master_to_master",
+        "daemon_to_peer",
+        "daemon_to_master",
+        "restart_replay",
+    ];
+    if !PATHS.contains(&path.as_str()) {
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_PROBE_INVALID_PATH:{path}");
+    }
+    for (name, value) in [
+        ("closure_id", &closure_id),
+        ("source_commit", &source_commit),
+        ("artifact_hash", &artifact_hash),
+        ("environment_id", &environment_id),
+        ("to", &to),
+    ] {
+        if value.trim().is_empty() {
+            anyhow::bail!("COLLAB_LIVE_CLOSURE_PROBE_MISSING:{name}");
+        }
+    }
+
+    let ident = me(scope, None)?;
+    let context: serde_json::Value = call_project(
+        scope,
+        &ident,
+        &Req::Context {
+            worker_id: ident.worker_id.clone(),
+            token: ident.token.clone(),
+        },
+    )?;
+    let workers: serde_json::Value = call_project(scope, &ident, &Req::Workers)?;
+    let master: serde_json::Value = call_project(scope, &ident, &Req::MasterStatus)?;
+    let target_scope = if path == "master_to_master" {
+        let target = to_project
+            .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_PROBE_MISSING:to_project"))?
+            .canonicalize()?;
+        if target == scope.root.canonicalize()? {
+            anyhow::bail!("COLLAB_LIVE_CLOSURE_CROSS_PROJECT_REQUIRED");
+        }
+        if !target.join(".agent-collab").is_dir() {
+            anyhow::bail!(
+                "COLLAB_LIVE_CLOSURE_TARGET_PROJECT_UNREGISTERED:{}",
+                target.display()
+            );
+        }
+        Some(Scope { root: target })
+    } else {
+        if to_project.is_some() {
+            anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_PROJECT_ONLY_FOR_MASTER_TO_MASTER");
+        }
+        None
+    };
+    let target_workers: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
+        client::call_with_context(
+            &target_scope.sock_path(),
+            &Req::Workers,
+            Some(cli_project_context(&target_scope.root)?),
+        )?
+    } else {
+        workers.clone()
+    };
+    let target_master: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
+        client::call_with_context(
+            &target_scope.sock_path(),
+            &Req::MasterStatus,
+            Some(cli_project_context(&target_scope.root)?),
+        )?
+    } else {
+        master.clone()
+    };
+    let endpoint_generation = ident
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.endpoint_generation)
+        .unwrap_or_default();
+    let first_failure = |code: &str, detail: &str| {
+        out(&json!({
+            "status": "failed",
+            "closure_claim": false,
+            "entrypoint": "collab live-closure probe",
+            "path": path,
+            "first_failure": {"code": code, "detail": detail},
+            "identity": ident.worker_id.clone(),
+            "endpoint_generation": endpoint_generation,
+        }));
+    };
+    if context
+        .get("registered")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || context
+            .pointer("/liveness/live")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_DAEMON_NOT_LIVE",
+            "the probe requires an existing registered route and resident daemon",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_DAEMON_NOT_LIVE");
+    }
+    let target = target_workers
+        .get("workers")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|worker| {
+                worker.get("id").and_then(serde_json::Value::as_str) == Some(to.as_str())
+            })
+        });
+    let Some(target) = target.filter(|worker| {
+        worker
+            .get("endpoint_live")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && worker
+                .get("identity_valid")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    }) else {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE",
+            "target must already be a live authenticated worker",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE:{to}");
+    };
+    let master_id = master
+        .pointer("/master/worker_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let target_master_id = target_master
+        .pointer("/master/worker_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let sender_role = if ident.worker_id == master_id {
+        "master"
+    } else {
+        "peer"
+    };
+    let expected_sender_role = path.split("_to_").next().unwrap_or_default();
+    if path.starts_with("daemon_") || path == "restart_replay" {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_DAEMON_PRODUCER_UNSUPPORTED",
+            "the resident daemon has no authenticated exact-challenge producer; no daemon identity is forged",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_DAEMON_PRODUCER_UNSUPPORTED");
+    }
+    if sender_role != expected_sender_role {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_SENDER_ROLE_MISMATCH",
+            "the probe only sends as the current authenticated worker",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_SENDER_ROLE_MISMATCH");
+    }
+    if ident.worker_id == to {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_TARGET_SELF",
+            "a closure path requires a distinct target worker",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_SELF");
+    }
+    if path.ends_with("_to_master") && path != "master_to_master" && to != master_id {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH",
+            "the target is not the current live master",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH");
+    }
+    if path == "master_to_master" && to != target_master_id {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH",
+            "the target project route is not owned by the requested live master",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH");
+    }
+    let challenge = format!(
+        "appsdk-collab-live:{closure_id}:{path}:{source_commit}:{artifact_hash}:{environment_id}:{endpoint_generation}"
+    );
+    let command = command_envelope(scope, &ident)?;
+    let timeout = live_closure_timeout()?;
+    let response: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
+        let assigned_by = master
+            .get("master")
+            .and_then(|value| value.get("assigned_by"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let assigned_ms = master
+            .get("master")
+            .and_then(|value| value.get("assigned_ms"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        let approval = master
+            .get("master")
+            .and_then(|value| value.get("approval"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        client::call_with_context(
+            &target_scope.sock_path(),
+            &Req::CrossProjectSend {
+                from: ident.worker_id.clone(),
+                from_project: scope.root.display().to_string(),
+                source_master_assigned_by: assigned_by.to_owned(),
+                source_master_approval: approval,
+                source_master_assigned_ms: assigned_ms,
+                to: to.clone(),
+                subject: challenge.clone(),
+                body: challenge.clone(),
+                in_reply_to: None,
+            },
+            Some(cli_project_context(&target_scope.root)?),
+        )?
+    } else {
+        call_project(
+            scope,
+            &ident,
+            &Req::Send {
+                from: ident.worker_id.clone(),
+                worker_id: Some(ident.worker_id.clone()),
+                token: Some(ident.token.clone()),
+                command: Some(command),
+                to: to.clone(),
+                mtype: "notify".into(),
+                subject: Some(challenge.clone()),
+                body: challenge.clone(),
+                in_reply_to: None,
+                delivery: "immediate".into(),
+            },
+        )?
+    };
+    let message_id = response
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| response.get("msg_id").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            response
+                .pointer("/message/id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or_default();
+    if message_id.is_empty() {
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_PROBE_MESSAGE_ID_MISSING");
+    }
+    let target_transport = live_closure_target_transport(target).map_err(|error| {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_TARGET_TRANSPORT_INVALID",
+            &error.to_string(),
+        );
+        error
+    })?;
+    let observation_deadline = Instant::now() + timeout;
+    let target_execution = loop {
+        match observe_live_closure_target(&target_transport, &challenge, message_id) {
+            Ok(execution) => break execution,
+            Err(error)
+                if error
+                    .to_string()
+                    .starts_with("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:") =>
+            {
+                if Instant::now() >= observation_deadline {
+                    first_failure(
+                        "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_TIMEOUT",
+                        &error.to_string(),
+                    );
+                    anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_TIMEOUT");
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(error) => {
+                first_failure(
+                    "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_READ_FAILED",
+                    &error.to_string(),
+                );
+                return Err(error);
+            }
+        }
+    };
+    let receipt = wait_live_closure_receipt(
+        || {
+            if let Some(target_scope) = target_scope.as_ref() {
+                client::call_with_context(
+                    &target_scope.sock_path(),
+                    &Req::MsgStatus {
+                        msg_id: message_id.to_owned(),
+                    },
+                    Some(cli_project_context(&target_scope.root)?),
+                )
+            } else {
+                call_project(
+                    scope,
+                    &ident,
+                    &Req::MsgStatus {
+                        msg_id: message_id.to_owned(),
+                    },
+                )
+            }
+        },
+        observation_deadline,
+        message_id,
+        &challenge,
+    )
+    .map_err(|error| {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_RECEIPT_NOT_CONSUMED",
+            &error.to_string(),
+        );
+        error
+    })?;
+    let target_master_route = target_scope.as_ref().map(|_| {
+        json!({
+            "worker_id": to,
+            "role": "master",
+            "endpoint_live": target.get("endpoint_live").and_then(serde_json::Value::as_bool),
+            "identity_valid": target.get("identity_valid").and_then(serde_json::Value::as_bool),
+            "transport": target.get("transport").cloned().unwrap_or_else(|| json!({})),
+        })
+    });
+    out(&json!({
+        "status": "closure_observed",
+        "closure_claim": true,
+        "entrypoint": "collab live-closure probe",
+        "path": path,
+        "challenge": challenge,
+        "message_id": message_id,
+        "sender_worker_id": ident.worker_id,
+        "sender_role": sender_role,
+        "target_worker_id": to,
+        "target_project_scope": target_scope
+            .as_ref()
+            .map(|scope| scope.root.display().to_string()),
+        "target_master_route": target_master_route,
+        "message_project_scope": target_scope
+            .as_ref()
+            .map(|scope| scope.root.display().to_string()),
+        "message_sender": if target_scope.is_some() {
+            format!("{}@{}", ident.worker_id, scope.root.display())
+        } else {
+            ident.worker_id.clone()
+        },
+        "endpoint_generation": endpoint_generation,
+        "target_execution": target_execution,
+        "receipt": receipt,
+        "source": "collab daemon route + target App Server thread/turns/list(itemsView=full) + collab msg status"
+    }));
+    Ok(())
 }
 
 fn cli_project_context(root: &std::path::Path) -> anyhow::Result<ProjectContext> {
@@ -947,6 +1835,41 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "native_thread_id": route.native_thread_id,
             }));
             Ok(())
+        }
+        Cmd::LiveClosure {
+            command:
+                LiveClosureCmd::Probe {
+                    closure_id,
+                    source_commit,
+                    artifact_hash,
+                    environment_id,
+                    path,
+                    to,
+                    to_project,
+                },
+        } => {
+            let scope = Scope::resolve()?;
+            live_closure_probe(
+                &scope,
+                closure_id,
+                source_commit,
+                artifact_hash,
+                environment_id,
+                path,
+                to,
+                to_project,
+            )
+        }
+        Cmd::LiveClosure {
+            command:
+                LiveClosureCmd::Observe {
+                    to,
+                    challenge,
+                    message_id,
+                },
+        } => {
+            let scope = Scope::resolve()?;
+            live_closure_observe(&scope, to, challenge, message_id)
         }
         Cmd::Root { command } | Cmd::Master { command } => {
             if matches!(command, MasterCmd::Status) {
@@ -1545,6 +2468,510 @@ mod tests {
         };
         let identity = identity_with_runtime(Some(runtime.clone()));
         assert_eq!(runtime_for_request(&identity).unwrap(), &runtime);
+    }
+
+    #[test]
+    fn live_closure_item_turn_id_is_required_for_native_correlation() {
+        assert_eq!(
+            live_closure_item_turn_id(&json!({"text": "challenge message"})),
+            None
+        );
+        assert_eq!(
+            live_closure_item_turn_id(&json!({"turnId": "turn-1"})),
+            Some("turn-1")
+        );
+        assert_eq!(
+            live_closure_item_turn_id(&json!({"turn_id": "turn-2"})),
+            Some("turn-2")
+        );
+        assert_eq!(live_closure_item_turn_id(&json!({"turnId": "  "})), None);
+    }
+
+    #[test]
+    fn live_closure_item_message_id_accepts_native_notification_client_id() {
+        assert_eq!(
+            live_closure_item_message_id(&json!({
+                "clientId": "collab-notification-message-1"
+            })),
+            Some("message-1")
+        );
+        assert_eq!(
+            live_closure_item_message_id(&json!({
+                "clientUserMessageId": "message-2"
+            })),
+            Some("message-2")
+        );
+        assert_eq!(live_closure_item_message_id(&json!({})), None);
+    }
+
+    #[test]
+    fn live_closure_item_correlation_accepts_native_item_envelopes() {
+        let item = json!({
+            "turnId": "turn-envelope",
+            "item": {
+                "type": "userMessage",
+                "id": "item-envelope",
+                "clientId": "collab-notification-message-envelope"
+            }
+        });
+        assert_eq!(live_closure_item_turn_id(&item), Some("turn-envelope"));
+        assert_eq!(
+            live_closure_item_message_id(&item),
+            Some("message-envelope")
+        );
+        assert_eq!(live_closure_item_payload(&item)["id"], "item-envelope");
+    }
+
+    #[test]
+    fn live_closure_item_correlation_accepts_send_message_function_call_output() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let item = json!({
+            "type": "functionCallOutput",
+            "id": "fco_01a0bee4-83d0-7f40-9e5e-2f8d9b9c564f",
+            "name": "send_message_to_thread",
+            "namespace": "codex_tui",
+            "output": format!(
+                "<codex_delegation>\n  <source_thread_id>01a0b92e-bc55-75e1-8078-8c55e59cfd1d</source_thread_id>\n  <client_message_id>collab-notification-message-target</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
+            )
+        });
+        let turns = vec![json!({
+            "id": "turn-target",
+            "status": "completed",
+            "items": [item, {
+                "type": "agentMessage",
+                "id": "result-target",
+                "text": "Target peer remains ready."
+            }]
+        })];
+
+        let items = live_closure_turn_items(&turns).unwrap();
+        assert!(live_closure_item_matches_input(
+            &items[0],
+            challenge,
+            "message-target"
+        ));
+    }
+
+    #[test]
+    fn live_closure_item_correlation_rejects_mismatched_prefixed_function_call_output() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let item = json!({
+            "turnId": "turn-target",
+            "type": "functionCallOutput",
+            "name": "send_message_to_thread",
+            "output": format!(
+                "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-other</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
+            )
+        });
+
+        assert!(!live_closure_item_matches_input(
+            &item,
+            challenge,
+            "message-target"
+        ));
+    }
+
+    #[test]
+    fn live_closure_item_correlation_accepts_xml_escaped_function_call_output() {
+        let challenge = "appsdk-collab-live:a & b < c > d";
+        let item = json!({
+            "turnId": "turn-target",
+            "type": "functionCallOutput",
+            "name": "send_message_to_thread",
+            "output": format!(
+                "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>message-target</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+                client::adapters::codex_app_server::escape_delegated_text(challenge)
+            )
+        });
+
+        assert!(live_closure_item_matches_input(
+            &item,
+            challenge,
+            "message-target"
+        ));
+    }
+
+    #[test]
+    fn live_closure_item_correlation_rejects_malformed_or_mismatched_function_outputs() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let valid_output = format!(
+            "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>message-target</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
+        );
+        for item in [
+            json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <input>{challenge}-other</input>\n</codex_delegation>"
+                )
+            }),
+            json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "other_tool",
+                "output": valid_output
+            }),
+            json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!("prefix\n{valid_output}")
+            }),
+            json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <input>{challenge}</input>\n</codex_delegation>\nsuffix"
+                )
+            }),
+            json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <input></input>\n</codex_delegation>"
+            }),
+            json!({
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": valid_output
+            }),
+        ] {
+            assert!(!live_closure_item_matches_input(
+                &item,
+                challenge,
+                "message-target"
+            ));
+        }
+
+        let stale_output = format!(
+            "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>message-old</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
+        );
+        assert!(!live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": stale_output,
+            }),
+            challenge,
+            "message-target"
+        ));
+    }
+
+    #[test]
+    fn live_closure_full_turn_items_preserve_exact_message_turn_result_correlation() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let turns = vec![
+            json!({
+                "id": "turn-other",
+                "status": "completed",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": "collab-notification-message-other",
+                    "content": [{"type": "text", "text": challenge}]
+                }, {
+                    "type": "agentMessage",
+                    "id": "result-other"
+                }]
+            }),
+            json!({
+                "id": "turn-target",
+                "status": "completed",
+                "items": [{
+                    "type": "userMessage",
+                    "clientId": "collab-notification-message-target",
+                    "content": [{"type": "text", "text": challenge}]
+                }, {
+                    "type": "agentMessage",
+                    "id": "result-target"
+                }]
+            }),
+        ];
+        let items = live_closure_turn_items(&turns).unwrap();
+        let input = items
+            .iter()
+            .find(|item| {
+                live_closure_item_message_id(item) == Some("message-target")
+                    && live_closure_item_contains_challenge(item, challenge)
+            })
+            .unwrap();
+        let input_turn_id = live_closure_item_turn_id(input).unwrap();
+        assert_eq!(input_turn_id, "turn-target");
+        let completed_turn = turns
+            .iter()
+            .find(|turn| {
+                turn["status"] == "completed" && turn["id"].as_str() == Some(input_turn_id)
+            })
+            .unwrap();
+        assert_eq!(completed_turn["id"], "turn-target");
+        let result = items
+            .iter()
+            .rev()
+            .find(|item| {
+                live_closure_item_payload(item)["id"] == "result-target"
+                    && live_closure_item_turn_id(item) == Some("turn-target")
+            })
+            .unwrap();
+        assert_eq!(live_closure_item_payload(result)["id"], "result-target");
+    }
+
+    #[test]
+    fn live_closure_full_turn_items_reject_malformed_history() {
+        for malformed in [
+            json!([{"status": "completed", "items": []}]),
+            json!([{"id": "turn-1", "status": "completed"}]),
+            json!([{
+                "id": "turn-1",
+                "status": "completed",
+                "items": ["not-an-item"]
+            }]),
+            json!([{
+                "id": "turn-1",
+                "status": "completed",
+                "items": [{"turnId": 7}]
+            }]),
+            json!([{
+                "id": "turn-1",
+                "status": "completed",
+                "items": [{"item": "not-an-envelope"}]
+            }]),
+        ] {
+            assert!(
+                live_closure_turn_items(malformed.as_array().unwrap()).is_err(),
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_closure_full_turn_items_reject_mismatched_history() {
+        for mismatched in [
+            json!({
+                "turnId": "turn-other",
+                "type": "userMessage",
+                "clientId": "collab-notification-message-target",
+                "content": [{"type": "text", "text": "challenge"}]
+            }),
+            json!({
+                "turnId": "turn-target",
+                "item": {
+                    "turnId": "turn-other",
+                    "type": "userMessage",
+                    "clientId": "collab-notification-message-target",
+                    "content": [{"type": "text", "text": "challenge"}]
+                }
+            }),
+        ] {
+            let error = live_closure_turn_items(&[json!({
+                "id": "turn-target",
+                "status": "completed",
+                "items": [mismatched]
+            })])
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("COLLAB_LIVE_CLOSURE_TARGET_ITEM_TURN_MISMATCH"));
+        }
+    }
+
+    #[test]
+    fn live_closure_fresh_thread_materialization_is_bounded_pending() {
+        let attempts = std::cell::Cell::new(0);
+        let execution = wait_live_closure_fresh_thread_materialization(
+            || {
+                let attempt = attempts.get();
+                attempts.set(attempt + 1);
+                if attempt == 0 {
+                    return Err(live_closure_turns_read_error(
+                        client::adapters::AdapterError::Unknown {
+                            operation: "rpc",
+                            detail: "list_turns is not supported yet".into(),
+                        },
+                    ));
+                }
+                Ok(json!({"status": "completed"}))
+            },
+            Instant::now() + Duration::from_millis(500),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        assert_eq!(execution, json!({"status": "completed"}));
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn live_closure_permanent_unsupported_turns_read_fails_closed() {
+        let attempts = std::cell::Cell::new(0);
+        let error = wait_live_closure_fresh_thread_materialization(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(live_closure_turns_read_error(
+                    client::adapters::AdapterError::Unknown {
+                        operation: "rpc",
+                        detail: "thread/turns/list is not supported yet".into(),
+                    },
+                ))
+            },
+            Instant::now() + Duration::from_millis(500),
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts.get(), 1);
+        assert!(error
+            .to_string()
+            .starts_with("COLLAB_LIVE_CLOSURE_TARGET_TURNS_READ:"));
+        assert!(error
+            .to_string()
+            .contains("thread/turns/list is not supported yet"));
+    }
+
+    #[test]
+    fn live_closure_item_correlation_requires_the_exact_native_challenge_body() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let item = json!({
+            "turnId": "turn-envelope",
+            "item": {
+                "type": "userMessage",
+                "clientId": "collab-notification-message-envelope",
+                "content": [{"type": "text", "text": challenge }]
+            }
+        });
+        assert!(live_closure_item_contains_challenge(&item, challenge));
+
+        let wrapped = json!({
+            "turnId": "turn-envelope",
+            "item": {
+                "type": "userMessage",
+                "clientId": "collab-notification-message-envelope",
+                "content": [{"type": "text", "text": format!("{challenge} | READ IS NOT DONE") }]
+            }
+        });
+        assert!(!live_closure_item_contains_challenge(&wrapped, challenge));
+
+        let mismatched = json!({
+            "turnId": "turn-envelope",
+            "item": {
+                "type": "userMessage",
+                "clientId": "collab-notification-message-envelope",
+                "content": [{"type": "text", "text": "appsdk-collab-live:closure-1:other-path" }]
+            }
+        });
+        assert!(!live_closure_item_contains_challenge(
+            &mismatched,
+            challenge
+        ));
+    }
+
+    #[test]
+    fn live_closure_pages_follow_backwards_cursor_to_find_over_window_challenge() {
+        let requested_cursors = std::cell::RefCell::new(Vec::new());
+        let pages = [
+            json!({
+                "data": [{"id": "recent-item"}],
+                "backwardsCursor": "older-page"
+            }),
+            json!({
+                "data": [{"id": "exact-challenge-item"}],
+                "backwardsCursor": null
+            }),
+        ];
+        let values = read_live_closure_pages(|cursor| {
+            requested_cursors
+                .borrow_mut()
+                .push(cursor.map(str::to_owned));
+            Ok(pages[requested_cursors.borrow().len() - 1].clone())
+        })
+        .unwrap();
+
+        assert_eq!(
+            requested_cursors.into_inner(),
+            vec![None, Some("older-page".into())]
+        );
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["recent-item", "exact-challenge-item"]
+        );
+    }
+
+    #[test]
+    fn live_closure_pages_use_next_cursor_and_bound_repeated_cursors() {
+        let requested_cursors = std::cell::RefCell::new(Vec::new());
+        let pages = [
+            json!({"data": [{"id": "turn-1"}], "nextCursor": "page-2"}),
+            json!({"data": [{"id": "turn-2"}], "nextCursor": "page-2"}),
+        ];
+        let values = read_live_closure_pages(|cursor| {
+            requested_cursors
+                .borrow_mut()
+                .push(cursor.map(str::to_owned));
+            Ok(pages[requested_cursors.borrow().len() - 1].clone())
+        })
+        .unwrap();
+        assert_eq!(
+            values,
+            vec![json!({"id": "turn-1"}), json!({"id": "turn-2"})]
+        );
+        assert_eq!(
+            requested_cursors.into_inner(),
+            vec![None, Some("page-2".into())]
+        );
+    }
+
+    #[test]
+    fn live_closure_timeout_is_bounded_and_configurable() {
+        assert_eq!(
+            live_closure_timeout_from_value(None).unwrap(),
+            Duration::from_millis(DEFAULT_LIVE_CLOSURE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            live_closure_timeout_from_value(Some("240000")).unwrap(),
+            Duration::from_millis(240_000)
+        );
+        assert_eq!(
+            live_closure_timeout_from_value(Some("3600000")).unwrap(),
+            Duration::from_millis(MAX_LIVE_CLOSURE_TIMEOUT_MS)
+        );
+        assert!(live_closure_timeout_from_value(Some("0"))
+            .unwrap_err()
+            .to_string()
+            .contains("COLLAB_LIVE_CLOSURE_TIMEOUT_INVALID"));
+        assert!(live_closure_timeout_from_value(Some("3600001"))
+            .unwrap_err()
+            .to_string()
+            .contains("COLLAB_LIVE_CLOSURE_TIMEOUT_INVALID"));
+        assert!(live_closure_timeout_from_value(Some("not-a-duration"))
+            .unwrap_err()
+            .to_string()
+            .contains("COLLAB_LIVE_CLOSURE_TIMEOUT_INVALID"));
+    }
+
+    #[test]
+    fn live_closure_receipt_wait_rechecks_until_consume_before_deadline() {
+        let attempts = std::cell::Cell::new(0);
+        let receipt = wait_live_closure_receipt(
+            || {
+                let attempt = attempts.get();
+                attempts.set(attempt + 1);
+                Ok(if attempt == 0 {
+                    json!({"id": "message-1", "state": "pending", "body": "challenge"})
+                } else {
+                    json!({"id": "message-1", "state": "read", "body": "challenge"})
+                })
+            },
+            Instant::now() + Duration::from_millis(500),
+            "message-1",
+            "challenge",
+        )
+        .unwrap();
+        assert_eq!(receipt["state"], "read");
+        assert_eq!(attempts.get(), 2);
     }
 
     #[test]

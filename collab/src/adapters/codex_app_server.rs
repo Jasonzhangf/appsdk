@@ -494,7 +494,7 @@ pub fn immediate_notify(
                     "toolOutput": {
                         "name": "send_message_to_thread",
                         "namespace": "codex_tui",
-                        "output": delegated_prompt(source_thread_id, body),
+                        "output": delegated_prompt(source_thread_id, client_user_message_id, body),
                     },
                     "clientUserMessageId": client_user_message_id,
                 }),
@@ -630,13 +630,41 @@ pub fn read_thread_items(
     thread_id: &str,
     limit: usize,
 ) -> Result<Value, AdapterError> {
+    read_thread_items_page(transport, thread_id, limit, None)
+}
+
+pub fn read_thread_items_page(
+    transport: &SelectedTransport,
+    thread_id: &str,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<Value, AdapterError> {
     let mut client = transport_client(transport)?;
     client.call(
         "thread/items/list",
         json!({
             "threadId": thread_id,
             "limit": limit,
+            "cursor": cursor,
             "sortDirection": "desc",
+        }),
+    )
+}
+
+pub fn read_thread_turns_with_items_page(
+    transport: &SelectedTransport,
+    thread_id: &str,
+    cursor: Option<&str>,
+) -> Result<Value, AdapterError> {
+    let mut client = transport_client(transport)?;
+    client.call(
+        "thread/turns/list",
+        json!({
+            "threadId": thread_id,
+            "limit": 100,
+            "cursor": cursor,
+            "sortDirection": "desc",
+            "itemsView": "full",
         }),
     )
 }
@@ -649,16 +677,25 @@ pub fn read_thread_status(
     client.call("thread/read", json!({"threadId": thread_id}))
 }
 
-pub fn read_latest_turn_status(
+pub fn read_turn_statuses(
     transport: &SelectedTransport,
     thread_id: &str,
+) -> Result<Value, AdapterError> {
+    read_turn_statuses_page(transport, thread_id, None)
+}
+
+pub fn read_turn_statuses_page(
+    transport: &SelectedTransport,
+    thread_id: &str,
+    cursor: Option<&str>,
 ) -> Result<Value, AdapterError> {
     let mut client = transport_client(transport)?;
     client.call(
         "thread/turns/list",
         json!({
             "threadId": thread_id,
-            "limit": 1,
+            "limit": 100,
+            "cursor": cursor,
             "sortDirection": "desc",
         }),
     )
@@ -715,16 +752,18 @@ fn thread_status_from_metadata(thread: &Value) -> Result<String, AdapterError> {
         })
 }
 
-fn delegated_prompt(source_thread_id: &str, body: &str) -> String {
-    let escape = |text: &str| {
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    };
+pub(crate) fn escape_delegated_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn delegated_prompt(source_thread_id: &str, client_user_message_id: &str, body: &str) -> String {
     format!(
-        "<codex_delegation>\n  <source_thread_id>{}</source_thread_id>\n  <input>{}</input>\n</codex_delegation>",
-        escape(source_thread_id),
-        escape(body)
+        "<codex_delegation>\n  <source_thread_id>{}</source_thread_id>\n  <client_message_id>{}</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+        escape_delegated_text(source_thread_id),
+        escape_delegated_text(client_user_message_id),
+        escape_delegated_text(body)
     )
 }
 
@@ -2050,7 +2089,7 @@ mod tests {
             assert_eq!(request["params"]["toolOutput"]["namespace"], "codex_tui");
             assert_eq!(
                 request["params"]["toolOutput"]["output"],
-                "<codex_delegation>\n  <source_thread_id>sender-thread</source_thread_id>\n  <input>notify body</input>\n</codex_delegation>"
+                "<codex_delegation>\n  <source_thread_id>sender-thread</source_thread_id>\n  <client_message_id>message-start</client_message_id>\n  <input>notify body</input>\n</codex_delegation>"
             );
             respond(
                 &mut stream,
@@ -2103,7 +2142,7 @@ mod tests {
             assert_eq!(request["params"]["threadId"], "recipient-thread");
             assert_eq!(
                 request["params"]["toolOutput"]["output"],
-                "<codex_delegation>\n  <source_thread_id>sender-thread</source_thread_id>\n  <input>notify body</input>\n</codex_delegation>"
+                "<codex_delegation>\n  <source_thread_id>sender-thread</source_thread_id>\n  <client_message_id>message-source-thread</client_message_id>\n  <input>notify body</input>\n</codex_delegation>"
             );
             respond(
                 &mut stream,
@@ -2200,8 +2239,8 @@ mod tests {
     #[test]
     fn delegated_prompt_escapes_xml_special_characters() {
         assert_eq!(
-            delegated_prompt("thread-1", "a & b < c > d"),
-            "<codex_delegation>\n  <source_thread_id>thread-1</source_thread_id>\n  <input>a &amp; b &lt; c &gt; d</input>\n</codex_delegation>"
+            delegated_prompt("thread-1", "message-1", "a & b < c > d"),
+            "<codex_delegation>\n  <source_thread_id>thread-1</source_thread_id>\n  <client_message_id>message-1</client_message_id>\n  <input>a &amp; b &lt; c &gt; d</input>\n</codex_delegation>"
         );
     }
 

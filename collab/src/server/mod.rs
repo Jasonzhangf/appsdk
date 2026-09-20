@@ -181,9 +181,7 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
         let mut status =
             crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
                 .map_err(|error| error.to_string())?;
-        match crate::client::adapters::codex_app_server::read_latest_turn_status(
-            transport, thread_id,
-        ) {
+        match crate::client::adapters::codex_app_server::read_turn_statuses(transport, thread_id) {
             Ok(turns) => {
                 if let Some(data) = turns.get("data").and_then(serde_json::Value::as_array) {
                     status["thread"]["turns"] = serde_json::Value::Array(data.clone());

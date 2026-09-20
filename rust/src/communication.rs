@@ -1978,7 +1978,6 @@ impl CommunicationStore {
             tombstone: tombstone.clone(),
         };
         let data = serde_json::to_value(&event).unwrap();
-        self.validate_agent_rebound_event(&data)?;
         let operation = DiscoveryOperation::Rebind {
             event: event.clone(),
         };
@@ -5335,6 +5334,9 @@ impl CommunicationStore {
     }
 
     fn commit(&mut self, kind: &str, data: Value) -> CommResult<String> {
+        if kind == "agent.rebound" {
+            self.validate_agent_rebound_event(&data)?;
+        }
         let event = EventRecord {
             protocol: PROTOCOL.into(),
             event_id: new_id("event"),

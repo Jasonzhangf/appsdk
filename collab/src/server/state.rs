@@ -245,6 +245,14 @@ pub struct Message {
     pub last_wake_attempt_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotificationDeliveryFailure {
+    pub message_id: String,
+    pub operation: String,
+    pub error: String,
+    pub failed_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerAdmissionRecord {
     pub request_id: String,
@@ -485,6 +493,12 @@ pub enum Event {
         #[serde(default)]
         attempted_ms: i64,
     },
+    NotificationDeliveryFailed {
+        message_id: String,
+        operation: String,
+        error: String,
+        failed_ms: i64,
+    },
     NotificationSubscribed {
         subscription: NotificationSubscription,
     },
@@ -606,6 +620,7 @@ pub struct State {
     pub subagents: HashMap<String, crate::subagent::Record>,
     pub workers: HashMap<String, WorkerRec>,
     pub msgs: HashMap<String, Message>,
+    pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     pub tasks: HashMap<String, TaskRec>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
@@ -817,6 +832,22 @@ impl State {
                         message.last_wake_attempt_ms = *attempted_ms;
                     }
                 }
+            }
+            Event::NotificationDeliveryFailed {
+                message_id,
+                operation,
+                error,
+                failed_ms,
+            } => {
+                self.notification_delivery_failures.insert(
+                    message_id.clone(),
+                    NotificationDeliveryFailure {
+                        message_id: message_id.clone(),
+                        operation: operation.clone(),
+                        error: error.clone(),
+                        failed_ms: *failed_ms,
+                    },
+                );
             }
             Event::NotificationSubscribed { subscription } => {
                 self.notification_subscriptions
@@ -1146,6 +1177,22 @@ impl State {
                 .into_iter()
                 .map(|subscription| Event::NotificationSubscribed { subscription }),
         );
+        let mut delivery_failures: Vec<_> = self
+            .notification_delivery_failures
+            .values()
+            .cloned()
+            .collect();
+        delivery_failures.sort_by(|a, b| {
+            (a.failed_ms, a.message_id.as_str()).cmp(&(b.failed_ms, b.message_id.as_str()))
+        });
+        events.extend(delivery_failures.into_iter().map(|failure| {
+            Event::NotificationDeliveryFailed {
+                message_id: failure.message_id,
+                operation: failure.operation,
+                error: failure.error,
+                failed_ms: failure.failed_ms,
+            }
+        }));
         let mut messages: Vec<_> = self.msgs.values().cloned().collect();
         messages.sort_by(|a, b| (a.created_ms, a.id.clone()).cmp(&(b.created_ms, b.id.clone())));
         for msg in messages {
@@ -1351,6 +1398,51 @@ mod tests {
             std::process::id(),
             REPLAY_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn notification_delivery_failure_replays_and_compacts() {
+        let mut state = State::default();
+        let event = Event::NotificationDeliveryFailed {
+            message_id: "msg-persisted-failure".into(),
+            operation: "notification.emitted".into(),
+            error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
+            failed_ms: 42,
+        };
+        state.apply(&event);
+        assert_eq!(
+            state.notification_delivery_failures["msg-persisted-failure"],
+            NotificationDeliveryFailure {
+                message_id: "msg-persisted-failure".into(),
+                operation: "notification.emitted".into(),
+                error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
+                failed_ms: 42,
+            }
+        );
+
+        let compacted = state.snapshot_events();
+        assert!(compacted.iter().any(|candidate| {
+            matches!(
+                candidate,
+                Event::NotificationDeliveryFailed {
+                    message_id,
+                    operation,
+                    error,
+                    failed_ms,
+                } if message_id == "msg-persisted-failure"
+                    && operation == "notification.emitted"
+                    && error == "ADAPTER_ROUTE_UNAVAILABLE: persisted failure"
+                    && *failed_ms == 42
+            )
+        }));
+        let mut replayed = State::default();
+        for event in compacted {
+            replayed.apply(&event);
+        }
+        assert_eq!(
+            replayed.notification_delivery_failures,
+            state.notification_delivery_failures
+        );
     }
 
     #[test]

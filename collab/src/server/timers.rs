@@ -397,6 +397,8 @@ mod tests {
                 root: root.clone(),
                 storage_root: root.clone(),
                 journal_path: root.join(".agent-collab/server/journal.jsonl"),
+                host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state"))
+                    .unwrap(),
                 state: Mutex::new(State::default()),
                 journal: Mutex::new(journal),
                 appserver_candidate_check: Arc::new(|candidate| {
@@ -752,6 +754,7 @@ mod tests {
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
+            host_paths: crate::scope::HostPaths::for_state_root(root.join("host-state")).unwrap(),
             state: Mutex::new(replayed),
             journal: Mutex::new(journal),
             appserver_candidate_check: super::super::default_appserver_candidate_check(),

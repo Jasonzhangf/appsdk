@@ -441,13 +441,17 @@ pub fn immediate_notify(
     })?;
     let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
     client.initialize()?;
-    let status = match thread_metadata(&mut client, thread_id.as_str()) {
-        Ok(thread) => thread_status_from_metadata(&thread)?,
+    let (thread, status) = match thread_metadata(&mut client, thread_id.as_str()) {
+        Ok(thread) => {
+            let status = thread_status_from_metadata(&thread)?;
+            (Some(thread), status)
+        }
         Err(AdapterError::Unknown { operation, detail })
             if operation == "rpc"
-                && detail == format!("thread not loaded: {}", thread_id.as_str()) =>
+                && (detail == format!("thread not loaded: {}", thread_id.as_str())
+                    || detail == format!("thread not found: {}", thread_id.as_str())) =>
         {
-            "notLoaded".to_owned()
+            (None, "notLoaded".to_owned())
         }
         Err(error) => return Err(error),
     };
@@ -456,8 +460,22 @@ pub fn immediate_notify(
         _ => None,
     };
     let action = notification_action(&status, active_turn_id)?;
+    if matches!(action, NotificationAction::Resume) {
+        let exclude_turns = thread
+            .as_ref()
+            .and_then(|thread| thread.get("historyMode"))
+            .and_then(Value::as_str)
+            .is_some_and(|history_mode| history_mode == "paginated");
+        client.call(
+            "thread/resume",
+            json!({
+                "threadId": thread_id.as_str(),
+                "excludeTurns": exclude_turns,
+            }),
+        )?;
+    }
     match action {
-        NotificationAction::Start => {
+        NotificationAction::Resume | NotificationAction::Start => {
             let receipt = client.call(
                 "turn/start",
                 json!({
@@ -761,6 +779,7 @@ fn active_turn_id_from_page(page: &Value) -> Result<Option<String>, AdapterError
 #[derive(Debug, PartialEq, Eq)]
 enum NotificationAction {
     Start,
+    Resume,
     Steer(String),
 }
 
@@ -774,7 +793,7 @@ fn notification_action(
             None => NotificationAction::Start,
         }),
         "idle" => Ok(NotificationAction::Start),
-        "notLoaded" => Ok(NotificationAction::Start),
+        "notLoaded" => Ok(NotificationAction::Resume),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -1628,7 +1647,7 @@ mod tests {
         );
         assert_eq!(
             notification_action("notLoaded", None).unwrap(),
-            NotificationAction::Start
+            NotificationAction::Resume
         );
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
@@ -1956,8 +1975,8 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_starts_not_loaded_thread_without_resume() {
-        let socket = temp_socket("notify-start-not-loaded");
+    fn immediate_notify_resumes_not_loaded_thread_before_turn_start() {
+        let socket = temp_socket("notify-resume-not-loaded");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -1974,6 +1993,22 @@ mod tests {
                         "thread": {
                             "id": "thread-1",
                             "status": {"type": "notLoaded"}
+                        }
+                    }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], false);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
                         }
                     }
                 }),
@@ -2030,6 +2065,22 @@ mod tests {
                     }
                 }),
             );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], false);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
             let request = next_request(&mut stream);
             assert_eq!(request["method"], "turn/start");
             assert_eq!(request["params"]["threadId"], "thread-1");
@@ -2062,8 +2113,71 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_ignores_history_mode_when_starting_not_loaded_thread() {
-        let socket = temp_socket("notify-start-paginated");
+    fn immediate_notify_starts_thread_when_read_reports_thread_not_found() {
+        let socket = temp_socket("notify-read-not-found-error");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "error": {
+                        "code": -32602,
+                        "message": "thread not found: thread-1"
+                    }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], false);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
+            let request = next_request(&mut stream);
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            respond(
+                &mut stream,
+                json!({
+                    "id": request["id"],
+                    "result": {
+                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        immediate_notify(
+            &selected_transport(&socket),
+            "sender-thread",
+            "notify body",
+            "message-start",
+        )
+        .unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn immediate_notify_resume_includes_paginated_history_when_requested() {
+        let socket = temp_socket("notify-resume-paginated");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -2081,6 +2195,22 @@ mod tests {
                             "id": "thread-1",
                             "status": {"type": "notLoaded"},
                             "historyMode": "paginated"
+                        }
+                    }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], true);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
                         }
                     }
                 }),
@@ -2111,8 +2241,8 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_starts_legacy_not_loaded_thread_directly() {
-        let socket = temp_socket("notify-start-legacy");
+    fn immediate_notify_resume_omits_paginated_history_for_legacy_threads() {
+        let socket = temp_socket("notify-resume-legacy");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
         };
@@ -2130,6 +2260,22 @@ mod tests {
                             "id": "thread-1",
                             "status": {"type": "notLoaded"},
                             "historyMode": "legacy"
+                        }
+                    }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "thread-1");
+            assert_eq!(resume["params"]["excludeTurns"], false);
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
                         }
                     }
                 }),
@@ -2155,6 +2301,59 @@ mod tests {
             "message-start",
         )
         .unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn immediate_notify_preserves_resume_active_writer_error() {
+        let socket = temp_socket("notify-resume-active-writer");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "notLoaded"},
+                            "historyMode": "paginated"
+                        }
+                    }
+                }),
+            );
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "error": {
+                        "code": -32600,
+                        "message": "thread thread-1 already has an active writer"
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let error = immediate_notify(
+            &selected_transport(&socket),
+            "sender-thread",
+            "notify body",
+            "message-start",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("thread thread-1 already has an active writer"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

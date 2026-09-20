@@ -1903,6 +1903,11 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
         server.state.lock().unwrap().subagents["managed"].status,
         "idle"
     );
+    server.commit(&[Event::SubagentSnapshotCaptured {
+        subagent_id: "managed".into(),
+        thread_id: "thread-child".into(),
+        captured_ms: now_ms(),
+    }]);
     assert!(
         crate::subagent::handle(
             &server,

@@ -1,6 +1,8 @@
 # App Server loaded-admission verification evidence
 
-Base: `456c76fd95d576722614f5f0f165cfe5b878b4e8`
+Candidate: `bc48653f060a5a85f5e01f6d07696557a4975276`
+Tree: `23703bd9811e06423f481ebe3740acfa98a6bf72`
+Base: `384abb8a737525d01aaa10362a78a77d60f7010e`
 Environment: macOS arm64, Codex CLI `0.154.0`, Cargo `1.97.1`
 
 The review scope binds this evidence to the exact candidate commit and tree.
@@ -22,7 +24,7 @@ COLLAB_APPSERVER_SOCKET=<isolated.sock> \
 COLLAB_APPSERVER_NAMESPACE=codex_app \
 CODEX_THREAD_ID=<loaded-thread> \
 cargo test --manifest-path collab/Cargo.toml \
-  client::adapters::codex_app_server::tests::live_appserver_candidate_is_admitted_only_when_loaded \
+  client::adapters::codex_app_server::tests::live_appserver_candidate_is_admitted_when_loaded_or_rejected_when_unloaded \
   -- --nocapture
 ```
 
@@ -57,9 +59,13 @@ against the real isolated App Server thread.
 
 `immediate_notify` rejects a persisted but not-loaded thread with
 `RouteUnavailable` before issuing `thread/resume` or `turn/start`. The focused
-adapter test `immediate_notify_rejects_not_loaded_thread_without_resume_or_turn_start`
-asserts that no second App Server method is sent for `notLoaded` metadata,
-`thread not loaded`, or `thread not found` responses.
+adapter tests `immediate_notify_rejects_not_loaded_thread` and
+`immediate_notify_rejects_thread_read_not_loaded_error` assert that no second
+App Server method is sent for `notLoaded` metadata or a `thread not loaded`
+response. The separate tests
+`immediate_notify_rejects_missing_thread_without_turn_start` and
+`immediate_notify_rejects_wrapped_missing_thread_without_turn_start` cover the
+missing-thread response variants and their wrapped form.
 
 ## Focused source checks
 
@@ -71,7 +77,7 @@ git diff --check
 ```
 
 Result: formatting and diff checks passed; the adapter test set reported
-`29 passed, 0 failed, 1 ignored`.
+`31 passed, 0 failed, 1 ignored`.
 
 The full `--all-targets` run also executed all tests; the only failure was the
 pre-existing timing-sensitive `subagent::tests::probes_are_bounded_and_require_exact_success`

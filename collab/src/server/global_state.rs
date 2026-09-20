@@ -1443,6 +1443,29 @@ impl GlobalState {
         })
     }
 
+    pub fn retire_current_thread_route(
+        &mut self,
+        binding: RuntimeBinding,
+    ) -> Result<StateVersion, StateError> {
+        binding.validate()?;
+        let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
+            return Err(StateError::invalid(
+                "current thread route retirement",
+                "requires a native thread id",
+            ));
+        };
+        self.mutate(|next| {
+            if next
+                .current_thread_routes
+                .get(native_thread_id.as_str())
+                .is_some_and(|current| current == &binding)
+            {
+                next.current_thread_routes.remove(native_thread_id.as_str());
+            }
+            Ok(())
+        })
+    }
+
     pub fn lookup_master_grant_for(
         &self,
         route_scope: &RouteScope,

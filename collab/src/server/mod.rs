@@ -1982,47 +1982,13 @@ impl ProjectRuntimeManager {
         context: &ProjectContext,
         worker_id: &str,
     ) -> Result<(), String> {
-        let route_scope = RouteScope {
-            app_scope_id: context.app_scope_id.clone(),
-            project_scope_id: context.project_scope.clone(),
-        };
-        let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
-            .map_err(|error| format!("ROUTE_TRANSITION_INVALID: {error}"))?;
-        let binding = runtime
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_binding_for(&route_scope, &binding_id)
-            .filter(|binding| binding.agent_id.as_str() == worker_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no matching runtime binding"
-                )
-            })?;
-        let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
-            format!(
-                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
-            )
-        })?;
-        if self
-            .host
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_current_thread_route(native_thread_id)
-            == Some(&binding)
-        {
-            return Ok(());
-        }
-        self.host
-            .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
-            .map(|_| ())
-            .map_err(|error| {
-                format!("ROUTE_TRANSITION_DURABILITY_FAILED: host journal commit failed: {error}")
-            })
+        commit_current_thread_route_for_runtime(
+            self.host.as_ref(),
+            runtime.as_ref(),
+            worker_id,
+            context.project_scope.as_str(),
+            Some(&context.app_scope_id),
+        )
     }
 
     fn finalize_registration(
@@ -2567,7 +2533,7 @@ impl ProjectRuntimeManager {
     ) -> (Arc<Server>, Resp) {
         let Some(context) = project_context else {
             if matches!(req, Req::Ping) {
-                let response = dispatch_with_route_context(&self.host, req, None);
+                let response = dispatch_with_route_context(&self.host, req, None, None);
                 return (self.host.clone(), response);
             }
             return (
@@ -2604,7 +2570,12 @@ impl ProjectRuntimeManager {
                 if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
-                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
+                    dispatch_with_route_context(
+                        &runtime,
+                        req,
+                        Some(context.clone()),
+                        Some(self.host.as_ref()),
+                    )
                 };
             return self.finalize_registration(
                 runtime,
@@ -2629,7 +2600,12 @@ impl ProjectRuntimeManager {
                 if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
-                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
+                    dispatch_with_route_context(
+                        &runtime,
+                        req,
+                        Some(context.clone()),
+                        Some(self.host.as_ref()),
+                    )
                 };
             return self.finalize_registration(
                 runtime,
@@ -2653,7 +2629,12 @@ impl ProjectRuntimeManager {
                 if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
-                    dispatch_with_route_context(&self.host, req, Some(context.clone()))
+                    dispatch_with_route_context(
+                        &self.host,
+                        req,
+                        Some(context.clone()),
+                        Some(self.host.as_ref()),
+                    )
                 };
             if response.ok && is_register {
                 self.install_runtime(&key, self.host.clone(), None);
@@ -2701,7 +2682,12 @@ impl ProjectRuntimeManager {
         {
             Resp::err(error)
         } else {
-            dispatch_with_route_context(&runtime, req, Some(context.clone()))
+            dispatch_with_route_context(
+                &runtime,
+                req,
+                Some(context.clone()),
+                Some(self.host.as_ref()),
+            )
         };
         self.finalize_registration(runtime, &context, register_worker_id.as_deref(), response)
     }
@@ -4824,9 +4810,182 @@ pub(crate) fn handle_register_with_app_scope(
     app_scope: Option<AppServerId>,
     candidates: Option<TransportCandidates>,
 ) -> Resp {
+    let route_worker_id = worker_id.clone();
+    let route_cwd = cwd.clone();
+    let route_app_scope = app_scope.clone();
+    let response = handle_register_with_app_scope_inner(
+        server, worker_id, token, cwd, app_scope, candidates, false,
+    );
+    if !response.ok {
+        return response;
+    }
+    if let Err(error) = commit_current_thread_route_for_runtime(
+        server,
+        server,
+        &route_worker_id,
+        &route_cwd,
+        route_app_scope.as_ref(),
+    ) {
+        let cleanup = retire_runtime_binding_after_route_failure(
+            server,
+            &route_worker_id,
+            &route_cwd,
+            route_app_scope.as_ref(),
+            &route_worker_id,
+            "registration route publication failed",
+        );
+        let cleanup_status = cleanup
+            .map(|_| "registration binding retired".to_owned())
+            .unwrap_or_else(|cleanup_error| {
+                format!("registration cleanup failed: {cleanup_error}")
+            });
+        return Resp::err(format!("{error}; {cleanup_status}"));
+    }
+    response
+}
+
+pub(crate) fn handle_register_with_app_scope_unfinalized(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    cwd: String,
+    app_scope: Option<AppServerId>,
+    candidates: Option<TransportCandidates>,
+) -> Resp {
     handle_register_with_app_scope_inner(
         server, worker_id, token, cwd, app_scope, candidates, false,
     )
+}
+
+pub(crate) fn commit_current_thread_route_for_runtime(
+    route_owner: &Server,
+    runtime: &Server,
+    worker_id: &str,
+    cwd: &str,
+    app_scope: Option<&AppServerId>,
+) -> Result<(), String> {
+    let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+        .map_err(|error| format!("ROUTE_TRANSITION_INVALID: {error}"))?;
+    let app_scope = app_scope.cloned().unwrap_or_else(|| {
+        AppServerId::new("tui-default").expect("static App Server scope must be valid")
+    });
+    let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+        .map_err(|error| format!("ROUTE_TRANSITION_INVALID: {error}"))?;
+    let route_scope = RouteScope {
+        app_scope_id: app_scope,
+        project_scope_id: project_scope,
+    };
+    let binding = runtime
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_binding_for(&route_scope, &binding_id)
+        .filter(|binding| binding.agent_id.as_str() == worker_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no matching runtime binding"
+            )
+        })?;
+    let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
+        format!(
+            "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
+        )
+    })?;
+    if route_owner
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_current_thread_route(native_thread_id)
+        == Some(&binding)
+    {
+        return Ok(());
+    }
+    route_owner
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
+        .map(|_| ())
+        .map_err(|error| format!("ROUTE_TRANSITION_DURABILITY_FAILED: {error}"))
+}
+
+pub(crate) fn retire_runtime_binding_after_route_failure(
+    runtime: &Server,
+    worker_id: &str,
+    cwd: &str,
+    app_scope: Option<&AppServerId>,
+    closed_by: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
+    let route_scope = RouteScope {
+        app_scope_id: app_scope.cloned().unwrap_or_else(|| {
+            AppServerId::new("tui-default").expect("static App Server scope must be valid")
+        }),
+        project_scope_id: project_scope,
+    };
+    let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
+    let binding = runtime
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_binding_for(&route_scope, &binding_id)
+        .cloned()
+        .ok_or_else(|| format!("ROUTE_CLEANUP_INVALID: no binding exists for {worker_id}"))?;
+    let next_generation = binding.endpoint_generation.checked_add(1).ok_or_else(|| {
+        format!("ROUTE_CLEANUP_INVALID: endpoint generation overflow for {worker_id}")
+    })?;
+    let mut retired = binding;
+    retired.endpoint_generation = next_generation;
+    retired.native_thread_id = None;
+    runtime
+        .commit_checked(&[
+            Event::GlobalRuntimeBound { binding: retired },
+            Event::WorkerClosed {
+                worker_id: worker_id.to_owned(),
+                closed_by: closed_by.to_owned(),
+                reason: reason.to_owned(),
+                snapshot_captured_ms: None,
+                at_ms: now_ms(),
+            },
+        ])
+        .map(|_| ())
+        .map_err(|error| format!("ROUTE_CLEANUP_DURABILITY_FAILED: {error}"))
+}
+
+pub(crate) fn retire_current_thread_route_after_launch_failure(
+    route_owner: &Server,
+    runtime: &Server,
+    worker_id: &str,
+    cwd: &str,
+    app_scope: Option<&AppServerId>,
+) -> Result<(), String> {
+    let project_scope = GlobalState::canonical_project_scope(Path::new(cwd))
+        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
+    let route_scope = RouteScope {
+        app_scope_id: app_scope.cloned().unwrap_or_else(|| {
+            AppServerId::new("tui-default").expect("static App Server scope must be valid")
+        }),
+        project_scope_id: project_scope,
+    };
+    let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+        .map_err(|error| format!("ROUTE_CLEANUP_INVALID: {error}"))?;
+    let binding = runtime
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_binding_for(&route_scope, &binding_id)
+        .filter(|binding| binding.agent_id.as_str() == worker_id)
+        .cloned()
+        .ok_or_else(|| format!("ROUTE_CLEANUP_INVALID: no binding exists for {worker_id}"))?;
+    route_owner
+        .commit_checked(&[Event::GlobalCurrentThreadRouteRetired { binding }])
+        .map(|_| ())
+        .map_err(|error| format!("ROUTE_CLEANUP_DURABILITY_FAILED: {error}"))
 }
 
 fn handle_register_with_app_scope_inner(
@@ -9081,6 +9240,7 @@ fn dispatch_with_route_context(
     server: &Arc<Server>,
     req: Req,
     project_context: Option<ProjectContext>,
+    route_owner: Option<&Server>,
 ) -> Resp {
     if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
         return Resp::err(
@@ -9108,7 +9268,13 @@ fn dispatch_with_route_context(
             launch_env,
         } => match app_scope {
             Some(app_scope) => crate::subagent::handle_with_env_for_app_scope(
-                server, &worker_id, &token, command, app_scope, launch_env,
+                server,
+                route_owner.unwrap_or(server.as_ref()),
+                &worker_id,
+                &token,
+                command,
+                app_scope,
+                launch_env,
             ),
             None => {
                 crate::subagent::handle_with_env(server, &worker_id, &token, command, launch_env)
@@ -9762,7 +9928,7 @@ fn dispatch_with_route_context(
 }
 
 fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
-    dispatch_with_route_context(server, req, None)
+    dispatch_with_route_context(server, req, None, None)
 }
 
 fn request_requires_project_context(req: &Req) -> bool {
@@ -13805,6 +13971,16 @@ mod host_route_registry_tests {
             test_candidates("thread-child"),
         );
         assert!(child.ok, "{child:?}");
+        let child_route = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&NativeThreadId::new("thread-child").unwrap())
+            .cloned()
+            .expect("direct child registration must publish its current thread route");
+        assert_eq!(child_route.agent_id.as_str(), "child");
+        assert_eq!(child_route.app_scope_id, app.clone());
 
         let listed = dispatch_wire(
             server.clone(),
@@ -13850,6 +14026,189 @@ mod host_route_registry_tests {
             .all(|binding| binding.app_scope_id == app));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_registration_route_failure_reports_cleanup_failure() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        inject_current_thread_route_journal_fault();
+        let registered = handle_register_with_app_scope(
+            &server,
+            "route-failure-worker".into(),
+            "token-route-failure-worker".into(),
+            root.display().to_string(),
+            Some(AppServerId::new("route-failure-app").unwrap()),
+            test_candidates("thread-route-failure-worker"),
+        );
+        assert!(!registered.ok, "{registered:?}");
+        let error = registered.error.unwrap_or_default();
+        assert!(
+            error.contains("ROUTE_TRANSITION_DURABILITY_FAILED:")
+                && error.contains("registration cleanup failed:"),
+            "{error}"
+        );
+
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let state = server.state.lock().unwrap();
+        assert!(state.workers.contains_key("route-failure-worker"));
+        let binding = state
+            .global
+            .lookup_binding_for(
+                &RouteScope {
+                    app_scope_id: AppServerId::new("route-failure-app").unwrap(),
+                    project_scope_id: project_scope,
+                },
+                &BindingId::new("binding-route-failure-worker").unwrap(),
+            )
+            .cloned()
+            .expect("failed registration keeps an explicitly retired binding");
+        assert!(binding.native_thread_id.is_some());
+        assert!(state
+            .global
+            .lookup_current_thread_route(
+                &NativeThreadId::new("thread-route-failure-worker").unwrap()
+            )
+            .is_none());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nonresident_child_route_is_committed_to_host_owner() {
+        let (host, host_root, _) = test_server();
+        let project_root = host_root.with_file_name(format!(
+            "{}-child-route",
+            host_root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let context = context_with_app(&project_root, "child-route-app");
+        let (runtime, parent) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "child-route-parent".into(),
+                token: "token-child-route-parent".into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-child-route-parent"),
+            },
+        );
+        assert!(parent.ok, "{parent:?}");
+        assert!(!Arc::ptr_eq(&runtime, &host));
+
+        let child = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            "child-route-child".into(),
+            "token-child-route-child".into(),
+            project_root.display().to_string(),
+            Some(AppServerId::new("child-route-app").unwrap()),
+            test_candidates("thread-child-route-child"),
+        );
+        assert!(child.ok, "{child:?}");
+        commit_current_thread_route_for_runtime(
+            &host,
+            &runtime,
+            "child-route-child",
+            &project_root.display().to_string(),
+            Some(&AppServerId::new("child-route-app").unwrap()),
+        )
+        .unwrap();
+
+        let child_thread = NativeThreadId::new("thread-child-route-child").unwrap();
+        assert!(host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&child_thread)
+            .is_some());
+        assert!(runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&child_thread)
+            .is_none());
+        let route = manager.resolve_route_by_native_thread("thread-child-route-child");
+        assert!(route.is_ok(), "{route:?}");
+        retire_current_thread_route_after_launch_failure(
+            &host,
+            &runtime,
+            "child-route-child",
+            &project_root.display().to_string(),
+            Some(&AppServerId::new("child-route-app").unwrap()),
+        )
+        .unwrap();
+        assert!(host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&child_thread)
+            .is_none());
+
+        let failed_child = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            "child-route-failed".into(),
+            "token-child-route-failed".into(),
+            project_root.display().to_string(),
+            Some(AppServerId::new("child-route-app").unwrap()),
+            test_candidates("thread-child-route-failed"),
+        );
+        assert!(failed_child.ok, "{failed_child:?}");
+        inject_current_thread_route_journal_fault();
+        let route_error = commit_current_thread_route_for_runtime(
+            &host,
+            &runtime,
+            "child-route-failed",
+            &project_root.display().to_string(),
+            Some(&AppServerId::new("child-route-app").unwrap()),
+        )
+        .unwrap_err();
+        assert!(route_error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:"));
+        retire_runtime_binding_after_route_failure(
+            &runtime,
+            "child-route-failed",
+            &project_root.display().to_string(),
+            Some(&AppServerId::new("child-route-app").unwrap()),
+            "child-route-parent",
+            "route publication failed",
+        )
+        .unwrap();
+        let failed_binding = {
+            let state = runtime.state.lock().unwrap();
+            state
+                .global
+                .lookup_binding_for(
+                    &RouteScope {
+                        app_scope_id: AppServerId::new("child-route-app").unwrap(),
+                        project_scope_id: GlobalState::canonical_project_scope(&project_root)
+                            .unwrap(),
+                    },
+                    &BindingId::new("binding-child-route-failed").unwrap(),
+                )
+                .cloned()
+                .unwrap()
+        };
+        assert!(failed_binding.native_thread_id.is_none());
+        assert!(runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get("child-route-failed")
+            .is_none());
+        assert!(host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&NativeThreadId::new("thread-child-route-failed").unwrap())
+            .is_none());
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
     }
 
     #[tokio::test]
@@ -14775,7 +15134,7 @@ async fn dispatch_wire(
             if let Err(error) = validate_request_context(&server, &req, project_context.as_ref()) {
                 return Resp::err(error);
             }
-            dispatch_with_route_context(&server, req, project_context)
+            dispatch_with_route_context(&server, req, project_context, None)
         })
         .await
         .unwrap_or_else(|e| Resp::err(format!("handler join error: {}", e))),

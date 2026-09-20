@@ -102,6 +102,13 @@ pub enum GlobalEvent {
     RuntimeBound {
         binding: RuntimeBinding,
     },
+    MasterGranted {
+        grant: super::global_state::MasterGrant,
+    },
+    MasterRevoked {
+        project_scope: crate::scope::ProjectScopeId,
+        binding_id: crate::identity::BindingId,
+    },
     MigrationCommitEvidence {
         evidence: super::global_state::MigrationCommitEvidence,
     },
@@ -114,6 +121,13 @@ impl GlobalEvent {
                 global.register_project(registration).map(|_| ())
             }
             Self::RuntimeBound { binding } => global.bind_runtime(binding).map(|_| ()),
+            Self::MasterGranted { grant } => global.grant_master(grant).map(|_| ()),
+            Self::MasterRevoked {
+                project_scope,
+                binding_id,
+            } => global
+                .revoke_master(&project_scope, &binding_id)
+                .map(|_| ()),
             Self::MigrationCommitEvidence { evidence } => {
                 global.record_migration_commit_evidence(evidence)
             }
@@ -634,6 +648,13 @@ pub enum Event {
     GlobalRuntimeBound {
         binding: super::global_state::RuntimeBinding,
     },
+    GlobalMasterGranted {
+        grant: super::global_state::MasterGrant,
+    },
+    GlobalMasterRevoked {
+        project_scope: crate::scope::ProjectScopeId,
+        binding_id: crate::identity::BindingId,
+    },
     GlobalCurrentThreadRouteSet {
         binding: super::global_state::RuntimeBinding,
     },
@@ -1141,6 +1162,31 @@ impl State {
                     binding: binding.clone(),
                 })?;
             }
+            Event::GlobalMasterGranted { grant } => {
+                self.apply_global_event(&GlobalEvent::MasterGranted {
+                    grant: grant.clone(),
+                })?;
+            }
+            Event::GlobalMasterRevoked {
+                project_scope,
+                binding_id,
+            } => {
+                let revoked_agent = self
+                    .global
+                    .lookup_project(project_scope)
+                    .and_then(|project| project.runtime_bindings.get(binding_id.as_str()))
+                    .map(|binding| binding.agent_id.as_str().to_owned());
+                if revoked_agent.as_deref() == self.master_worker_id.as_deref() {
+                    self.master_worker_id = None;
+                    self.master_assigned_by = None;
+                    self.master_approval = None;
+                    self.master_assigned_ms = None;
+                }
+                self.apply_global_event(&GlobalEvent::MasterRevoked {
+                    project_scope: project_scope.clone(),
+                    binding_id: binding_id.clone(),
+                })?;
+            }
             Event::GlobalCurrentThreadRouteSet { binding } => {
                 let mut next = self.global.clone();
                 next.set_current_thread_route(binding.clone())
@@ -1351,14 +1397,6 @@ impl State {
                 });
             }
         }
-        if let Some(worker_id) = self.master_worker_id.clone() {
-            events.push(Event::MasterAssigned {
-                worker_id,
-                assigned_by: self.master_assigned_by.clone().unwrap_or_default(),
-                approval: self.master_approval.clone(),
-                assigned_ms: self.master_assigned_ms.unwrap_or(0),
-            });
-        }
         let mut bindings: Vec<_> = self.worktree_bindings.values().cloned().collect();
         bindings.sort_by(|a, b| a.binding_id.cmp(&b.binding_id));
         events.extend(
@@ -1375,6 +1413,11 @@ impl State {
             for binding in project.runtime_bindings.values() {
                 events.push(Event::GlobalRuntimeBound {
                     binding: binding.clone(),
+                });
+            }
+            for grant in project.master_grants.values() {
+                events.push(Event::GlobalMasterGranted {
+                    grant: grant.clone(),
                 });
             }
         }

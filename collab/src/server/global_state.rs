@@ -263,7 +263,7 @@ impl RuntimeBinding {
         Ok(())
     }
 
-    fn same_principal(&self, other: &Self) -> bool {
+    pub(crate) fn same_principal(&self, other: &Self) -> bool {
         self.project_scope == other.project_scope
             && self.app_scope_id == other.app_scope_id
             && self.agent_id == other.agent_id
@@ -1746,6 +1746,17 @@ impl GlobalState {
                 grant.binding_id
             )));
         }
+        if let Some(current) = project.master_grants.values().find(|current| {
+            current.project_scope == grant.project_scope
+                && current.app_scope_id == grant.app_scope_id
+        }) {
+            return Err(StateError::MasterGrantConflict(format!(
+                "route {} / {} already has a master grant for {}",
+                current.project_scope.as_str(),
+                current.app_scope_id.as_str(),
+                current.agent_id.as_str()
+            )));
+        }
 
         self.mutate(|next| {
             let project = next
@@ -2618,6 +2629,50 @@ mod tests {
         assert_eq!(
             state.role_for_binding(&scope, &runtime.binding_id),
             PeerRole::Master
+        );
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn route_rejects_a_second_master_grant() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let first = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-one",
+            "binding-one",
+            1,
+        );
+        let second = binding(
+            &scope,
+            "app-one",
+            "agent-two",
+            "runtime-two",
+            "binding-two",
+            1,
+        );
+        state.bind_runtime(first.clone()).unwrap();
+        state.bind_runtime(second.clone()).unwrap();
+        state
+            .grant_master(grant(&scope, "app-one", "agent-one", "binding-one", 1))
+            .unwrap();
+
+        assert!(matches!(
+            state.grant_master(grant(&scope, "app-one", "agent-two", "binding-two", 1,)),
+            Err(StateError::MasterGrantConflict(_))
+        ));
+        assert_eq!(
+            state.role_for_binding(&scope, &first.binding_id),
+            PeerRole::Master
+        );
+        assert_eq!(
+            state.role_for_binding(&scope, &second.binding_id),
+            PeerRole::Peer
         );
         state.validate().unwrap();
     }

@@ -703,8 +703,38 @@ impl Server {
                     events.push(Event::GlobalProjectRegistered { registration })
                 }
                 GlobalEvent::RuntimeBound { binding } => {
+                    let previous = st
+                        .global
+                        .lookup_binding_for(&binding.route_scope(), &binding.binding_id);
+                    let replaces_generation = previous.is_some_and(|current| {
+                        current.same_principal(&binding)
+                            && current.endpoint_generation < binding.endpoint_generation
+                    });
+                    if replaces_generation {
+                        if let Some(worker_id) = st
+                            .master_worker_id
+                            .as_ref()
+                            .filter(|worker_id| worker_id.as_str() == binding.agent_id.as_str())
+                        {
+                            let _ = worker_id;
+                            events.push(Event::GlobalMasterRevoked {
+                                project_scope: binding.project_scope.clone(),
+                                binding_id: binding.binding_id.clone(),
+                            });
+                        }
+                    }
                     events.push(Event::GlobalRuntimeBound { binding })
                 }
+                GlobalEvent::MasterGranted { grant } => {
+                    events.push(Event::GlobalMasterGranted { grant })
+                }
+                GlobalEvent::MasterRevoked {
+                    project_scope,
+                    binding_id,
+                } => events.push(Event::GlobalMasterRevoked {
+                    project_scope,
+                    binding_id,
+                }),
                 GlobalEvent::MigrationCommitEvidence { .. } => {
                     return Err(notification_contract::JournalError::InvalidCommand(
                         "migration commit evidence is not part of worker registration".into(),
@@ -1358,6 +1388,15 @@ impl Server {
         st: &mut State,
         evs: &[Event],
     ) -> Result<(), notification_contract::JournalError> {
+        if evs
+            .iter()
+            .any(|event| matches!(event, Event::Delivered { .. }))
+        {
+            // The wake reducer still consumes this compatibility projection.
+            // Derive it from the typed grant before applying delivery events.
+            let route_scope = server_route_scope(self, st).ok().flatten();
+            st.master_worker_id = current_master_worker_id(st, route_scope.as_ref());
+        }
         for ev in evs {
             if let Err(error) = st.apply_checked(ev) {
                 st.journal_poison.get_or_insert(error.clone());
@@ -2429,9 +2468,17 @@ impl ProjectRuntimeManager {
             if live_master.as_deref() != Some(from) {
                 continue;
             }
-            if state.master_assigned_by.as_deref() != Some(assigned_by)
-                || state.master_approval.as_deref() != approval
-                || state.master_assigned_ms != Some(assigned_ms)
+            let route_scope = match server_route_scope(&runtime, &state) {
+                Ok(Some(route_scope)) => route_scope,
+                Ok(None) => continue,
+                Err(error) => {
+                    return Err(format!("CROSS_PROJECT_SOURCE_REJECTED: {error}"));
+                }
+            };
+            let grant = current_master_grant(&state, Some(&route_scope));
+            if grant.as_ref().map(|grant| grant.granted_by.as_str()) != Some(assigned_by)
+                || grant.as_ref().map(|grant| grant.approval.as_str()) != approval
+                || grant.as_ref().map(|grant| grant.granted_at_ms) != Some(assigned_ms)
             {
                 return Err(
                     "CROSS_PROJECT_SOURCE_REJECTED: source master assignment evidence does not match the source reducer"
@@ -4748,7 +4795,7 @@ fn register_typed(
                     let registered_at = match &typed.command {
                         TypedCommand::RegisterWorker { worker, .. } => worker.registered_ms,
                     };
-                    (role_brief(&st, worker_id), registered_at)
+                    (role_brief(server, &st, worker_id), registered_at)
                 };
                 Resp::data(json!({
                     "worker_id": worker_id,
@@ -4898,8 +4945,149 @@ fn existing_route_scope(state: &State, worker_id: &str) -> Result<Option<RouteSc
     Ok(found)
 }
 
-fn role_brief(state: &State, worker_id: &str) -> serde_json::Value {
-    if state.master_worker_id.as_deref() == Some(worker_id) {
+fn route_scope_for_root(root: &Path, state: &State) -> Result<Option<RouteScope>, &'static str> {
+    let project_scope = GlobalState::canonical_project_scope(root)
+        .map_err(|_| "server project root has no canonical scope")?;
+    let Some(project) = state.global.lookup_project(&project_scope) else {
+        return Ok(None);
+    };
+    let mut app_scopes = project
+        .runtime_bindings
+        .values()
+        .map(|binding| binding.app_scope_id.clone())
+        .collect::<Vec<_>>();
+    app_scopes.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    app_scopes.dedup();
+    if app_scopes.is_empty() {
+        return match project.registrations.values().next() {
+            Some(registration) if project.registrations.len() == 1 => {
+                Ok(Some(registration.route_scope()))
+            }
+            None => Ok(None),
+            Some(_) => Err("server project has multiple registered app scopes"),
+        };
+    }
+    if app_scopes.len() != 1 {
+        return Err("server project has multiple runtime-bound app scopes");
+    }
+    Ok(app_scopes.pop().map(|app_scope_id| RouteScope {
+        app_scope_id,
+        project_scope_id: project_scope,
+    }))
+}
+
+fn server_route_scope(server: &Server, state: &State) -> Result<Option<RouteScope>, &'static str> {
+    route_scope_for_root(&server.root, state)
+}
+
+fn master_grant_for_worker(
+    state: &State,
+    route_scope: &RouteScope,
+    worker_id: &str,
+    granted_by: &str,
+    approval: &str,
+) -> Result<crate::server::global_state::MasterGrant, String> {
+    let project = state
+        .global
+        .lookup_project_for_route(route_scope)
+        .ok_or_else(|| {
+            format!(
+                "MASTER_AUTHORITY_REQUIRES_REGISTERED_ROUTE: {} / {}",
+                route_scope.project_scope_id.as_str(),
+                route_scope.app_scope_id
+            )
+        })?;
+    let mut bindings = project.runtime_bindings.values().filter(|binding| {
+        binding.project_scope == route_scope.project_scope_id
+            && binding.app_scope_id == route_scope.app_scope_id
+            && binding.agent_id.as_str() == worker_id
+    });
+    let Some(binding) = bindings.next() else {
+        return Err(format!(
+            "MASTER_AUTHORITY_REQUIRES_RUNTIME_BINDING: worker {worker_id} has no runtime binding"
+        ));
+    };
+    if bindings.next().is_some() {
+        return Err(format!(
+            "MASTER_AUTHORITY_AMBIGUOUS_BINDING: worker {worker_id} has multiple runtime bindings"
+        ));
+    }
+    crate::server::global_state::MasterGrant::new(
+        binding.project_scope.clone(),
+        binding.app_scope_id.clone(),
+        binding.agent_id.clone(),
+        "project",
+        granted_by,
+        approval,
+        binding.binding_id.clone(),
+        binding.endpoint_generation,
+        now_ms(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn master_authority_transfer_events(
+    state: &State,
+    route_scope: &RouteScope,
+    grant: crate::server::global_state::MasterGrant,
+) -> Vec<Event> {
+    let mut events = state
+        .global
+        .lookup_project_for_route(route_scope)
+        .into_iter()
+        .flat_map(|project| project.master_grants.values())
+        .filter(|current| {
+            current.project_scope == route_scope.project_scope_id
+                && current.app_scope_id == route_scope.app_scope_id
+        })
+        .map(|current| Event::GlobalMasterRevoked {
+            project_scope: current.project_scope.clone(),
+            binding_id: current.binding_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    events.push(Event::GlobalMasterGranted { grant });
+    events
+}
+
+fn current_master_grant(
+    state: &State,
+    route_scope: Option<&RouteScope>,
+) -> Option<crate::server::global_state::MasterGrant> {
+    if let Some(route_scope) = route_scope {
+        let project = state.global.lookup_project_for_route(route_scope)?;
+        let mut grants = project.master_grants.values().filter(|grant| {
+            grant.project_scope == route_scope.project_scope_id
+                && grant.app_scope_id == route_scope.app_scope_id
+                && state
+                    .global
+                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                    .is_some_and(|current| current == *grant)
+        });
+        let grant = grants.next()?.clone();
+        return grants.next().is_none().then_some(grant);
+    }
+    let mut grants = state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.master_grants.values())
+        .filter(|grant| {
+            state
+                .global
+                .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                .is_some_and(|current| current == *grant)
+        });
+    let grant = grants.next()?.clone();
+    grants.next().is_none().then_some(grant)
+}
+
+fn current_master_worker_id(state: &State, route_scope: Option<&RouteScope>) -> Option<String> {
+    current_master_grant(state, route_scope).map(|grant| grant.agent_id.as_str().to_owned())
+}
+
+fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
+    let route_scope = server_route_scope(server, state).ok().flatten();
+    if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
         return json!({
             "role": "master",
             "role_task": "Orchestrate the project; implementation is not your primary job.",
@@ -5218,8 +5406,8 @@ pub(crate) fn live_master_id(
     server: &Server,
     state: &State,
 ) -> Result<Option<String>, &'static str> {
-    let Some(worker) = state
-        .master_worker_id
+    let route_scope = server_route_scope(server, state)?;
+    let Some(worker) = current_master_worker_id(state, route_scope.as_ref())
         .as_ref()
         .and_then(|id| state.workers.get(id))
     else {
@@ -5272,8 +5460,8 @@ pub(crate) fn scheduler_admit_subagent_start(
     // same reason as registered_idle_peer_for_admission.
     let Some(master) = ({
         let state = server.state.lock().unwrap();
-        state
-            .master_worker_id
+        let route_scope = server_route_scope(server, &state).ok().flatten();
+        current_master_worker_id(&state, route_scope.as_ref())
             .as_ref()
             .and_then(|id| state.workers.get(id))
             .cloned()
@@ -5703,8 +5891,8 @@ pub(crate) fn handle_scheduler_dispatch(
     }
     let Some(master) = ({
         let state = server.state.lock().unwrap();
-        state
-            .master_worker_id
+        let route_scope = server_route_scope(server, &state).ok().flatten();
+        current_master_worker_id(&state, route_scope.as_ref())
             .as_ref()
             .and_then(|id| state.workers.get(id))
             .cloned()
@@ -6005,19 +6193,22 @@ fn handle_master_promote(
             "promotion candidate identity is unknown; defer promotion until transport probes succeed",
         ),
     }
-    server.commit_locked(
-        &mut state,
-        &[Event::MasterAssigned {
-            worker_id: worker_id.clone(),
-            assigned_by: worker_id.clone(),
-            approval: Some(approval),
-            assigned_ms: now_ms(),
-        }],
-    );
+    let route_scope = match server_route_scope(server, &state) {
+        Ok(Some(route_scope)) => route_scope,
+        Ok(None) => return Resp::err("master promotion requires a registered project route"),
+        Err(error) => return Resp::err(error),
+    };
+    let grant =
+        match master_grant_for_worker(&state, &route_scope, &worker_id, &worker_id, &approval) {
+            Ok(grant) => grant,
+            Err(error) => return Resp::err(error),
+        };
+    let events = master_authority_transfer_events(&state, &route_scope, grant);
+    server.commit_locked(&mut state, &events);
     Resp::data(json!({
         "master": worker_id,
         "mode": "user_approved_self_promotion",
-        "role_brief": role_brief(&state, &worker_id)
+        "role_brief": role_brief(server, &state, &worker_id)
     }))
 }
 
@@ -6045,19 +6236,27 @@ fn handle_master_delegate(
             )
         }
     }
-    server.commit_locked(
-        &mut state,
-        &[Event::MasterAssigned {
-            worker_id: target_id.clone(),
-            assigned_by: worker_id.clone(),
-            approval: None,
-            assigned_ms: now_ms(),
-        }],
-    );
+    let route_scope = match server_route_scope(server, &state) {
+        Ok(Some(route_scope)) => route_scope,
+        Ok(None) => return Resp::err("master delegation requires a registered project route"),
+        Err(error) => return Resp::err(error),
+    };
+    let grant = match master_grant_for_worker(
+        &state,
+        &route_scope,
+        &target_id,
+        &worker_id,
+        "delegated by the live master",
+    ) {
+        Ok(grant) => grant,
+        Err(error) => return Resp::err(error),
+    };
+    let events = master_authority_transfer_events(&state, &route_scope, grant);
+    server.commit_locked(&mut state, &events);
     Resp::data(json!({
         "master": target_id,
         "delegated_by": worker_id,
-        "role_brief": role_brief(&state, &target_id)
+        "role_brief": role_brief(server, &state, &target_id)
     }))
 }
 
@@ -6209,38 +6408,47 @@ fn handle_worker_snapshot(
 
 fn master_assignment_view(
     state: &State,
+    route_scope: Option<&RouteScope>,
     worker_id: &str,
     endpoint_live: bool,
 ) -> serde_json::Value {
+    let grant = current_master_grant(state, route_scope)
+        .filter(|grant| grant.agent_id.as_str() == worker_id);
     json!({
         "worker_id": worker_id,
         "endpoint_live": endpoint_live,
-        "assigned_by": state.master_assigned_by,
-        "approval": state.master_approval,
-        "assigned_ms": state.master_assigned_ms,
+        "assigned_by": grant.as_ref().map(|grant| grant.granted_by.clone()).or_else(|| state.master_assigned_by.clone()),
+        "approval": grant.as_ref().map(|grant| grant.approval.clone()).or_else(|| state.master_approval.clone()),
+        "assigned_ms": grant.as_ref().map(|grant| grant.granted_at_ms).or(state.master_assigned_ms),
         "master_wake": state.master_wake,
     })
 }
 
 fn handle_master_status(server: &Server) -> Resp {
     let state = server.state.lock().unwrap();
+    let route_scope = server_route_scope(server, &state).ok().flatten();
     let live = match live_master_id(server, &state) {
         Ok(master) => master,
         Err(error) => {
             return Resp::err_data(
                 error,
-                json!({"status": "unknown", "recorded_worker_id": state.master_worker_id}),
+                json!({"status": "unknown", "recorded_worker_id": current_master_worker_id(
+                    &state,
+                    route_scope.as_ref()
+                )}),
             )
         }
     };
     let master = live
         .as_ref()
-        .map(|id| master_assignment_view(&state, id, true));
-    let recorded = state
-        .master_worker_id
+        .map(|id| master_assignment_view(&state, route_scope.as_ref(), id, true));
+    let recorded_worker = current_master_grant(&state, route_scope.as_ref())
+        .map(|grant| grant.agent_id.as_str().to_owned())
+        .or_else(|| state.master_worker_id.clone());
+    let recorded = recorded_worker
         .as_ref()
         .filter(|id| live.as_deref() != Some(id.as_str()))
-        .map(|id| master_assignment_view(&state, id, false));
+        .map(|id| master_assignment_view(&state, route_scope.as_ref(), id, false));
     Resp::data(json!({"master": master, "recorded_unusable": recorded}))
 }
 
@@ -7920,7 +8128,9 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         })
         .collect();
     let managed = is_managed_subagent(&st, &worker_id);
-    let role = if st.master_worker_id.as_deref() == Some(worker_id.as_str()) {
+    let route_scope = server_route_scope(server, &st).ok().flatten();
+    let current_master = current_master_worker_id(&st, route_scope.as_ref());
+    let role = if current_master.as_deref() == Some(worker_id.as_str()) {
         "master"
     } else if managed {
         "managed-subagent"
@@ -7966,7 +8176,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         .workers
         .values()
         .map(|peer| {
-            let peer_role = if st.master_worker_id.as_deref() == Some(peer.id.as_str()) {
+            let peer_role = if current_master.as_deref() == Some(peer.id.as_str()) {
                 "master"
             } else if is_managed_subagent(&st, &peer.id) {
                 "managed-subagent"
@@ -7977,10 +8187,11 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         })
         .collect();
     peer_snapshots.sort_by(|left, right| left.0.id.cmp(&right.0.id));
-    let master_worker_id = st.master_worker_id.clone();
-    let master_assigned_by = st.master_assigned_by.clone();
-    let master_approval = st.master_approval.clone();
-    let master_assigned_ms = st.master_assigned_ms;
+    let master_worker_id = current_master;
+    let master_grant = current_master_grant(&st, route_scope.as_ref());
+    let master_assigned_by = master_grant.as_ref().map(|grant| grant.granted_by.clone());
+    let master_approval = master_grant.as_ref().map(|grant| grant.approval.clone());
+    let master_assigned_ms = master_grant.as_ref().map(|grant| grant.granted_at_ms);
     let master_wake = st.master_wake.clone();
     drop(st);
 
@@ -11815,10 +12026,14 @@ mod host_route_registry_tests {
 
         let (assigned_by, approval, assigned_ms) = {
             let state = source_runtime.state.lock().unwrap();
+            let route_scope = server_route_scope(&source_runtime, &state)
+                .unwrap()
+                .unwrap();
+            let grant = current_master_grant(&state, Some(&route_scope)).unwrap();
             (
-                state.master_assigned_by.clone().unwrap(),
-                state.master_approval.clone(),
-                state.master_assigned_ms.unwrap(),
+                grant.granted_by.clone(),
+                Some(grant.approval.clone()),
+                grant.granted_at_ms,
             )
         };
         let cross_project_send = |assigned_ms: i64| Req::CrossProjectSend {
@@ -14753,6 +14968,26 @@ fn apply_replayed_event(st: &mut State, event: &Event, line: usize) -> anyhow::R
     }
 }
 
+fn track_legacy_master_authority(
+    event: &Event,
+    legacy_master_is_current: &mut bool,
+    saw_typed_master_authority: &mut bool,
+) {
+    match event {
+        Event::MasterAssigned { .. } => {
+            *legacy_master_is_current = !*saw_typed_master_authority;
+        }
+        Event::GlobalRuntimeBound { .. } => {
+            *legacy_master_is_current = false;
+        }
+        Event::GlobalMasterGranted { .. } | Event::GlobalMasterRevoked { .. } => {
+            *legacy_master_is_current = false;
+            *saw_typed_master_authority = true;
+        }
+        _ => {}
+    }
+}
+
 fn replay(root: &Path) -> anyhow::Result<State> {
     replay_from_journal(root, &root.join(".agent-collab/server/journal.jsonl"))
 }
@@ -14760,7 +14995,7 @@ fn replay(root: &Path) -> anyhow::Result<State> {
 /// Replay a project reducer from the journal selected by its runtime owner.
 /// The project root remains the semantic scope used by worktree and identity
 /// validation; the journal path may be an appserver-specific runtime store.
-fn replay_from_journal(_root: &Path, journal: &Path) -> anyhow::Result<State> {
+fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
     let mut st = State::default();
     if !journal.exists() {
         return Ok(st);
@@ -14772,6 +15007,8 @@ fn replay_from_journal(_root: &Path, journal: &Path) -> anyhow::Result<State> {
     let mut seen_operation_ids = std::collections::HashMap::new();
     let mut convert_root = false;
     let mut saw_current_thread_route = false;
+    let mut legacy_master_is_current = false;
+    let mut saw_typed_master_authority = false;
     for (index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -14855,6 +15092,11 @@ fn replay_from_journal(_root: &Path, journal: &Path) -> anyhow::Result<State> {
                         pending_command = None;
                         for event in committed {
                             apply_replayed_event(&mut st, &event, index + 1)?;
+                            track_legacy_master_authority(
+                                &event,
+                                &mut legacy_master_is_current,
+                                &mut saw_typed_master_authority,
+                            );
                             events.push(event);
                         }
                     }
@@ -14876,6 +15118,11 @@ fn replay_from_journal(_root: &Path, journal: &Path) -> anyhow::Result<State> {
                 convert_root = true;
             }
             apply_replayed_event(&mut st, &event, index + 1)?;
+            track_legacy_master_authority(
+                &event,
+                &mut legacy_master_is_current,
+                &mut saw_typed_master_authority,
+            );
             events.push(event);
         }
     }
@@ -14887,6 +15134,49 @@ fn replay_from_journal(_root: &Path, journal: &Path) -> anyhow::Result<State> {
     if !saw_current_thread_route {
         st.restore_unique_current_thread_routes_from_bindings()
             .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
+    }
+    if legacy_master_is_current {
+        let Some(worker_id) = st.master_worker_id.clone() else {
+            unreachable!("legacy master event must leave a legacy master projection");
+        };
+        if let Some(route_scope) = route_scope_for_root(root, &st)
+            .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?
+        {
+            let has_typed_grant = st
+                .global
+                .lookup_project_for_route(&route_scope)
+                .is_some_and(|project| {
+                    project.master_grants.values().any(|grant| {
+                        grant.project_scope == route_scope.project_scope_id
+                            && grant.app_scope_id == route_scope.app_scope_id
+                            && grant.agent_id.as_str() == worker_id
+                    })
+                });
+            if !has_typed_grant {
+                if let Ok(grant) = master_grant_for_worker(
+                    &st,
+                    &route_scope,
+                    &worker_id,
+                    st.master_assigned_by.as_deref().unwrap_or(&worker_id),
+                    st.master_approval
+                        .as_deref()
+                        .unwrap_or("legacy master assignment imported"),
+                ) {
+                    st.global
+                        .grant_master(grant)
+                        .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
+                }
+            }
+            st.master_worker_id = None;
+            st.master_assigned_by = None;
+            st.master_approval = None;
+            st.master_assigned_ms = None;
+        }
+    } else {
+        st.master_worker_id = None;
+        st.master_assigned_by = None;
+        st.master_approval = None;
+        st.master_assigned_ms = None;
     }
     st.global.validate().map_err(|error| {
         anyhow::anyhow!("journal replay failed: global state validation: {error}")
@@ -15854,17 +16144,22 @@ mod scheduler_admission_tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    fn promote_master(server: &Server) {
+        let response = handle_master_promote(
+            server,
+            "master".into(),
+            "token-master".into(),
+            "scheduler test".into(),
+        );
+        assert!(response.ok, "master promotion failed: {response:?}");
+    }
+
     #[test]
     fn start_admits_registered_idle_peer_before_managed_child_without_duplicates() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "idle-peer", "%idle-peer");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let server = Arc::new(server);
 
         let start = |id: Option<&str>, token: &str| {
@@ -16002,30 +16297,23 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "managed-peer", "%managed-peer");
-        server.commit(&[
-            Event::MasterAssigned {
-                worker_id: "master".into(),
-                assigned_by: "operator".into(),
-                approval: Some("scheduler test".into()),
-                assigned_ms: now_ms(),
+        promote_master(&server);
+        server.commit(&[Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "existing-child".into(),
+                parent: "master".into(),
+                peer: "managed-peer".into(),
+                status: "idle".into(),
+                thread_id: Some("thread-managed-peer".into()),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
             },
-            Event::SubagentUpdated {
-                subagent: crate::subagent::Record {
-                    id: "existing-child".into(),
-                    parent: "master".into(),
-                    peer: "managed-peer".into(),
-                    status: "idle".into(),
-                    thread_id: Some("thread-managed-peer".into()),
-                    profile: None,
-                    created_ms: now_ms(),
-                    ready_deadline_ms: 0,
-                    last_message: None,
-                    error: None,
-                    probe_failures: Vec::new(),
-                    runtime: Some("codex".into()),
-                },
-            },
-        ]);
+        }]);
         let server = Arc::new(server);
         let reused = dispatch(
             &server,
@@ -16095,30 +16383,23 @@ mod scheduler_admission_tests {
         register(&server, "master", "%master");
         register(&server, "idle-peer", "%idle-peer");
         register(&server, "managed-peer", "%managed-peer");
-        server.commit(&[
-            Event::MasterAssigned {
-                worker_id: "master".into(),
-                assigned_by: "operator".into(),
-                approval: Some("scheduler test".into()),
-                assigned_ms: now_ms(),
+        promote_master(&server);
+        server.commit(&[Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "existing-child".into(),
+                parent: "master".into(),
+                peer: "managed-peer".into(),
+                status: "idle".into(),
+                thread_id: Some("thread-managed-peer".into()),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
             },
-            Event::SubagentUpdated {
-                subagent: crate::subagent::Record {
-                    id: "existing-child".into(),
-                    parent: "master".into(),
-                    peer: "managed-peer".into(),
-                    status: "idle".into(),
-                    thread_id: Some("thread-managed-peer".into()),
-                    profile: None,
-                    created_ms: now_ms(),
-                    ready_deadline_ms: 0,
-                    last_message: None,
-                    error: None,
-                    probe_failures: Vec::new(),
-                    runtime: Some("codex".into()),
-                },
-            },
-        ]);
+        }]);
 
         let admission = scheduler_admit_subagent_start(
             &server,
@@ -16137,12 +16418,7 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "idle-peer", "%idle-peer");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let events = root.join(".agent-collab/server/events.jsonl");
         std::fs::create_dir(&events).unwrap();
         let server = Arc::new(server);
@@ -16171,12 +16447,7 @@ mod scheduler_admission_tests {
     fn no_capacity_records_explicit_create_admission() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let decision =
             scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
                 .unwrap();
@@ -16193,12 +16464,7 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let server = Arc::new(server);
         let dispatch_request = |subject: &str, body: &str| {
             dispatch(
@@ -16316,12 +16582,7 @@ mod scheduler_admission_tests {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let reject_once = Arc::new(AtomicBool::new(true));
         let reject_once_for_sink = reject_once.clone();
         server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
@@ -16423,30 +16684,23 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "managed-peer", "%managed-peer");
-        server.commit(&[
-            Event::MasterAssigned {
-                worker_id: "master".into(),
-                assigned_by: "operator".into(),
-                approval: Some("scheduler test".into()),
-                assigned_ms: now_ms(),
+        promote_master(&server);
+        server.commit(&[Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "managed-child".into(),
+                parent: "master".into(),
+                peer: "managed-peer".into(),
+                status: "idle".into(),
+                thread_id: Some("thread-managed-peer".into()),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
             },
-            Event::SubagentUpdated {
-                subagent: crate::subagent::Record {
-                    id: "managed-child".into(),
-                    parent: "master".into(),
-                    peer: "managed-peer".into(),
-                    status: "idle".into(),
-                    thread_id: Some("thread-managed-peer".into()),
-                    profile: None,
-                    created_ms: now_ms(),
-                    ready_deadline_ms: 0,
-                    last_message: None,
-                    error: None,
-                    probe_failures: Vec::new(),
-                    runtime: Some("codex".into()),
-                },
-            },
-        ]);
+        }]);
         let server = Arc::new(server);
         let request = || {
             dispatch(
@@ -16489,12 +16743,7 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let activity_path = root.join(".agent-collab/server/events.jsonl");
         std::fs::create_dir_all(activity_path.parent().unwrap()).unwrap();
         std::fs::create_dir(&activity_path).unwrap();
@@ -16555,30 +16804,23 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "managed-peer", "%managed-peer");
-        server.commit(&[
-            Event::MasterAssigned {
-                worker_id: "master".into(),
-                assigned_by: "operator".into(),
-                approval: Some("scheduler test".into()),
-                assigned_ms: now_ms(),
+        promote_master(&server);
+        server.commit(&[Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "managed-child-failed-audit".into(),
+                parent: "master".into(),
+                peer: "managed-peer".into(),
+                status: "idle".into(),
+                thread_id: Some("thread-managed-peer".into()),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
             },
-            Event::SubagentUpdated {
-                subagent: crate::subagent::Record {
-                    id: "managed-child-failed-audit".into(),
-                    parent: "master".into(),
-                    peer: "managed-peer".into(),
-                    status: "idle".into(),
-                    thread_id: Some("thread-managed-peer".into()),
-                    profile: None,
-                    created_ms: now_ms(),
-                    ready_deadline_ms: 0,
-                    last_message: None,
-                    error: None,
-                    probe_failures: Vec::new(),
-                    runtime: Some("codex".into()),
-                },
-            },
-        ]);
+        }]);
         std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
         let server = Arc::new(server);
         let dispatch_result = dispatch(
@@ -16637,12 +16879,7 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
         let server = Arc::new(server);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -16707,12 +16944,7 @@ mod scheduler_admission_tests {
             .unwrap()
             .notification_subscriptions
             .contains_key("sub-default-direct-message-peer"));
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let server = Arc::new(server);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -16775,13 +17007,8 @@ mod scheduler_admission_tests {
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
         server.config.notifications.enabled = true;
+        promote_master(&server);
         server.commit(&[
-            Event::MasterAssigned {
-                worker_id: "master".into(),
-                assigned_by: "operator".into(),
-                approval: Some("scheduler test".into()),
-                assigned_ms: now_ms(),
-            },
             Event::Sent {
                 msg: Message {
                     id: "scheduler-req-pending-recovery-1".into(),
@@ -16925,12 +17152,7 @@ mod scheduler_admission_tests {
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
         server.config.notifications.enabled = true;
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let server = Arc::new(server);
         let barrier = Arc::new(Barrier::new(2));
         let request = |server: Arc<Server>, barrier: Arc<Barrier>| {
@@ -17005,12 +17227,7 @@ mod scheduler_admission_tests {
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
         server.config.notifications.enabled = true;
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let sink_calls = Arc::new(AtomicUsize::new(0));
         let sink_calls_for_sink = Arc::clone(&sink_calls);
         let sink_gate = Arc::new((Mutex::new(0usize), Condvar::new()));
@@ -17148,12 +17365,7 @@ mod scheduler_admission_tests {
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
         server.config.notifications.enabled = true;
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let server = Arc::new(server);
         let first = dispatch(
             &server,
@@ -17223,12 +17435,7 @@ mod scheduler_admission_tests {
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
         server.config.notifications.enabled = true;
-        server.commit(&[Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("scheduler test".into()),
-            assigned_ms: now_ms(),
-        }]);
+        promote_master(&server);
         let server = Arc::new(server);
         let first = dispatch(
             &server,

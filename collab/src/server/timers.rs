@@ -372,9 +372,7 @@ fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str)
 mod tests {
     use super::*;
     use crate::server::keepalive::Record;
-    use crate::server::state::{
-        Event, NotificationSubscription, State, TaskRec, WaitSpec, WorkerRec,
-    };
+    use crate::server::state::{Event, NotificationSubscription, State, TaskRec, WaitSpec};
     use std::sync::Mutex;
 
     fn test_server() -> (Arc<Server>, std::path::PathBuf) {
@@ -425,44 +423,29 @@ mod tests {
     }
 
     fn register(server: &Server, worker_id: &str) {
-        let thread_id = format!("thread-{worker_id}");
-        server.commit(&[Event::Registered {
-            worker: WorkerRec {
-                id: worker_id.into(),
-                token: format!("token-{worker_id}"),
-                cwd: "/tmp".into(),
-                registered_ms: now_ms(),
-                transport: Some(SelectedTransport {
-                    kind: crate::proto::TransportKind::AppServer,
-                    endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
-                    namespace: Some("codex_tui".into()),
-                    thread_id: Some(thread_id),
-                    capabilities: vec!["send_message_to_thread".into()],
-                    self_check: "test appserver".into(),
-                }),
-            },
-        }]);
+        let response =
+            crate::server::peer_tests::register(server, worker_id, &format!("thread-{worker_id}"));
+        assert!(response.ok, "worker registration failed: {response:?}");
     }
 
     fn register_master(server: &Server) {
         register(server, "master");
         let now = now_ms();
-        server.commit(&[
-            Event::MasterAssigned {
-                worker_id: "master".into(),
-                assigned_by: "operator".into(),
-                approval: Some("user-approved".into()),
-                assigned_ms: now,
+        let promoted = crate::server::handle_master_promote(
+            server,
+            "master".into(),
+            "token-master".into(),
+            "user-approved".into(),
+        );
+        assert!(promoted.ok, "master promotion failed: {promoted:?}");
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "idle".into(),
+                idle_since_ms: now - 900_001,
+                ..Record::default()
             },
-            Event::KeepaliveUpdated {
-                worker_id: "master".into(),
-                record: Record {
-                    observed: "idle".into(),
-                    idle_since_ms: now - 900_001,
-                    ..Record::default()
-                },
-            },
-        ]);
+        }]);
     }
 
     fn master_idle_subscription(server: &Server, interval_ms: i64) -> String {
@@ -2023,6 +2006,12 @@ mod tests {
         let (server, root) = test_server();
         register_master(&server);
         register(&server, "waiter");
+        server
+            .state
+            .lock()
+            .unwrap()
+            .notification_subscriptions
+            .remove("sub-default-direct-message-master");
         working_task(&server, "waiter");
         let now = now_ms();
         let mut task = server.state.lock().unwrap().tasks["task"].clone();
@@ -2059,7 +2048,7 @@ mod tests {
         register_master(&server);
         register(&server, "waiter");
         working_task(&server, "waiter");
-        let subscription_id = subscribe(&server, "master", "direct-message", None, None);
+        let subscription_id = "sub-default-direct-message-master".to_owned();
         let now = now_ms();
         let mut task = server.state.lock().unwrap().tasks["task"].clone();
         task.status = "waiting".into();

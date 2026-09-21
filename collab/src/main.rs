@@ -651,6 +651,36 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         scope::canonical_route_for_identity(&host_paths, &scope.root, &runtime.appserver_id)
             .is_ok_and(|route| route.root == scope_root),
     )
+    .and_then(|file_says_reusable| {
+        if !file_says_reusable {
+            return Ok(false);
+        }
+        // The route journal on disk is not the live truth: after a daemon
+        // restart or re-registration the running daemon may hold no route for
+        // this address even though the file still lists one.  Reuse is only
+        // valid when the live daemon resolves the same session/thread/cwd.
+        let Some(thread_id) = runtime
+            .native_thread_id
+            .as_ref()
+            .map(crate::identity::NativeThreadId::as_str)
+        else {
+            return Ok(true);
+        };
+        let Some(session_id) = runtime
+            .session_id
+            .as_ref()
+            .map(crate::identity::SessionId::as_str)
+        else {
+            return Ok(false);
+        };
+        let resolved = client::resolve_route(
+            &scope.sock_path(),
+            session_id,
+            thread_id,
+            &scope_root.to_string_lossy(),
+        );
+        Ok(resolved.is_ok())
+    })
 }
 
 fn runtime_for_request<'a>(ident: &'a Identity) -> anyhow::Result<&'a RuntimeIdentity> {

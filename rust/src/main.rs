@@ -13789,19 +13789,29 @@ fn prepare_project(workspace: &Path) {
     }
 }
 
-const COLLAB_INIT_TIMEOUT: Duration = Duration::from_secs(5);
+const COLLAB_INIT_TIMEOUT_MS: u64 = 120_000;
+const COLLAB_INIT_TIMEOUT: Duration = Duration::from_millis(COLLAB_INIT_TIMEOUT_MS);
+
+fn collab_init_timeout() -> Duration {
+    env::var("APPSDK_COLLAB_INIT_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| (1..=COLLAB_INIT_TIMEOUT_MS).contains(value))
+        .map(Duration::from_millis)
+        .unwrap_or(COLLAB_INIT_TIMEOUT)
+}
 
 fn initialize_collab_peer(root: &Path) {
     let mut command = Command::new("collab");
     command.arg("init").current_dir(root);
-    let output = match run_goal_collab_command(command, COLLAB_INIT_TIMEOUT) {
+    let output = match run_goal_collab_command(command, collab_init_timeout()) {
         Ok(output) => output,
         Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT" => {
-            eprintln!("COLLAB_INIT_TIMEOUT; shared collaboration unavailable; independent work may continue");
+            eprintln!("COLLAB_INIT_TIMEOUT: collab init did not finish within the bounded registration window; run collab worker recover from the canonical project root or retry appsdk init . after the daemon is reachable; shared collaboration unavailable; independent work may continue");
             return;
         }
         Err(error) if error == "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT" => {
-            eprintln!("COLLAB_INIT_OUTPUT_TIMEOUT; shared collaboration unavailable; independent work may continue");
+            eprintln!("COLLAB_INIT_OUTPUT_TIMEOUT: collab init exited but output did not drain within the bounded registration window; run collab worker recover from the canonical project root or retry appsdk init . after the daemon is reachable; shared collaboration unavailable; independent work may continue");
             return;
         }
         Err(error) => {

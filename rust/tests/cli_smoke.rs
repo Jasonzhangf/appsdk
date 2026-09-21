@@ -8300,6 +8300,112 @@ exit 73
 }
 
 #[test]
+fn init_waits_for_slow_collab_route_recovery_before_timeout() {
+    let root = temp_root("init-collab-slow-route-recovery");
+    fs::create_dir_all(&root).unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        format!(
+            "#!/bin/sh\n/bin/sleep 6\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-slow-route-recovery\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"session_status\",\"read_thread\",\"send_message_to_thread\",\"wait_reply\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-slow-route-recovery\",\"capabilities\":[\"session_status\",\"read_thread\",\"send_message_to_thread\",\"wait_reply\"],\"self_check\":\"test\"}}}}'\n",
+            root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &fake_bin)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_TIMEOUT"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("collab-channel"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("thread-slow-route-recovery"));
+    let registry = test_global_registry_root_for_project(&root).join("runtimes.jsonl");
+    let runtime = fs::read_to_string(registry).unwrap();
+    assert!(runtime.contains("runtime-slow-route-recovery"), "{runtime}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_bounds_oversized_collab_timeout_override() {
+    let root = temp_root("init-collab-oversized-timeout");
+    fs::create_dir_all(&root).unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-oversized-timeout\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"session_status\",\"read_thread\",\"send_message_to_thread\",\"wait_reply\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-oversized-timeout\",\"capabilities\":[\"session_status\",\"read_thread\",\"send_message_to_thread\",\"wait_reply\"],\"self_check\":\"test\"}}}}'\n",
+            root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &fake_bin)
+        .env("APPSDK_COLLAB_INIT_TIMEOUT_MS", u64::MAX.to_string())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("collab-channel"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_TIMEOUT"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let registry = test_global_registry_root_for_project(&root).join("runtimes.jsonl");
+    let runtime = fs::read_to_string(registry).unwrap();
+    assert!(runtime.contains("runtime-oversized-timeout"), "{runtime}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_bounds_hanging_collab_bootstrap_without_faking_success() {
     let root = temp_root("init-collab-timeout");
     fs::create_dir_all(&root).unwrap();
@@ -8322,6 +8428,7 @@ fn init_bounds_hanging_collab_bootstrap_without_faking_success() {
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
         .env("APPSDK_COLLAB_PROBE", &probe)
+        .env("APPSDK_COLLAB_INIT_TIMEOUT_MS", "1000")
         .output()
         .unwrap();
 

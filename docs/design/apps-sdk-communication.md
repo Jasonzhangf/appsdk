@@ -94,6 +94,69 @@ JSONL 是唯一持久化事实源。每行是带 `protocol`、`eventId`、`at`�
 `namespace`（`codex_app` 或 `codex_tui`）、由 cwd 确定的 `projectRoot` 和允许的
 `sessionIds`。不同 `scopeId` 即使 appserver 或 project 相同，也属于不同通信 scope。
 
+### sessionID、threadID 与 canonical cwd 的三键恢复契约
+
+App Server 绑定必须同时持久化宿主提供的 `sessionId`、native `threadId` 和
+canonical project cwd。三者是不同事实，不能互相代替，也不能从模型名、进程名、
+历史 route 或 `runtimeId` 推断：
+
+- `sessionId` 是宿主声明的通信 session 地址；注册、refresh、rebind 和
+  daemon replay 都必须原样携带并验证。
+- `threadId` 是 App Server 实际承载消息的 native thread；注册前必须通过
+  `thread/loaded/list` 和 `thread/read` 验证其存在、已加载且 ID 完全一致。
+- identity、runtime binding 和 `RouteResolve` 必须保存三者；route 解析只有
+  在 `(sessionId, threadId, canonical cwd)` 都匹配当前 binding 时才成功。
+- canonical cwd 必须是项目主树，不是 `playground/` worktree。worktree 只是
+  任务执行目录；从 worktree 发起 route 解析、context、master status、注册、
+  recovery 或 promotion 必须显式失败，不得按父目录、Git common dir 或历史
+  route 回退到主树身份。
+- `sessionId` 缺失、为空或与 threadID 不一致时，注册与 rebind 显式失败。
+  不得用一个字段合成另一个字段，也不得静默选择最近的 route。
+- session 变化但 threadID 保持时，使用同一个稳定 identity、同一个
+  `bindingId` 和已经持久化的同一个 `runtimeId` 执行显式 rebind；
+  `runtimeId` 只在首次注册时从已验真的 transport 生成一次，后续不能由
+  新 session/thread 重新派生。旧 `(sessionId, threadId)` 地址进入只读
+  tombstone，不能重新注册、refresh、发送、接收或取得 master 权限。
+- threadID 变化时同样使用显式 rebind；旧 thread 不能作为 fallback。
+  rebind 成功后旧 binding 变为 stale，新 binding 成为 current，role、
+  parent、任务关系、`messageId`、`attemptId` 和历史 receipt 保持不变。
+- daemon 重启后从追加事实重放 identity、binding 和 tombstone；重放必须得到
+  同一 `(sessionId, threadId, canonical cwd)` current binding，不能依赖进程
+  内缓存或 worktree cwd。
+- tombstone 的 `reboundTo` 是完整 replacement runtime binding，至少包含同一
+  identity/runtime/binding 的新 `(sessionId, threadId)` 和 endpoint
+  generation；它只用于只读恢复指引，不能作为 route selector。当前
+  `RouteResolve` 的错误线上返回该 replacement 的
+  `(sessionId, threadId)` 文本指引；完整 tombstone 是 daemon durable
+  state，不是错误 payload 的公开结构化字段。
+
+恢复失败时必须保留精确错误和 durable 事实，并给出可执行恢复指引：
+
+1. 缺 `sessionId`、`threadId` 或 canonical cwd：先让宿主重新提供并验证
+   三字段，再对同一 identity 执行一次显式 rebind；不要手改 identity、
+   binding 或 route。
+2. `sessionId`、`threadId` 或 canonical cwd 不一致：保留旧 binding，显式返回
+   `SESSION_THREAD_BINDING_MISMATCH` 或 `ROUTE_RESOLVE_INVALID`；修复宿主绑定
+   后从 canonical project root 重新注册，不得覆盖旧 binding 或创建替代
+   identity。
+3. 旧 session/thread 命中 tombstone：返回
+   `SESSION_THREAD_BINDING_STALE`，在错误中给出 tombstone 的
+   `reboundTo=(sessionId, threadId)`，再向 current 地址发送或消费；
+   不得复活旧地址。
+4. host route 已写但 daemon 状态不确定：保留双方 journal，重启受影响
+   daemon 后按事件重放；host route replay不一致返回
+   `HOST_ROUTE_REPLAY_FAILED`，identity/binding replay不一致返回
+   `SESSION_THREAD_BINDING_MIGRATION_REQUIRED` 或明确 journal
+   replay错误；禁止手工修 route/binding。
+
+注册事务在 host route 发布前已经写入 worker transport 和默认 direct-message
+订阅。若 host route 发布是确定的失败，补偿必须同时恢复该 worker 之前的
+transport 和全部 notification subscription，并恢复 runtime binding 与
+master grant；首次注册没有前一版本时，必须移除未落地的 worker 和订阅。
+不能只恢复 route/binding，否则旧 route 虽然可解析，通知仍会尝试发往失败的新
+thread。host route 发布结果不确定时不得猜选旧状态，必须保留双方 journal
+并按重放结果收口。
+
 角色默认是 `peer`；只有显式、非空的用户 `masterGrant` 才能注册 `master`，`auto`
 被拒绝。每个 scope 只能有一个 master。`subagent` 必须绑定同 scope 的 parent，
 且 parent 在注册时必须仍处于有效 lease。session ID 是地址的一部分，必须由宿主在

@@ -311,14 +311,21 @@ pub(crate) fn inject_task_register_journal_fault(fault: TaskRegisterJournalFault
 }
 
 #[cfg(test)]
-thread_local! {
-    static CURRENT_THREAD_ROUTE_JOURNAL_FAULT: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CurrentThreadRouteJournalFault {
+    Append,
+    Sync,
 }
 
 #[cfg(test)]
-pub(crate) fn inject_current_thread_route_journal_fault() {
-    CURRENT_THREAD_ROUTE_JOURNAL_FAULT.with(|injected| injected.set(true));
+thread_local! {
+    static CURRENT_THREAD_ROUTE_JOURNAL_FAULT: std::cell::Cell<Option<CurrentThreadRouteJournalFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_current_thread_route_journal_fault(fault: CurrentThreadRouteJournalFault) {
+    CURRENT_THREAD_ROUTE_JOURNAL_FAULT.with(|injected| injected.set(Some(fault)));
 }
 
 #[derive(Clone, Copy)]
@@ -549,6 +556,7 @@ impl Server {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some(format!("session-{worker_id}")),
             thread_id: Some(thread_id.to_string()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver transport".into(),
@@ -578,31 +586,45 @@ impl Server {
     ) -> Result<TypedEnvelope, String> {
         let binding_text = sanitize_identifier(&format!("binding-{worker_id}"));
         let binding_id = BindingId::new(binding_text.clone()).map_err(|error| error.to_string())?;
-        let transport_identity = transport.thread_id.as_deref().unwrap_or("appserver");
-        let runtime_text = format!(
-            "runtime-{}-{}",
-            transport.kind.as_str(),
-            sanitize_identifier(transport_identity)
-        );
         let route_scope = RouteScope {
             app_scope_id: app_scope.clone(),
             project_scope_id: project_scope.clone(),
         };
-        let generation = {
+        let (runtime_text, generation) = {
             let st = self.state.lock().unwrap();
             match st.global.lookup_binding_for(&route_scope, &binding_id) {
-                Some(existing)
-                    if reuse_existing
-                        && existing.agent_id.as_str() == worker_id
-                        && existing.runtime_id.as_str() == runtime_text =>
-                {
-                    existing.endpoint_generation
+                Some(existing) if existing.agent_id.as_str() == worker_id => {
+                    let runtime_text = existing.runtime_id.as_str().to_owned();
+                    let generation = if reuse_existing {
+                        existing.endpoint_generation
+                    } else {
+                        existing
+                            .endpoint_generation
+                            .checked_add(1)
+                            .ok_or_else(|| "endpoint generation overflow".to_string())?
+                    };
+                    (runtime_text, generation)
                 }
-                Some(existing) => existing
-                    .endpoint_generation
-                    .checked_add(1)
-                    .ok_or_else(|| "endpoint generation overflow".to_string())?,
-                None => 1,
+                Some(_) => {
+                    return Err(format!(
+                        "RUNTIME_BINDING_REJECTED: binding {binding_id} belongs to another worker"
+                    ));
+                }
+                None => {
+                    let runtime_text = match (
+                        transport.session_id.as_deref(),
+                        transport.thread_id.as_deref(),
+                    ) {
+                        (Some(session_id), Some(thread_id)) => format!(
+                            "runtime-{}-{}-{}",
+                            transport.kind.as_str(),
+                            sanitize_identifier(session_id),
+                            sanitize_identifier(thread_id)
+                        ),
+                        _ => format!("runtime-{}-appserver", transport.kind.as_str()),
+                    };
+                    (runtime_text, 1)
+                }
             }
         };
         let (registration, registered_ms) = {
@@ -635,13 +657,23 @@ impl Server {
             .map(|value| NativeThreadId::new(value.clone()))
             .transpose()
             .map_err(|error| error.to_string())?;
-        let binding = RuntimeBinding::new(
+        let session_id = transport
+            .session_id
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "App Server registration requires session_id".to_string())?;
+        let session_id = Some(
+            crate::identity::SessionId::new(session_id.clone())
+                .map_err(|error| error.to_string())?,
+        );
+        let binding = RuntimeBinding::new_with_session(
             project_scope.clone(),
             app_scope,
             agent_id,
             runtime_id,
             binding_id.clone(),
             generation,
+            session_id,
             native_thread_id,
         )
         .map_err(|error| error.to_string())?;
@@ -817,6 +849,7 @@ impl Server {
                 let same_runtime_thread = existing_binding.is_some_and(|current| {
                     current.agent_id == binding.agent_id
                         && current.native_thread_id == binding.native_thread_id
+                        && current.session_id == binding.session_id
                 });
                 if !same_route || !same_runtime_thread {
                     return Err(notification_contract::JournalError::InvalidCommand(
@@ -1189,26 +1222,29 @@ impl Server {
         #[cfg(not(test))]
         let (task_register_append_fault, task_register_sync_fault) = (false, false);
         #[cfg(test)]
-        let current_thread_route_append_fault =
+        let current_thread_route_journal_fault =
             CURRENT_THREAD_ROUTE_JOURNAL_FAULT.with(|injected| {
                 let has_current_thread_route = evs
                     .iter()
                     .any(|event| matches!(event, Event::GlobalCurrentThreadRouteSet { .. }));
-                if has_current_thread_route && injected.get() {
-                    injected.set(false);
-                    true
+                if has_current_thread_route {
+                    injected.replace(None)
                 } else {
-                    false
+                    None
                 }
             });
         #[cfg(not(test))]
-        let current_thread_route_append_fault = false;
+        let current_thread_route_journal_fault: Option<()> = None;
         if append_fault {
             let message = "injected subagent journal append failure".to_string();
             st.journal_poison = Some(message.clone());
             return Err(notification_contract::JournalError::Append(message));
         }
-        if current_thread_route_append_fault {
+        #[cfg(test)]
+        if matches!(
+            current_thread_route_journal_fault,
+            Some(CurrentThreadRouteJournalFault::Append)
+        ) {
             let message = "injected current thread route journal append failure".to_string();
             st.journal_poison = Some(message.clone());
             return Err(notification_contract::JournalError::Append(message));
@@ -1246,6 +1282,15 @@ impl Server {
         let sync_fault = false;
         if sync_fault {
             let message = "injected subagent journal sync failure".to_string();
+            st.journal_poison = Some(message.clone());
+            return Err(notification_contract::JournalError::Flush(message));
+        }
+        #[cfg(test)]
+        if matches!(
+            current_thread_route_journal_fault,
+            Some(CurrentThreadRouteJournalFault::Sync)
+        ) {
+            let message = "injected current thread route journal sync failure".to_string();
             st.journal_poison = Some(message.clone());
             return Err(notification_contract::JournalError::Flush(message));
         }
@@ -1497,12 +1542,29 @@ fn validate_transport_candidates(
     server: &Server,
     worker_id: &str,
     candidates: &TransportCandidates,
+    registration_cwd: &str,
 ) -> Result<SelectedTransport, String> {
-    let Some(candidate) = candidates.appserver.as_ref() else {
+    let Some(mut candidate) = candidates.appserver.as_ref().cloned() else {
         return Err("TRANSPORT_NONE: server self-check found no App Server candidate".into());
     };
+    let requested_root = std::fs::canonicalize(registration_cwd)
+        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
+    let requested_root = requested_root.to_str().ok_or_else(|| {
+        "RUNTIME_BINDING_REJECTED: registration cwd must be valid UTF-8".to_string()
+    })?;
+    let candidate_root = std::fs::canonicalize(&server.root)
+        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: candidate root: {error}"))?;
+    if candidate_root != std::path::Path::new(requested_root) {
+        return Err(format!(
+            "RUNTIME_BINDING_REJECTED: registration cwd {requested_root} does not match App Server project root {}",
+            candidate_root.display()
+        ));
+    }
+    // The daemon derives the expected thread cwd from its authenticated
+    // registration context. A client-supplied cwd is not authoritative.
+    candidate.cwd = requested_root.to_owned();
     let state = server.state.lock().unwrap();
-    match appserver_thread_binding(&state, &candidate.thread_id) {
+    match appserver_thread_binding(&state, &candidate.session_id, &candidate.thread_id) {
         Ok(Some(binding)) if binding.agent_id.as_str() != worker_id => {
             return Err(format!(
                 "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
@@ -1513,7 +1575,7 @@ fn validate_transport_candidates(
         Err(error) => return Err(error),
     }
     drop(state);
-    match (server.appserver_candidate_check)(candidate) {
+    match (server.appserver_candidate_check)(&candidate) {
         Ok(transport) => Ok(transport),
         Err(error) => {
             append_log(
@@ -1532,6 +1594,7 @@ fn validate_transport_candidates(
 
 fn appserver_thread_binding<'a>(
     state: &'a State,
+    session_id: &str,
     thread_id: &str,
 ) -> Result<Option<&'a RuntimeBinding>, String> {
     let mut bindings = state
@@ -1541,9 +1604,13 @@ fn appserver_thread_binding<'a>(
         .flat_map(|project| project.runtime_bindings.values())
         .filter(|binding| {
             binding
-                .native_thread_id
+                .session_id
                 .as_ref()
-                .is_some_and(|native_thread_id| native_thread_id.as_str() == thread_id)
+                .is_some_and(|candidate| candidate.as_str() == session_id)
+                && binding
+                    .native_thread_id
+                    .as_ref()
+                    .is_some_and(|native_thread_id| native_thread_id.as_str() == thread_id)
         });
     let Some(binding) = bindings.next() else {
         return Ok(None);
@@ -1558,11 +1625,14 @@ fn appserver_thread_binding<'a>(
 
 fn current_thread_binding<'a>(
     state: &'a State,
+    session_id: &crate::identity::SessionId,
     thread_id: &str,
 ) -> Result<Option<&'a RuntimeBinding>, String> {
     let native_thread_id = NativeThreadId::new(thread_id.to_owned())
         .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
-    Ok(state.global.lookup_current_thread_route(&native_thread_id))
+    Ok(state
+        .global
+        .lookup_current_thread_route(session_id, &native_thread_id))
 }
 
 type RouteKey = (String, String);
@@ -1601,6 +1671,8 @@ struct ProjectRuntimeManager {
     project_locks: Mutex<std::collections::BTreeMap<PathBuf, std::fs::File>>,
     register_gate: Mutex<()>,
     runtime_init_gates: Mutex<std::collections::BTreeMap<RouteKey, Arc<Mutex<()>>>>,
+    #[cfg(test)]
+    fail_current_thread_route_publish: std::sync::atomic::AtomicBool,
 }
 
 fn storage_owner_path(path: &Path) -> Result<PathBuf, String> {
@@ -2041,6 +2113,8 @@ impl ProjectRuntimeManager {
             project_locks: Mutex::new(std::collections::BTreeMap::new()),
             register_gate: Mutex::new(()),
             runtime_init_gates: Mutex::new(std::collections::BTreeMap::new()),
+            #[cfg(test)]
+            fail_current_thread_route_publish: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Replay every durable route at startup.  A broken external runtime
@@ -2102,7 +2176,11 @@ impl ProjectRuntimeManager {
             .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: restore resident route: {error}"))
     }
 
-    fn native_thread_binding(&self, thread_id: &str) -> Result<Option<RuntimeBinding>, String> {
+    fn native_thread_binding(
+        &self,
+        session_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<RuntimeBinding>, String> {
         let runtimes = {
             let routes = self.routes.lock().unwrap();
             let mut runtimes = Vec::new();
@@ -2123,13 +2201,13 @@ impl ProjectRuntimeManager {
         let mut bindings = Vec::new();
         {
             let state = self.host.state.lock().unwrap();
-            if let Some(binding) = appserver_thread_binding(&state, thread_id)? {
+            if let Some(binding) = appserver_thread_binding(&state, session_id, thread_id)? {
                 bindings.push(binding.clone());
             }
         }
         for runtime in runtimes {
             let state = runtime.state.lock().unwrap();
-            if let Some(binding) = appserver_thread_binding(&state, thread_id)? {
+            if let Some(binding) = appserver_thread_binding(&state, session_id, thread_id)? {
                 if !bindings.iter().any(|existing| existing == binding) {
                     bindings.push(binding.clone());
                 }
@@ -2162,7 +2240,9 @@ impl ProjectRuntimeManager {
         let Some(candidate) = candidates.appserver.as_ref() else {
             return Ok(());
         };
-        let Some(binding) = self.native_thread_binding(&candidate.thread_id)? else {
+        let Some(binding) =
+            self.native_thread_binding(&candidate.session_id, &candidate.thread_id)?
+        else {
             return Ok(());
         };
         if binding.agent_id.as_str() != worker_id {
@@ -2208,23 +2288,52 @@ impl ProjectRuntimeManager {
 
     fn resolve_route_by_native_thread(
         &self,
+        session_id: &str,
         native_thread_id: &str,
+        identity_cwd: &str,
     ) -> Result<RouteResolution, String> {
+        let session_id = crate::identity::SessionId::new(session_id.to_owned())
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
         let native_thread_id = NativeThreadId::new(native_thread_id.to_owned())
             .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
-        let binding = self
-            .host
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_current_thread_route(&native_thread_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
-                )
-            })?;
+        let requested_root = std::fs::canonicalize(identity_cwd)
+            .map_err(|error| format!("ROUTE_RESOLVE_INVALID: identity cwd: {error}"))?;
+        let requested_root = requested_root
+            .to_str()
+            .ok_or_else(|| "ROUTE_RESOLVE_INVALID: identity cwd must be valid UTF-8".to_string())?;
+        let binding = {
+            let state = self.host.state.lock().unwrap();
+            if let Some(binding) = state
+                .global
+                .lookup_current_thread_route(&session_id, &native_thread_id)
+                .cloned()
+            {
+                binding
+            } else if let Some(tombstone) = state
+                .global
+                .lookup_current_thread_route_tombstone(&session_id, &native_thread_id)
+            {
+                return Err(format!(
+                    "SESSION_THREAD_BINDING_STALE: old session/thread address ({session_id}, {native_thread_id}) was retired; reboundTo=({}, {})",
+                    tombstone
+                        .rebound_to
+                        .session_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    tombstone
+                        .rebound_to
+                        .native_thread_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                ));
+            } else {
+                return Err(format!(
+                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id} under session {session_id} in {requested_root}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
+                ));
+            }
+        };
         let key = (
             binding.app_scope_id.as_str().to_owned(),
             binding.project_scope.as_str().to_owned(),
@@ -2243,6 +2352,11 @@ impl ProjectRuntimeManager {
             })?;
             (route.storage_root.clone(), runtime)
         };
+        let session_id = binding.session_id.clone().ok_or_else(|| {
+            format!(
+                "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no session id"
+            )
+        })?;
         let registered = runtime
             .state
             .lock()
@@ -2261,6 +2375,43 @@ impl ProjectRuntimeManager {
             ));
         }
         let canonical_root = binding.project_scope.as_str().to_owned();
+        if canonical_root != requested_root {
+            return Err(format!(
+                "ROUTE_RESOLVE_INVALID: App Server thread {native_thread_id} is bound to project root {canonical_root}, not requested cwd {requested_root}"
+            ));
+        }
+        let transport = {
+            let state = runtime.state.lock().unwrap();
+            state
+                .workers
+                .get(registered.agent_id.as_str())
+                .and_then(selected_transport_for_worker)
+                .ok_or_else(|| {
+                    format!(
+                        "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no selected transport"
+                    )
+                })?
+        };
+        let candidate = crate::proto::AppServerCandidate {
+            endpoint: transport.endpoint.ok_or_else(|| {
+                format!(
+                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no endpoint"
+                )
+            })?,
+            namespace: transport.namespace.ok_or_else(|| {
+                format!(
+                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no namespace"
+                )
+            })?,
+            session_id: session_id.as_str().to_owned(),
+            thread_id: native_thread_id.as_str().to_owned(),
+            cwd: requested_root.to_owned(),
+        };
+        (runtime.appserver_candidate_check)(&candidate).map_err(|error| {
+            format!(
+                "ROUTE_RESOLVE_INVALID: App Server thread {native_thread_id} identity verification failed: {error}"
+            )
+        })?;
         let route = RouteResolution {
             app_scope_id: binding.app_scope_id,
             project_scope: binding.project_scope,
@@ -2269,6 +2420,7 @@ impl ProjectRuntimeManager {
             agent_id: binding.agent_id,
             binding_id: binding.binding_id,
             endpoint_generation: binding.endpoint_generation,
+            session_id,
             native_thread_id: binding.native_thread_id.ok_or_else(|| {
                 "ROUTE_RESOLVE_INVALID: current route state has no native App Server thread"
                     .to_owned()
@@ -2285,14 +2437,123 @@ impl ProjectRuntimeManager {
         runtime: &Arc<Server>,
         context: &ProjectContext,
         worker_id: &str,
+        previous_binding: Option<&RuntimeBinding>,
+        previous_grant: Option<&crate::server::global_state::MasterGrant>,
+        previous_worker: Option<&WorkerRec>,
+        previous_subscriptions: &[NotificationSubscription],
     ) -> Result<(), String> {
-        commit_current_thread_route_for_runtime(
-            self.host.as_ref(),
-            runtime.as_ref(),
-            worker_id,
-            context.project_scope.as_str(),
-            Some(&context.app_scope_id),
-        )
+        let route_scope = RouteScope {
+            app_scope_id: context.app_scope_id.clone(),
+            project_scope_id: context.project_scope.clone(),
+        };
+        let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+            .map_err(|error| format!("ROUTE_TRANSITION_INVALID: {error}"))?;
+        let binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&route_scope, &binding_id)
+            .filter(|binding| binding.agent_id.as_str() == worker_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no matching runtime binding"
+                )
+            })?;
+        let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
+            format!(
+                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
+            )
+        })?;
+        let session_id = binding.session_id.as_ref().ok_or_else(|| {
+            format!(
+                "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no session id"
+            )
+        })?;
+        let current = self
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(session_id, native_thread_id)
+            .cloned();
+        if current.as_ref() == Some(&binding) {
+            return Ok(());
+        }
+        if let Some(existing) = current {
+            if existing.agent_id != binding.agent_id
+                || existing.route_scope() != binding.route_scope()
+            {
+                return Err(format!(
+                    "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
+                    native_thread_id, existing.agent_id
+                ));
+            }
+        }
+        #[cfg(test)]
+        let injected_publish_error = self
+            .fail_current_thread_route_publish
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            .then(|| "injected current thread route publication failure".to_string());
+        #[cfg(not(test))]
+        let injected_publish_error: Option<String> = None;
+        enum RoutePublishError {
+            Definite(String),
+            Ambiguous(String),
+        }
+        let publish_result = match injected_publish_error {
+            Some(error) => Err(RoutePublishError::Definite(error)),
+            None => self
+                .host
+                .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+                    binding: binding.clone(),
+                }])
+                .map(|_| ())
+                .map_err(|error| match error {
+                    notification_contract::JournalError::Append(error) => {
+                        RoutePublishError::Ambiguous(error)
+                    }
+                    notification_contract::JournalError::Flush(error) => {
+                        RoutePublishError::Ambiguous(error)
+                    }
+                    notification_contract::JournalError::Replay(error) => {
+                        RoutePublishError::Ambiguous(error)
+                    }
+                    notification_contract::JournalError::Reducer(error) => {
+                        RoutePublishError::Ambiguous(error)
+                    }
+                    notification_contract::JournalError::InvalidCommand(error) => {
+                        RoutePublishError::Ambiguous(error)
+                    }
+                }),
+        };
+        if let Err(RoutePublishError::Definite(error)) = publish_result {
+            let rollback = runtime
+                .commit_checked(&[Event::GlobalRuntimeBindingRollback {
+                    failed: binding,
+                    previous: previous_binding.cloned(),
+                    previous_grant: previous_grant.cloned(),
+                    previous_worker: previous_worker.cloned(),
+                    previous_subscriptions: previous_subscriptions.to_vec(),
+                }])
+                .map_err(|rollback_error| {
+                    format!(
+                        "ROUTE_TRANSITION_DURABILITY_FAILED: {error}; rollback journal commit failed: {rollback_error}"
+                    )
+                });
+            rollback?;
+            return Err(format!(
+                "ROUTE_TRANSITION_DURABILITY_FAILED: {error}; previous worker transport, notification subscriptions, runtime binding, and master grant were restored"
+            ));
+        }
+        if let Err(RoutePublishError::Ambiguous(error)) = publish_result {
+            return Err(format!(
+                "ROUTE_TRANSITION_DURABILITY_FAILED: host journal publication outcome is unknown: {error}; registration route may already be durable; preserve both journals and restart the affected daemon from the reviewed AppSDK main binary before retrying; do not edit routes or bindings manually"
+            ));
+        }
+        Ok(())
     }
 
     fn finalize_registration(
@@ -2300,15 +2561,75 @@ impl ProjectRuntimeManager {
         runtime: Arc<Server>,
         context: &ProjectContext,
         worker_id: Option<&str>,
+        previous_binding: Option<RuntimeBinding>,
+        previous_grant: Option<crate::server::global_state::MasterGrant>,
+        previous_worker: Option<WorkerRec>,
+        previous_subscriptions: Vec<NotificationSubscription>,
         response: Resp,
     ) -> (Arc<Server>, Resp) {
         let Some(worker_id) = worker_id.filter(|_| response.ok) else {
             return (runtime, response);
         };
-        match self.commit_current_thread_route(&runtime, context, worker_id) {
+        match self.commit_current_thread_route(
+            &runtime,
+            context,
+            worker_id,
+            previous_binding.as_ref(),
+            previous_grant.as_ref(),
+            previous_worker.as_ref(),
+            &previous_subscriptions,
+        ) {
             Ok(()) => (runtime, response),
-            Err(error) => (runtime, Resp::err(error)),
+            Err(error) => (
+                runtime,
+                Resp::err(format!(
+                    "{error}; recovery: preserve the project and host journals, then restart the affected daemon from the reviewed AppSDK main binary so durable state can be replayed; do not edit routes or bindings manually"
+                )),
+            ),
         }
+    }
+
+    fn registration_rollback_state(
+        &self,
+        runtime: &Arc<Server>,
+        context: &ProjectContext,
+        worker_id: &str,
+    ) -> Result<
+        (
+            Option<RuntimeBinding>,
+            Option<crate::server::global_state::MasterGrant>,
+            Option<WorkerRec>,
+            Vec<NotificationSubscription>,
+        ),
+        String,
+    > {
+        let route_scope = RouteScope {
+            app_scope_id: context.app_scope_id.clone(),
+            project_scope_id: context.project_scope.clone(),
+        };
+        let binding_id = BindingId::new(sanitize_identifier(&format!("binding-{worker_id}")))
+            .map_err(|error| format!("ROUTE_TRANSITION_INVALID: {error}"))?;
+        let state = runtime.state.lock().unwrap();
+        let mut previous_subscriptions = state
+            .notification_subscriptions
+            .values()
+            .filter(|subscription| subscription.worker_id == worker_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        previous_subscriptions.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok((
+            state
+                .global
+                .lookup_binding_for(&route_scope, &binding_id)
+                .filter(|binding| binding.agent_id.as_str() == worker_id)
+                .cloned(),
+            state
+                .global
+                .lookup_master_grant_for(&route_scope, &binding_id)
+                .cloned(),
+            state.workers.get(worker_id).cloned(),
+            previous_subscriptions,
+        ))
     }
 
     fn route_key(context: &ProjectContext) -> RouteKey {
@@ -2790,35 +3111,14 @@ impl ProjectRuntimeManager {
                 .as_ref()
                 .map(|runtime| (runtime.clone(), false))
         }) {
-            let response =
-                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
-                    Resp::err(error)
-                } else {
-                    dispatch_with_route_context(
-                        &runtime,
-                        req,
-                        Some(context.clone()),
-                        Some(self.host.as_ref()),
-                    )
-                };
-            return self.finalize_registration(
-                runtime,
-                &context,
-                register_worker_id.as_deref(),
-                response,
-            );
-        }
-
-        let pending_route = self
-            .routes
-            .lock()
-            .unwrap()
-            .get(&key)
-            .map(|route| (route.root.clone(), route.storage_root.clone()));
-        if let Some((root, storage_root)) = pending_route {
-            let runtime = match self.ensure_runtime(&key, &root, &storage_root) {
-                Ok(runtime) => runtime,
-                Err(error) => return (self.host.clone(), Resp::err(error)),
+            let rollback_state = match register_worker_id.as_deref() {
+                Some(worker_id) => {
+                    match self.registration_rollback_state(&runtime, &context, worker_id) {
+                        Ok(state) => state,
+                        Err(error) => return (runtime, Resp::err(error)),
+                    }
+                }
+                None => (None, None, None, Vec::new()),
             };
             let response =
                 if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
@@ -2835,6 +3135,53 @@ impl ProjectRuntimeManager {
                 runtime,
                 &context,
                 register_worker_id.as_deref(),
+                rollback_state.0,
+                rollback_state.1,
+                rollback_state.2,
+                rollback_state.3,
+                response,
+            );
+        }
+
+        let pending_route = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|route| (route.root.clone(), route.storage_root.clone()));
+        if let Some((root, storage_root)) = pending_route {
+            let runtime = match self.ensure_runtime(&key, &root, &storage_root) {
+                Ok(runtime) => runtime,
+                Err(error) => return (self.host.clone(), Resp::err(error)),
+            };
+            let rollback_state = match register_worker_id.as_deref() {
+                Some(worker_id) => {
+                    match self.registration_rollback_state(&runtime, &context, worker_id) {
+                        Ok(state) => state,
+                        Err(error) => return (runtime, Resp::err(error)),
+                    }
+                }
+                None => (None, None, None, Vec::new()),
+            };
+            let response =
+                if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
+                    Resp::err(error)
+                } else {
+                    dispatch_with_route_context(
+                        &runtime,
+                        req,
+                        Some(context.clone()),
+                        Some(self.host.as_ref()),
+                    )
+                };
+            return self.finalize_registration(
+                runtime,
+                &context,
+                register_worker_id.as_deref(),
+                rollback_state.0,
+                rollback_state.1,
+                rollback_state.2,
+                rollback_state.3,
                 response,
             );
         }
@@ -2851,6 +3198,15 @@ impl ProjectRuntimeManager {
                     return (self.host.clone(), Resp::err(error));
                 }
             }
+            let rollback_state = match register_worker_id.as_deref() {
+                Some(worker_id) => {
+                    match self.registration_rollback_state(&self.host, &context, worker_id) {
+                        Ok(state) => state,
+                        Err(error) => return (self.host.clone(), Resp::err(error)),
+                    }
+                }
+                None => (None, None, None, Vec::new()),
+            };
             let response =
                 if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
                     Resp::err(error)
@@ -2872,6 +3228,10 @@ impl ProjectRuntimeManager {
                 self.host.clone(),
                 &context,
                 register_worker_id.as_deref(),
+                rollback_state.0,
+                rollback_state.1,
+                rollback_state.2,
+                rollback_state.3,
                 response,
             );
         }
@@ -2905,6 +3265,15 @@ impl ProjectRuntimeManager {
             Ok(runtime) => runtime,
             Err(error) => return (self.host.clone(), Resp::err(error)),
         };
+        let rollback_state = match register_worker_id.as_deref() {
+            Some(worker_id) => {
+                match self.registration_rollback_state(&runtime, &context, worker_id) {
+                    Ok(state) => state,
+                    Err(error) => return (runtime, Resp::err(error)),
+                }
+            }
+            None => (None, None, None, Vec::new()),
+        };
         let response = if let Err(error) = validate_request_context(&runtime, &req, Some(&context))
         {
             Resp::err(error)
@@ -2916,7 +3285,16 @@ impl ProjectRuntimeManager {
                 Some(self.host.as_ref()),
             )
         };
-        self.finalize_registration(runtime, &context, register_worker_id.as_deref(), response)
+        self.finalize_registration(
+            runtime,
+            &context,
+            register_worker_id.as_deref(),
+            rollback_state.0,
+            rollback_state.1,
+            rollback_state.2,
+            rollback_state.3,
+            response,
+        )
     }
 }
 
@@ -3798,6 +4176,7 @@ mod notification_batch_tests {
                         kind: TransportKind::AppServer,
                         endpoint: Some(candidate.endpoint.clone()),
                         namespace: Some(candidate.namespace.clone()),
+                        session_id: Some(candidate.session_id.clone()),
                         thread_id: Some(candidate.thread_id.clone()),
                         capabilities: vec!["send_message_to_thread".into()],
                         self_check: "test appserver".into(),
@@ -3838,6 +4217,7 @@ mod notification_batch_tests {
                         kind: TransportKind::AppServer,
                         endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
                         namespace: Some("codex_tui".into()),
+                        session_id: Some(format!("session-{worker_id}")),
                         thread_id: Some(format!("thread-{worker_id}")),
                         capabilities: vec!["send_message_to_thread".into()],
                         self_check: "test appserver".into(),
@@ -3994,6 +4374,7 @@ mod notification_batch_tests {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-thread-recipient".into()),
             thread_id: Some("thread-recipient".into()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
@@ -5178,12 +5559,17 @@ pub(crate) fn commit_current_thread_route_for_runtime(
             "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no native App Server thread"
         )
     })?;
+    let session_id = binding.session_id.as_ref().ok_or_else(|| {
+        format!(
+            "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no session id"
+        )
+    })?;
     if route_owner
         .state
         .lock()
         .unwrap()
         .global
-        .lookup_current_thread_route(native_thread_id)
+        .lookup_current_thread_route(session_id, native_thread_id)
         == Some(&binding)
     {
         return Ok(());
@@ -5283,7 +5669,7 @@ fn handle_register_with_app_scope_inner(
     recover_existing: bool,
 ) -> Resp {
     let candidates = candidates.unwrap_or_default();
-    let selected = match validate_transport_candidates(server, &worker_id, &candidates) {
+    let selected = match validate_transport_candidates(server, &worker_id, &candidates, &cwd) {
         Ok(selected) => selected,
         Err(error) => return Resp::err(error),
     };
@@ -5307,27 +5693,44 @@ fn handle_register_with_app_scope_inner(
                 .map(|route| route.app_scope_id.clone())
         });
         // Transport is a server-selected capability, not a permanent worker
-        // identity. Re-registering the *same* App Server thread is idempotent
-        // and keeps the current generation. A *different* verified thread is a
-        // recovery: it must advance the endpoint generation so every context
-        // bound to the old thread is fenced.
-        let existing_thread = existing_route_scope.as_ref().and_then(|route| {
+        // identity. Re-registering the same session/thread/cwd key is
+        // idempotent and keeps the current generation. Any changed key is a
+        // rebind: it advances the endpoint generation so every context bound
+        // to the old address is fenced.
+        let existing_key = existing_route_scope.as_ref().and_then(|route| {
             st.global
                 .lookup_binding_for(
                     route,
                     &BindingId::new(sanitize_identifier(&format!("binding-{worker_id}"))).ok()?,
                 )
-                .and_then(|binding| binding.native_thread_id.as_ref())
-                .map(|thread| thread.as_str().to_owned())
+                .map(|binding| {
+                    (
+                        binding
+                            .session_id
+                            .as_ref()
+                            .map(|session| session.as_str().to_owned()),
+                        binding
+                            .native_thread_id
+                            .as_ref()
+                            .map(|thread| thread.as_str().to_owned()),
+                    )
+                })
         });
-        let same_thread = existing_thread.as_deref() == selected.thread_id.as_deref();
+        let same_runtime_key = existing_key.as_ref().is_some_and(|(session, thread)| {
+            session.as_deref() == selected.session_id.as_deref()
+                && thread.as_deref() == selected.thread_id.as_deref()
+        });
+        let same_thread = existing_key
+            .as_ref()
+            .and_then(|(_, thread)| thread.as_deref())
+            == selected.thread_id.as_deref();
         if existing.token != token && (!recover_existing || !same_thread) {
             return Resp::err(format!(
                 "worker_id {} already registered by another token",
                 worker_id
             ));
         }
-        let reuse_existing = !recover_existing && same_thread;
+        let reuse_existing = !recover_existing && same_runtime_key;
         drop(st);
         let mut resp = register_typed(
             server,
@@ -5634,15 +6037,20 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
     };
-    let (Some(endpoint), Some(namespace), Some(thread_id)) =
-        (transport.endpoint, transport.namespace, transport.thread_id)
-    else {
+    let (Some(endpoint), Some(namespace), Some(session_id), Some(thread_id)) = (
+        transport.endpoint,
+        transport.namespace,
+        transport.session_id,
+        transport.thread_id,
+    ) else {
         return IdentityPresence::Missing;
     };
     let candidate = crate::proto::AppServerCandidate {
         endpoint,
         namespace,
+        session_id,
         thread_id,
+        cwd: worker.cwd.clone(),
     };
     match (server.appserver_candidate_check)(&candidate) {
         Ok(_) => IdentityPresence::Present,
@@ -7102,6 +7510,7 @@ fn handle_authenticated_send_with_app_scope(
                 appserver_id: binding.app_scope_id.clone(),
                 endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
             };
             (runtime, binding.route_scope())
@@ -7147,6 +7556,7 @@ fn handle_authenticated_send_with_app_scope(
                 appserver_id: binding.app_scope_id.clone(),
                 endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
             };
             (runtime, registered_scope)
@@ -9501,8 +9911,9 @@ fn validate_cli_register_rebind(
                         runtime.agent_id == binding.agent_id
                             && runtime.native_thread_id == binding.native_thread_id
                     });
-            let candidate_owner = appserver_thread_binding(&state, &candidate.thread_id)
-                .map(|binding| binding.map(|binding| binding.agent_id.as_str()))?;
+            let candidate_owner =
+                appserver_thread_binding(&state, &candidate.session_id, &candidate.thread_id)
+                    .map(|binding| binding.map(|binding| binding.agent_id.as_str()))?;
             if candidate_owner != Some(worker_id) || !same_runtime_thread {
                 return Err(
                     "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
@@ -9541,6 +9952,7 @@ fn validate_cli_register_rebind(
                 appserver_id: binding.app_scope_id.clone(),
                 endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
             };
             if persisted.worker_id != worker_id
@@ -9555,7 +9967,7 @@ fn validate_cli_register_rebind(
             crate::identity::validate_binding(&registered_runtime, persisted_runtime).map_err(
                 |error| {
                     format!(
-                        "RUNTIME_BINDING_REJECTED: persisted identity runtime does not match the registered binding: {error}"
+                        "SESSION_THREAD_BINDING_MISMATCH: persisted identity runtime does not match the registered binding: {error}; preserve the registered binding, obtain the verified host session/thread pair, and explicitly rebind the same identity and runtime; do not edit or infer the binding"
                     )
                 },
             )?;
@@ -9570,7 +9982,8 @@ fn validate_cli_register_rebind(
             "RUNTIME_BINDING_REJECTED: CLI rebind requires an App Server candidate".to_owned()
         })?;
     let state = server.state.lock().unwrap();
-    let candidate_binding = appserver_thread_binding(&state, &candidate.thread_id)?;
+    let candidate_binding =
+        appserver_thread_binding(&state, &candidate.session_id, &candidate.thread_id)?;
     if orphan_recovery {
         let Some(candidate_binding) = candidate_binding else {
             return Err(
@@ -9669,13 +10082,17 @@ fn project_route_actor(
         appserver_id: binding.app_scope_id.clone(),
         endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id.clone(),
+        session_id: binding.session_id.clone(),
         native_thread_id: binding.native_thread_id.clone(),
     };
     registered
         .validate()
         .map_err(|error| Resp::err(format!("RUNTIME_BINDING_REJECTED: {error}")))?;
-    crate::identity::validate_binding(&registered, runtime)
-        .map_err(|error| Resp::err(format!("RUNTIME_BINDING_REJECTED: {error}")))?;
+    crate::identity::validate_binding(&registered, runtime).map_err(|error| {
+        Resp::err(format!(
+            "SESSION_THREAD_BINDING_MISMATCH: {error}; preserve the registered binding, obtain the verified host session/thread pair, and explicitly rebind the same identity and runtime; do not edit or infer the binding"
+        ))
+    })?;
     Ok(worker)
 }
 
@@ -10484,7 +10901,12 @@ fn validate_wire_route_principals(
         } = req
         {
             if let Some(candidate) = candidates.appserver.as_ref() {
-                if let Some(binding) = current_thread_binding(&state, &candidate.thread_id)? {
+                if let Some(binding) = current_thread_binding(
+                    &state,
+                    &crate::identity::SessionId::new(candidate.session_id.clone())
+                        .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?,
+                    &candidate.thread_id,
+                )? {
                     if binding.agent_id.as_str() != worker_id {
                         return Err(format!(
                             "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
@@ -10671,7 +11093,23 @@ fn validate_project_registration_cwd(cwd: &str, expected_root: &Path) -> Result<
             expected_root.display()
         ));
     }
+    reject_linked_worktree_registration(expected_root)?;
     validate_register_cwd(cwd, expected_root)
+}
+
+fn reject_linked_worktree_registration(root: &Path) -> Result<(), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("PROJECT_SCOPE_INVALID: registration root: {error}"))?;
+    if crate::scope::is_linked_worktree_root(&root)
+        .map_err(|error| format!("PROJECT_SCOPE_INVALID: {error}"))?
+    {
+        return Err(format!(
+            "PROJECT_SCOPE_INVALID: linked worktree {} cannot own Collab identity; register the canonical main checkout",
+            root.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Admit the explicit CLI host operator route independently of project
@@ -10792,6 +11230,7 @@ mod host_route_registry_tests {
             kind: TransportKind::AppServer,
             endpoint: Some(candidate.endpoint.clone()),
             namespace: Some(candidate.namespace.clone()),
+            session_id: Some(candidate.session_id.clone()),
             thread_id: Some(candidate.thread_id.clone()),
             capabilities: vec![
                 "session_status".into(),
@@ -10807,9 +11246,30 @@ mod host_route_registry_tests {
             appserver: Some(AppServerCandidate {
                 endpoint: format!("unix:///tmp/collab-{thread_id}.sock"),
                 namespace: "codex_tui".into(),
+                session_id: format!("session-{thread_id}"),
                 thread_id: thread_id.into(),
+                cwd: env!("CARGO_MANIFEST_DIR").into(),
             }),
         })
+    }
+
+    fn test_selected_transport(thread_id: &str) -> SelectedTransport {
+        let candidate = test_candidates(thread_id)
+            .and_then(|candidates| candidates.appserver)
+            .expect("appserver candidate");
+        SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some(candidate.endpoint),
+            namespace: Some(candidate.namespace),
+            session_id: Some(candidate.session_id),
+            thread_id: Some(candidate.thread_id),
+            capabilities: vec![
+                "session_status".into(),
+                "read_thread".into(),
+                "send_message_to_thread".into(),
+            ],
+            self_check: "test selected App Server transport".into(),
+        }
     }
 
     fn context_with_app(root: &Path, app_scope: &str) -> ProjectContext {
@@ -10879,6 +11339,7 @@ mod host_route_registry_tests {
             appserver_id: binding.app_scope_id,
             endpoint_generation: binding.endpoint_generation,
             binding_id: binding.binding_id,
+            session_id: binding.session_id,
             native_thread_id: binding.native_thread_id,
         }
     }
@@ -10904,7 +11365,9 @@ mod host_route_registry_tests {
         let appserver = AppServerCandidate {
             endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
             namespace: "codex_tui".into(),
+            session_id: "session-thread-1".into(),
             thread_id: "thread-1".into(),
+            cwd: root.display().to_string(),
         };
         let selected = validate_transport_candidates(
             &server,
@@ -10912,6 +11375,7 @@ mod host_route_registry_tests {
             &TransportCandidates {
                 appserver: Some(appserver),
             },
+            root.to_str().unwrap(),
         )
         .unwrap();
         assert_eq!(selected.kind, TransportKind::AppServer);
@@ -10932,9 +11396,12 @@ mod host_route_registry_tests {
                 appserver: Some(AppServerCandidate {
                     endpoint: "unix:///tmp/collab-missing-appserver.sock".into(),
                     namespace: "codex_tui".into(),
+                    session_id: "session-thread-1".into(),
                     thread_id: "thread-1".into(),
+                    cwd: root.display().to_string(),
                 }),
             },
+            root.to_str().unwrap(),
         )
         .unwrap_err();
         assert!(error.starts_with("TRANSPORT_NONE:"), "{error}");
@@ -10951,9 +11418,106 @@ mod host_route_registry_tests {
             &server,
             "worker-1",
             &TransportCandidates { appserver: None },
+            root.to_str().unwrap(),
         )
         .unwrap_err();
         assert!(error.starts_with("TRANSPORT_NONE:"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registration_rejects_a_cwd_that_is_not_the_server_project_root() {
+        let (mut server, root, _) = test_server();
+        let other = root.with_file_name(format!(
+            "{}-registration-other",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other).unwrap();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let error = validate_transport_candidates(
+            &server,
+            "worker-1",
+            &TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
+                    namespace: "codex_tui".into(),
+                    session_id: "session-thread-1".into(),
+                    thread_id: "thread-1".into(),
+                    cwd: other.display().to_string(),
+                }),
+            },
+            other.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("RUNTIME_BINDING_REJECTED:"), "{error}");
+        assert!(
+            error.contains("does not match App Server project root"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
+    fn registration_rejects_a_linked_worktree_root() {
+        let id = TEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "collab-worktree-registration-{id}-{}",
+            std::process::id()
+        ));
+        let canonical = root.join("project");
+        let linked = canonical.join("playground/task-a");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::create_dir_all(canonical.join(".agent-collab")).unwrap();
+
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&canonical)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Collab Test",
+                "-c",
+                "user.email=collab-test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "initial",
+            ])
+            .current_dir(&canonical)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        let worktree = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task-a",
+                linked.to_str().unwrap(),
+                "main",
+            ])
+            .current_dir(&canonical)
+            .status()
+            .unwrap();
+        assert!(worktree.success());
+
+        let canonical = canonical.canonicalize().unwrap();
+        let linked = linked.canonicalize().unwrap();
+        std::fs::create_dir_all(linked.join(".agent-collab")).unwrap();
+
+        validate_project_registration_cwd(canonical.to_str().unwrap(), canonical.as_path())
+            .unwrap();
+        let error = validate_project_registration_cwd(linked.to_str().unwrap(), linked.as_path())
+            .unwrap_err();
+        assert!(error.starts_with("PROJECT_SCOPE_INVALID:"), "{error}");
+        assert!(error.contains("linked worktree"), "{error}");
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -10972,7 +11536,9 @@ mod host_route_registry_tests {
                 appserver: Some(AppServerCandidate {
                     endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
                     namespace: "codex_tui".into(),
+                    session_id: "session-thread-1".into(),
                     thread_id: "thread-1".into(),
+                    cwd: root.display().to_string(),
                 }),
             }),
         );
@@ -10990,7 +11556,9 @@ mod host_route_registry_tests {
                 appserver: Some(AppServerCandidate {
                     endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
                     namespace: "codex_tui".into(),
+                    session_id: "session-thread-1".into(),
                     thread_id: "thread-1".into(),
+                    cwd: root.display().to_string(),
                 }),
             }),
         );
@@ -11025,7 +11593,9 @@ mod host_route_registry_tests {
                 appserver: Some(AppServerCandidate {
                     endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
                     namespace: "codex_tui".into(),
+                    session_id: "session-thread-1".into(),
                     thread_id: "thread-1".into(),
+                    cwd: root.display().to_string(),
                 }),
             }),
         );
@@ -11128,6 +11698,7 @@ mod host_route_registry_tests {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-thread-current".into()),
             thread_id: Some("thread-current".into()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "server verified".into(),
@@ -11367,13 +11938,14 @@ mod host_route_registry_tests {
         if !registration {
             register_known_project_with_app(&server, &root, "app-route");
         }
-        let binding = RuntimeBinding::new(
+        let binding = RuntimeBinding::new_with_session(
             GlobalState::canonical_project_scope(&root).unwrap(),
             AppServerId::new("app-route").unwrap(),
             AgentId::new("agent-route").unwrap(),
             RuntimeId::new("runtime-route").unwrap(),
             BindingId::new("binding-route").unwrap(),
             9,
+            Some(crate::identity::SessionId::new("session-thread-route").unwrap()),
             Some(NativeThreadId::new("thread-route").unwrap()),
         )
         .unwrap();
@@ -11396,13 +11968,14 @@ mod host_route_registry_tests {
             None,
         );
         register_known_project_with_app(&historical_server, &historical_root, "app-route");
-        let historical_binding = RuntimeBinding::new(
+        let historical_binding = RuntimeBinding::new_with_session(
             GlobalState::canonical_project_scope(&historical_root).unwrap(),
             AppServerId::new("app-route").unwrap(),
             AgentId::new("agent-route").unwrap(),
             RuntimeId::new("runtime-route").unwrap(),
             BindingId::new("binding-route").unwrap(),
             9,
+            Some(crate::identity::SessionId::new("session-thread-route").unwrap()),
             Some(NativeThreadId::new("thread-route").unwrap()),
         )
         .unwrap();
@@ -11419,7 +11992,7 @@ mod host_route_registry_tests {
                 token: "historical-token".into(),
                 cwd: historical_root.to_string_lossy().into_owned(),
                 registered_ms: now_ms(),
-                transport: None,
+                transport: Some(test_selected_transport("thread-route")),
             },
         }]);
         manager.routes.lock().unwrap().insert(
@@ -11439,6 +12012,7 @@ mod host_route_registry_tests {
             appserver_id: binding.app_scope_id.clone(),
             endpoint_generation: binding.endpoint_generation,
             binding_id: binding.binding_id.clone(),
+            session_id: binding.session_id.clone(),
             native_thread_id: binding.native_thread_id.clone(),
         };
         write_global_identity(&host_paths, "agent-route", "token-route", None, &runtime);
@@ -11448,14 +12022,18 @@ mod host_route_registry_tests {
                 token: "token-route".into(),
                 cwd: root.to_string_lossy().into_owned(),
                 registered_ms: now_ms(),
-                transport: None,
+                transport: Some(test_selected_transport("thread-route")),
             },
         }]);
 
         let state_before = mutation_snapshot(&server);
         let journal_before = std::fs::read(&journal_path).unwrap();
         let route = manager
-            .resolve_route_by_native_thread("thread-route")
+            .resolve_route_by_native_thread(
+                "session-thread-route",
+                "thread-route",
+                root.to_str().unwrap(),
+            )
             .unwrap();
         assert_eq!(route.app_scope_id.as_str(), "app-route");
         assert_eq!(
@@ -11482,33 +12060,36 @@ mod host_route_registry_tests {
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         register_known_project_with_app(&server, &root, "app-route");
         let scope = GlobalState::canonical_project_scope(&root).unwrap();
-        let current = RuntimeBinding::new(
+        let current = RuntimeBinding::new_with_session(
             scope.clone(),
             AppServerId::new("app-route").unwrap(),
             AgentId::new("agent-current").unwrap(),
             RuntimeId::new("runtime-current").unwrap(),
             BindingId::new("binding-current").unwrap(),
             1,
+            Some(crate::identity::SessionId::new("session-thread-duplicate").unwrap()),
             Some(NativeThreadId::new("thread-duplicate").unwrap()),
         )
         .unwrap();
-        let duplicate = RuntimeBinding::new(
+        let duplicate = RuntimeBinding::new_with_session(
             scope.clone(),
             AppServerId::new("app-route").unwrap(),
             AgentId::new("agent-a").unwrap(),
             RuntimeId::new("runtime-a").unwrap(),
             BindingId::new("binding-a").unwrap(),
             1,
+            Some(crate::identity::SessionId::new("session-thread-duplicate-a").unwrap()),
             Some(NativeThreadId::new("thread-duplicate").unwrap()),
         )
         .unwrap();
-        let second = RuntimeBinding::new(
+        let second = RuntimeBinding::new_with_session(
             scope,
             AppServerId::new("app-route").unwrap(),
             AgentId::new("agent-b").unwrap(),
             RuntimeId::new("runtime-b").unwrap(),
             BindingId::new("binding-b").unwrap(),
             1,
+            Some(crate::identity::SessionId::new("session-thread-duplicate-b").unwrap()),
             Some(NativeThreadId::new("thread-duplicate").unwrap()),
         )
         .unwrap();
@@ -11540,6 +12121,7 @@ mod host_route_registry_tests {
                 appserver_id: current.app_scope_id.clone(),
                 endpoint_generation: current.endpoint_generation,
                 binding_id: current.binding_id.clone(),
+                session_id: current.session_id.clone(),
                 native_thread_id: current.native_thread_id.clone(),
             },
         );
@@ -11549,12 +12131,16 @@ mod host_route_registry_tests {
                 token: "token-current".into(),
                 cwd: root.to_string_lossy().into_owned(),
                 registered_ms: now_ms(),
-                transport: None,
+                transport: Some(test_selected_transport("thread-duplicate")),
             },
         }]);
 
         let missing = manager
-            .resolve_route_by_native_thread("thread-missing")
+            .resolve_route_by_native_thread(
+                "session-thread-missing",
+                "thread-missing",
+                root.to_str().unwrap(),
+            )
             .unwrap_err();
         assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
         assert!(
@@ -11562,7 +12148,11 @@ mod host_route_registry_tests {
             "{missing}"
         );
         let current = manager
-            .resolve_route_by_native_thread("thread-duplicate")
+            .resolve_route_by_native_thread(
+                "session-thread-duplicate",
+                "thread-duplicate",
+                root.to_str().unwrap(),
+            )
             .unwrap();
         assert_eq!(current.agent_id.as_str(), "agent-current");
         assert_eq!(current.binding_id.as_str(), "binding-current");
@@ -11577,34 +12167,147 @@ mod host_route_registry_tests {
                 appserver_id: AppServerId::new("app-route").unwrap(),
                 endpoint_generation: 1,
                 binding_id: BindingId::new("binding-other").unwrap(),
+                session_id: Some(
+                    crate::identity::SessionId::new("session-thread-duplicate").unwrap(),
+                ),
                 native_thread_id: Some(NativeThreadId::new("thread-duplicate").unwrap()),
             },
         );
         let resolved = manager
-            .resolve_route_by_native_thread("thread-duplicate")
+            .resolve_route_by_native_thread(
+                "session-thread-duplicate",
+                "thread-duplicate",
+                root.to_str().unwrap(),
+            )
             .unwrap();
         assert_eq!(resolved, current);
         for invalid in ["", "thread\ninvalid"] {
-            let error = manager.resolve_route_by_native_thread(invalid).unwrap_err();
+            let error = manager
+                .resolve_route_by_native_thread(
+                    "session-thread-duplicate",
+                    invalid,
+                    root.to_str().unwrap(),
+                )
+                .unwrap_err();
             assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
         }
 
-        let corrupt = RuntimeBinding::new(
+        let corrupt = RuntimeBinding::new_with_session(
             current.project_scope.clone(),
             current.app_scope_id.clone(),
             AgentId::new("agent-corrupt").unwrap(),
             RuntimeId::new("runtime-corrupt").unwrap(),
             BindingId::new("binding-corrupt").unwrap(),
             1,
+            Some(crate::identity::SessionId::new("session-thread-duplicate").unwrap()),
             Some(current.native_thread_id.clone()),
         )
         .unwrap();
         server.commit(&[Event::GlobalCurrentThreadRouteSet { binding: corrupt }]);
         let error = manager
-            .resolve_route_by_native_thread("thread-duplicate")
+            .resolve_route_by_native_thread(
+                "session-thread-duplicate",
+                "thread-duplicate",
+                root.to_str().unwrap(),
+            )
             .unwrap_err();
         assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
         assert!(error.contains("missing runtime binding"), "{error}");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_thread_route_resolution_requires_the_registered_cwd() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let other = root.with_file_name(format!(
+            "{}-other-cwd",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&other).unwrap();
+        let app = "app-cwd-route";
+        let thread = "thread-cwd-route";
+        let session = "session-thread-cwd-route";
+        let (_, registered) = manager.dispatch_sync(
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: "worker-cwd-route".into(),
+                token: "token-worker-cwd-route".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(thread),
+            },
+        );
+        assert!(registered.ok, "{registered:?}");
+
+        let resolved = manager
+            .resolve_route_by_native_thread(session, thread, root.to_str().unwrap())
+            .unwrap();
+        assert_eq!(resolved.agent_id.as_str(), "worker-cwd-route");
+
+        let error = manager
+            .resolve_route_by_native_thread(session, thread, other.to_str().unwrap())
+            .unwrap_err();
+        assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
+        assert!(error.contains("not requested cwd"), "{error}");
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
+    fn native_thread_route_resolution_rejects_a_client_cwd_not_owned_by_the_thread() {
+        let (mut server, root, _) = test_server();
+        let thread_root = root.join("playground/task-a");
+        std::fs::create_dir_all(&thread_root).unwrap();
+        let thread_root = thread_root.canonicalize().unwrap();
+        let root_for_check = root.clone();
+        let reject_route_resolve = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reject_route_resolve_for_check = reject_route_resolve.clone();
+        with_appserver_check(&mut server, move |candidate| {
+            if candidate.thread_id == "thread-cwd-owner"
+                && reject_route_resolve_for_check.load(std::sync::atomic::Ordering::Relaxed)
+                && candidate.cwd != thread_root.to_string_lossy()
+            {
+                return Err(format!(
+                    "thread/read cwd mismatch: expected {}, observed {}",
+                    candidate.cwd,
+                    thread_root.display()
+                ));
+            }
+            Ok(verified_appserver(candidate))
+        });
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = "app-thread-cwd-route";
+        let thread = "thread-cwd-owner";
+        let session = "session-thread-cwd-owner";
+        let (_, registered) = manager.dispatch_sync(
+            Some(context_with_app(&root, app)),
+            Req::Register {
+                worker_id: "worker-cwd-owner".into(),
+                token: "token-worker-cwd-owner".into(),
+                cwd: root.display().to_string(),
+                candidates: Some(TransportCandidates {
+                    appserver: Some(AppServerCandidate {
+                        endpoint: "unix:///tmp/collab-thread-cwd.sock".into(),
+                        namespace: "codex_tui".into(),
+                        session_id: session.into(),
+                        thread_id: thread.into(),
+                        cwd: root_for_check.display().to_string(),
+                    }),
+                }),
+            },
+        );
+        assert!(registered.ok, "{registered:?}");
+        reject_route_resolve.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let error = manager
+            .resolve_route_by_native_thread(session, thread, root.to_str().unwrap())
+            .unwrap_err();
+        assert!(error.starts_with("ROUTE_RESOLVE_INVALID"), "{error}");
+        assert!(error.contains("identity verification failed"), "{error}");
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -11615,13 +12318,14 @@ mod host_route_registry_tests {
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         register_known_project_with_app(&server, &root, "app-wire-route");
-        let binding = RuntimeBinding::new(
+        let binding = RuntimeBinding::new_with_session(
             GlobalState::canonical_project_scope(&root).unwrap(),
             AppServerId::new("app-wire-route").unwrap(),
             AgentId::new("agent-wire-route").unwrap(),
             RuntimeId::new("runtime-wire-route").unwrap(),
             BindingId::new("binding-wire-route").unwrap(),
             3,
+            Some(crate::identity::SessionId::new("session-thread-wire-route").unwrap()),
             Some(NativeThreadId::new("thread-wire-route").unwrap()),
         )
         .unwrap();
@@ -11654,6 +12358,7 @@ mod host_route_registry_tests {
                 appserver_id: binding.app_scope_id.clone(),
                 endpoint_generation: binding.endpoint_generation,
                 binding_id: binding.binding_id.clone(),
+                session_id: binding.session_id.clone(),
                 native_thread_id: binding.native_thread_id.clone(),
             },
         );
@@ -11663,14 +12368,16 @@ mod host_route_registry_tests {
                 token: "token-wire-route".into(),
                 cwd: root.to_string_lossy().into_owned(),
                 registered_ms: now_ms(),
-                transport: None,
+                transport: Some(test_selected_transport("thread-wire-route")),
             },
         }]);
 
         assert!(validate_request_context(
             &server,
             &Req::RouteResolve {
+                session_id: "session-thread-wire-route".into(),
                 native_thread_id: "thread-wire-route".into(),
+                identity_cwd: root.canonicalize().unwrap().to_string_lossy().into_owned(),
             },
             None,
         )
@@ -11681,7 +12388,9 @@ mod host_route_registry_tests {
             manager,
             None,
             Req::RouteResolve {
+                session_id: "session-thread-wire-route".into(),
                 native_thread_id: "thread-wire-route".into(),
+                identity_cwd: root.canonicalize().unwrap().to_string_lossy().into_owned(),
             },
             tokio::sync::watch::channel(false).1,
         )
@@ -11794,7 +12503,11 @@ mod host_route_registry_tests {
         );
 
         let current = manager
-            .resolve_route_by_native_thread(shared_thread)
+            .resolve_route_by_native_thread(
+                &format!("session-{shared_thread}"),
+                shared_thread,
+                project_a.to_str().unwrap(),
+            )
             .unwrap();
         assert_eq!(
             current.project_scope.as_str(),
@@ -11816,7 +12529,11 @@ mod host_route_registry_tests {
         assert!(!rejected.ok, "{rejected:?}");
         assert_eq!(
             manager
-                .resolve_route_by_native_thread(shared_thread)
+                .resolve_route_by_native_thread(
+                    &format!("session-{shared_thread}"),
+                    shared_thread,
+                    project_a.to_str().unwrap(),
+                )
                 .unwrap(),
             current
         );
@@ -11863,7 +12580,11 @@ mod host_route_registry_tests {
         let replayed_manager = ProjectRuntimeManager::new(replayed_host, &host_paths).unwrap();
         assert_eq!(
             replayed_manager
-                .resolve_route_by_native_thread(shared_thread)
+                .resolve_route_by_native_thread(
+                    &format!("session-{shared_thread}"),
+                    shared_thread,
+                    project_a.to_str().unwrap(),
+                )
                 .unwrap(),
             current
         );
@@ -11908,14 +12629,182 @@ mod host_route_registry_tests {
         assert!(rebound.ok, "{rebound:?}");
 
         let old = manager
-            .resolve_route_by_native_thread(shared_thread)
+            .resolve_route_by_native_thread(
+                &format!("session-{shared_thread}"),
+                shared_thread,
+                root.to_str().unwrap(),
+            )
             .unwrap_err();
-        assert!(old.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{old}");
+        assert!(old.starts_with("SESSION_THREAD_BINDING_STALE"), "{old}");
+        assert!(
+            old.contains("reboundTo=(session-thread-same-worker-new"),
+            "{old}"
+        );
         let current = manager
-            .resolve_route_by_native_thread("thread-same-worker-new")
+            .resolve_route_by_native_thread(
+                "session-thread-same-worker-new",
+                "thread-same-worker-new",
+                root.to_str().unwrap(),
+            )
             .unwrap();
         assert_eq!(current.agent_id.as_str(), worker_id);
         assert_eq!(current.native_thread_id.as_str(), "thread-same-worker-new");
+        let replayed_host = replay(&root).unwrap();
+        let replayed_old = replayed_host
+            .global
+            .lookup_current_thread_route_tombstone(
+                &crate::identity::SessionId::new(format!("session-{shared_thread}")).unwrap(),
+                &NativeThreadId::new(shared_thread).unwrap(),
+            )
+            .expect("daemon replay must retain the old route tombstone");
+        assert_eq!(
+            replayed_old
+                .rebound_to
+                .session_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "session-thread-same-worker-new"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_thread_session_rotation_rebinds_generation_and_fences_old_pair() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker_id = "same-thread-session-worker";
+        let token = "token-same-thread-session-worker";
+        let context = context_with_app(&root, app);
+        let shared_thread = "thread-same-session-worker";
+        let candidates = |session_id: &str| {
+            Some(TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-same-thread-session.sock".into(),
+                    namespace: "codex_tui".into(),
+                    session_id: session_id.into(),
+                    thread_id: shared_thread.into(),
+                    cwd: root.display().to_string(),
+                }),
+            })
+        };
+
+        let (_, first) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: candidates("session-same-thread-old"),
+            },
+        );
+        assert!(first.ok, "{first:?}");
+        let previous = runtime_for_registered(&server, &root, worker_id, app);
+
+        let (_, rebound) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &previous)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: candidates("session-same-thread-new"),
+            },
+        );
+        assert!(rebound.ok, "{rebound:?}");
+        assert_eq!(rebound.data["recovered"], true);
+        let current = runtime_for_registered(&server, &root, worker_id, app);
+        assert_eq!(
+            current.endpoint_generation,
+            previous.endpoint_generation + 1
+        );
+        assert_eq!(
+            current.session_id.as_ref().unwrap().as_str(),
+            "session-same-thread-new"
+        );
+        assert_eq!(
+            current.native_thread_id.as_ref().unwrap().as_str(),
+            shared_thread
+        );
+        assert_eq!(current.runtime_id, previous.runtime_id);
+
+        let old = manager
+            .resolve_route_by_native_thread(
+                "session-same-thread-old",
+                shared_thread,
+                root.to_str().unwrap(),
+            )
+            .unwrap_err();
+        assert!(old.starts_with("SESSION_THREAD_BINDING_STALE"), "{old}");
+        assert!(old.contains("reboundTo=(session-same-thread-new"), "{old}");
+        let resolved = manager
+            .resolve_route_by_native_thread(
+                "session-same-thread-new",
+                shared_thread,
+                root.to_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(resolved.agent_id.as_str(), worker_id);
+        assert_eq!(resolved.endpoint_generation, current.endpoint_generation);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn distinct_sessions_can_share_one_native_thread_without_overwriting_routes() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let context = context_with_app(&root, app);
+        let shared_thread = "thread-session-pair-worker";
+        let candidates = |session_id: &str| {
+            Some(TransportCandidates {
+                appserver: Some(AppServerCandidate {
+                    endpoint: "unix:///tmp/collab-session-pair.sock".into(),
+                    namespace: "codex_tui".into(),
+                    session_id: session_id.into(),
+                    thread_id: shared_thread.into(),
+                    cwd: root.display().to_string(),
+                }),
+            })
+        };
+
+        for (worker_id, token, session_id) in [
+            (
+                "session-pair-worker-a",
+                "token-session-pair-worker-a",
+                "session-pair-a",
+            ),
+            (
+                "session-pair-worker-b",
+                "token-session-pair-worker-b",
+                "session-pair-b",
+            ),
+        ] {
+            let (_, response) = manager.dispatch_sync(
+                Some(context.clone()),
+                Req::Register {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    cwd: root.display().to_string(),
+                    candidates: candidates(session_id),
+                },
+            );
+            assert!(response.ok, "{response:?}");
+        }
+
+        let first = manager
+            .resolve_route_by_native_thread("session-pair-a", shared_thread, root.to_str().unwrap())
+            .unwrap();
+        let second = manager
+            .resolve_route_by_native_thread("session-pair-b", shared_thread, root.to_str().unwrap())
+            .unwrap();
+        assert_eq!(first.agent_id.as_str(), "session-pair-worker-a");
+        assert_eq!(second.agent_id.as_str(), "session-pair-worker-b");
+        assert_ne!(first.binding_id, second.binding_id);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -11946,11 +12835,14 @@ mod host_route_registry_tests {
             .unwrap()
             .global
             .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-host-route-failure-old").unwrap(),
                 &NativeThreadId::new("thread-host-route-failure-old").unwrap(),
             )
             .cloned()
             .unwrap();
-        inject_current_thread_route_journal_fault();
+        manager
+            .fail_current_thread_route_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let (_, response) = manager.dispatch_sync(
             Some(context_with_runtime(
@@ -11962,6 +12854,7 @@ mod host_route_registry_tests {
                     appserver_id: binding.app_scope_id.clone(),
                     endpoint_generation: binding.endpoint_generation,
                     binding_id: binding.binding_id.clone(),
+                    session_id: binding.session_id.clone(),
                     native_thread_id: binding.native_thread_id.clone(),
                 },
             )),
@@ -11988,6 +12881,8 @@ mod host_route_registry_tests {
                 .unwrap()
                 .global
                 .lookup_current_thread_route(
+                    &crate::identity::SessionId::new("session-thread-host-route-failure-old",)
+                        .unwrap(),
                     &NativeThreadId::new("thread-host-route-failure-old").unwrap()
                 )
                 .map(|binding| binding.native_thread_id.as_ref().unwrap().as_str()),
@@ -11995,6 +12890,423 @@ mod host_route_registry_tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_first_registration_route_commit_removes_unpublished_worker() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = "first-route-compensation-app";
+        let context = context_with_app(&root, app);
+        let worker_id = "first-route-compensation-worker";
+        let token = "token-first-route-compensation-worker";
+        manager
+            .fail_current_thread_route_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let (_, response) = manager.dispatch_sync(
+            Some(context),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-first-route-compensation"),
+            },
+        );
+        assert!(!response.ok, "{response:?}");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:")),
+            "{response:?}"
+        );
+        {
+            let state = server.state.lock().unwrap();
+            assert!(!state.workers.contains_key(worker_id));
+            assert!(state
+                .notification_subscriptions
+                .values()
+                .all(|subscription| subscription.worker_id != worker_id));
+            assert!(state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+                .all(|binding| binding.agent_id.as_str() != worker_id));
+            assert!(state
+                .global
+                .current_thread_routes
+                .values()
+                .all(|binding| binding.agent_id.as_str() != worker_id));
+        }
+
+        drop(manager);
+        let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let missing = replayed
+            .resolve_route_by_native_thread(
+                "session-thread-first-route-compensation",
+                "thread-first-route-compensation",
+                root.to_str().unwrap(),
+            )
+            .unwrap_err();
+        assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
+        let replayed_state = replayed.host.state.lock().unwrap();
+        assert!(!replayed_state.workers.contains_key(worker_id));
+        assert!(replayed_state
+            .notification_subscriptions
+            .values()
+            .all(|subscription| subscription.worker_id != worker_id));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_registration_route_commit_is_explicit_and_replay_safe() {
+        let (server, root, _) = test_server();
+        let project_root = root.with_file_name(format!(
+            "{}-route-compensation",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = "route-compensation-app";
+        let context = context_with_app(&project_root, app);
+        let worker_id = "host-route-compensation-worker";
+        let token = "token-host-route-compensation-worker";
+
+        let (runtime, registered) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-host-route-compensation-old"),
+            },
+        );
+        assert!(registered.ok, "{registered:?}");
+        assert!(!Arc::ptr_eq(&runtime, &server));
+        let binding = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-host-route-compensation-old")
+                    .unwrap(),
+                &NativeThreadId::new("thread-host-route-compensation-old").unwrap(),
+            )
+            .cloned()
+            .unwrap();
+        let old_route = manager
+            .resolve_route_by_native_thread(
+                "session-thread-host-route-compensation-old",
+                "thread-host-route-compensation-old",
+                project_root.to_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(old_route.agent_id.as_str(), worker_id);
+        let old_grant = {
+            let mut state = runtime.state.lock().unwrap();
+            state
+                .global
+                .grant_master(
+                    crate::server::global_state::MasterGrant::new(
+                        binding.project_scope.clone(),
+                        binding.app_scope_id.clone(),
+                        binding.agent_id.clone(),
+                        "project",
+                        "operator",
+                        "user approved",
+                        binding.binding_id.clone(),
+                        binding.endpoint_generation,
+                        now_ms(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            state
+                .global
+                .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+                .cloned()
+                .unwrap()
+        };
+        manager
+            .fail_current_thread_route_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let (_, response) = manager.dispatch_sync(
+            Some(context_with_runtime(
+                &project_root,
+                app,
+                &RuntimeIdentity {
+                    agent_id: binding.agent_id.clone(),
+                    runtime_id: binding.runtime_id.clone(),
+                    appserver_id: binding.app_scope_id.clone(),
+                    endpoint_generation: binding.endpoint_generation,
+                    binding_id: binding.binding_id.clone(),
+                    session_id: binding.session_id.clone(),
+                    native_thread_id: binding.native_thread_id.clone(),
+                },
+            )),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-host-route-compensation-new"),
+            },
+        );
+        assert!(!response.ok, "{response:?}");
+        assert!(
+            response.error.as_deref().is_some_and(|error| {
+                error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:")
+                    && error.contains("injected current thread route publication failure")
+                    && error.contains(
+                        "previous worker transport, notification subscriptions, runtime binding, and master grant were restored",
+                    )
+            }),
+            "{response:?}"
+        );
+
+        {
+            let state = runtime.state.lock().unwrap();
+            assert!(state.workers.contains_key(worker_id));
+            let restored_worker = state.workers.get(worker_id).unwrap();
+            assert_eq!(
+                restored_worker
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.thread_id.as_deref()),
+                Some("thread-host-route-compensation-old")
+            );
+            let restored_subscriptions: Vec<_> = state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| subscription.worker_id == worker_id)
+                .collect();
+            assert_eq!(restored_subscriptions.len(), 1);
+            assert_eq!(
+                restored_subscriptions[0].target,
+                "thread-host-route-compensation-old"
+            );
+            assert_eq!(restored_subscriptions[0].status, "armed");
+            let current = state
+                .global
+                .lookup_binding_for(
+                    &RouteScope {
+                        app_scope_id: AppServerId::new(app).unwrap(),
+                        project_scope_id: GlobalState::canonical_project_scope(&project_root)
+                            .unwrap(),
+                    },
+                    &binding.binding_id,
+                )
+                .unwrap();
+            assert_eq!(current, &binding);
+            assert_eq!(
+                state
+                    .global
+                    .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id),
+                Some(&old_grant)
+            );
+            assert_eq!(
+                state
+                    .global
+                    .role_for_route(&binding.route_scope(), &binding.binding_id),
+                crate::server::global_state::PeerRole::Master
+            );
+        }
+        let old = manager
+            .resolve_route_by_native_thread(
+                "session-thread-host-route-compensation-old",
+                "thread-host-route-compensation-old",
+                project_root.to_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(old.binding_id, binding.binding_id);
+        let new = manager
+            .resolve_route_by_native_thread(
+                "session-thread-host-route-compensation-new",
+                "thread-host-route-compensation-new",
+                project_root.to_str().unwrap(),
+            )
+            .unwrap_err();
+        assert!(new.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{new}");
+
+        drop(manager);
+        let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let old = replayed
+            .resolve_route_by_native_thread(
+                "session-thread-host-route-compensation-old",
+                "thread-host-route-compensation-old",
+                project_root.to_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(old.binding_id, binding.binding_id);
+        let missing = replayed
+            .resolve_route_by_native_thread(
+                "session-thread-host-route-compensation-new",
+                "thread-host-route-compensation-new",
+                project_root.to_str().unwrap(),
+            )
+            .unwrap_err();
+        assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
+        {
+            let replayed_runtime = replayed
+                .routes
+                .lock()
+                .unwrap()
+                .get(&(
+                    app.to_owned(),
+                    GlobalState::canonical_project_scope(&project_root)
+                        .unwrap()
+                        .as_str()
+                        .to_owned(),
+                ))
+                .and_then(|route| route.runtime.clone())
+                .unwrap();
+            let state = replayed_runtime.state.lock().unwrap();
+            assert_eq!(
+                state
+                    .global
+                    .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id),
+                Some(&old_grant)
+            );
+            assert_eq!(
+                state
+                    .workers
+                    .get(worker_id)
+                    .unwrap()
+                    .transport
+                    .as_ref()
+                    .and_then(|transport| transport.thread_id.as_deref()),
+                Some("thread-host-route-compensation-old")
+            );
+            let replayed_subscriptions: Vec<_> = state
+                .notification_subscriptions
+                .values()
+                .filter(|subscription| subscription.worker_id == worker_id)
+                .collect();
+            assert_eq!(replayed_subscriptions.len(), 1);
+            assert_eq!(
+                replayed_subscriptions[0].target,
+                "thread-host-route-compensation-old"
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambiguous_registration_route_commit_does_not_restore_stale_binding() {
+        let (server, root, _) = test_server();
+        let project_root = root.with_file_name(format!(
+            "{}-route-ambiguous",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(project_root.join(".agent-collab/server")).unwrap();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = "route-ambiguous-app";
+        let context = context_with_app(&project_root, app);
+        let worker_id = "host-route-ambiguous-worker";
+        let token = "token-host-route-ambiguous-worker";
+
+        let (runtime, registered) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-host-route-ambiguous-old"),
+            },
+        );
+        assert!(registered.ok, "{registered:?}");
+        let previous = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-host-route-ambiguous-old")
+                    .unwrap(),
+                &NativeThreadId::new("thread-host-route-ambiguous-old").unwrap(),
+            )
+            .cloned()
+            .unwrap();
+        inject_current_thread_route_journal_fault(CurrentThreadRouteJournalFault::Sync);
+
+        let (_, response) = manager.dispatch_sync(
+            Some(context_with_runtime(
+                &project_root,
+                app,
+                &RuntimeIdentity {
+                    agent_id: previous.agent_id.clone(),
+                    runtime_id: previous.runtime_id.clone(),
+                    appserver_id: previous.app_scope_id.clone(),
+                    endpoint_generation: previous.endpoint_generation,
+                    binding_id: previous.binding_id.clone(),
+                    session_id: previous.session_id.clone(),
+                    native_thread_id: previous.native_thread_id.clone(),
+                },
+            )),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: token.into(),
+                cwd: project_root.display().to_string(),
+                candidates: test_candidates("thread-host-route-ambiguous-new"),
+            },
+        );
+        assert!(!response.ok, "{response:?}");
+        assert!(
+            response.error.as_deref().is_some_and(|error| {
+                error.starts_with("ROUTE_TRANSITION_DURABILITY_FAILED:")
+                    && error.contains("publication outcome is unknown")
+            }),
+            "{response:?}"
+        );
+        let current = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&previous.route_scope(), &previous.binding_id)
+            .cloned()
+            .expect("the durable new binding must not be rolled back");
+        assert_eq!(
+            current.native_thread_id.as_ref().unwrap().as_str(),
+            "thread-host-route-ambiguous-new"
+        );
+        assert_eq!(
+            current.endpoint_generation,
+            previous.endpoint_generation + 1
+        );
+        let replayed_host = replay(&root).unwrap();
+        let replayed_route = replayed_host
+            .global
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-host-route-ambiguous-new")
+                    .unwrap(),
+                &NativeThreadId::new("thread-host-route-ambiguous-new").unwrap(),
+            )
+            .expect("the host journal must retain the complete published route");
+        assert_eq!(
+            replayed_route.endpoint_generation,
+            current.endpoint_generation
+        );
+        assert!(replayed_host
+            .global
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-host-route-ambiguous-old",)
+                    .unwrap(),
+                &NativeThreadId::new("thread-host-route-ambiguous-old").unwrap(),
+            )
+            .is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
     }
 
     #[tokio::test]
@@ -12639,7 +13951,9 @@ mod host_route_registry_tests {
         let appserver_candidate = |thread_id: &str| AppServerCandidate {
             endpoint: format!("unix:///tmp/collab-{thread_id}.sock"),
             namespace: "codex_app".into(),
+            session_id: format!("session-{thread_id}"),
             thread_id: thread_id.into(),
+            cwd: project_a.display().to_string(),
         };
 
         let (source_runtime, source_registration) = manager.dispatch_sync(
@@ -13520,9 +14834,10 @@ mod host_route_registry_tests {
         ));
         std::fs::create_dir_all(external_root.join(".agent-collab").join("server")).unwrap();
         let context = context_with_app(&external_root, "routecodex-app");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
 
-        let response = dispatch_wire(
-            server.clone(),
+        let (runtime, response) = manager.dispatch_sync(
             Some(context.clone()),
             Req::Register {
                 worker_id: "routecodex-master".into(),
@@ -13530,12 +14845,11 @@ mod host_route_registry_tests {
                 cwd: external_root.display().to_string(),
                 candidates: test_candidates("thread-routecodex-master"),
             },
-        )
-        .await;
+        );
         assert!(response.ok, "{response:?}");
 
         let project_scope = GlobalState::canonical_project_scope(&external_root).unwrap();
-        let state = server.state.lock().unwrap();
+        let state = runtime.state.lock().unwrap();
         let project = state.global.lookup_project(&project_scope).unwrap();
         assert!(project
             .lookup_registration(&AppServerId::new("routecodex-app").unwrap())
@@ -13548,18 +14862,17 @@ mod host_route_registry_tests {
         // A route that is not owned by this resident reducer may still be
         // re-registered through the same explicit route. Reconnect remains
         // idempotent and does not create a second registration or binding.
-        let runtime = runtime_for_registered(
-            &server,
+        let runtime_identity = runtime_for_registered(
+            &runtime,
             &external_root,
             "routecodex-master",
             "routecodex-app",
         );
-        let repeated = dispatch_wire(
-            server.clone(),
+        let (_, repeated) = manager.dispatch_sync(
             Some(context_with_runtime(
                 &external_root,
                 "routecodex-app",
-                &runtime,
+                &runtime_identity,
             )),
             Req::Register {
                 worker_id: "routecodex-master".into(),
@@ -13567,24 +14880,26 @@ mod host_route_registry_tests {
                 cwd: external_root.display().to_string(),
                 candidates: test_candidates("thread-routecodex-master"),
             },
-        )
-        .await;
+        );
         assert!(repeated.ok, "{repeated:?}");
         assert_eq!(repeated.data["replayed"], true);
 
-        // The host daemon's single journal is the durable source for a route
-        // registration. A fresh replay must recover the same external route.
-        let replayed = replay(&root).unwrap();
-        let replayed_project = replayed.global.lookup_project(&project_scope).unwrap();
+        // The host route journal is the durable route index. The external
+        // runtime owns the project's reducer journal and replays that state.
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let route_records = load_host_route_records(&route_journal).unwrap();
+        assert!(route_records.iter().any(|record| {
+            record.app_scope_id == "routecodex-app"
+                && record.project_scope == project_scope.as_str()
+        }));
+        let replayed_external = replay(&external_root).unwrap();
+        let replayed_project = replayed_external
+            .global
+            .lookup_project(&project_scope)
+            .expect("external runtime replay must retain the project route");
         assert!(replayed_project
             .lookup_registration(&AppServerId::new("routecodex-app").unwrap())
             .is_some());
-        assert!(matches!(
-            HostRouteRegistry::for_server(&server)
-                .unwrap()
-                .lookup(&context),
-            Some(HostRouteOwner::RegisteredNotReady { .. })
-        ));
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(external_root).unwrap();
@@ -13913,7 +15228,13 @@ mod host_route_registry_tests {
             },
         );
         assert!(response.ok, "{response:?}");
-        let resolved = manager.resolve_route_by_native_thread(thread_id).unwrap();
+        let resolved = manager
+            .resolve_route_by_native_thread(
+                &format!("session-{thread_id}"),
+                thread_id,
+                root.to_str().unwrap(),
+            )
+            .unwrap();
         assert_eq!(resolved.agent_id.as_str(), worker_id);
         assert_eq!(
             resolved.project_scope.as_str(),
@@ -13989,7 +15310,11 @@ mod host_route_registry_tests {
         assert!(response.ok, "{response:?}");
         assert!(Arc::ptr_eq(&selected, &server));
         let resolved = replayed_manager
-            .resolve_route_by_native_thread(thread_id)
+            .resolve_route_by_native_thread(
+                &format!("session-{thread_id}"),
+                thread_id,
+                host_root.to_str().unwrap(),
+            )
             .unwrap();
         assert_eq!(resolved.agent_id.as_str(), worker_id);
         assert_eq!(resolved.app_scope_id.as_str(), app_scope);
@@ -14060,7 +15385,11 @@ mod host_route_registry_tests {
         drop(manager);
         let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
         let missing = replayed
-            .resolve_route_by_native_thread("thread-resident-route-failure-worker")
+            .resolve_route_by_native_thread(
+                "session-thread-resident-route-failure-worker",
+                "thread-resident-route-failure-worker",
+                root.to_str().unwrap(),
+            )
             .unwrap_err();
         assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
 
@@ -14368,7 +15697,11 @@ mod host_route_registry_tests {
         .unwrap();
         assert_eq!(
             manager
-                .resolve_route_by_native_thread("thread-resident-repair-worker")
+                .resolve_route_by_native_thread(
+                    "session-thread-resident-repair-worker",
+                    "thread-resident-repair-worker",
+                    root.to_str().unwrap(),
+                )
                 .unwrap()
                 .agent_id
                 .as_str(),
@@ -14813,6 +16146,9 @@ mod host_route_registry_tests {
             appserver_id: AppServerId::new(app).unwrap(),
             endpoint_generation: 0,
             binding_id: BindingId::new("binding-wire-runtime-worker").unwrap(),
+            session_id: Some(
+                crate::identity::SessionId::new("session-thread-wire-runtime-worker").unwrap(),
+            ),
             native_thread_id: Some(NativeThreadId::new("thread-wire-runtime-worker").unwrap()),
         };
 
@@ -14870,6 +16206,7 @@ mod host_route_registry_tests {
                     kind: TransportKind::AppServer,
                     endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
                     namespace: Some("codex_tui".into()),
+                    session_id: Some("session-thread-worker-a".into()),
                     thread_id: Some("thread-worker-a".into()),
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
@@ -14904,6 +16241,7 @@ mod host_route_registry_tests {
                     kind: TransportKind::AppServer,
                     endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
                     namespace: Some("codex_tui".into()),
+                    session_id: Some("session-thread-worker-b".into()),
                     thread_id: Some("thread-worker-b".into()),
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
@@ -14965,7 +16303,10 @@ mod host_route_registry_tests {
             .lock()
             .unwrap()
             .global
-            .lookup_current_thread_route(&NativeThreadId::new("thread-child").unwrap())
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-child").unwrap(),
+                &NativeThreadId::new("thread-child").unwrap(),
+            )
             .cloned()
             .expect("direct child registration must publish its current thread route");
         assert_eq!(child_route.agent_id.as_str(), "child");
@@ -15021,7 +16362,7 @@ mod host_route_registry_tests {
     fn direct_registration_route_failure_reports_cleanup_failure() {
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-        inject_current_thread_route_journal_fault();
+        inject_current_thread_route_journal_fault(CurrentThreadRouteJournalFault::Sync);
         let registered = handle_register_with_app_scope(
             &server,
             "route-failure-worker".into(),
@@ -15056,6 +16397,7 @@ mod host_route_registry_tests {
         assert!(state
             .global
             .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-route-failure-worker").unwrap(),
                 &NativeThreadId::new("thread-route-failure-worker").unwrap()
             )
             .is_none());
@@ -15105,21 +16447,27 @@ mod host_route_registry_tests {
         .unwrap();
 
         let child_thread = NativeThreadId::new("thread-child-route-child").unwrap();
+        let child_session =
+            crate::identity::SessionId::new("session-thread-child-route-child").unwrap();
         assert!(host
             .state
             .lock()
             .unwrap()
             .global
-            .lookup_current_thread_route(&child_thread)
+            .lookup_current_thread_route(&child_session, &child_thread)
             .is_some());
         assert!(runtime
             .state
             .lock()
             .unwrap()
             .global
-            .lookup_current_thread_route(&child_thread)
+            .lookup_current_thread_route(&child_session, &child_thread)
             .is_none());
-        let route = manager.resolve_route_by_native_thread("thread-child-route-child");
+        let route = manager.resolve_route_by_native_thread(
+            "session-thread-child-route-child",
+            "thread-child-route-child",
+            project_root.to_str().unwrap(),
+        );
         assert!(route.is_ok(), "{route:?}");
         retire_current_thread_route_after_launch_failure(
             &host,
@@ -15134,7 +16482,7 @@ mod host_route_registry_tests {
             .lock()
             .unwrap()
             .global
-            .lookup_current_thread_route(&child_thread)
+            .lookup_current_thread_route(&child_session, &child_thread)
             .is_none());
 
         let failed_child = handle_register_with_app_scope_unfinalized(
@@ -15146,7 +16494,7 @@ mod host_route_registry_tests {
             test_candidates("thread-child-route-failed"),
         );
         assert!(failed_child.ok, "{failed_child:?}");
-        inject_current_thread_route_journal_fault();
+        inject_current_thread_route_journal_fault(CurrentThreadRouteJournalFault::Sync);
         let route_error = commit_current_thread_route_for_runtime(
             &host,
             &runtime,
@@ -15193,7 +16541,10 @@ mod host_route_registry_tests {
             .lock()
             .unwrap()
             .global
-            .lookup_current_thread_route(&NativeThreadId::new("thread-child-route-failed").unwrap())
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-thread-child-route-failed").unwrap(),
+                &NativeThreadId::new("thread-child-route-failed").unwrap(),
+            )
             .is_none());
 
         std::fs::remove_dir_all(host_root).unwrap();
@@ -15333,7 +16684,7 @@ mod host_route_registry_tests {
             assert!(rejected
                 .error
                 .as_deref()
-                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+                .is_some_and(|error| error.starts_with("SESSION_THREAD_BINDING_MISMATCH:")));
             let after = mutation_snapshot(&server);
             assert_eq!(after, before);
             assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
@@ -15678,7 +17029,7 @@ mod host_route_registry_tests {
         assert!(rejected
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+            .is_some_and(|error| error.starts_with("SESSION_THREAD_BINDING_MISMATCH:")));
         assert_eq!(mutation_snapshot(&server), before);
         assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
         assert_eq!(
@@ -16012,13 +17363,14 @@ mod host_route_registry_tests {
             &runtime,
         );
         let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
-        let ambiguous = RuntimeBinding::new(
+        let ambiguous = RuntimeBinding::new_with_session(
             project_scope.clone(),
             AppServerId::new(app).unwrap(),
             AgentId::new(worker_id.to_owned()).unwrap(),
             RuntimeId::new("runtime-orphan-ambiguous").unwrap(),
             BindingId::new("binding-orphan-ambiguous").unwrap(),
             runtime.endpoint_generation,
+            runtime.session_id.clone(),
             runtime.native_thread_id.clone(),
         )
         .unwrap();
@@ -16121,7 +17473,9 @@ mod host_route_registry_tests {
                     appserver: Some(AppServerCandidate {
                         endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
                         namespace: "codex_tui".into(),
+                        session_id: "session-thread-another-worker".into(),
                         thread_id: "thread-another-worker".into(),
+                        cwd: root.display().to_string(),
                     }),
                 }),
             },
@@ -16143,7 +17497,9 @@ mod host_route_registry_tests {
                     appserver: Some(AppServerCandidate {
                         endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
                         namespace: "codex_tui".into(),
+                        session_id: "session-thread-another-worker".into(),
                         thread_id: "thread-another-worker".into(),
+                        cwd: root.display().to_string(),
                     }),
                 }),
             },
@@ -16294,7 +17650,7 @@ mod host_route_registry_tests {
         assert!(poll_result
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
+            .is_some_and(|error| error.starts_with("SESSION_THREAD_BINDING_MISMATCH:")));
         assert!(rebind_result.ok, "{rebind_result:?}");
         let state = server.state.lock().unwrap();
         let message = state.msgs.get("poll-rebind-message").unwrap();
@@ -16410,8 +17766,16 @@ async fn dispatch_wire_routed(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<Server>, Resp) {
     match req {
-        Req::RouteResolve { native_thread_id } => {
-            let response = match manager.resolve_route_by_native_thread(&native_thread_id) {
+        Req::RouteResolve {
+            session_id,
+            native_thread_id,
+            identity_cwd,
+        } => {
+            let response = match manager.resolve_route_by_native_thread(
+                &session_id,
+                &native_thread_id,
+                &identity_cwd,
+            ) {
                 Ok(route) => match serde_json::to_value(route) {
                     Ok(value) => Resp::data(value),
                     Err(error) => {
@@ -17292,6 +18656,7 @@ mod reducer_binding_tests {
                     kind: TransportKind::AppServer,
                     endpoint: Some(candidate.endpoint.clone()),
                     namespace: Some(candidate.namespace.clone()),
+                    session_id: Some(candidate.session_id.clone()),
                     thread_id: Some(candidate.thread_id.clone()),
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),

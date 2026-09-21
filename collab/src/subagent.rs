@@ -513,7 +513,12 @@ fn launch(
             .namespace
             .clone()
             .context("parent App Server transport has no namespace")?,
+        session_id: parent_transport
+            .session_id
+            .clone()
+            .context("parent App Server transport has no session_id")?,
         thread_id: thread_id.to_string(),
+        cwd: server.root.display().to_string(),
     };
     let scope = crate::scope::Scope {
         root: server.root.clone(),

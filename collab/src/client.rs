@@ -91,19 +91,40 @@ pub fn call<T: DeserializeOwned>(sock: &Path, req: &Req) -> anyhow::Result<T> {
     call_with_context(sock, req, None)
 }
 
-pub fn resolve_route(sock: &Path, native_thread_id: &str) -> anyhow::Result<RouteResolution> {
+pub fn resolve_route(
+    sock: &Path,
+    session_id: &str,
+    native_thread_id: &str,
+    identity_cwd: &str,
+) -> anyhow::Result<RouteResolution> {
     let route: RouteResolution = call(
         sock,
         &Req::RouteResolve {
+            session_id: session_id.to_owned(),
             native_thread_id: native_thread_id.to_owned(),
+            identity_cwd: identity_cwd.to_owned(),
         },
     )?;
     route.validate()?;
+    if route.session_id.as_str() != session_id {
+        anyhow::bail!(
+            "ROUTE_RESOLVE_INVALID: daemon returned session {} for requested session {}",
+            route.session_id,
+            session_id
+        );
+    }
     if route.native_thread_id.as_str() != native_thread_id {
         anyhow::bail!(
             "ROUTE_RESOLVE_INVALID: daemon returned thread {} for requested thread {}",
             route.native_thread_id,
             native_thread_id
+        );
+    }
+    if route.canonical_root != identity_cwd {
+        anyhow::bail!(
+            "ROUTE_RESOLVE_INVALID: daemon returned project root {} for requested cwd {}",
+            route.canonical_root,
+            identity_cwd
         );
     }
     Ok(route)
@@ -429,6 +450,7 @@ mod route_context_tests {
             appserver_id: AppServerId::new("real-appserver-1").unwrap(),
             endpoint_generation: 1,
             binding_id: BindingId::new("binding-1").unwrap(),
+            session_id: None,
             native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
         };
         let expected_root = std::fs::canonicalize(&root).unwrap();
@@ -791,6 +813,7 @@ mod tests {
                 "agent_id": "agent-1",
                 "binding_id": "binding-1",
                 "endpoint_generation": 7,
+                "session_id": "session-requested",
                 "native_thread_id": "thread-other"
             });
             stream
@@ -798,7 +821,13 @@ mod tests {
                 .expect("write route response");
         });
 
-        let error = resolve_route(&fixture.socket(), "thread-requested").unwrap_err();
+        let error = resolve_route(
+            &fixture.socket(),
+            "session-requested",
+            "thread-requested",
+            env!("CARGO_MANIFEST_DIR"),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("ROUTE_RESOLVE_INVALID"),
             "{error}"
@@ -824,7 +853,13 @@ mod tests {
                 .expect("write partial route response");
         });
 
-        let error = resolve_route(&fixture.socket(), "thread-1").unwrap_err();
+        let error = resolve_route(
+            &fixture.socket(),
+            "session-1",
+            "thread-1",
+            env!("CARGO_MANIFEST_DIR"),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("unexpected response shape"),
             "{error}"

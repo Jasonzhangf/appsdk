@@ -404,6 +404,7 @@ mod tests {
                         kind: crate::proto::TransportKind::AppServer,
                         endpoint: Some(candidate.endpoint.clone()),
                         namespace: Some(candidate.namespace.clone()),
+                        session_id: Some(candidate.session_id.clone()),
                         thread_id: Some(candidate.thread_id.clone()),
                         capabilities: vec!["send_message_to_thread".into()],
                         self_check: "test appserver".into(),

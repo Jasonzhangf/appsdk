@@ -557,6 +557,7 @@ mod tests {
             appserver_id: AppServerId::new(appserver).unwrap(),
             endpoint_generation: generation,
             binding_id: BindingId::new(binding).unwrap(),
+            session_id: None,
             native_thread_id: None,
         }
     }

@@ -428,6 +428,8 @@ enum MasterCmd {
 enum RouteCmd {
     /// Resolve one thread without using the current cwd as a selector
     Resolve {
+        #[arg(long = "session-id")]
+        session_id: Option<String>,
         #[arg(long = "native-thread-id")]
         native_thread_id: Option<String>,
     },
@@ -695,11 +697,17 @@ fn live_closure_target_transport(worker: &serde_json::Value) -> anyhow::Result<S
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_THREAD_MISSING"))?;
+    let session_id = transport
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_SESSION_MISSING"))?;
     Ok(SelectedTransport {
         kind: TransportKind::AppServer,
         endpoint: Some(endpoint.to_owned()),
         namespace: Some(namespace.to_owned()),
-        thread_id: Some(thread_id.to_owned()),
+        session_id: Some(session_id.to_owned()),
+        thread_id: Some(thread_id.to_string()),
         capabilities: vec!["read_thread".into(), "thread/turns/list".into()],
         self_check: "daemon-verified-live-closure-target-route".into(),
     })
@@ -1953,7 +1961,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Route {
-            command: RouteCmd::Resolve { native_thread_id },
+            command:
+                RouteCmd::Resolve {
+                    session_id,
+                    native_thread_id,
+                },
         } => {
             let host_paths = scope::HostPaths::resolve()?;
             let native_thread_id = native_thread_id
@@ -1962,7 +1974,21 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 .ok_or_else(|| {
                     anyhow::anyhow!("route resolve requires --native-thread-id or CODEX_THREAD_ID")
                 })?;
-            let route = crate::client::resolve_route(&host_paths.socket_path(), &native_thread_id)?;
+            let session_id = session_id
+                .or_else(|| std::env::var("CODEX_SESSION_ID").ok())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("route resolve requires --session-id or CODEX_SESSION_ID")
+                })?;
+            let route = crate::client::resolve_route(
+                &host_paths.socket_path(),
+                &session_id,
+                &native_thread_id,
+                std::env::current_dir()?
+                    .canonicalize()?
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("identity cwd must be valid UTF-8"))?,
+            )?;
             out(&json!({
                 "canonical_root": route.canonical_root,
                 "storage_root": route.storage_root,
@@ -1971,6 +1997,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "agent_id": route.agent_id,
                 "binding_id": route.binding_id,
                 "endpoint_generation": route.endpoint_generation,
+                "session_id": route.session_id,
                 "native_thread_id": route.native_thread_id,
             }));
             Ok(())
@@ -2016,7 +2043,21 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 let thread_id = std::env::var("CODEX_THREAD_ID").map_err(|_| anyhow::anyhow!(
                     "master status requires CODEX_THREAD_ID; use `collab route resolve` to inspect an explicit thread"
                 ))?;
-                let route = scope::route_for_native_thread(&host_paths, &thread_id)?;
+                let session_id = std::env::var("CODEX_SESSION_ID").map_err(|_| {
+                    anyhow::anyhow!(
+                        "master status requires CODEX_SESSION_ID so the daemon can resolve the global binding"
+                    )
+                })?;
+                let canonical_cwd = std::env::current_dir()?.canonicalize()?;
+                let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
+                })?;
+                let route = scope::route_for_native_thread(
+                    &host_paths,
+                    &session_id,
+                    &thread_id,
+                    identity_cwd,
+                )?;
                 let scope = Scope { root: route.root };
                 let v: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),
@@ -2313,7 +2354,21 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "context requires CODEX_THREAD_ID so the daemon can resolve the global binding"
                 )
             })?;
-            let route = match scope::route_for_native_thread(&host_paths, &thread_id) {
+            let session_id = std::env::var("CODEX_SESSION_ID").map_err(|_| {
+                anyhow::anyhow!(
+                    "context requires CODEX_SESSION_ID so the daemon can resolve the global binding"
+                )
+            })?;
+            let canonical_cwd = std::env::current_dir()?.canonicalize()?;
+            let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
+                anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
+            })?;
+            let route = match scope::route_for_native_thread(
+                &host_paths,
+                &session_id,
+                &thread_id,
+                identity_cwd,
+            ) {
                 Ok(route) => route,
                 Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
                     out(&unregistered_context(None, None, Some(&error.to_string()))?);
@@ -2604,6 +2659,7 @@ mod tests {
             appserver_id: identity::AppServerId::new("tui-default").unwrap(),
             endpoint_generation: 3,
             binding_id: identity::BindingId::new("binding-tui").unwrap(),
+            session_id: None,
             native_thread_id: None,
         };
         let identity = identity_with_runtime(Some(runtime.clone()));
@@ -3368,6 +3424,7 @@ mod tests {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/codex.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-worker-1".into()),
             thread_id: Some("thread-worker-1".into()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
@@ -3446,6 +3503,7 @@ mod tests {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/codex.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-worker-1".into()),
             thread_id: Some("thread-worker-1".into()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
@@ -3505,6 +3563,7 @@ mod tests {
             appserver_id: identity::AppServerId::new("appserver-old").unwrap(),
             endpoint_generation: 3,
             binding_id: identity::BindingId::new("binding-old").unwrap(),
+            session_id: Some(identity::SessionId::new("session-thread-old").unwrap()),
             native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
         };
         let mut identity = identity_with_runtime(Some(old_runtime));
@@ -3520,6 +3579,7 @@ mod tests {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/codex.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-thread-old".into()),
             thread_id: Some("thread-old".into()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
@@ -3551,6 +3611,7 @@ mod tests {
                     "kind": "appserver",
                     "endpoint": "unix:///tmp/codex.sock",
                     "namespace": "codex_tui",
+                    "session_id": "session-thread-new",
                     "thread_id": "thread-new",
                     "capabilities": ["send_message_to_thread"],
                     "self_check": "test appserver"
@@ -3569,6 +3630,7 @@ mod tests {
                         "runtime_id": "runtime-new",
                         "binding_id": "binding-new",
                         "endpoint_generation": 1,
+                        "session_id": "session-thread-new",
                         "native_thread_id": "thread-new"
                     }
                 }
@@ -3603,6 +3665,7 @@ mod tests {
             appserver_id: identity::AppServerId::new("tui-default").unwrap(),
             endpoint_generation: 2,
             binding_id: identity::BindingId::new("binding-thread-1").unwrap(),
+            session_id: Some(identity::SessionId::new("session-1").unwrap()),
             native_thread_id: Some(identity::NativeThreadId::new("thread-1").unwrap()),
         };
         let mut identity = identity_with_runtime(Some(runtime));
@@ -3610,6 +3673,7 @@ mod tests {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/codex.sock".into()),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
             capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
             self_check: "test appserver".into(),
@@ -3644,6 +3708,7 @@ mod tests {
             appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
             endpoint_generation: 9,
             binding_id: identity::BindingId::new("binding-live").unwrap(),
+            session_id: None,
             native_thread_id: None,
         };
         let identity = identity_with_runtime(Some(runtime));

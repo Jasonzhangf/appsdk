@@ -600,46 +600,49 @@ Only a standalone non-AppSDK project uses explicit `collab init`.
 
 ## Worktree identity
 
-A Git worktree normally has no local `.agent-collab/`; that is not evidence
-that the peer is unregistered or that no live master exists. Run
-`collab context` from the worktree. The server resolves the canonical project
-route from the global Collab state by the same Codex sessionID/App Server
-thread, and the returned `project_root` is the canonical project root.
+A Git worktree is a task execution directory, not a second identity or a
+substitute for the canonical project root. Identity is valid only when the
+Codex sessionID, App Server threadID, and canonical cwd all identify the same
+registered route. A worktree cwd therefore cannot resolve the main identity;
+run `collab context` from the canonical project main tree. Registration,
+recovery, rebind, and master promotion must also run from that canonical root,
+not from a `playground/` worktree.
 
 Use `collab master status` for the authoritative live-master answer; `collab
 who` only lists registered peers. This query resolves the canonical route from
-the global Collab route state and does not require a worktree-local
-`.agent-collab/` or a new registration. Do not run `appsdk init`, `collab
-init`, `collab worker recover`, or master promotion from a worktree, and do
-not report "no master" because `.agent-collab/`, `collab context`, or a
-`who.master` field is absent or failed. If `collab context` fails with
-`token mismatch`, `PROJECT_SCOPE_UNKNOWN`, or another exact error, preserve
-that error, run `collab master status` separately, and report the
-registration problem to the live master. Do not infer "no master", recover by
-copying or editing identity/token state, or reset the project. Only
-`master status` returning `master: null` with no `recorded_unusable` entry
-means no live master; then follow the explicit user-approved promotion
-protocol.
+the global Collab route state from the canonical project main tree. Do not run
+`appsdk init`, `collab init`, `collab worker recover`, or master promotion from
+a worktree, and do not report "no master" because `.agent-collab/`,
+`collab context`, or a `who.master` field is absent or failed. If
+`collab context` fails with `token mismatch`, `PROJECT_SCOPE_UNKNOWN`, or
+another exact error, preserve that error, run `collab master status` separately
+from the canonical root, and report the registration problem to the live
+master. Do not infer "no master", recover by copying or editing identity/token
+state, or reset the project. Only `master status` returning `master: null`
+with no `recorded_unusable` entry means no live master; then follow the
+explicit user-approved promotion protocol.
 
 ### Thread-backed route resolution
 
 When `CODEX_THREAD_ID` is present, the daemon is the sole route selector. The
-CLI sends only the native App Server thread ID through the context-free
-`RouteResolve` request. The daemon first finds the one global identity for that
-thread, then matches that identity's current runtime binding; the global
-identity's current binding is the route selector. Historical routes are not
-candidates, even when they contain the same thread, binding ID, or generation.
-`routes.jsonl` is only the host route admission/storage index, never a selector
-or a fallback.
+CLI sends the host `CODEX_SESSION_ID` and native App Server thread ID through
+the context-free `RouteResolve` request together with the caller's canonical
+cwd. The daemon requires one global identity whose current runtime binding
+matches all three keys: sessionID, threadID, and canonical project root. The
+current binding is the route selector. Historical routes and tombstones are
+not candidates, even when they contain the same thread, binding ID, or
+generation. `routes.jsonl` is only the host route admission/storage index,
+never a selector or a fallback.
 
 `collab route resolve` exposes this read-only lookup; it defaults to
-`CODEX_THREAD_ID` and accepts `--native-thread-id <id>` for diagnostics.
-Thread-backed `collab context`, `collab master status`, and normal scoped
-commands must not use the current cwd or read `routes.jsonl` to guess a route.
-The daemon returns exactly one route, `ROUTE_RESOLVE_NOT_FOUND` for zero
-matches, and `ROUTE_RESOLVE_AMBIGUOUS` when multiple current global identities
-are bound to the thread or the selected identity's binding still maps to
-multiple routes. An invalid or malformed thread ID is
+`CODEX_SESSION_ID` and `CODEX_THREAD_ID`, and accepts `--session-id <id>` and
+`--native-thread-id <id>` for diagnostics. Thread-backed `collab context`,
+`collab master status`, and normal scoped commands must use the exact canonical
+cwd and must not read `routes.jsonl` to guess a route. The daemon returns
+exactly one route, `ROUTE_RESOLVE_NOT_FOUND` for zero matches, and
+`ROUTE_RESOLVE_AMBIGUOUS` when multiple current global identities match the
+key or the selected identity's binding still maps to multiple routes. A
+session/thread/cwd mismatch, invalid cwd, or malformed key is
 `ROUTE_RESOLVE_INVALID`. The resolver is read-only and returns no token;
 identity/token loading remains a separate authentication step after the route
 is selected.

@@ -53,6 +53,7 @@ string_id!(RuntimeId);
 string_id!(AppServerId);
 string_id!(BindingId);
 string_id!(NativeThreadId);
+string_id!(SessionId);
 string_id!(TurnId);
 string_id!(MessageId);
 string_id!(DispatchId);
@@ -76,6 +77,8 @@ pub struct RuntimeIdentity {
     pub appserver_id: AppServerId,
     pub endpoint_generation: u64,
     pub binding_id: BindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<NativeThreadId>,
 }
@@ -102,6 +105,11 @@ fn validate_registration_transport(
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("selected App Server transport has no thread_id"))?;
+    let session_id = transport
+        .session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("selected App Server transport has no session_id"))?;
     if runtime
         .native_thread_id
         .as_ref()
@@ -111,6 +119,9 @@ fn validate_registration_transport(
         anyhow::bail!(
             "selected App Server thread_id does not match typed binding native_thread_id"
         );
+    }
+    if runtime.session_id.as_ref().map(SessionId::as_str) != Some(session_id) {
+        anyhow::bail!("selected App Server session_id does not match typed binding session_id");
     }
     if !matches!(namespace, "codex_tui" | "codex_app") {
         anyhow::bail!("selected App Server transport has unsupported namespace {namespace}");
@@ -136,6 +147,7 @@ impl RuntimeIdentity {
             appserver_id: AppServerId::new(CLI_APP_SERVER_ID)?,
             endpoint_generation: 0,
             binding_id: BindingId::new(format!("binding-{worker_id}"))?,
+            session_id: None,
             native_thread_id: None,
         };
         identity.validate()?;
@@ -147,6 +159,9 @@ impl RuntimeIdentity {
         validate_id(self.runtime_id.as_str())?;
         validate_id(self.appserver_id.as_str())?;
         validate_id(self.binding_id.as_str())?;
+        if let Some(session_id) = &self.session_id {
+            validate_id(session_id.as_str())?;
+        }
         if let Some(native_thread_id) = &self.native_thread_id {
             validate_id(native_thread_id.as_str())?;
         }
@@ -162,6 +177,8 @@ struct RegistrationBinding {
     runtime_id: RuntimeId,
     binding_id: BindingId,
     endpoint_generation: u64,
+    #[serde(default)]
+    session_id: Option<SessionId>,
     #[serde(default)]
     native_thread_id: Option<NativeThreadId>,
 }
@@ -226,6 +243,7 @@ pub fn registration_from_receipt(
         appserver_id: binding.app_scope_id,
         endpoint_generation: binding.endpoint_generation,
         binding_id: binding.binding_id,
+        session_id: binding.session_id,
         native_thread_id: binding.native_thread_id,
     };
     runtime.validate()?;
@@ -422,6 +440,21 @@ pub fn validate_binding(
                 .unwrap_or_default(),
         });
     }
+    if registered.session_id != incoming.session_id {
+        return Err(BindingValidationError::Mismatch {
+            field: "session_id",
+            expected: registered
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            observed: incoming
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        });
+    }
     Ok(())
 }
 
@@ -558,8 +591,9 @@ fn read_identity(path: &std::path::Path) -> anyhow::Result<Option<Identity>> {
     Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?))
 }
 
-fn identities_by_native_thread_at(
+fn identities_by_runtime_key_at(
     host_paths: &HostPaths,
+    session_id: &str,
     native_thread_id: &str,
 ) -> anyhow::Result<Vec<Identity>> {
     let identities_root = host_paths.state_root().join("identities");
@@ -579,11 +613,18 @@ fn identities_by_native_thread_at(
     Ok(identities
         .into_values()
         .filter(|identity| {
-            identity
-                .runtime
+            let Some(runtime) = identity.runtime.as_ref() else {
+                return false;
+            };
+            let thread_matches = runtime
+                .native_thread_id
                 .as_ref()
-                .and_then(|runtime| runtime.native_thread_id.as_ref())
-                .is_some_and(|thread_id| thread_id.as_str() == native_thread_id)
+                .is_some_and(|thread_id| thread_id.as_str() == native_thread_id);
+            thread_matches
+                && runtime
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.as_str() == session_id)
         })
         .collect())
 }
@@ -621,7 +662,15 @@ pub(crate) fn load_existing_at(
     let selected_explicitly = explicit_worker.is_some();
     if !selected_explicitly {
         if let Some(thread_id) = thread_id.as_deref() {
-            let mut matches = identities_by_native_thread_at(host_paths, thread_id)?;
+            let session_id = std::env::var("CODEX_SESSION_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects a persisted App Server identity"
+                    )
+                })?;
+            let mut matches = identities_by_runtime_key_at(host_paths, &session_id, thread_id)?;
             match matches.len() {
                 1 => return Ok(matches.pop()),
                 0 => {}
@@ -686,7 +735,15 @@ fn load_or_create_resolved_at(
         })?;
     if explicit_worker.is_none() {
         let thread_id = thread_id.as_deref().unwrap();
-        let mut matches = identities_by_native_thread_at(host_paths, thread_id)?;
+        let session_id = std::env::var("CODEX_SESSION_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects a persisted App Server identity"
+                )
+            })?;
+        let mut matches = identities_by_runtime_key_at(host_paths, &session_id, thread_id)?;
         match matches.len() {
             1 => return Ok(matches.remove(0)),
             0 => {}
@@ -768,6 +825,7 @@ mod tests {
                 kind: TransportKind::AppServer,
                 endpoint: Some("unix:///tmp/codex.sock".into()),
                 namespace: Some("codex_tui".into()),
+                session_id: Some("session-1".into()),
                 thread_id: Some("thread-1".into()),
                 capabilities: vec!["send_message".into()],
                 self_check: "ok".into(),
@@ -776,13 +834,19 @@ mod tests {
         .unwrap();
 
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
         let previous_worker = std::env::var_os("COLLAB_WORKER");
         std::env::set_var("CODEX_THREAD_ID", "thread-1");
+        std::env::set_var("CODEX_SESSION_ID", "session-1");
         std::env::remove_var("COLLAB_WORKER");
         let resolved = load_or_create_resolved_at(&host_paths, &scope, None).unwrap();
         match previous_thread {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
             None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
         }
         match previous_worker {
             Some(value) => std::env::set_var("COLLAB_WORKER", value),
@@ -793,6 +857,121 @@ mod tests {
         assert_eq!(resolved.token, identity.token);
         assert_eq!(resolved.runtime, identity.runtime);
         assert_eq!(resolved.transport, identity.transport);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn identity_requires_the_matching_session_for_a_codex_thread() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("ci-session-thread-key");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let mut identity =
+            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into())).unwrap();
+        let mut runtime = runtime_identity(4, "binding-managed");
+        runtime.session_id = Some(SessionId::new("session-old").unwrap());
+        runtime.native_thread_id = Some(NativeThreadId::new("thread-shared").unwrap());
+        persist_registration_at(
+            &host_paths,
+            &scope,
+            &mut identity,
+            runtime,
+            SelectedTransport {
+                kind: TransportKind::AppServer,
+                endpoint: Some("unix:///tmp/codex.sock".into()),
+                namespace: Some("codex_tui".into()),
+                session_id: Some("session-old".into()),
+                thread_id: Some("thread-shared".into()),
+                capabilities: vec!["send_message".into()],
+                self_check: "ok".into(),
+            },
+        )
+        .unwrap();
+
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("CODEX_THREAD_ID", "thread-shared");
+        std::env::set_var("CODEX_SESSION_ID", "session-new");
+        std::env::remove_var("COLLAB_WORKER");
+        let resolved = load_existing_at(&host_paths, &scope, None).unwrap();
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+
+        assert!(resolved.is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn identity_selection_requires_session_for_a_persisted_thread_binding() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("ci-session-thread-required");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let mut identity =
+            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into())).unwrap();
+        persist_registration_at(
+            &host_paths,
+            &scope,
+            &mut identity,
+            runtime_identity(4, "binding-managed"),
+            SelectedTransport {
+                kind: TransportKind::AppServer,
+                endpoint: Some("unix:///tmp/codex.sock".into()),
+                namespace: Some("codex_tui".into()),
+                session_id: Some("session-1".into()),
+                thread_id: Some("thread-1".into()),
+                capabilities: vec!["send_message".into()],
+                self_check: "ok".into(),
+            },
+        )
+        .unwrap();
+
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("CODEX_THREAD_ID", "thread-1");
+        std::env::remove_var("CODEX_SESSION_ID");
+        std::env::remove_var("COLLAB_WORKER");
+
+        let existing_error = load_existing_at(&host_paths, &scope, None).unwrap_err();
+        let create_error = load_or_create_resolved_at(&host_paths, &scope, None).unwrap_err();
+
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+
+        assert!(
+            existing_error.to_string().contains("CODEX_SESSION_ID"),
+            "{existing_error}"
+        );
+        assert!(
+            create_error.to_string().contains("CODEX_SESSION_ID"),
+            "{create_error}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -817,6 +996,7 @@ mod tests {
                 kind: TransportKind::AppServer,
                 endpoint: Some("unix:///tmp/codex.sock".into()),
                 namespace: Some("codex_tui".into()),
+                session_id: Some("session-1".into()),
                 thread_id: Some("thread-current".into()),
                 capabilities: vec!["send_message".into()],
                 self_check: "ok".into(),
@@ -836,13 +1016,19 @@ mod tests {
         .unwrap();
 
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
         let previous_worker = std::env::var_os("COLLAB_WORKER");
         std::env::set_var("CODEX_THREAD_ID", "thread-current");
+        std::env::set_var("CODEX_SESSION_ID", "session-1");
         std::env::remove_var("COLLAB_WORKER");
         let resolved = load_existing_at(&host_paths, &scope, None).unwrap();
         match previous_thread {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
             None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
         }
         match previous_worker {
             Some(value) => std::env::set_var("COLLAB_WORKER", value),
@@ -885,6 +1071,7 @@ mod tests {
             appserver_id: AppServerId::new("appserver-1").unwrap(),
             endpoint_generation: generation,
             binding_id: BindingId::new(binding).unwrap(),
+            session_id: Some(SessionId::new("session-1").unwrap()),
             native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
         }
     }
@@ -901,6 +1088,7 @@ mod tests {
                 "appserver_id": "appserver-1",
                 "endpoint_generation": 3,
                 "binding_id": "binding-1",
+                "session_id": "session-1",
                 "native_thread_id": "thread-1"
             })
         );
@@ -939,6 +1127,7 @@ mod tests {
                 "kind": "appserver",
                 "endpoint": "unix:///tmp/codex.sock",
                 "namespace": "codex_tui",
+                "session_id": "session-1",
                 "thread_id": "thread-1",
                 "capabilities": ["session_status", "read_thread", "send_message_to_thread"],
                 "self_check": "server verified"
@@ -952,6 +1141,7 @@ mod tests {
                     "runtime_id": "runtime-thread-1",
                     "binding_id": "binding-1",
                     "endpoint_generation": 4,
+                    "session_id": "session-1",
                     "native_thread_id": "thread-1"
                 }
             }
@@ -1049,6 +1239,7 @@ mod tests {
                 "kind": "appserver",
                 "endpoint": "unix:///tmp/codex.sock",
                 "namespace": "codex_tui",
+                "session_id": "session-selected",
                 "thread_id": "thread-selected",
                 "capabilities": ["send_message_to_thread"],
                 "self_check": "server verified"
@@ -1062,6 +1253,7 @@ mod tests {
                     "runtime_id": "runtime-1",
                     "binding_id": "binding-1",
                     "endpoint_generation": 1,
+                    "session_id": "session-selected",
                     "native_thread_id": "thread-other"
                 }
             }
@@ -1109,6 +1301,7 @@ mod tests {
                 kind: TransportKind::AppServer,
                 endpoint: Some("unix:///tmp/codex.sock".into()),
                 namespace: Some("codex_tui".into()),
+                session_id: Some("session-1".into()),
                 thread_id: Some("thread-1".into()),
                 capabilities: vec!["send_message".into()],
                 self_check: "ok".into(),
@@ -1163,6 +1356,7 @@ mod tests {
                 kind: TransportKind::AppServer,
                 endpoint: Some("unix:///tmp/codex.sock".into()),
                 namespace: Some("codex_tui".into()),
+                session_id: Some("session-1".into()),
                 thread_id: Some("thread-1".into()),
                 capabilities: vec!["send_message".into()],
                 self_check: "server verified".into(),
@@ -1216,6 +1410,7 @@ mod tests {
                 kind: TransportKind::AppServer,
                 endpoint: Some("unix:///tmp/codex.sock".into()),
                 namespace: Some("codex_tui".into()),
+                session_id: Some("session-1".into()),
                 thread_id: Some("thread-1".into()),
                 capabilities: vec!["send_message".into()],
                 self_check: "server verified".into(),

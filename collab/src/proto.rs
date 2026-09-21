@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::{
     validate_binding, AgentId, AppServerId, BindingId, CommandId, DispatchId, MessageId,
-    NativeThreadId, OperationId, RuntimeIdentity, TurnId,
+    NativeThreadId, OperationId, RuntimeIdentity, SessionId, TurnId,
 };
 use crate::scope::{ProjectScopeId, RouteScope};
 
@@ -24,7 +24,9 @@ impl TransportKind {
 pub struct AppServerCandidate {
     pub endpoint: String,
     pub namespace: String,
+    pub session_id: String,
     pub thread_id: String,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +42,8 @@ pub struct SelectedTransport {
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     pub capabilities: Vec<String>,
@@ -120,6 +124,7 @@ impl CommandEnvelope {
             appserver_id: registered.appserver_id.clone(),
             endpoint_generation: self.endpoint_generation,
             binding_id: self.actor_binding_id.clone(),
+            session_id: registered.session_id.clone(),
             native_thread_id: registered.native_thread_id.clone(),
         };
         validate_binding(registered, &incoming)?;
@@ -157,6 +162,7 @@ pub struct RouteResolution {
     pub agent_id: AgentId,
     pub binding_id: BindingId,
     pub endpoint_generation: u64,
+    pub session_id: SessionId,
     pub native_thread_id: NativeThreadId,
 }
 
@@ -166,6 +172,7 @@ impl RouteResolution {
         self.project_scope.validate()?;
         crate::identity::validate_id_for_protocol(self.agent_id.as_str())?;
         crate::identity::validate_id_for_protocol(self.binding_id.as_str())?;
+        crate::identity::validate_id_for_protocol(self.session_id.as_str())?;
         crate::identity::validate_id_for_protocol(self.native_thread_id.as_str())?;
         for (name, value) in [
             ("canonical root", self.canonical_root.as_str()),
@@ -368,7 +375,9 @@ pub enum Req {
     /// thread. This is a daemon-owned read-only lookup: callers must not
     /// select a route by cwd or by reading routes.jsonl directly.
     RouteResolve {
+        session_id: String,
         native_thread_id: String,
+        identity_cwd: String,
     },
     MsgStatus {
         msg_id: String,
@@ -647,6 +656,7 @@ mod tests {
             appserver_id: AppServerId::new("appserver-1").unwrap(),
             endpoint_generation: 7,
             binding_id: BindingId::new("binding-1").unwrap(),
+            session_id: Some(crate::identity::SessionId::new("session-1").unwrap()),
             native_thread_id: Some(NativeThreadId::new("thread-1").unwrap()),
         }
     }
@@ -661,6 +671,7 @@ mod tests {
             agent_id: AgentId::new("agent-1").unwrap(),
             binding_id: BindingId::new("binding-1").unwrap(),
             endpoint_generation: 7,
+            session_id: crate::identity::SessionId::new("session-1").unwrap(),
             native_thread_id: NativeThreadId::new("thread-1").unwrap(),
         }
     }
@@ -718,6 +729,7 @@ mod tests {
         assert_eq!(encoded["agent_id"], "agent-1");
         assert_eq!(encoded["binding_id"], "binding-1");
         assert_eq!(encoded["endpoint_generation"], 7);
+        assert_eq!(encoded["session_id"], "session-1");
         assert_eq!(encoded["native_thread_id"], "thread-1");
         let decoded: RouteResolution = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, route);

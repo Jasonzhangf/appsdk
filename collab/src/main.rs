@@ -595,6 +595,44 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         .runtime
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("identity has no registered runtime binding"))?;
+    // A missing transport cannot be reused, but it is a normal legacy shape
+    // rather than an error: report "not reusable" so the caller re-registers.
+    let Some(transport) = ident.transport.as_ref() else {
+        return Ok(false);
+    };
+    // A thread-backed binding is only reusable when the persisted identity
+    // still carries both halves of the App Server address.  An identity
+    // written before session binding existed has a native thread and no
+    // session, so it can never resolve its own route and must re-register
+    // instead of being reported as reused.
+    if runtime.native_thread_id.is_some()
+        && (runtime.session_id.is_none() || transport.session_id.is_none())
+    {
+        return Ok(false);
+    }
+    if runtime.native_thread_id.is_some() {
+        let current_session = std::env::var("CODEX_SESSION_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let current_thread = std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if let (Some(thread), Some(session)) = (current_thread, current_session) {
+            let persisted_thread = runtime
+                .native_thread_id
+                .as_ref()
+                .map(crate::identity::NativeThreadId::as_str);
+            let persisted_session = runtime
+                .session_id
+                .as_ref()
+                .map(crate::identity::SessionId::as_str);
+            if persisted_thread != Some(thread.as_str())
+                || persisted_session != Some(session.as_str())
+            {
+                return Ok(false);
+            }
+        }
+    }
     let host_paths = scope.host_paths()?;
     let scope_root = std::fs::canonicalize(&scope.root)?;
     if ident
@@ -2640,6 +2678,21 @@ mod tests {
             runtime,
             transport: None,
         }
+    }
+
+    /// Bind the process environment to one explicit App Server address while
+    /// holding the shared env lock.  Registration reuse now compares the
+    /// persisted thread/session against the live ones, so a test that builds
+    /// a thread-backed fixture must state the address it means instead of
+    /// inheriting whatever the developer's shell exported.
+    fn set_current_session_thread(thread_id: &str, session_id: &str) {
+        std::env::set_var("CODEX_THREAD_ID", thread_id);
+        std::env::set_var("CODEX_SESSION_ID", session_id);
+    }
+
+    fn clear_current_session_thread() {
+        std::env::remove_var("CODEX_THREAD_ID");
+        std::env::remove_var("CODEX_SESSION_ID");
     }
 
     #[test]

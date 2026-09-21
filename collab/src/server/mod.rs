@@ -8862,6 +8862,37 @@ fn handle_task_close(
             task_id, task.status
         ));
     }
+    let lifecycle_complete = st.task_lifecycle.get(&task_id).is_some_and(|record| {
+        record
+            .delivery_evidence
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && record.delivered_ms.is_some()
+            && record
+                .review_evidence
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && record
+                .reviewer
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && record.reviewed_ms.is_some()
+            && record
+                .integration_commit
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && record
+                .integration_evidence
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && record.integrated_ms.is_some()
+    });
+    if !lifecycle_complete {
+        return Resp::err(format!(
+            "task {} cannot close before delivery, review, and integration evidence",
+            task_id
+        ));
+    }
     let receipt_reusable = st
         .cleanup_receipts
         .get(&task.id)

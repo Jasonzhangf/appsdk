@@ -1775,17 +1775,14 @@ impl ProjectRuntimeManager {
         for record in &route_records {
             let key = (record.app_scope_id.clone(), record.project_scope.clone());
             let storage_root = PathBuf::from(&record.storage_root);
-            if (storage_roots_equal(&storage_root, &host.root)
+            let resident_storage = storage_roots_equal(&storage_root, &host.root)
                 .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
                 || storage_roots_equal(&storage_root, &host.storage_root)
-                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?)
-                && !routes.get(&key).is_some_and(|route| {
-                    route
-                        .runtime
-                        .as_ref()
-                        .is_some_and(|runtime| Arc::ptr_eq(runtime, &host))
-                })
-            {
+                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+            let resident_self_route = record.app_scope_id == crate::identity::CLI_APP_SERVER_ID
+                && record.canonical_root == host_root.as_str()
+                && record.project_scope == host_root.as_str();
+            if resident_storage && !resident_self_route {
                 return Err(format!(
                     "HOST_ROUTE_REPLAY_FAILED: runtime storage root {} is already owned by resident host",
                     record.storage_root
@@ -1811,14 +1808,45 @@ impl ProjectRuntimeManager {
 
         for record in route_records {
             let (key, root, storage_root) = validate_host_route_record(&record)?;
-            if key.1 == host_root.as_str()
-                && routes.get(&key).is_some_and(|route| {
-                    route
-                        .runtime
-                        .as_ref()
-                        .is_some_and(|runtime| Arc::ptr_eq(runtime, &host))
-                })
-            {
+            let resident_self_route = key.0 == crate::identity::CLI_APP_SERVER_ID
+                && root == Path::new(host_root.as_str())
+                && key.1 == host_root.as_str()
+                && (storage_roots_equal(&storage_root, &host.root)
+                    .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?
+                    || storage_roots_equal(&storage_root, &host.storage_root)
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?);
+            if resident_self_route {
+                let registration = ProjectRegistration::with_registered_at(
+                    ProjectScopeId::new(key.1.clone())
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                    AppServerId::new(key.0.clone())
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                    record.registered_ms,
+                )
+                .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+                if host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_registration(&registration.project_scope, &registration.app_scope_id)
+                    .is_none()
+                {
+                    host.commit_checked(&[Event::GlobalProjectRegistered { registration }])
+                        .map_err(|error| {
+                            format!(
+                                "HOST_ROUTE_REPLAY_FAILED: restore resident project registration: {error}"
+                            )
+                        })?;
+                }
+                routes.insert(
+                    key,
+                    RuntimeRoute {
+                        root,
+                        storage_root,
+                        runtime: Some(host.clone()),
+                    },
+                );
                 continue;
             }
             routes.insert(
@@ -2718,19 +2746,20 @@ impl ProjectRuntimeManager {
         if context_root == self.host_root
             && !self.has_project_route(&context.project_scope.as_str())
         {
-            if let Err(error) = self.append_resident_route_record(&context) {
-                return (self.host.clone(), Resp::err(error));
-            }
             let response =
                 if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
                     dispatch_with_route_context(&self.host, req, Some(context.clone()))
                 };
-            if response.ok && is_register {
-                self.install_runtime(&key, self.host.clone(), None);
-            } else if !response.ok {
+            if !response.ok {
                 return (self.host.clone(), response);
+            }
+            if is_register {
+                if let Err(error) = self.append_resident_route_record(&context) {
+                    return (self.host.clone(), Resp::err(error));
+                }
+                self.install_runtime(&key, self.host.clone(), None);
             }
             return self.finalize_registration(
                 self.host.clone(),
@@ -12952,6 +12981,109 @@ mod host_route_registry_tests {
             unknown_app.starts_with("PROJECT_SCOPE_UNKNOWN:"),
             "{unknown_app}"
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_resident_route_replays_and_admits_register() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        std::fs::create_dir_all(host_paths.state_root()).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: crate::identity::CLI_APP_SERVER_ID.into(),
+            project_scope: canonical_root.to_string_lossy().into_owned(),
+            canonical_root: canonical_root.to_string_lossy().into_owned(),
+            storage_root: canonical_root.to_string_lossy().into_owned(),
+            registered_ms: 1,
+        };
+        std::fs::write(
+            &route_journal,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let registration = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_registration(
+                &GlobalState::canonical_project_scope(&root).unwrap(),
+                &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
+            )
+            .cloned()
+            .expect("resident route replay must restore the project registration");
+        assert_eq!(registration.registered_at_ms, 1);
+
+        let worker_id = "resident-route-worker";
+        let thread_id = "thread-resident-route-worker";
+        let (_, response) = manager.dispatch_sync(
+            Some(context_with_app(&root, crate::identity::CLI_APP_SERVER_ID)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: "token-resident-route-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates(thread_id),
+            },
+        );
+        assert!(response.ok, "{response:?}");
+        let resolved = manager.resolve_route_by_native_thread(thread_id).unwrap();
+        assert_eq!(resolved.agent_id.as_str(), worker_id);
+        assert_eq!(
+            resolved.project_scope.as_str(),
+            canonical_root.to_string_lossy()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_publish_failure_does_not_leave_a_replayable_route() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let mut manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let route_journal_blocker = root.join("route-journal-blocker");
+        std::fs::create_dir_all(&route_journal_blocker).unwrap();
+        Arc::get_mut(&mut manager).unwrap().route_journal = route_journal_blocker;
+
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, failed) = manager.dispatch_sync(
+            Some(context),
+            Req::Register {
+                worker_id: "resident-route-failure-worker".into(),
+                token: "token-resident-route-failure-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-resident-route-failure-worker"),
+            },
+        );
+        assert!(!failed.ok, "{failed:?}");
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")),
+            "{failed:?}"
+        );
+        assert!(
+            !route_journal.exists(),
+            "failed publish wrote a route journal"
+        );
+
+        drop(manager);
+        let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let missing = replayed
+            .resolve_route_by_native_thread("thread-resident-route-failure-worker")
+            .unwrap_err();
+        assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
 
         std::fs::remove_dir_all(root).unwrap();
     }

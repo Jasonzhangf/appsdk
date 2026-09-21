@@ -8,6 +8,11 @@ pub enum AgentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityPresence {
     Present,
+    /// The durable identity and its App Server address are verified, but the
+    /// native thread is not resident on the endpoint right now.  This is a
+    /// distinct, honest state: the peer is addressable and will be loaded by
+    /// the next immediate notification, so it is not "missing".
+    Cold,
     Missing,
     Unknown,
 }

@@ -5002,6 +5002,7 @@ fn migration_issues(server: &Server, state: &State) -> Vec<String> {
     for worker in state.workers.values() {
         match worker_presence(server, worker) {
             IdentityPresence::Present => {}
+            IdentityPresence::Cold => {}
             IdentityPresence::Missing => issues.push(format!(
                 "worker {} has no live server-verified App Server transport",
                 worker.id
@@ -6100,7 +6101,11 @@ fn worker_presence_with_view(
             .get("thread_state")
             .and_then(serde_json::Value::as_str),
     ) {
-        (IdentityPresence::Present, Some("notLoaded" | "systemError")) => IdentityPresence::Missing,
+        // A persisted thread that is cold on this endpoint still has a
+        // verified identity and address, so it is Cold rather than Missing.
+        // A system-error thread is genuinely unusable and stays Missing.
+        (IdentityPresence::Present, Some("notLoaded")) => IdentityPresence::Cold,
+        (IdentityPresence::Present, Some("systemError")) => IdentityPresence::Missing,
         _ => presence,
     };
     (presence, agent_view)
@@ -6351,6 +6356,10 @@ pub(crate) fn live_master_id(
     };
     match worker_presence(server, worker) {
         IdentityPresence::Present => Ok(Some(worker.id.clone())),
+        // Master authority requires a thread that is resident now: a cold
+        // master cannot act on a request until something loads it, so it is
+        // not treated as a live master.
+        IdentityPresence::Cold => Ok(None),
         IdentityPresence::Missing => Ok(None),
         IdentityPresence::Unknown => Err(
             "master identity is unknown; defer authority changes until transport probes succeed",
@@ -7134,6 +7143,11 @@ fn handle_master_promote(
     }
     match worker_presence(server, &worker) {
         IdentityPresence::Present => {}
+        // Promotion needs a master that can act immediately, so a cold thread
+        // is refused with the same rule as a missing one.
+        IdentityPresence::Cold => {
+            return Resp::err("master promotion requires a live registered transport")
+        }
         IdentityPresence::Missing => {
             return Resp::err("master promotion requires a live registered transport")
         }
@@ -7175,6 +7189,9 @@ fn handle_master_delegate(
     };
     match worker_presence(server, target) {
         IdentityPresence::Present => {}
+        // Delegation goes through the same immediate notification path that
+        // loads a cold thread, so a verified-but-cold target is acceptable.
+        IdentityPresence::Cold => {}
         IdentityPresence::Missing => {
             return Resp::err("master delegation requires a live target transport")
         }
@@ -8685,6 +8702,10 @@ fn handle_task_close(
             Ok(master) => master,
             Err(error) => return Resp::err(error),
         };
+        // Only a definitively missing owner identity is treated as dead.  A
+        // cold thread may simply be idle on the endpoint and an unknown probe
+        // is not evidence of death, so neither authorizes force-closing
+        // another peer's task.
         let owner_identity_live = st.workers.get(&task.owner).is_some_and(|owner| {
             !matches!(worker_presence(server, owner), IdentityPresence::Missing)
         });
@@ -9149,6 +9170,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
                 "role": peer_role,
                 "presence": match peer_presence {
                     IdentityPresence::Present => "present",
+                    IdentityPresence::Cold => "cold",
                     IdentityPresence::Missing => "missing",
                     IdentityPresence::Unknown => "unknown",
                 },
@@ -9238,9 +9260,13 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         },
         "role_brief": current_role_brief,
         "liveness": {
+            // `live` stays reserved for a thread that is resident now.  A cold
+            // thread reports its own presence value below and is labelled
+            // "cold" rather than "present" or "missing".
             "live": presence == IdentityPresence::Present,
             "presence": match presence {
                 IdentityPresence::Present => "present",
+                IdentityPresence::Cold => "cold",
                 IdentityPresence::Missing => "missing",
                 IdentityPresence::Unknown => "unknown",
             },
@@ -9491,6 +9517,8 @@ fn worker_status_summary_with_maps(
                 .cloned()
                 .unwrap_or_default();
             let agent_state = match (presence, thread_state) {
+                // A verified identity whose thread is cold on this endpoint.
+                (IdentityPresence::Cold, Some("notLoaded")) => "not_loaded",
                 (IdentityPresence::Missing, Some("systemError")) => "system_error",
                 (IdentityPresence::Missing, Some("notLoaded")) => "not_loaded",
                 (IdentityPresence::Missing, _) => "absent",
@@ -9582,6 +9610,7 @@ fn worker_status_summary_with_maps(
         "status": status,
         "presence": match presence {
             IdentityPresence::Present => "present",
+            IdentityPresence::Cold => "cold",
             IdentityPresence::Missing => "missing",
             IdentityPresence::Unknown => "unknown",
         },

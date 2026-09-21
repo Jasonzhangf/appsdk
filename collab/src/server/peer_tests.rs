@@ -4394,7 +4394,7 @@ fn orphan_force_close_defers_when_owner_appserver_probe_is_unknown() {
 }
 
 #[test]
-fn orphan_force_close_treats_not_loaded_owner_as_dead() {
+fn orphan_force_close_refuses_a_cold_owner_because_cold_is_not_dead() {
     let (mut server, root) = test_server();
     register(&server, "owner", "thread-owner");
     register(&server, "peer", "thread-peer");
@@ -4409,7 +4409,9 @@ fn orphan_force_close_treats_not_loaded_owner_as_dead() {
         }))
     });
 
-    let closed = handle_task_close(
+    // A cold thread is not evidence that its owner is dead: the owner may
+    // simply be idle on the endpoint, so force close stays refused.
+    let refused = handle_task_close(
         &server,
         "peer".into(),
         "token-peer".into(),
@@ -4417,11 +4419,17 @@ fn orphan_force_close_treats_not_loaded_owner_as_dead() {
         true,
         Some("owner native thread is not loaded".into()),
     );
-    assert!(closed.ok, "{closed:?}");
-    assert_eq!(closed.data["status"], "closed");
+    assert!(!refused.ok, "{refused:?}");
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not authorized")),
+        "{refused:?}"
+    );
     assert_eq!(
         server.state.lock().unwrap().tasks["orphan"].status,
-        "closed"
+        "working"
     );
     std::fs::remove_dir_all(root).ok();
 }

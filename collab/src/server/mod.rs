@@ -2317,7 +2317,7 @@ impl ProjectRuntimeManager {
                 .lookup_current_thread_route_tombstone(&session_id, &native_thread_id)
             {
                 return Err(format!(
-                    "SESSION_THREAD_BINDING_STALE: old session/thread address ({session_id}, {native_thread_id}) was retired; reboundTo=({}, {})",
+                    "SESSION_THREAD_BINDING_STALE: old session/thread address ({session_id}, {native_thread_id}) was retired; reboundTo=({}, {}); recovery: re-run the caller with the current address; never revive the old route or hand-edit the journal",
                     tombstone
                         .rebound_to
                         .session_id
@@ -2333,7 +2333,7 @@ impl ProjectRuntimeManager {
                 ));
             } else {
                 return Err(format!(
-                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id} under session {session_id} in {requested_root}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
+                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id} under session {session_id}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
                 ));
             }
         };

@@ -1008,7 +1008,7 @@ impl Scope {
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects an App Server route"
+                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects an App Server route; recovery: read the host session from the live App Server environment and re-run with both keys; if the peer's durable record predates the dual key, the daemon still resolves it by the unique thread once this session is present; do not infer a session from the thread or edit route state by hand"
                     )
                 })?;
             let route = route_for_native_thread(host_paths, &session_id, &thread_id)?;

@@ -688,7 +688,7 @@ pub(crate) fn load_existing_at(
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects a persisted App Server identity"
+                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects a persisted App Server identity; recovery: read the host session from the live App Server environment and re-run with both keys, then explicitly rebind the same identity and persisted runtime; do not infer a session from the thread, copy another peer's token, or edit identity state by hand"
                     )
                 })?;
             let mut matches = identities_by_runtime_key_at(host_paths, &session_id, thread_id)?;
@@ -696,7 +696,7 @@ pub(crate) fn load_existing_at(
                 1 => return Ok(matches.pop()),
                 0 => {}
                 count => anyhow::bail!(
-                    "multiple persisted Collab identities are bound to App Server thread {thread_id}: {count}"
+                    "multiple persisted Collab identities are bound to App Server thread {thread_id}: {count}; recovery: identify the intended peer from `collab status --all`, then explicitly rebind that one identity with the current host session/thread pair; do not guess among the matches, delete identities, or edit identity state by hand"
                 ),
             }
         }
@@ -761,7 +761,7 @@ fn load_or_create_resolved_at(
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects a persisted App Server identity"
+                    "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects a persisted App Server identity; recovery: read the host session from the live App Server environment and re-run with both keys, then explicitly rebind the same identity and persisted runtime; do not infer a session from the thread, copy another peer's token, or edit identity state by hand"
                 )
             })?;
         let mut matches = identities_by_runtime_key_at(host_paths, &session_id, thread_id)?;
@@ -769,7 +769,7 @@ fn load_or_create_resolved_at(
             1 => return Ok(matches.remove(0)),
             0 => {}
             count => anyhow::bail!(
-                "multiple persisted Collab identities are bound to App Server thread {thread_id}: {count}"
+                "multiple persisted Collab identities are bound to App Server thread {thread_id}: {count}; recovery: identify the intended peer from `collab status --all`, then explicitly rebind that one identity with the current host session/thread pair; do not guess among the matches, delete identities, or edit identity state by hand"
             ),
         }
     }

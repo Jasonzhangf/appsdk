@@ -972,4 +972,55 @@ mod tests {
         server.join().expect("server thread");
         assert_eq!(response, json!({"pong": true}));
     }
+
+    #[test]
+    fn authoritative_mutation_never_reaches_a_selected_native_endpoint() {
+        let fixture = TempServerDir::new("native-bypass");
+        let listener = UnixListener::bind(fixture.socket()).expect("bind native fixture socket");
+        listener
+            .set_nonblocking(true)
+            .expect("native fixture socket is nonblocking");
+        let identity = crate::identity::RuntimeIdentity {
+            agent_id: crate::identity::AgentId::new("agent-1").unwrap(),
+            runtime_id: crate::identity::RuntimeId::new("runtime-1").unwrap(),
+            appserver_id: crate::identity::AppServerId::new("appserver-desktop").unwrap(),
+            endpoint_generation: 3,
+            binding_id: crate::identity::BindingId::new("binding-3").unwrap(),
+            session_id: None,
+            native_thread_id: None,
+        };
+        let request = Req::Send {
+            from: "agent-1".into(),
+            worker_id: Some("agent-1".into()),
+            token: Some("token-1".into()),
+            command: None,
+            to: "agent-2".into(),
+            mtype: "notify".into(),
+            subject: Some("subject".into()),
+            body: "authoritative mutation".into(),
+            in_reply_to: None,
+            delivery: "immediate".into(),
+        };
+
+        let error =
+            crate::client::call_with_runtime_identity_at_root_for_endpoint::<serde_json::Value>(
+                &fixture.socket(),
+                &request,
+                fixture.path(),
+                &identity,
+                crate::client::adapters::EndpointKind::Desktop,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ADAPTER_ENDPOINT_UNAVAILABLE"),
+            "{error}"
+        );
+        // The authoritative request must fail closed before any byte reaches
+        // the selected native endpoint, so the endpoint cannot mutate state
+        // outside the resident daemon reducer and journal.
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
 }

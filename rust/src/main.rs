@@ -17661,10 +17661,28 @@ fn reset_generated_roots(root: &Path) -> Result<Vec<String>, String> {
 }
 
 fn reset_requires_clean_worktree(root: &Path, mode: ResetMode) -> Result<(), String> {
+    let worktree_root = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or(""),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .output()
+        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
+    if !worktree_root.status.success() {
+        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
+    }
+    let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_root.stdout).trim());
+    let status_root = if mode == ResetMode::DiscardLegacy {
+        worktree_root.as_path()
+    } else {
+        root
+    };
     let mut status_command = Command::new("git");
     status_command.args([
         "-C",
-        root.to_str().unwrap_or(""),
+        status_root.to_str().unwrap_or(""),
         "status",
         "--porcelain=v1",
         "-z",
@@ -17683,19 +17701,6 @@ fn reset_requires_clean_worktree(root: &Path, mode: ResetMode) -> Result<(), Str
     }
     let ignored_lock = if mode == ResetMode::DiscardLegacy {
         let lock_path = reset_transaction_lock_path(root);
-        let worktree_root = Command::new("git")
-            .args([
-                "-C",
-                root.to_str().unwrap_or(""),
-                "rev-parse",
-                "--show-toplevel",
-            ])
-            .output()
-            .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
-        if !worktree_root.status.success() {
-            return Err("RESET_GIT_WORKTREE_REQUIRED".into());
-        }
-        let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_root.stdout).trim());
         let lock_is_inside_worktree = fs::canonicalize(&lock_path)
             .ok()
             .zip(fs::canonicalize(&worktree_root).ok())
@@ -17704,7 +17709,7 @@ fn reset_requires_clean_worktree(root: &Path, mode: ResetMode) -> Result<(), Str
             let lock_status = Command::new("git")
                 .args([
                     "-C",
-                    root.to_str().unwrap_or(""),
+                    worktree_root.to_str().unwrap_or(""),
                     "status",
                     "--porcelain=v1",
                     "-z",

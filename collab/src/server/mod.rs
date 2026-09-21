@@ -5513,6 +5513,23 @@ fn current_master_worker_id(state: &State, route_scope: Option<&RouteScope>) -> 
     current_master_grant(state, route_scope).map(|grant| grant.agent_id.as_str().to_owned())
 }
 
+fn communication_recovery_brief() -> serde_json::Value {
+    json!({
+        "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
+        "steps": [
+            "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
+            "After a daemon restart, identity mismatch, or missing route, run `collab worker recover` only from the canonical project main tree; never inject recovery into a foreign thread.",
+            "Run `collab context` again, then send one bounded recovery report request; do not replay an old message batch or retry automatically.",
+            "If recovery still fails, report the exact error, root cause, proposed fix, and decision needed to the live master; do not edit routes, journal, mailbox, tokens, or start a second daemon."
+        ],
+        "close_only_when": [
+            "the same native target produces a result item",
+            "the durable receipt for that result is consumed through the canonical receive/consume operation; read-only inspection alone does not close",
+            "the bug or feature record is updated with the full evidence"
+        ]
+    })
+}
+
 fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Value {
     let route_scope = server_route_scope(server, state).ok().flatten();
     if current_master_worker_id(state, route_scope.as_ref()).as_deref() == Some(worker_id) {
@@ -5526,6 +5543,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
                 "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
             ],
+            "communication_recovery": communication_recovery_brief(),
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
@@ -5539,6 +5557,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "On trouble, investigate first. Send root cause, attempted actions, proposed fix, and any required decision to the live master; copy parent when different.",
                 "Complete implementation, tests, commit, delivery evidence, and resource cleanup; do not stop at code-written or ACK."
             ],
+            "communication_recovery": communication_recovery_brief(),
             "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
         });
     }
@@ -5551,6 +5570,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "On trouble, investigate first. Report root cause, attempted actions, proposed fix, and the exact decision needed to the live master.",
             "Do not wait passively and do not stop on ACK/read/summary; after handling a notification, resume your current task."
         ],
+        "communication_recovery": communication_recovery_brief(),
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
 }

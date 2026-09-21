@@ -133,6 +133,26 @@
       "edges": [{"from": "whitebox", "to": "build"}, {"from": "build", "to": "install"}, {"from": "build", "to": "restart"}, {"from": "build", "to": "blackbox"}, {"from": "install", "to": "restart"}, {"from": "install", "to": "blackbox"}, {"from": "restart", "to": "blackbox"}, {"from": "blackbox", "to": "bind_validation"}]
     },
     {
+      "domain": "communication-recovery",
+      "objective": "Restore communication after an exact route, identity, daemon, or transport failure and prove the original native path again.",
+      "entry_node": "preserve_error",
+      "nodes": [
+        {"node_id": "preserve_error", "instruction": "Persist the exact error, durable IDs, source commit, installed binary, daemon PID/socket, and current task/bug binding; do not classify ACK, notification acceptance, health, or timeout as delivery.", "owner": "project", "evidence": ["communication-failure-record"]},
+        {"node_id": "inspect_state", "instruction": "Run `collab context` and inspect the named identity, route, daemon, task, and inbox state; use `collab master status` separately when master state is needed.", "owner": "project", "evidence": ["communication-state"]},
+        {"node_id": "recover_route", "instruction": "After a daemon restart, identity mismatch, or missing route, run `collab worker recover` only from the canonical project main tree; never edit routes, journal, mailbox, tokens, or start a second daemon.", "owner": "project", "evidence": ["recovery-receipt"]},
+        {"node_id": "verify_route", "instruction": "Run `collab context` again and send one bounded recovery report request; preserve failure and stop if the route is still unknown, ambiguous, foreign, or not live.", "owner": "project", "evidence": ["recovered-route"]},
+        {"node_id": "replay_native", "instruction": "Replay the same native target through the installed binary and record the target result item; queue acceptance or a daemon health response alone is insufficient.", "owner": "project", "evidence": ["native-target-result"]},
+        {"node_id": "consume_receipt", "instruction": "Consume the durable receipt for the target result through the canonical receive/consume operation; read-only inspection alone does not close. Update the bound bug or feature record and close only when the result and receipt evidence are present.", "owner": "project", "evidence": ["durable-receipt", "issue-update"]}
+      ],
+      "edges": [
+        {"from": "preserve_error", "to": "inspect_state"},
+        {"from": "inspect_state", "to": "recover_route"},
+        {"from": "recover_route", "to": "verify_route"},
+        {"from": "verify_route", "to": "replay_native"},
+        {"from": "replay_native", "to": "consume_receipt"}
+      ]
+    },
+    {
       "domain": "integration",
       "objective": "Merge only an exact candidate verified against latest main.",
       "entry_node": "refresh_main",

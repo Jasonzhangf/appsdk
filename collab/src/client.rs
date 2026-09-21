@@ -208,18 +208,7 @@ pub fn call_with_runtime_identity_at_root<T: DeserializeOwned>(
     root: &Path,
     identity: &RuntimeIdentity,
 ) -> anyhow::Result<T> {
-    call_with_runtime_identity_at_root_selected_endpoint(sock, req, root, identity, None)
-}
-
-#[cfg(test)]
-pub(crate) fn call_with_runtime_identity_at_root_for_endpoint<T: DeserializeOwned>(
-    sock: &Path,
-    req: &Req,
-    root: &Path,
-    identity: &RuntimeIdentity,
-    endpoint: adapters::EndpointKind,
-) -> anyhow::Result<T> {
-    call_with_runtime_identity_at_root_selected_endpoint(sock, req, root, identity, Some(endpoint))
+    call_with_runtime_identity_at_root_selected_endpoint(sock, req, root, identity)
 }
 
 fn call_with_runtime_identity_at_root_selected_endpoint<T: DeserializeOwned>(
@@ -227,14 +216,10 @@ fn call_with_runtime_identity_at_root_selected_endpoint<T: DeserializeOwned>(
     req: &Req,
     root: &Path,
     identity: &RuntimeIdentity,
-    explicit_endpoint: Option<adapters::EndpointKind>,
 ) -> anyhow::Result<T> {
     let project_context = ProjectContext::for_registered_route(root, identity)?;
     let envelope = RequestEnvelope::new(req.clone(), Some(project_context));
-    let binding = match explicit_endpoint {
-        Some(endpoint) => Some(adapters::EndpointBinding::new(endpoint, identity)),
-        None => adapters::binding_for_request(identity, &envelope)?,
-    };
+    let binding = adapters::binding_for_request(identity, &envelope)?;
     if let Some(binding) = binding {
         // An explicitly selected AppServer owns this attempt. Adapter errors
         // are returned directly; the daemon remains a separate compatibility
@@ -1002,15 +987,20 @@ mod tests {
             delivery: "immediate".into(),
         };
 
-        let error =
-            crate::client::call_with_runtime_identity_at_root_for_endpoint::<serde_json::Value>(
-                &fixture.socket(),
-                &request,
-                fixture.path(),
-                &identity,
-                crate::client::adapters::EndpointKind::Desktop,
-            )
-            .unwrap_err();
+        let _env_guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var(crate::client::adapters::APPSERVER_ENV).ok();
+        std::env::set_var(crate::client::adapters::APPSERVER_ENV, "desktop");
+        let result = crate::client::call_with_runtime_identity_at_root::<serde_json::Value>(
+            &fixture.socket(),
+            &request,
+            fixture.path(),
+            &identity,
+        );
+        match previous {
+            Some(value) => std::env::set_var(crate::client::adapters::APPSERVER_ENV, value),
+            None => std::env::remove_var(crate::client::adapters::APPSERVER_ENV),
+        }
+        let error = result.unwrap_err();
         assert!(
             error.to_string().contains("ADAPTER_ENDPOINT_UNAVAILABLE"),
             "{error}"

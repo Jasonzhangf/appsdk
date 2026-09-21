@@ -1090,10 +1090,20 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let identity = registered_identity("appserver-desktop", 6, "binding-6");
 
-        let error = crate::client::call_with_runtime_identity_at_root_for_endpoint::<
-            serde_json::Value,
-        >(&socket, &Req::Ping, &root, &identity, EndpointKind::Desktop)
-        .unwrap_err();
+        let _env_guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var(APPSERVER_ENV).ok();
+        std::env::set_var(APPSERVER_ENV, "desktop");
+        let result = crate::client::call_with_runtime_identity_at_root::<serde_json::Value>(
+            &socket,
+            &Req::Ping,
+            &root,
+            &identity,
+        );
+        match previous {
+            Some(value) => std::env::set_var(APPSERVER_ENV, value),
+            None => std::env::remove_var(APPSERVER_ENV),
+        }
+        let error = result.unwrap_err();
         assert!(error.to_string().contains("ADAPTER_ENDPOINT_UNAVAILABLE"));
         assert!(matches!(
             listener.accept(),

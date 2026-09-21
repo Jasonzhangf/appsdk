@@ -8513,13 +8513,13 @@ fn validate_wire_runtime_binding(
             });
         drop(state);
         if !already_registered {
-            if project_context.runtime_context.is_some()
-                && !is_provisional_cli_runtime(project_context, worker_id)
-            {
-                return Err(
-                        "RUNTIME_BINDING_REJECTED: first register may carry only the provisional CLI runtime identity"
+            if let Some(runtime) = project_context.runtime_context.as_ref() {
+                if runtime.agent_id.as_str() != worker_id {
+                    return Err(
+                        "RUNTIME_BINDING_REJECTED: runtime identity does not match the registering worker"
                             .into(),
                     );
+                }
             }
             return Ok(());
         }
@@ -13466,6 +13466,42 @@ mod host_route_registry_tests {
         assert_eq!(state.revision, before_revision);
         drop(state);
         assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_register_accepts_the_explicit_appserver_runtime() {
+        let (server, root, journal_path) = test_server();
+        let app = "app-wire";
+        let worker_id = "wire-runtime-worker";
+        let runtime = RuntimeIdentity {
+            agent_id: AgentId::new(worker_id).unwrap(),
+            runtime_id: RuntimeId::new("runtime-wire-runtime-worker").unwrap(),
+            appserver_id: AppServerId::new(app).unwrap(),
+            endpoint_generation: 0,
+            binding_id: BindingId::new("binding-wire-runtime-worker").unwrap(),
+            native_thread_id: Some(NativeThreadId::new("thread-wire-runtime-worker").unwrap()),
+        };
+
+        let response = dispatch_wire(
+            server.clone(),
+            Some(context_with_runtime(&root, app, &runtime)),
+            Req::Register {
+                worker_id: worker_id.into(),
+                token: "token-wire-runtime-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-wire-runtime-worker"),
+            },
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        let registered = runtime_for_registered(&server, &root, worker_id, app);
+        assert_eq!(registered.agent_id, runtime.agent_id);
+        assert_eq!(registered.appserver_id, runtime.appserver_id);
+        assert_eq!(registered.binding_id, runtime.binding_id);
+        assert_eq!(registered.native_thread_id, runtime.native_thread_id);
+        assert!(registered.endpoint_generation > 0);
+        assert!(journal_path.is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
 

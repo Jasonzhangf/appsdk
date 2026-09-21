@@ -9507,7 +9507,10 @@ fn worker_status_summary_with_maps(
             let (presence, agent_view) = worker_presence_with_view(server, w);
             let endpoint_live = presence == IdentityPresence::Present;
             let ownership = endpoint_live.then_some(Ok(true));
-            let identity_valid = endpoint_live;
+            // Identity validity is proven by the binding itself, which a cold
+            // peer still carries; it must not be conflated with residency.
+            let identity_valid =
+                matches!(presence, IdentityPresence::Present | IdentityPresence::Cold);
             let thread_state = agent_view
                 .get("thread_state")
                 .and_then(serde_json::Value::as_str);

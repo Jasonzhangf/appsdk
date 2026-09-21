@@ -17508,6 +17508,47 @@ fn reset_generated_roots(root: &Path) -> Result<Vec<String>, String> {
     Ok(roots)
 }
 
+fn reset_requires_clean_worktree(root: &Path, mode: ResetMode) -> Result<(), String> {
+    let mut status_command = Command::new("git");
+    status_command.args([
+        "-C",
+        root.to_str().unwrap_or(""),
+        "status",
+        "--porcelain=v1",
+        "-z",
+    ]);
+    // `init --fresh` historically scoped cleanliness to the project root so a
+    // nested project did not fail on unrelated parent changes. Preserve that
+    // exact gate for fresh mode; the reset entry remains whole-worktree.
+    if mode == ResetMode::FreshInit {
+        status_command.args(["--", "."]);
+    }
+    let status = status_command
+        .output()
+        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
+    if !status.status.success() {
+        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
+    }
+    let ignored_lock = if mode == ResetMode::DiscardLegacy {
+        let lock_path = reset_transaction_lock_path(root);
+        lock_path
+            .strip_prefix(root.parent().unwrap_or(root))
+            .ok()
+            .map(|path| format!("?? {}", path.display()))
+    } else {
+        None
+    };
+    let has_unexpected_dirty = status
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .filter(|record| !record.is_empty())
+        .any(|record| ignored_lock.as_deref() != Some(String::from_utf8_lossy(record).as_ref()));
+    if has_unexpected_dirty {
+        return Err("RESET_REQUIRES_CLEAN_WORKTREE".into());
+    }
+    Ok(())
+}
+
 fn reset_governance(root: &Path, discard_legacy: bool) {
     reset_governance_internal(root, discard_legacy, ResetMode::DiscardLegacy)
         .unwrap_or_else(|error| fail(error));
@@ -17551,23 +17592,7 @@ fn reset_governance_internal(
         Ok(None) => {}
         Err(error) => return Err(error),
     }
-    let mut status_command = Command::new("git");
-    status_command.args(["-C", root.to_str().unwrap_or(""), "status", "--porcelain"]);
-    // `init --fresh` historically scoped cleanliness to the project root so a
-    // nested project did not fail on unrelated parent changes. Preserve that
-    // exact gate for fresh mode; the reset entry remains whole-worktree.
-    if mode == ResetMode::FreshInit {
-        status_command.args(["--", "."]);
-    }
-    let status = status_command
-        .output()
-        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
-    if !status.status.success() {
-        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
-    }
-    if !status.stdout.is_empty() {
-        return Err("RESET_REQUIRES_CLEAN_WORKTREE".into());
-    }
+    reset_requires_clean_worktree(root, mode)?;
     let generated_roots = reset_generated_roots(root)?;
     reset_transaction_run(root, &branch, &generated_roots, mode)?;
     println!("{}", mode.applied_message());

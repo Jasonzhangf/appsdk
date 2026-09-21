@@ -6594,6 +6594,47 @@ fn legacy_accepted_candidate_can_record_merge() {
 }
 
 #[test]
+fn merged_task_without_lifecycle_edges_cannot_close() {
+    let (server, root) = test_server();
+    register(&server, "peer", "%peer");
+    assert!(create_task(&server, "peer", "accepted-task", "feature").ok);
+    {
+        let mut state = server.state.lock().unwrap();
+        let mut task = state.tasks.remove("accepted-task").unwrap();
+        task.status = "accepted".into();
+        state.tasks.insert(task.id.clone(), task);
+    }
+    assert!(
+        handle_task_update(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "accepted-task".into(),
+            Some("merged".into()),
+            Some("legacy merge compatibility".into()),
+        )
+        .ok
+    );
+    let closed = handle_task_close(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "accepted-task".into(),
+        false,
+        None,
+    );
+    assert_eq!(
+        closed.error.as_deref(),
+        Some("task accepted-task cannot close before delivery, review, and integration evidence")
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["accepted-task"].status,
+        "merged"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn delivery_review_and_exact_main_integration_are_durable() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");

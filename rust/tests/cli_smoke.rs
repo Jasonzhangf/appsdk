@@ -805,6 +805,21 @@ fn reset_governance_nested_project_does_not_self_dirty_clean_worktree() {
         .unwrap();
     assert!(status.status.success());
     assert_eq!(status.stdout, b"?? .appsdk-reset-transaction-v4.lock\0");
+    let scoped_status = Command::new("git")
+        .args([
+            "-C",
+            root_text,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            lock_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(scoped_status.status.success());
+    assert_eq!(scoped_status.stdout, status.stdout);
 
     let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
     assert!(

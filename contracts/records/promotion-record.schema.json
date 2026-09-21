@@ -41,5 +41,11 @@
     "playground_cleanup_record_id": {"type": "string"},
     "bug_closure_verified": {"type": "boolean"},
     "created_at": {"type": "string"}
-  }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["collaboration_record_id"]},
+      "then": {"required": ["collab_live_closure_record_id"]}
+    }
+  ]
 }

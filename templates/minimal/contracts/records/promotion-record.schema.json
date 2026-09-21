@@ -22,6 +22,7 @@
     "merge_queue_record_id": {"type": "string"},
     "integration_record_id": {"type": "string"},
     "mainline_receipt_record_id": {"type": "string"},
+    "collab_live_closure_record_id": {"type": "string"},
     "previous_active_version": {"type": ["string", "null"]},
     "new_active_version": {"type": "string"},
     "base_artifact_hash": {"type": ["string", "null"]},
@@ -39,5 +40,11 @@
     "change_reason_comment": {"type": "string"},
     "playground_cleanup_record_id": {"type": "string"},
     "created_at": {"type": "string"}
-  }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["collaboration_record_id"]},
+      "then": {"required": ["collab_live_closure_record_id"]}
+    }
+  ]
 }

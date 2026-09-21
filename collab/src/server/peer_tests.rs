@@ -2764,6 +2764,13 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
         .as_str()
         .unwrap()
         .contains("independent task"));
+    assert_eq!(
+        worker_registration.data["role_brief"]["communication_recovery"]["close_only_when"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
 
     let missing =
         super::handle_master_promote(&server, "peer-a".into(), "token-peer-a".into(), "".into());
@@ -2784,6 +2791,13 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
         .unwrap()
         .iter()
         .any(|line| line.as_str().unwrap().contains("assign tasks")));
+    assert!(
+        promoted.data["role_brief"]["communication_recovery"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("collab worker recover"))
+    );
     let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a");
     let status = super::handle_master_status(&server);

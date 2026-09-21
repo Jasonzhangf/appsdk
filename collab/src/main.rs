@@ -581,7 +581,7 @@ fn ensure_registration(scope: &Scope, ident: &mut Identity) -> anyhow::Result<se
     if ident.runtime.is_none() || ident.transport.is_none() {
         register(scope, ident)
     } else if !persisted_runtime_matches_scope(scope, ident)? {
-        register(scope, ident)
+        register_recovery(scope, ident)
     } else {
         runtime_for_request(ident)?;
         Ok(json!({"reused": true}))
@@ -1732,7 +1732,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "daemon_started": started,
                 "role_brief": registration["role_brief"],
                 "task_board": task_board["tasks"],
-                "recovery_action": "inspect your own tasks, conflicts, and inbox through collab context"
+                "recovery_action": registration["role_brief"]["communication_recovery"]
             }));
             Ok(())
         }
@@ -2502,6 +2502,7 @@ fn _unused(_r: Resp) {}
 mod tests {
     use super::*;
     use crate::proto::{SelectedTransport, TransportKind};
+    use std::io::BufRead;
 
     fn test_root(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -3284,6 +3285,130 @@ mod tests {
         .unwrap());
 
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ensure_registration_uses_provisional_runtime_for_scope_mismatch() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("registration-recovery");
+        let old_root = root.join("old-project");
+        let new_root = root.join("new-project");
+        let state_root = std::env::temp_dir().join(format!(
+            "collab-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(new_root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        let route = json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": "appserver-old",
+            "project_scope": old_root.canonicalize().unwrap(),
+            "canonical_root": old_root.canonicalize().unwrap(),
+            "storage_root": old_root.canonicalize().unwrap(),
+            "registered_ms": 1
+        });
+        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+        let old_runtime = RuntimeIdentity {
+            agent_id: identity::AgentId::new("worker-1").unwrap(),
+            runtime_id: identity::RuntimeId::new("runtime-old").unwrap(),
+            appserver_id: identity::AppServerId::new("appserver-old").unwrap(),
+            endpoint_generation: 3,
+            binding_id: identity::BindingId::new("binding-old").unwrap(),
+            native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
+        };
+        let mut identity = identity_with_runtime(Some(old_runtime));
+        identity.project_scope = Some(
+            Scope {
+                root: old_root.clone(),
+            }
+            .route_scope(identity::AppServerId::new("appserver-old").unwrap())
+            .unwrap()
+            .project_scope_id,
+        );
+        identity.transport = Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            thread_id: Some("thread-old".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        });
+
+        let socket = state_root.join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let new_root_string = new_root
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                request["project_context"]["app_scope_id"],
+                identity::CLI_APP_SERVER_ID
+            );
+            let response = json!({
+                "ok": true,
+                "worker_id": "worker-1",
+                "identity_kind": "peer",
+                "transport_selected": {
+                    "kind": "appserver",
+                    "endpoint": "unix:///tmp/codex.sock",
+                    "namespace": "codex_tui",
+                    "thread_id": "thread-new",
+                    "capabilities": ["send_message_to_thread"],
+                    "self_check": "test appserver"
+                },
+                "typed": true,
+                "command_id": "command-register",
+                "operation_id": "operation-register",
+                "sequence": 1,
+                "revision": 1,
+                "replayed": false,
+                "command": {
+                    "binding": {
+                        "project_scope": new_root_string,
+                        "app_scope_id": identity::CLI_APP_SERVER_ID,
+                        "agent_id": "worker-1",
+                        "runtime_id": "runtime-new",
+                        "binding_id": "binding-new",
+                        "endpoint_generation": 1,
+                        "native_thread_id": "thread-new"
+                    }
+                }
+            });
+            std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+        });
+
+        let response = ensure_registration(
+            &Scope {
+                root: new_root.clone(),
+            },
+            &mut identity,
+        )
+        .unwrap();
+        responder.join().unwrap();
+        assert_eq!(response["typed"], true);
+        assert_eq!(
+            identity.runtime.unwrap().appserver_id.as_str(),
+            identity::CLI_APP_SERVER_ID
+        );
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
 

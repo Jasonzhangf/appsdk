@@ -2368,7 +2368,10 @@ mod tests {
         let thread = NativeThreadId::new("thread-legacy").unwrap();
         let legacy = replayed
             .global
-            .lookup_legacy_thread_route(&thread)
+            .legacy_thread_route_matches(&thread)
+            .into_iter()
+            .next()
+            .cloned()
             .expect("legacy binding must stay resolvable");
         assert_eq!(legacy.agent_id.as_str(), "agent-legacy");
         assert_eq!(legacy.binding_id.as_str(), "binding-legacy");
@@ -2426,7 +2429,10 @@ mod tests {
         let thread = NativeThreadId::new("thread-legacy-live").unwrap();
         let legacy = replayed
             .global
-            .lookup_legacy_thread_route(&thread)
+            .legacy_thread_route_matches(&thread)
+            .into_iter()
+            .next()
+            .cloned()
             .expect("legacy route event must stay resolvable");
         assert_eq!(legacy.agent_id.as_str(), "agent-legacy");
         assert_eq!(legacy.endpoint_generation, 4);
@@ -2437,7 +2443,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_binding_replay_rejects_ambiguous_legacy_thread_only_routes() {
+    fn runtime_binding_replay_keeps_ambiguous_legacy_thread_only_routes_as_candidates() {
         let root = replay_test_root("legacy-thread-ambiguous");
         let journal = root.join(".agent-collab/server/journal.jsonl");
         std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
@@ -2473,14 +2479,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(&journal, format!("{body}\n")).unwrap();
-        let error = crate::server::replay(&root)
-            .err()
-            .expect("two legacy bindings for one thread must fail closed")
-            .to_string();
-        assert!(
-            error.contains("multiple legacy thread-only bindings"),
-            "{error}"
-        );
+        // Replay must not abort on two candidates for one thread; the resolver
+        // fails closed instead, so both survive as read-only candidates.
+        let replayed = crate::server::replay(&root).expect("legacy replay must not abort");
+        let thread = NativeThreadId::new("thread-shared").unwrap();
+        let mut matches = replayed.global.legacy_thread_route_matches(&thread);
+        matches.sort_by(|left, right| left.binding_id.as_str().cmp(right.binding_id.as_str()));
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].binding_id.as_str(), "binding-one");
+        assert_eq!(matches[1].binding_id.as_str(), "binding-two");
+        replayed.global.validate().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -2306,12 +2306,20 @@ impl ProjectRuntimeManager {
                 .cloned()
             {
                 (binding, false)
-            } else if let Some(binding) = state
+            } else if !state
                 .global
-                .lookup_legacy_thread_route(&native_thread_id)
-                .cloned()
+                .legacy_thread_route_matches(&native_thread_id)
+                .is_empty()
             {
-                (binding, true)
+                let matches = state.global.legacy_thread_route_matches(&native_thread_id);
+                if matches.len() > 1 {
+                    return Err(format!(
+                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} has {count} legacy thread-only bindings under app scope {app}; recovery: identify the intended peer from `collab status --all`, then explicitly rebind that one identity with the current host session/thread pair so it owns the strict dual key; never guess among the candidates or edit the journal",
+                        count = matches.len(),
+                        app = matches[0].app_scope_id.as_str(),
+                    ));
+                }
+                (matches[0].clone(), true)
             } else if let Some(tombstone) = state
                 .global
                 .lookup_current_thread_route_tombstone(&session_id, &native_thread_id)

@@ -348,12 +348,30 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         loaded_ids.push(loaded_id);
     }
     if !loaded_ids.contains(&thread_id.as_str()) {
-        return Err(AdapterError::RouteUnavailable {
-            detail: format!(
-                "thread {} is persisted but not loaded by the App Server",
-                thread_id.as_str()
-            ),
-        });
+        // The thread may simply be cold on this endpoint.  Run the explicit
+        // load step before refusing: `thread/resume` either puts the thread
+        // into the loaded set, or the App Server answers that another live
+        // process already owns the writer, which is itself proof of liveness.
+        // Anything else stays a refusal with the exact server error.
+        match load_persisted_thread(&mut client, thread_id.as_str())? {
+            ThreadLoad::Loaded => {}
+            ThreadLoad::OwnedElsewhere { detail } => {
+                return Err(AdapterError::RouteUnavailable {
+                    detail: format!(
+                        "thread {} is persisted but not loaded by the App Server on this endpoint: {detail}",
+                        thread_id.as_str()
+                    ),
+                })
+            }
+            ThreadLoad::Refused { detail } => {
+                return Err(AdapterError::RouteUnavailable {
+                    detail: format!(
+                        "thread {} is persisted but not loaded by the App Server, and the explicit load step was refused: {detail}",
+                        thread_id.as_str()
+                    ),
+                })
+            }
+        }
     }
     let response = match client.call("thread/read", json!({"threadId": thread_id.as_str()})) {
         Ok(response) => response,
@@ -552,12 +570,15 @@ pub fn immediate_notify(
     client.initialize()?;
     let status = match thread_metadata(&mut client, thread_id.as_str()) {
         Ok(thread) => thread_status_from_metadata(&thread)?,
+        // A cold thread is loaded by the immediate notification itself:
+        // `turn/start` is the native load-and-start call, so a persisted
+        // thread reports a not-loaded status that resolves to Start rather
+        // than an invented queue or a refusal.  A genuinely missing thread
+        // still fails closed below.
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
-            return Err(AdapterError::RouteUnavailable {
-                detail: format!("thread {thread_id} is persisted but not loaded by the App Server"),
-            });
+            "notLoaded".to_string()
         }
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
@@ -612,6 +633,44 @@ pub fn immediate_notify(
 fn is_thread_not_loaded_error(operation: &str, detail: &str, thread_id: &str) -> bool {
     operation == "rpc"
         && (detail == "thread not loaded" || detail == format!("thread not loaded: {thread_id}"))
+}
+
+/// Outcome of the explicit load step for a persisted-but-cold thread.
+enum ThreadLoad {
+    /// The App Server now reports the thread in its loaded set.
+    Loaded,
+    /// Another live process holds the thread writer, so this endpoint cannot
+    /// and must not adopt it.  The thread is live, just not reachable here.
+    OwnedElsewhere { detail: String },
+    /// The load step failed for any other reason; the exact server error is
+    /// preserved so admission can refuse without guessing a recovery.
+    Refused { detail: String },
+}
+
+/// Ask the App Server to load one persisted thread into memory.
+///
+/// `thread/resume` is the native load step.  A thread that is already loaded
+/// needs no call.  A conflicting live writer is reported as `OwnedElsewhere`
+/// rather than retried, so admission never invents a second route.
+fn load_persisted_thread(client: &mut Client, thread_id: &str) -> Result<ThreadLoad, AdapterError> {
+    let params = json!({"threadId": thread_id});
+    match client.call("thread/resume", params) {
+        Ok(_) => Ok(ThreadLoad::Loaded),
+        Err(AdapterError::Unknown { detail, .. })
+            if detail.contains("already has an active writer") =>
+        {
+            Ok(ThreadLoad::OwnedElsewhere { detail })
+        }
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_found_error(&operation, &detail, thread_id) =>
+        {
+            Ok(ThreadLoad::Refused { detail })
+        }
+        Err(AdapterError::CapabilityUnavailable { .. }) => Ok(ThreadLoad::Refused {
+            detail: "App Server does not expose thread/resume for a persisted thread".into(),
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 fn is_thread_not_found_error(operation: &str, detail: &str, thread_id: &str) -> bool {
@@ -972,9 +1031,10 @@ fn notification_action(
             None => NotificationAction::Start,
         }),
         "idle" => Ok(NotificationAction::Start),
-        "notLoaded" => Err(AdapterError::RouteUnavailable {
-            detail: "thread is persisted but not loaded by the App Server".into(),
-        }),
+        // `thread/read` reports notLoaded for a persisted thread that is cold
+        // on this endpoint.  `turn/start` is the native load-and-start call,
+        // so an immediate notification loads it instead of refusing.
+        "notLoaded" => Ok(NotificationAction::Start),
         status => Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
@@ -1655,11 +1715,27 @@ mod tests {
                     "result": {"data": ["some-other-thread"]}
                 }),
             );
+            // A persisted thread that is cold on this endpoint gets one
+            // explicit load attempt; the server reports a conflicting live
+            // writer, which admission must surface instead of retrying.
+            let resume = next_request(&mut stream);
+            assert_eq!(resume["method"], "thread/resume");
+            assert_eq!(resume["params"]["threadId"], "persisted-thread");
+            respond(
+                &mut stream,
+                json!({
+                    "id": resume["id"],
+                    "error": {
+                        "code": -32600,
+                        "message": "thread persisted-thread already has an active writer"
+                    }
+                }),
+            );
             let mut byte = [0_u8; 1];
             assert_eq!(
                 stream.read(&mut byte).unwrap(),
                 0,
-                "unloaded thread must not issue another App Server method"
+                "a thread owned by another live writer must not issue another method"
             );
             stream.shutdown(Shutdown::Both).ok();
         });
@@ -2184,10 +2260,11 @@ mod tests {
             notification_action("idle", None).unwrap(),
             NotificationAction::Start
         );
-        let error = notification_action("notLoaded", None).unwrap_err();
-        assert!(
-            matches!(error, AdapterError::RouteUnavailable { .. }),
-            "{error}"
+        // A cold thread is loaded by `turn/start`, which is the native
+        // load-and-start call, so notLoaded resolves to Start.
+        assert_eq!(
+            notification_action("notLoaded", None).unwrap(),
+            NotificationAction::Start
         );
         for status in ["systemError", "unknown", ""] {
             let error = notification_action(status, None).unwrap_err();
@@ -2515,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_rejects_not_loaded_thread() {
+    fn immediate_notify_loads_not_loaded_thread_through_turn_start() {
         let socket = temp_socket("notify-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2537,32 +2614,36 @@ mod tests {
                     }
                 }),
             );
-            let mut byte = [0_u8; 1];
-            assert_eq!(
-                stream.read(&mut byte).unwrap(),
-                0,
-                "not-loaded thread must not issue turn/start"
+            // A cold thread is loaded by the immediate notification itself:
+            // `turn/start` is the native load-and-start call.
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            assert_eq!(start["params"]["threadId"], "thread-1");
+            respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {"id": "turn-loaded", "status": "inProgress", "items": []}
+                    }
+                }),
             );
             stream.shutdown(Shutdown::Both).ok();
         });
 
-        let error = immediate_notify(
+        immediate_notify(
             &selected_transport(&socket),
             Some("sender-thread"),
             "notify body",
             "message-start",
         )
-        .unwrap_err();
-        assert!(
-            matches!(error, AdapterError::RouteUnavailable { .. }),
-            "{error}"
-        );
+        .unwrap();
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
 
     #[test]
-    fn immediate_notify_rejects_thread_read_not_loaded_error() {
+    fn immediate_notify_loads_thread_whose_read_reports_not_loaded() {
         let socket = temp_socket("notify-read-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2582,26 +2663,28 @@ mod tests {
                     }
                 }),
             );
-            let mut byte = [0_u8; 1];
-            assert_eq!(
-                stream.read(&mut byte).unwrap(),
-                0,
-                "not-loaded thread must not issue turn/start"
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            assert_eq!(start["params"]["threadId"], "thread-1");
+            respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {"id": "turn-loaded", "status": "inProgress", "items": []}
+                    }
+                }),
             );
             stream.shutdown(Shutdown::Both).ok();
         });
 
-        let error = immediate_notify(
+        immediate_notify(
             &selected_transport(&socket),
             Some("sender-thread"),
             "notify body",
             "message-start",
         )
-        .unwrap_err();
-        assert!(
-            matches!(error, AdapterError::RouteUnavailable { .. }),
-            "{error}"
-        );
+        .unwrap();
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

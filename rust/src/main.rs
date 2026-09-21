@@ -17529,53 +17529,61 @@ fn reset_requires_clean_worktree(root: &Path, mode: ResetMode) -> Result<(), Str
     if !status.status.success() {
         return Err("RESET_GIT_WORKTREE_REQUIRED".into());
     }
-    let worktree_root = Command::new("git")
-        .args([
-            "-C",
-            root.to_str().unwrap_or(""),
-            "rev-parse",
-            "--show-toplevel",
-        ])
-        .output()
-        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
-    if !worktree_root.status.success() {
-        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
-    }
-    let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_root.stdout).trim());
-    let owned_lock_path = if mode == ResetMode::DiscardLegacy {
-        Some(reset_transaction_lock_path(root))
+    let ignored_lock = if mode == ResetMode::DiscardLegacy {
+        let lock_path = reset_transaction_lock_path(root);
+        let worktree_root = Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap_or(""),
+                "rev-parse",
+                "--show-toplevel",
+            ])
+            .output()
+            .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
+        if !worktree_root.status.success() {
+            return Err("RESET_GIT_WORKTREE_REQUIRED".into());
+        }
+        let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_root.stdout).trim());
+        let lock_is_inside_worktree = fs::canonicalize(&lock_path)
+            .ok()
+            .zip(fs::canonicalize(&worktree_root).ok())
+            .is_some_and(|(lock, worktree)| lock.starts_with(worktree));
+        if lock_is_inside_worktree {
+            let lock_status = Command::new("git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap_or(""),
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--",
+                    lock_path.to_str().unwrap_or(""),
+                ])
+                .output()
+                .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
+            if !lock_status.status.success() {
+                return Err("RESET_GIT_WORKTREE_REQUIRED".into());
+            }
+            lock_status.stdout
+        } else {
+            Vec::new()
+        }
     } else {
-        None
+        Vec::new()
     };
     let has_unexpected_dirty = status.stdout.split(|byte| *byte == b'\0').any(|record| {
         if record.is_empty() {
             return false;
         }
-        if let Some(lock_path) = owned_lock_path.as_ref() {
-            if let Some(relative) = record.strip_prefix(b"?? ") {
-                let relative_text = String::from_utf8_lossy(relative);
-                let candidate = worktree_root.join(Path::new(relative_text.as_ref()));
-                if paths_refer_to_same_file(lock_path, &candidate) {
-                    return false;
-                }
-            }
-        }
-        true
+        ignored_lock
+            .split(|byte| *byte == b'\0')
+            .all(|ignored| ignored.is_empty() || ignored != record)
     });
     if has_unexpected_dirty {
         return Err("RESET_REQUIRES_CLEAN_WORKTREE".into());
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    match (fs::metadata(left), fs::metadata(right)) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
-    }
 }
 
 fn reset_governance(root: &Path, discard_legacy: bool) {

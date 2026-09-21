@@ -797,7 +797,7 @@ fn reset_governance_nested_project_does_not_self_dirty_clean_worktree() {
     fs::write(root.join("business.txt"), "keep\n").unwrap();
     init_git(&workspace);
     let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
-    let lock_path = workspace.join(".appsdk-reset-transaction-v4.lock");
+    let lock_path = reset_transaction_lock_path(&root);
     fs::write(&lock_path, "").unwrap();
     let status = Command::new("git")
         .args(["-C", root_text, "status", "--porcelain=v1", "-z"])
@@ -817,6 +817,37 @@ fn reset_governance_nested_project_does_not_self_dirty_clean_worktree() {
         fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
         project_before
     );
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn reset_governance_nested_project_rejects_untracked_symlink_to_lock() {
+    let workspace = temp_root("reset-governance-nested-project-lock-symlink");
+    fs::create_dir_all(&workspace).unwrap();
+    let root = workspace.join("v4");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    fs::write(root.join("business.txt"), "keep\n").unwrap();
+    init_git(&workspace);
+    let lock_path = workspace.join(".appsdk-reset-transaction-v4.lock");
+    fs::write(&lock_path, "").unwrap();
+    std::os::unix::fs::symlink(&lock_path, root.join("user-link")).unwrap();
+    let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+
+    let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
+    assert!(!reset.status.success());
+    assert!(
+        String::from_utf8_lossy(&reset.stderr).contains("RESET_REQUIRES_CLEAN_WORKTREE"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&reset.stdout),
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert!(root.join("user-link").is_symlink());
 
     fs::remove_dir_all(workspace).unwrap();
 }

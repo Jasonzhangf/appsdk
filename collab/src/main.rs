@@ -1564,10 +1564,8 @@ fn unregistered_context(
         Some(scope) => scope.root.clone(),
         None => canonical_cwd.clone(),
     };
-    let route_recovery_required = route_error.is_some_and(|error| {
-        error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
-            && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
-    });
+    let route_recovery_required =
+        route_error.is_some_and(|error| error.starts_with("ROUTE_RESOLVE_NOT_FOUND:"));
     let looks_like_worktree = canonical_cwd.ancestors().any(|ancestor| {
         ancestor
             .file_name()
@@ -3253,6 +3251,43 @@ mod tests {
             "from the canonical project main checkout, if the running daemon predates the installed collab binary run `collab down`, then `collab up` once; then run `appsdk init .`"
         );
         assert!(!root.join(".agent-collab").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn context_route_error_from_current_server_keeps_recovery_steps() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("current-route-recovery-context");
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let error = format!(
+            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-current-daemon; {}",
+            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
+        );
+        let result = unregistered_context(None, None, Some(&error));
+        std::env::set_current_dir(previous).unwrap();
+
+        let context = result.unwrap();
+        assert_eq!(context["recovery"]["kind"], "route_recovery_required");
+        assert_eq!(context["recovery"]["reason"], error);
+        let steps = context["recovery"]["steps"]
+            .as_array()
+            .expect("recovery steps");
+        for expected in [
+            "`collab down`",
+            "`collab up` once",
+            "`appsdk init .`",
+            "`collab context`",
+            "`collab route resolve --native-thread-id <thread-id>`",
+            "`collab master status`",
+        ] {
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step.as_str().is_some_and(|value| value.contains(expected))),
+                "missing recovery step {expected}: {steps:?}"
+            );
+        }
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -13990,9 +13990,26 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     }
     // `init` is also the supported idempotent SDK refresh entrypoint.  The
     // Bundle owns `.appsdk/contracts`, `.appsdk/docs`, `.appsdk/skills`, and
-    // the resource manifest; project contract, maps, records, Active, and
-    // Protected state remain project-owned and are not overwritten here.
+    // the resource manifest. Project-owned maps, records, Active, and
+    // Protected state remain untouched; SDK-owned record contract files and
+    // declarations are refreshed here.
     install_bundle_resources(root);
+    if !fresh_governance {
+        let mut project = read_project(root);
+        let records_changed = install_canonical_record_contracts(root);
+        let canonical_records = Value::Array(
+            CANONICAL_RECORD_CONTRACTS
+                .iter()
+                .map(|path| Value::String((*path).into()))
+                .collect(),
+        );
+        if records_changed
+            || project.pointer("/governance/record_contracts") != Some(&canonical_records)
+        {
+            project["governance"]["record_contracts"] = canonical_records;
+            write_project(root, &project);
+        }
+    }
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
     try_register_global_project(root);
@@ -15221,7 +15238,7 @@ fn install_current_project_contract(
     relative: &str,
     canonical: &str,
     replace_legacy: bool,
-) {
+) -> bool {
     let target = root.join(relative);
     assert_no_symlink_components(root, &target, "governance_contract_migration");
     let canonical: Value = serde_json::from_str(canonical)
@@ -15234,7 +15251,7 @@ fn install_current_project_contract(
             )
             .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
             if current == canonical {
-                return;
+                return false;
             }
         }
     }
@@ -15251,19 +15268,34 @@ fn install_current_project_contract(
         &content,
         "SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED",
     );
+    true
 }
 
-fn install_current_project_contracts(root: &Path, prefixes: &[&str], replace_legacy: bool) {
+fn install_current_project_contracts(root: &Path, prefixes: &[&str], replace_legacy: bool) -> bool {
+    let mut changed = false;
     for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
         .iter()
         .filter(|(path, _, _)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
     {
-        install_current_project_contract(root, relative, canonical, replace_legacy);
+        changed |= install_current_project_contract(root, relative, canonical, replace_legacy);
     }
+    changed
 }
 
-fn install_current_record_contracts(root: &Path) {
-    install_current_project_contracts(root, &["contracts/records/"], false);
+fn install_current_record_contracts(root: &Path) -> bool {
+    install_current_project_contracts(root, &["contracts/records/"], false)
+}
+
+fn install_canonical_record_contracts(root: &Path) -> bool {
+    let mut changed = false;
+    for relative in CANONICAL_RECORD_CONTRACTS {
+        let canonical = SDK_BUNDLE_RESOURCES
+            .iter()
+            .find_map(|(path, _, content)| (*path == relative).then_some(*content))
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_RESOURCE_SET"));
+        changed |= install_current_project_contract(root, relative, canonical, false);
+    }
+    changed
 }
 
 fn assert_fresh_project_contract_target(root: &Path, relative: &str) {

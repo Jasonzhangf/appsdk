@@ -1548,6 +1548,32 @@ impl State {
                 .cloned()
                 .map(|binding| Event::GlobalCurrentThreadRouteSet { binding }),
         );
+        // Legacy thread-only routes must survive compaction too.  Replaying a
+        // snapshot that already contains a strict route skips the
+        // bindings-based restoration, so omitting these would silently drop
+        // every pre-dual-key route on the next restart.
+        let mut legacy_routes: Vec<_> =
+            self.global.legacy_thread_routes.values().cloned().collect();
+        legacy_routes.sort_by(|left, right| {
+            (
+                left.app_scope_id.as_str(),
+                left.native_thread_id.as_ref().map(|thread| thread.as_str()),
+                left.binding_id.as_str(),
+            )
+                .cmp(&(
+                    right.app_scope_id.as_str(),
+                    right
+                        .native_thread_id
+                        .as_ref()
+                        .map(|thread| thread.as_str()),
+                    right.binding_id.as_str(),
+                ))
+        });
+        events.extend(
+            legacy_routes
+                .into_iter()
+                .map(|binding| Event::GlobalCurrentThreadRouteSet { binding }),
+        );
         events.extend(
             self.global
                 .current_thread_route_tombstones
@@ -2383,6 +2409,100 @@ mod tests {
             .all(|route| route.binding_id.as_str() != "binding-legacy"));
         replayed.global.validate().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_events_keep_legacy_routes_alongside_a_strict_route() {
+        // A compacted journal may hold one strict dual-key route plus a
+        // pre-dual-key thread-only route.  Replay skips the bindings-based
+        // restoration as soon as it sees any strict route, so the snapshot
+        // itself must carry the legacy route or restart drops it.
+        let legacy = RuntimeBinding {
+            project_scope: ProjectScopeId::new("/snapshot-legacy").unwrap(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new("agent-legacy").unwrap(),
+            runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
+            binding_id: BindingId::new("binding-legacy").unwrap(),
+            endpoint_generation: 1,
+            session_id: None,
+            native_thread_id: Some(NativeThreadId::new("thread-legacy-snapshot").unwrap()),
+        };
+        let strict = RuntimeBinding {
+            project_scope: ProjectScopeId::new("/snapshot-strict").unwrap(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new("agent-strict").unwrap(),
+            runtime_id: RuntimeId::new("runtime-strict").unwrap(),
+            binding_id: BindingId::new("binding-strict").unwrap(),
+            endpoint_generation: 1,
+            session_id: Some(crate::identity::SessionId::new("session-strict").unwrap()),
+            native_thread_id: Some(NativeThreadId::new("thread-strict").unwrap()),
+        };
+
+        let mut st = State::default();
+        st.apply(&Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(
+                legacy.project_scope.clone(),
+                AppServerId::new("appserver-cli").unwrap(),
+            )
+            .unwrap(),
+        });
+        st.apply(&Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(
+                strict.project_scope.clone(),
+                AppServerId::new("appserver-cli").unwrap(),
+            )
+            .unwrap(),
+        });
+        st.apply(&Event::GlobalRuntimeBound {
+            binding: legacy.clone(),
+        });
+        st.apply(&Event::GlobalRuntimeBound {
+            binding: strict.clone(),
+        });
+        st.apply(&Event::GlobalCurrentThreadRouteSet {
+            binding: strict.clone(),
+        });
+        st.apply(&Event::GlobalCurrentThreadRouteSet {
+            binding: legacy.clone(),
+        });
+
+        let events = st.snapshot_events();
+        let route_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::GlobalCurrentThreadRouteSet { binding } => Some(binding.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            route_events.iter().any(|binding| binding == &legacy),
+            "the snapshot must carry the legacy route"
+        );
+        assert!(route_events.iter().any(|binding| binding == &strict));
+
+        // Feeding the snapshot back through the reducer must preserve both
+        // routes, so a restart cannot lose the legacy candidate.
+        let mut replayed = State::default();
+        for event in &events {
+            replayed.apply(event);
+        }
+        assert_eq!(
+            replayed
+                .global
+                .legacy_thread_route_matches(
+                    &NativeThreadId::new("thread-legacy-snapshot").unwrap()
+                )
+                .len(),
+            1
+        );
+        assert!(replayed
+            .global
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-strict").unwrap(),
+                &NativeThreadId::new("thread-strict").unwrap()
+            )
+            .is_some());
+        replayed.global.validate().unwrap();
     }
 
     #[test]

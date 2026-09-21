@@ -11,7 +11,7 @@ Bug：`508510a`
 
 AppSDK 与 Collab 作为一个产品维护，但职责保持单一：
 
-- `appsdk/collab/`：注册、绑定、路由、live 查询、恢复和 App Server transport；它是本仓库内的独立目录和独立 binary。
+- `collab/`：注册、绑定、路由、live 查询、恢复和 App Server transport；它是本仓库内的独立目录和独立 binary。
 - AppSDK：Feature/Bug intake、角色约束、DAG、验证证据、main 集成和交付门禁。
 - 不新增第二套身份库、任务库、daemon 或 mailbox。
 

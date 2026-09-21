@@ -16937,7 +16937,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             ))),
         };
     }
-    std::fs::write(host_paths.pid_path(), std::process::id().to_string()).map_err(|error| {
+    let pid_path = host_paths.pid_path();
+    std::fs::write(&pid_path, std::process::id().to_string()).map_err(|error| {
         match remove_listener_socket(&sock_path, &socket_metadata) {
             Ok(()) => anyhow::Error::new(error),
             Err(cleanup_error) => anyhow::Error::new(error).context(format!(
@@ -16945,6 +16946,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             )),
         }
     })?;
+    let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
     let _ = record_activity(
         &scope.root,
         "daemon_start",
@@ -16970,7 +16972,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     // Background scheduler: bounded waits and explicitly registered notifications.
     let sched = runtime_manager.clone();
-    tokio::spawn(async move {
+    let scheduler = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(
             sched.host.config.timers.tick_interval_ms,
         ));
@@ -16984,6 +16986,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         }
     });
 
+    let mut connection_tasks = tokio::task::JoinSet::new();
     tokio::select! {
         _ = interrupt.as_mut() => {}
         _ = terminate.as_mut() => {}
@@ -16993,7 +16996,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let manager = runtime_manager.clone();
-                        tokio::spawn(conn_task_routed(manager, stream));
+                        connection_tasks.spawn(conn_task_routed(manager, stream));
                     }
                     Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),
                 }
@@ -17001,12 +17004,15 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         } => result,
     }
 
+    scheduler.abort();
+    let _ = scheduler.await;
+    connection_tasks.abort_all();
+    while connection_tasks.join_next().await.is_some() {}
+
     let _ = remove_listener_socket(&sock_path, &socket_metadata);
-    if std::fs::read_to_string(host_paths.pid_path())
-        .ok()
-        .is_some_and(|pid| pid.trim() == std::process::id().to_string())
+    if std::fs::symlink_metadata(&pid_path).is_ok_and(|current| same_inode(&pid_metadata, &current))
     {
-        let _ = std::fs::remove_file(host_paths.pid_path());
+        let _ = std::fs::remove_file(&pid_path);
     }
     Ok(())
 }

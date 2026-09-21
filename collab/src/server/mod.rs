@@ -16985,6 +16985,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
             tokio::select! {
                 _ = scheduler_stop_rx.recv() => break,
                 _ = interval.tick() => {
+                    while ticks.try_join_next().is_some() {}
                     for runtime in sched.runtimes() {
                         ticks.spawn_blocking(move || crate::server::timers::tick(&runtime));
                     }

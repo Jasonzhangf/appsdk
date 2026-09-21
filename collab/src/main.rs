@@ -573,9 +573,14 @@ fn me(scope: &Scope, worker: Option<String>) -> anyhow::Result<Identity> {
     let mut ident = identity::load_or_create(scope, worker, None)?;
     if ident.runtime.is_none() || ident.transport.is_none() {
         let _ = register(scope, &mut ident)?;
-    } else {
-        runtime_for_request(&ident)?;
+    } else if !persisted_runtime_matches_scope(scope, &ident)? {
+        // A persisted binding that no longer matches this session, thread, or
+        // canonical cwd must not be reused: commands would then be dispatched
+        // under a stale App Server address.  Re-register through the same
+        // owner used by `ensure_registration`.
+        register_recovery(scope, &mut ident)?;
     }
+    runtime_for_request(&ident)?;
     Ok(ident)
 }
 
@@ -3788,5 +3793,58 @@ mod tests {
             lines: 40,
         })
         .is_none());
+    }
+
+    #[test]
+    fn persisted_binding_for_another_session_or_thread_is_not_reusable() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("registration-foreign-address");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        set_current_session_thread("thread-current", "session-current");
+        let route = json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": identity::CLI_APP_SERVER_ID,
+            "project_scope": root.canonicalize().unwrap(),
+            "canonical_root": root.canonicalize().unwrap(),
+            "storage_root": root.canonicalize().unwrap(),
+            "registered_ms": 1
+        });
+        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+        let runtime = RuntimeIdentity {
+            agent_id: identity::AgentId::new("worker-1").unwrap(),
+            runtime_id: identity::RuntimeId::new("runtime-worker-1").unwrap(),
+            appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+            endpoint_generation: 1,
+            binding_id: identity::BindingId::new("binding-worker-1").unwrap(),
+            session_id: Some(identity::SessionId::new("session-other").unwrap()),
+            native_thread_id: Some(identity::NativeThreadId::new("thread-other").unwrap()),
+        };
+        let mut identity = identity_with_runtime(Some(runtime));
+        identity.project_scope = Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        );
+        identity.transport = Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("session-other".into()),
+            thread_id: Some("thread-other".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        });
+        assert!(
+            !persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap(),
+            "a binding for another session/thread must not be reused"
+        );
+        clear_current_session_thread();
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(root).ok();
     }
 }

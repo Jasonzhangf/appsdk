@@ -247,6 +247,87 @@ pub fn registration_from_receipt(
     Ok((runtime, selected))
 }
 
+pub fn role_brief_from_registration_receipt(
+    receipt: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let role_brief = receipt
+        .get("role_brief")
+        .cloned()
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(|| anyhow::anyhow!("registration receipt is missing role_brief"))?;
+    if role_brief
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        anyhow::bail!("registration receipt role_brief is missing role");
+    }
+    for field in [
+        "role_task",
+        "blocked_boundary",
+        "completion_action",
+        "next_action",
+        "notification_rule",
+    ] {
+        if role_brief
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            anyhow::bail!("registration receipt role_brief is missing {field}");
+        }
+    }
+    let responsibilities = role_brief
+        .get("responsibilities")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.as_str().is_some_and(|value| !value.trim().is_empty()))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("registration receipt role_brief is missing responsibilities")
+        })?;
+    if responsibilities.is_empty() {
+        anyhow::bail!("registration receipt role_brief responsibilities are empty");
+    }
+    let authority = role_brief
+        .get("authority")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("registration receipt role_brief is missing authority"))?;
+    for field in [
+        "managed_subagent",
+        "must_obey_master",
+        "may_decline_master_invite",
+    ] {
+        if !authority
+            .get(field)
+            .is_some_and(serde_json::Value::is_boolean)
+        {
+            anyhow::bail!("registration receipt role_brief authority is missing {field}");
+        }
+    }
+    let derivation = role_brief
+        .get("derivation")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("registration receipt role_brief is missing derivation"))?;
+    if derivation
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        anyhow::bail!("registration receipt role_brief derivation is missing kind");
+    }
+    if !derivation
+        .get("parent")
+        .is_some_and(|parent| parent.is_null() || parent.as_str().is_some())
+    {
+        anyhow::bail!("registration receipt role_brief derivation is missing parent");
+    }
+    Ok(role_brief)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingValidationError {
     StaleGeneration {
@@ -887,6 +968,45 @@ mod tests {
             "thread-1"
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn role_brief_receipt_requires_the_complete_contract() {
+        let missing_authority = serde_json::json!({
+            "role": "managed-subagent",
+            "role_task": "Execute the assigned task.",
+            "responsibilities": ["Stay in scope."],
+            "derivation": {"kind": "managed-subagent", "parent": "parent-1"},
+            "blocked_boundary": "Report a concrete blocker.",
+            "completion_action": "Return evidence.",
+            "next_action": "Continue.",
+            "notification_rule": "Handle priority actions."
+        });
+        let error = role_brief_from_registration_receipt(&serde_json::json!({
+            "role_brief": missing_authority
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("authority"), "{error}");
+
+        let missing_responsibilities = serde_json::json!({
+            "role": "worker",
+            "role_task": "Own the task.",
+            "authority": {
+                "managed_subagent": false,
+                "must_obey_master": false,
+                "may_decline_master_invite": true
+            },
+            "derivation": {"kind": "peer", "parent": null},
+            "blocked_boundary": "Negotiate conflicts.",
+            "completion_action": "Close the task.",
+            "next_action": "Resume.",
+            "notification_rule": "Handle priority actions."
+        });
+        let error = role_brief_from_registration_receipt(&serde_json::json!({
+            "role_brief": missing_responsibilities
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("responsibilities"), "{error}");
     }
 
     #[test]

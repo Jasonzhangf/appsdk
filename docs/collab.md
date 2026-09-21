@@ -35,6 +35,12 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 - Every registered identity is an equal `peer`; there is no inferred master
   from first registration. A host agent root is not Collab master.
+- `role_brief` is the single structured role contract. Registration returns
+  the brief effective at registration; `collab context` and `collab who`/
+  worker status project the current role, responsibilities, authority,
+  derivation, blocked boundary, and completion action. Promotion or delegation
+  returns the replacement brief. Do not maintain a second role prompt or infer
+  a role from process identity.
 - `collab init` and peer registration never create a master. A master exists
   only when a registered peer has a live transport and was assigned by
   user-approved self-promotion or live-master delegation. A recorded identity

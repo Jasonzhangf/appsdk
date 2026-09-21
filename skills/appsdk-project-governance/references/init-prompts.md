@@ -31,11 +31,12 @@ collab context
 ```
 
 `collab context` returns identity, liveness, tasks, inbox, `next_actions`,
-master/authority state, and truth. The active `role_brief` is not a context
-field; it is returned only by the registration receipt. That output is the
-truth. Stop after reading it. Do not inspect local environment/control paths
-or run any other exploratory command after it. Registration and wake use the
-internal Codex App Server native thread.
+master/authority state, `role_brief`, and truth. Registration returns the brief
+effective at registration; `collab context` and `collab who` project the
+current brief, and promotion or delegation returns the replacement brief. That
+output is the truth. Stop after reading it. Do not inspect local
+environment/control paths or run any other exploratory command after it.
+Registration and wake use the internal Codex App Server native thread.
 
 Ordinary initialization and Collab registration run only in the canonical
 project main checkout. A Git worktree contains tracked `.appsdk/` files but
@@ -83,8 +84,7 @@ appsdk goal status --json       # active/observed/collab_subscribed
 The master then owns orchestration:
 
 1. Query `collab context` once. It must show the identity, liveness, tasks,
-   inbox, `next_actions`, and master/authority state; verify the registration
-   receipt separately for `role_brief`.
+   inbox, `next_actions`, `role_brief`, and master/authority state.
 2. Split the confirmed goal by dependency and unique write scope. Dispatch
    through `collab subagent dispatch` or `appsdk subagent send`; every
    assignment needs done-iff, artifacts, forbidden paths, exact tests, and

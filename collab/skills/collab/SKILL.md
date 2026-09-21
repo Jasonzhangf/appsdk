@@ -209,7 +209,10 @@ Keep Collab enabled. At multi-worker startup, run official `collab init` once
 in the inherited live peer environment unless AppSDK already initialized it.
 This registers the peer and default finite direct-message subscription.
 Registration also returns `role_brief`. Read it as the active operating
-contract:
+contract. It is the registration-time projection; `collab context`,
+`collab who`, and worker status project the current brief, and promotion or
+delegation returns the replacement brief. Do not maintain a separate role
+prompt:
 
 - `master`: dispatch and allocate resources, keep workers loaded, own blockers,
   and drive verify/merge/cleanup/close. Implementation is not the primary job.

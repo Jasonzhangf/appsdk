@@ -5544,10 +5544,27 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
             ],
             "communication_recovery": communication_recovery_brief(),
+            "authority": {
+                "managed_subagent": false,
+                "must_obey_master": false,
+                "may_decline_master_invite": true
+            },
+            "derivation": {
+                "kind": "project-master",
+                "parent": null
+            },
+            "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
+            "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
+            "next_action": "Run `appsdk longhorizon show` and keep eligible workers loaded.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
     if is_managed_subagent(state, worker_id) {
+        let parent = state
+            .subagents
+            .values()
+            .find(|record| record.peer == worker_id)
+            .map(|record| record.parent.clone());
         return json!({
             "role": "managed-subagent",
             "role_task": "Execute the assigned independent task and return evidence to parent/master.",
@@ -5558,6 +5575,18 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
                 "Complete implementation, tests, commit, delivery evidence, and resource cleanup; do not stop at code-written or ACK."
             ],
             "communication_recovery": communication_recovery_brief(),
+            "authority": {
+                "managed_subagent": true,
+                "must_obey_master": true,
+                "may_decline_master_invite": false
+            },
+            "derivation": {
+                "kind": "managed-subagent",
+                "parent": parent
+            },
+            "blocked_boundary": "Stay within the assigned task and report a concrete root cause, proposed fix, and required decision to parent/master.",
+            "completion_action": "Return the completed scoped task with implementation, tests, commit, delivery evidence, and resource cleanup.",
+            "next_action": "Continue the assigned task; report ready when idle.",
             "notification_rule": "Handle the named priority action, then resume your assigned task. Reading or ACK is never task progress."
         });
     }
@@ -5571,6 +5600,18 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "Do not wait passively and do not stop on ACK/read/summary; after handling a notification, resume your current task."
         ],
         "communication_recovery": communication_recovery_brief(),
+        "authority": {
+            "managed_subagent": false,
+            "must_obey_master": false,
+            "may_decline_master_invite": true
+        },
+        "derivation": {
+            "kind": "peer",
+            "parent": null
+        },
+        "blocked_boundary": "Protect current ownership and capacity; negotiate conflicts explicitly instead of silently accepting or ignoring them.",
+        "completion_action": "Own the task through implementation, verification, delivery evidence, and resource closure.",
+        "next_action": "Resume the registered task or remain available for an explicit dispatch.",
         "notification_rule": "P0 preempts P1, P1 preempts P2. Higher priority interrupts but does not cancel your owned task."
     })
 }
@@ -8592,16 +8633,15 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             })
         })
         .collect();
-    let managed = is_managed_subagent(&st, &worker_id);
+    let current_role_brief = role_brief(server, &st, &worker_id);
+    let role = current_role_brief
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("worker")
+        .to_owned();
+    let authority = current_role_brief["authority"].clone();
     let route_scope = server_route_scope(server, &st).ok().flatten();
     let current_master = current_master_worker_id(&st, route_scope.as_ref());
-    let role = if current_master.as_deref() == Some(worker_id.as_str()) {
-        "master"
-    } else if managed {
-        "managed-subagent"
-    } else {
-        "worker"
-    };
     let worktrees: Vec<serde_json::Value> = {
         let mut worktrees = st
             .worktree_bindings
@@ -8641,13 +8681,11 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         .workers
         .values()
         .map(|peer| {
-            let peer_role = if current_master.as_deref() == Some(peer.id.as_str()) {
-                "master"
-            } else if is_managed_subagent(&st, &peer.id) {
-                "managed-subagent"
-            } else {
-                "worker"
-            };
+            let peer_role = role_brief(server, &st, &peer.id)
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("worker")
+                .to_owned();
             (peer.clone(), peer_role)
         })
         .collect();
@@ -8758,6 +8796,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             "role": role,
             "transport": transport,
         },
+        "role_brief": current_role_brief,
         "liveness": {
             "live": presence == IdentityPresence::Present,
             "presence": match presence {
@@ -8782,11 +8821,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         "next_actions": next_actions,
         "master": master,
         "recorded_unusable": recorded_unusable,
-        "authority": {
-            "managed_subagent": managed,
-            "must_obey_master": managed,
-            "may_decline_master_invite": !managed,
-        },
+        "authority": authority,
         "truth": "server journal, mailbox, and live App Server probes; context is read-only",
     }))
 }
@@ -8991,6 +9026,7 @@ fn worker_status_summary_with_maps(
     tasks: &std::collections::HashMap<String, TaskRec>,
     msgs: &std::collections::HashMap<String, Message>,
     keepalives: &std::collections::HashMap<String, crate::server::keepalive::Record>,
+    role_brief: serde_json::Value,
     w: &WorkerRec,
 ) -> serde_json::Value {
     let active = tasks
@@ -9094,6 +9130,8 @@ fn worker_status_summary_with_maps(
     };
     json!({
         "id": w.id,
+        "role": role_brief["role"].clone(),
+        "role_brief": role_brief,
         "transport": w.transport.as_ref().map(|transport| json!({
             "kind": transport.kind.as_str(),
             "endpoint": transport.endpoint,
@@ -10044,13 +10082,19 @@ fn dispatch_with_route_context(
             Resp::err("declared roles are removed; use collab who/context for peer identity")
         }
         Req::Workers => {
-            let (workers_rec, tasks_map, msgs_map, keepalives_map) = {
+            let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
+                let role_briefs = st
+                    .workers
+                    .keys()
+                    .map(|worker_id| (worker_id.clone(), role_brief(server, &st, worker_id)))
+                    .collect::<std::collections::HashMap<_, _>>();
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
                     st.msgs.clone(),
                     st.keepalives.clone(),
+                    role_briefs,
                 )
             };
             let mut workers: Vec<serde_json::Value> = workers_rec
@@ -10061,6 +10105,7 @@ fn dispatch_with_route_context(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
+                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
                         w,
                     )
                 })
@@ -10078,13 +10123,19 @@ fn dispatch_with_route_context(
             reason,
         } => handle_worker_close(server, worker_id, token, target_id, reason),
         Req::WorkerStatus { worker_id } => {
-            let (workers_rec, tasks_map, msgs_map, keepalives_map) = {
+            let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
+                let role_briefs = st
+                    .workers
+                    .keys()
+                    .map(|worker_id| (worker_id.clone(), role_brief(server, &st, worker_id)))
+                    .collect::<std::collections::HashMap<_, _>>();
                 (
                     st.workers.values().cloned().collect::<Vec<_>>(),
                     st.tasks.clone(),
                     st.msgs.clone(),
                     st.keepalives.clone(),
+                    role_briefs,
                 )
             };
             let mut workers: Vec<serde_json::Value> = workers_rec
@@ -10096,6 +10147,7 @@ fn dispatch_with_route_context(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
+                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
                         w,
                     )
                 })
@@ -10157,9 +10209,15 @@ fn dispatch_with_route_context(
                 keepalives_map,
                 master_wake,
                 now,
+                role_briefs,
             ) = {
                 let st = server.state.lock().unwrap();
                 let workers_rec: Vec<WorkerRec> = st.workers.values().cloned().collect();
+                let role_briefs = st
+                    .workers
+                    .keys()
+                    .map(|worker_id| (worker_id.clone(), role_brief(server, &st, worker_id)))
+                    .collect::<std::collections::HashMap<_, _>>();
                 let mut tasks: Vec<serde_json::Value> =
                     st.tasks.values().map(|task| task_view(&st, task)).collect();
                 tasks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -10178,6 +10236,7 @@ fn dispatch_with_route_context(
                     st.keepalives.clone(),
                     st.master_wake.clone(),
                     now,
+                    role_briefs,
                 )
             };
             let mut workers: Vec<serde_json::Value> = workers_rec
@@ -10188,6 +10247,7 @@ fn dispatch_with_route_context(
                         &tasks_map,
                         &msgs_map,
                         &keepalives_map,
+                        role_briefs.get(&w.id).cloned().unwrap_or_default(),
                         w,
                     )
                 })

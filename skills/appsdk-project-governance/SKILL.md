@@ -475,11 +475,12 @@ Collab, Codex TUI, Desktop, or a particular agent runtime.
 ## Long-Horizon Goal Subscription & Master Saturation
 
 `collab context` returns identity, liveness, tasks, inbox, `next_actions`,
-master/authority state, and truth. The active `role_brief` comes only from the
-registration receipt. Treat the current context plus role brief as the
-contract. Master dispatches rather than codes: split and assign work, allocate
-resources, keep workers loaded, own blockers, and drive
-verify/merge/cleanup/close.
+master/authority state, `role_brief`, and truth. Registration returns the brief
+effective at registration; `collab context` and `collab who` project the
+current brief, and promotion or delegation returns the replacement brief.
+Treat that brief as the contract. Master dispatches rather than codes: split
+and assign work, allocate resources, keep workers loaded, own blockers, and
+drive verify/merge/cleanup/close.
 Independent worker owns its task end to end and evaluates master collaboration
 requests against current ownership/capacity—accept non-conflicting work or
 negotiate explicitly. Managed subworker executes its assigned scope and reports
@@ -490,8 +491,8 @@ Notifications are interrupts, not completion. Follow the `P0/P1/P2 ACTION`,
 then resume current work; with no task, run `appsdk longhorizon show`. Never end
 on ACK, read, or summary.
 
-For a live peer, `collab context` is the authority and task-state query; use
-the registration receipt for `role_brief` and do not use `whoami` as a second
+For a live peer, `collab context` is the authority and task-state query and
+returns the canonical `role_brief`; do not use `whoami` as a second
 initialization path. When no work is owned, run
 `appsdk longhorizon show --json`. Long waits must use the supported timer/wake
 path and then stop; do not poll in a loop.

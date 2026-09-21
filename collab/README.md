@@ -9,6 +9,11 @@ wake is a bounded preview; the durable mailbox remains authoritative.
 
 - Every registered identity is an equal peer. Declared `master`/`worker` roles
   are removed.
+- Registration returns the `role_brief` effective at that registration.
+  `collab context`, `collab who`, and worker status project the current role
+  brief from server role truth; promotion and delegation return the new brief.
+  The brief defines role, authority, derivation, blocked boundary, completion
+  action, and next action without a second prompt contract.
 - The live master scheduler is the sole task assignment admission owner. It
   dispatches an authorized task to a live idle registered peer, then to an
   idle managed child when no ordinary peer is eligible. The assigned peer

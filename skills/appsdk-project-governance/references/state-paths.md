@@ -139,12 +139,13 @@ collab context
 ```
 
 `collab context` is the registration truth for `authority`, `identity`,
-`inbox`, `liveness`, `master`, `next_actions`, `tasks`, and `truth`. It does
-not return `role_brief` or `peers`; `role_brief` comes only from the
-registration receipt, and `collab who` is the peer-list command. `collab
-master status` is the separate live-master truth. Do not inspect journal,
-mailbox, `routes.jsonl`, or `~/.collab` paths to prove registration. Missing
-or failed identity prevents claiming registration.
+`inbox`, `liveness`, `master`, `next_actions`, `role_brief`, `tasks`, and
+`truth`. Registration returns the brief effective at registration; `collab
+context` and `collab who` project the current brief, and promotion or
+delegation returns the replacement brief. `collab who` is the peer-list
+command. `collab master status` is the separate live-master truth. Do not
+inspect journal, mailbox, `routes.jsonl`, or `~/.collab` paths to prove
+registration. Missing or failed identity prevents claiming registration.
 
 If `collab context` fails with `PROJECT_SCOPE_UNKNOWN` or `token mismatch`,
 preserve the exact error and stop registration repair. Do not infer worktree

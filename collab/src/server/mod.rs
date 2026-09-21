@@ -1591,7 +1591,7 @@ pub(crate) struct HostRouteRecord {
     pub(crate) registered_ms: i64,
 }
 
-pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
+pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: if the running daemon predates the installed collab binary, from the canonical project main checkout run `collab down`, then `collab up` once to load the installed binary; then run `appsdk init .` from that same checkout; verify `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work; preserve daemon state and do not re-register a worktree, edit routes.jsonl, copy identity tokens, start a second daemon, or use mailbox state as transport delivery";
 
 struct RuntimeRoute {
     root: PathBuf,
@@ -11448,9 +11448,7 @@ mod host_route_registry_tests {
             .unwrap_err();
         assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
         assert!(
-            missing.contains(
-                "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl"
-            ),
+            missing.contains(ROUTE_RESOLVE_NOT_FOUND_RECOVERY),
             "{missing}"
         );
         let current = manager

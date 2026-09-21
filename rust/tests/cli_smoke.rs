@@ -797,6 +797,14 @@ fn reset_governance_nested_project_does_not_self_dirty_clean_worktree() {
     fs::write(root.join("business.txt"), "keep\n").unwrap();
     init_git(&workspace);
     let project_before = fs::read_to_string(root.join(".appsdk/project.json")).unwrap();
+    let lock_path = workspace.join(".appsdk-reset-transaction-v4.lock");
+    fs::write(&lock_path, "").unwrap();
+    let status = Command::new("git")
+        .args(["-C", root_text, "status", "--porcelain=v1", "-z"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert_eq!(status.stdout, b"?? .appsdk-reset-transaction-v4.lock\0");
 
     let reset = run(&["reset-governance", root_text, "--discard-legacy"]);
     assert!(

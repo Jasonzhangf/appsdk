@@ -17529,24 +17529,53 @@ fn reset_requires_clean_worktree(root: &Path, mode: ResetMode) -> Result<(), Str
     if !status.status.success() {
         return Err("RESET_GIT_WORKTREE_REQUIRED".into());
     }
-    let ignored_lock = if mode == ResetMode::DiscardLegacy {
-        let lock_path = reset_transaction_lock_path(root);
-        lock_path
-            .strip_prefix(root.parent().unwrap_or(root))
-            .ok()
-            .map(|path| format!("?? {}", path.display()))
+    let worktree_root = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or(""),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .output()
+        .map_err(|_| "RESET_GIT_WORKTREE_REQUIRED".to_string())?;
+    if !worktree_root.status.success() {
+        return Err("RESET_GIT_WORKTREE_REQUIRED".into());
+    }
+    let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_root.stdout).trim());
+    let owned_lock_path = if mode == ResetMode::DiscardLegacy {
+        Some(reset_transaction_lock_path(root))
     } else {
         None
     };
-    let has_unexpected_dirty = status
-        .stdout
-        .split(|byte| *byte == b'\0')
-        .filter(|record| !record.is_empty())
-        .any(|record| ignored_lock.as_deref() != Some(String::from_utf8_lossy(record).as_ref()));
+    let has_unexpected_dirty = status.stdout.split(|byte| *byte == b'\0').any(|record| {
+        if record.is_empty() {
+            return false;
+        }
+        if let Some(lock_path) = owned_lock_path.as_ref() {
+            if let Some(relative) = record.strip_prefix(b"?? ") {
+                let relative_text = String::from_utf8_lossy(relative);
+                let candidate = worktree_root.join(Path::new(relative_text.as_ref()));
+                if paths_refer_to_same_file(lock_path, &candidate) {
+                    return false;
+                }
+            }
+        }
+        true
+    });
     if has_unexpected_dirty {
         return Err("RESET_REQUIRES_CLEAN_WORKTREE".into());
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (fs::metadata(left), fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
 }
 
 fn reset_governance(root: &Path, discard_legacy: bool) {

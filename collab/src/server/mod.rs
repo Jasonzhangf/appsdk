@@ -15681,7 +15681,6 @@ mod host_route_registry_tests {
                 .resolve_route_by_native_thread(
                     "session-thread-resident-repair-worker",
                     "thread-resident-repair-worker",
-                    root.to_str().unwrap(),
                 )
                 .unwrap()
                 .agent_id
@@ -16447,7 +16446,6 @@ mod host_route_registry_tests {
         let route = manager.resolve_route_by_native_thread(
             "session-thread-child-route-child",
             "thread-child-route-child",
-            project_root.to_str().unwrap(),
         );
         assert!(route.is_ok(), "{route:?}");
         retire_current_thread_route_after_launch_failure(

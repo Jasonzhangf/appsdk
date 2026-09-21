@@ -7400,6 +7400,26 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
     promote_master(&server, "master", "user-approved");
     let now = now_ms();
     server.commit(&[
+        Event::NotificationSubscribed {
+            subscription: crate::server::state::NotificationSubscription {
+                id: "sub-master".into(),
+                worker_id: "master".into(),
+                target: "thread-master".into(),
+                event: "worker-idle".into(),
+                subject: None,
+                method: "appserver".into(),
+                status: "armed".into(),
+                status_reason: None,
+                created_ms: now,
+                updated_ms: now,
+                fired_count: 0,
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                expires_ms: now + 60_000,
+            },
+        },
         Event::MasterWakeSignal {
             signal: crate::server::state::MasterWakeSignal::WorkerIdle {
                 worker_id: "worker".into(),
@@ -7453,6 +7473,76 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
 
     server.commit(&[Event::Delivered {
         ids: vec!["master-wake".into()],
+    }]);
+
+    assert_eq!(
+        server.state.lock().unwrap().master_wake.delivery_state,
+        "notified_unconsumed"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
+    let (server, root) = test_server();
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user-approved");
+    let now = now_ms();
+    server.commit(&[
+        Event::MasterWakeSignal {
+            signal: crate::server::state::MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: now,
+        },
+        Event::Sent {
+            msg: crate::server::state::Message {
+                id: "master-wake-typed".into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notify".into(),
+                subject: Some("worker-idle: worker".into()),
+                body: "wake".into(),
+                in_reply_to: None,
+                created_ms: now,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        },
+        Event::WakeBound {
+            message_id: "master-wake-typed".into(),
+            subscription_id: "sub-master".into(),
+        },
+    ]);
+    {
+        let mut state = server.state.lock().unwrap();
+        state.master_worker_id = None;
+        state.notification_subscriptions.insert(
+            "sub-master".into(),
+            crate::server::state::NotificationSubscription {
+                id: "sub-master".into(),
+                worker_id: "master".into(),
+                target: "thread-master".into(),
+                event: "worker-idle".into(),
+                subject: None,
+                method: "appserver".into(),
+                status: "armed".into(),
+                status_reason: None,
+                created_ms: now,
+                updated_ms: now,
+                fired_count: 1,
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                expires_ms: now + 60_000,
+            },
+        );
+    }
+
+    server.commit(&[Event::Delivered {
+        ids: vec!["master-wake-typed".into()],
     }]);
 
     assert_eq!(

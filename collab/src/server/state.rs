@@ -1765,6 +1765,27 @@ mod tests {
             message_id: "idle-1".into(),
             subscription_id: "sub-master".into(),
         });
+        state.notification_subscriptions.insert(
+            "sub-master".into(),
+            NotificationSubscription {
+                id: "sub-master".into(),
+                worker_id: "master".into(),
+                event: "worker-idle".into(),
+                subject: None,
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 60_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        );
         state.apply(&Event::Delivered {
             ids: vec!["idle-1".into()],
         });

@@ -520,6 +520,28 @@ pub fn immediate_notify(
     })?;
     let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
     client.initialize()?;
+    // Thread residency is per-connection: a thread created or resumed on one
+    // WebSocket is not loaded for a different connection, and `turn/start`
+    // answers "thread not found" for a thread this connection does not hold.
+    // Resume on this connection first so the immediate notification can be
+    // delivered, which is the native load step for a persisted thread.
+    let resumed_here = match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
+        Ok(_) => true,
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            return Err(AdapterError::RouteUnavailable { detail })
+        }
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            false
+        }
+        // `thread/resume` is not universal across App Server builds; a method
+        // that does not exist leaves the existing status-based path intact.
+        Err(AdapterError::CapabilityUnavailable { .. }) => false,
+        Err(error) => return Err(error),
+    };
     let status = match thread_metadata(&mut client, thread_id.as_str()) {
         Ok(thread) => thread_status_from_metadata(&thread)?,
         // A cold thread is loaded by the immediate notification itself:
@@ -530,6 +552,14 @@ pub fn immediate_notify(
         Err(AdapterError::Unknown { operation, detail })
             if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
         {
+            if resumed_here {
+                return Err(AdapterError::Unknown {
+                    operation: "thread/read",
+                    detail: format!(
+                        "thread {thread_id} was resumed on this connection but still reports not loaded"
+                    ),
+                });
+            }
             "notLoaded".to_string()
         }
         Err(AdapterError::Unknown { operation, detail })
@@ -2202,6 +2232,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2261,6 +2292,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2327,6 +2359,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2381,6 +2414,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2440,6 +2474,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2495,6 +2530,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2537,7 +2573,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_notify_loads_thread_whose_read_reports_not_loaded() {
+    fn immediate_notify_refuses_when_resumed_thread_still_reports_not_loaded() {
         let socket = temp_socket("notify-read-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2546,6 +2582,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2557,28 +2594,28 @@ mod tests {
                     }
                 }),
             );
-            let start = next_request(&mut stream);
-            assert_eq!(start["method"], "turn/start");
-            assert_eq!(start["params"]["threadId"], "thread-1");
-            respond(
-                &mut stream,
-                json!({
-                    "id": start["id"],
-                    "result": {
-                        "turn": {"id": "turn-loaded", "status": "inProgress", "items": []}
-                    }
-                }),
+            // A thread that this connection just resumed must not still report
+            // not-loaded; delivery refuses instead of starting a turn.
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "a resumed-but-still-cold thread must not issue turn/start"
             );
             stream.shutdown(Shutdown::Both).ok();
         });
 
-        immediate_notify(
+        let error = immediate_notify(
             &selected_transport(&socket),
             Some("sender-thread"),
             "notify body",
             "message-start",
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("still reports not loaded"),
+            "{error}"
+        );
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -2607,6 +2644,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 handshake(&mut stream);
                 initialize(&mut stream);
+                prepare_recipient_thread(&mut stream, "ok");
                 let read_id = next_request_id(&mut stream);
                 let mut response = response;
                 response["id"] = json!(read_id);
@@ -2646,6 +2684,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2748,6 +2787,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2796,6 +2836,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
             let read_id = next_request_id(&mut stream);
             respond(
                 &mut stream,
@@ -2903,6 +2944,32 @@ mod tests {
         let initialized = read_client_frame(stream);
         let initialized: Value = serde_json::from_slice(&initialized).unwrap();
         assert_eq!(initialized["method"], "initialized");
+    }
+
+    /// Answer the per-connection `thread/resume` that immediate delivery issues
+    /// before it can start a turn.  Test fixtures that model a usable thread
+    /// answer success; the ones modelling a missing thread answer not-found,
+    /// which delivery must surface unchanged.
+    fn prepare_recipient_thread(stream: &mut UnixStream, outcome: &str) {
+        let request = next_request(stream);
+        assert_eq!(request["method"], "thread/resume");
+        match outcome {
+            "ok" => respond(
+                stream,
+                json!({
+                    "id": request["id"],
+                    "result": {"thread": {"id": request["params"]["threadId"]}}
+                }),
+            ),
+            "notFound" => respond(
+                stream,
+                json!({
+                    "id": request["id"],
+                    "error": {"code": -32600, "message": "thread not found"}
+                }),
+            ),
+            other => panic!("unsupported recipient thread outcome {other}"),
+        }
     }
 
     fn next_request(stream: &mut UnixStream) -> Value {

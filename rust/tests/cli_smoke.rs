@@ -1368,6 +1368,131 @@ fn project_creation_and_initialization_persist_host_registration() {
 }
 
 #[test]
+fn ordinary_init_rejects_linked_worktree_before_registration_or_mutation() {
+    let main = temp_root("init-worktree-main");
+    let worktree = temp_root("init-worktree-linked");
+    let registry = temp_root("init-worktree-registry");
+    let main_text = main.to_str().unwrap();
+    let worktree_text = worktree.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    assert!(run(&["new", main_text]).status.success());
+    init_git(&main);
+    let added = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_text,
+            "HEAD",
+        ])
+        .status()
+        .unwrap();
+    assert!(added.success());
+
+    let project_before = fs::read(worktree.join(".appsdk/project.json")).unwrap();
+    let lock_before = fs::read(worktree.join(".appsdk/sdk.lock")).unwrap();
+    let rejected = Command::new(binary())
+        .args(["init", worktree_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("INIT_REQUIRES_CANONICAL_PROJECT_MAIN_TREE"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(
+        fs::read(worktree.join(".appsdk/project.json")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        fs::read(worktree.join(".appsdk/sdk.lock")).unwrap(),
+        lock_before
+    );
+    assert!(!registry.join("projects.jsonl").exists());
+    assert!(!worktree.join(".appsdk-control").exists());
+
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "remove",
+            "--force",
+            worktree_text,
+        ])
+        .status();
+    fs::remove_dir_all(main).unwrap();
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn ordinary_init_rejects_relocated_target_inside_linked_worktree() {
+    let main = temp_root("init-worktree-relocated-main");
+    let worktree = temp_root("init-worktree-relocated-linked");
+    let registry = temp_root("init-worktree-relocated-registry");
+    let main_text = main.to_str().unwrap();
+    let worktree_text = worktree.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    assert!(run(&["new", main_text]).status.success());
+    init_git(&main);
+    let added = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_text,
+            "HEAD",
+        ])
+        .status()
+        .unwrap();
+    assert!(added.success());
+    fs::remove_dir_all(worktree.join(".appsdk")).unwrap();
+    fs::create_dir_all(worktree.join("relocated")).unwrap();
+    confirm_preparation(&worktree, "relocated", "new_project");
+
+    let rejected = Command::new(binary())
+        .args(["init", worktree_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("INIT_REQUIRES_CANONICAL_PROJECT_MAIN_TREE"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(!worktree.join("relocated/.appsdk").exists());
+    assert!(!registry.join("projects.jsonl").exists());
+
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "remove",
+            "--force",
+            worktree_text,
+        ])
+        .status();
+    fs::remove_dir_all(main).unwrap();
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn init_fresh_completes_when_global_registry_is_unavailable() {
     let root = temp_root("init-fresh-registry-pending");
     let registry_parent = temp_root("init-fresh-registry-pending-home");

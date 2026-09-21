@@ -9719,6 +9719,62 @@ fn git_value(root: &Path, args: &[&str], error: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn is_linked_git_worktree(root: &Path) -> bool {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from);
+    let Some(git_dir) = lines.next() else {
+        return false;
+    };
+    let Some(common_dir) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+    match (fs::canonicalize(git_dir), fs::canonicalize(common_dir)) {
+        (Ok(git_dir), Ok(common_dir)) => git_dir != common_dir,
+        _ => false,
+    }
+}
+
+fn assert_ordinary_init_canonical_project_main_tree(root: &Path, fresh: bool) {
+    if fresh {
+        return;
+    }
+    let mut ancestor = Some(root);
+    while let Some(candidate) = ancestor {
+        if candidate.exists() {
+            if is_linked_git_worktree(candidate) {
+                fail(format!(
+                    "INIT_REQUIRES_CANONICAL_PROJECT_MAIN_TREE:{}",
+                    candidate.display()
+                ));
+            }
+        }
+        ancestor = candidate.parent();
+    }
+}
+
 fn assert_mutation_worktree(root: &Path) {
     let output = Command::new("git")
         .args([
@@ -13948,6 +14004,7 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     {
         fail(format!("TARGET_SYMLINK:{}", root.display()));
     }
+    assert_ordinary_init_canonical_project_main_tree(root, fresh);
     if fresh {
         if !discard_legacy {
             fail("INIT_FRESH_REQUIRES_DISCARD_LEGACY_CONFIRMATION");

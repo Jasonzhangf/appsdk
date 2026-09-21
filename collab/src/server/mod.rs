@@ -16879,6 +16879,38 @@ pub async fn run(scope: Scope) -> anyhow::Result<()> {
     run_with_host_paths(scope, host_paths).await
 }
 
+async fn run_timer_scheduler<T, R, F>(
+    mut stop_rx: tokio::sync::mpsc::Receiver<()>,
+    tick_interval_ms: u64,
+    runtimes: R,
+    spawn_tick: F,
+) where
+    T: Send + 'static,
+    R: Fn() -> Vec<T> + Send + 'static,
+    F: Fn(Vec<T>) -> tokio::task::JoinHandle<()> + Send + 'static,
+{
+    let mut interval = tokio::time::interval(Duration::from_millis(tick_interval_ms));
+    let mut tick = None;
+    loop {
+        tokio::select! {
+            _ = stop_rx.recv() => break,
+            _ = interval.tick() => {
+                if tick.as_ref().is_some_and(|task: &tokio::task::JoinHandle<()>| !task.is_finished()) {
+                    continue;
+                }
+                if let Some(completed) = tick.take() {
+                    let _ = completed.await;
+                }
+                tick = Some(spawn_tick(runtimes()));
+            }
+        }
+    }
+    if let Some(tick) = tick {
+        tick.abort();
+        let _ = tick.await;
+    }
+}
+
 async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Result<()> {
     host_paths.ensure_root()?;
     let sock_path = host_paths.socket_path();
@@ -16975,26 +17007,20 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     // Background scheduler: bounded waits and explicitly registered notifications.
     let sched = runtime_manager.clone();
-    let (scheduler_stop, mut scheduler_stop_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let mut scheduler = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(
-            sched.host.config.timers.tick_interval_ms,
-        ));
-        let mut ticks = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                _ = scheduler_stop_rx.recv() => break,
-                _ = interval.tick() => {
-                    while ticks.try_join_next().is_some() {}
-                    for runtime in sched.runtimes() {
-                        ticks.spawn_blocking(move || crate::server::timers::tick(&runtime));
-                    }
+    let (scheduler_stop, scheduler_stop_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let scheduler_interval_ms = sched.host.config.timers.tick_interval_ms;
+    let mut scheduler = tokio::spawn(run_timer_scheduler(
+        scheduler_stop_rx,
+        scheduler_interval_ms,
+        move || sched.runtimes(),
+        |runtimes| {
+            tokio::task::spawn_blocking(move || {
+                for runtime in runtimes {
+                    crate::server::timers::tick(&runtime);
                 }
-            }
-        }
-        ticks.abort_all();
-        while ticks.join_next().await.is_some() {}
-    });
+            })
+        },
+    ));
 
     let mut connection_tasks = tokio::task::JoinSet::new();
     tokio::select! {
@@ -17415,6 +17441,7 @@ mod startup_tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn test_root(name: &str) -> PathBuf {
@@ -17443,6 +17470,55 @@ mod startup_tests {
         );
 
         std::fs::remove_dir_all(root).expect("remove custom state root");
+    }
+
+    #[tokio::test]
+    async fn timer_scheduler_does_not_overlap_ticks() {
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+        let in_flight = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let scheduler = tokio::spawn(run_timer_scheduler(stop_rx, 1, || vec![()], {
+            let in_flight = in_flight.clone();
+            let starts = starts.clone();
+            let release = release.clone();
+            move |_| {
+                let in_flight = in_flight.clone();
+                let starts = starts.clone();
+                let release = release.clone();
+                tokio::task::spawn_blocking(move || {
+                    assert!(
+                        !in_flight.swap(true, Ordering::SeqCst),
+                        "timer tick overlapped an in-flight tick"
+                    );
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    in_flight.store(false, Ordering::SeqCst);
+                })
+            }
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while starts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduler did not start its first tick");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "scheduler queued another tick while the first was in flight"
+        );
+        release.store(true, Ordering::SeqCst);
+        let _ = stop_tx.try_send(());
+        tokio::time::timeout(Duration::from_secs(1), scheduler)
+            .await
+            .expect("scheduler did not stop")
+            .expect("scheduler task failed");
     }
 
     #[tokio::test]

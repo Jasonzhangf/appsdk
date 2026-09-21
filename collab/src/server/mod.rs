@@ -16947,6 +16947,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         }
     })?;
     let pid_metadata = std::fs::symlink_metadata(&pid_path)?;
+    let state_root_metadata = std::fs::symlink_metadata(host_paths.state_root())?;
     let _ = record_activity(
         &scope.root,
         "daemon_start",
@@ -16964,7 +16965,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         interval.tick().await;
         loop {
             interval.tick().await;
-            if !host_paths.state_root().is_dir() {
+            if !std::fs::symlink_metadata(host_paths.state_root())
+                .is_ok_and(|current| same_inode(&state_root_metadata, &current))
+            {
                 return;
             }
         }
@@ -16972,18 +16975,24 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
 
     // Background scheduler: bounded waits and explicitly registered notifications.
     let sched = runtime_manager.clone();
-    let scheduler = tokio::spawn(async move {
+    let (scheduler_stop, mut scheduler_stop_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut scheduler = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(
             sched.host.config.timers.tick_interval_ms,
         ));
+        let mut ticks = tokio::task::JoinSet::new();
         loop {
-            interval.tick().await;
-            for runtime in sched.runtimes() {
-                tokio::task::spawn_blocking(move || crate::server::timers::tick(&runtime))
-                    .await
-                    .ok();
+            tokio::select! {
+                _ = scheduler_stop_rx.recv() => break,
+                _ = interval.tick() => {
+                    for runtime in sched.runtimes() {
+                        ticks.spawn_blocking(move || crate::server::timers::tick(&runtime));
+                    }
+                }
             }
         }
+        ticks.abort_all();
+        while ticks.join_next().await.is_some() {}
     });
 
     let mut connection_tasks = tokio::task::JoinSet::new();
@@ -17004,8 +17013,14 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         } => result,
     }
 
-    scheduler.abort();
-    let _ = scheduler.await;
+    let _ = scheduler_stop.try_send(());
+    if tokio::time::timeout(Duration::from_secs(5), &mut scheduler)
+        .await
+        .is_err()
+    {
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
 
@@ -17565,6 +17580,37 @@ mod startup_tests {
         tokio::time::timeout(Duration::from_secs(5), running)
             .await
             .expect("daemon did not exit after its state root disappeared")
+            .expect("daemon task failed")
+            .expect("daemon returned an error");
+
+        assert!(!socket.exists());
+        assert!(!host_paths.pid_path().exists());
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn daemon_exits_when_its_owned_state_root_is_replaced() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("owned-state-root-replaced");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let socket = host_paths.socket_path();
+        let running = tokio::spawn(run_with_host_paths(
+            Scope { root: root.clone() },
+            host_paths.clone(),
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && !crate::client::alive(&socket) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(crate::client::alive(&socket), "daemon did not start");
+
+        std::fs::remove_dir_all(host_paths.state_root()).expect("remove owned state root");
+        std::fs::create_dir(host_paths.state_root()).expect("recreate state root");
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("daemon did not exit after its state root was replaced")
             .expect("daemon task failed")
             .expect("daemon returned an error");
 

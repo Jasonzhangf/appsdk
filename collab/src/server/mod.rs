@@ -1853,11 +1853,12 @@ impl ProjectRuntimeManager {
                     || storage_roots_equal(&storage_root, &host.storage_root)
                         .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?);
             if resident_self_route {
-                let registration = ProjectRegistration::new(
+                let registration = ProjectRegistration::with_registered_at(
                     ProjectScopeId::new(key.1.clone())
                         .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
                     AppServerId::new(key.0.clone())
                         .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                    record.registered_ms,
                 )
                 .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
                 if host
@@ -2048,7 +2049,7 @@ impl ProjectRuntimeManager {
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id}"
+                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id}; recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl"
                 )
             })?;
         let key = (
@@ -2756,9 +2757,6 @@ impl ProjectRuntimeManager {
         if context_root == self.host_root
             && !self.has_project_route(&context.project_scope.as_str())
         {
-            if let Err(error) = self.append_resident_route_record(&context) {
-                return (self.host.clone(), Resp::err(error));
-            }
             let response =
                 if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
                     Resp::err(error)
@@ -2770,10 +2768,33 @@ impl ProjectRuntimeManager {
                         Some(self.host.as_ref()),
                     )
                 };
-            if response.ok && is_register {
-                self.install_runtime(&key, self.host.clone(), None);
-            } else if !response.ok {
+            if !response.ok {
                 return (self.host.clone(), response);
+            }
+            if is_register {
+                if let Err(error) = self.append_resident_route_record(&context) {
+                    let worker_id = register_worker_id
+                        .as_deref()
+                        .expect("resident registration worker id must exist");
+                    let cleanup = retire_runtime_binding_after_route_failure(
+                        self.host.as_ref(),
+                        worker_id,
+                        context.project_scope.as_str(),
+                        Some(&context.app_scope_id),
+                        worker_id,
+                        "resident route publication failed",
+                    );
+                    let cleanup_status = cleanup
+                        .map(|_| "registration binding retired".to_owned())
+                        .unwrap_or_else(|cleanup_error| {
+                            format!("registration cleanup failed: {cleanup_error}")
+                        });
+                    return (
+                        self.host.clone(),
+                        Resp::err(format!("{error}; {cleanup_status}")),
+                    );
+                }
+                self.install_runtime(&key, self.host.clone(), None);
             }
             return self.finalize_registration(
                 self.host.clone(),
@@ -11368,6 +11389,12 @@ mod host_route_registry_tests {
             .resolve_route_by_native_thread("thread-missing")
             .unwrap_err();
         assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
+        assert!(
+            missing.contains(
+                "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl"
+            ),
+            "{missing}"
+        );
         let current = manager
             .resolve_route_by_native_thread("thread-duplicate")
             .unwrap();
@@ -13825,6 +13852,64 @@ mod host_route_registry_tests {
                 .map(|registration| registration.project_scope.as_str().to_owned()),
             Some(canonical_root.to_string_lossy().into_owned())
         );
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_registration(
+                    &GlobalState::canonical_project_scope(&root).unwrap(),
+                    &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()
+                )
+                .map(|registration| registration.registered_at_ms),
+            Some(1)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_publish_failure_does_not_leave_a_replayable_route() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let mut manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let route_journal_blocker = root.join("route-journal-blocker");
+        std::fs::create_dir_all(&route_journal_blocker).unwrap();
+        Arc::get_mut(&mut manager).unwrap().route_journal = route_journal_blocker;
+
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, failed) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "resident-route-failure-worker".into(),
+                token: "token-resident-route-failure-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-resident-route-failure-worker"),
+            },
+        );
+        assert!(!failed.ok, "{failed:?}");
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")),
+            "{failed:?}"
+        );
+        assert!(
+            !route_journal.exists(),
+            "failed route publish wrote a route journal"
+        );
+
+        drop(manager);
+        let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        assert!(!route_journal.exists(), "replay created a route journal");
+        let missing = replayed
+            .resolve_route_by_native_thread("thread-resident-route-failure-worker")
+            .unwrap_err();
+        assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
 
         std::fs::remove_dir_all(root).unwrap();
     }

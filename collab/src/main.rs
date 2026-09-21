@@ -2027,10 +2027,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 &host_paths.socket_path(),
                 &session_id,
                 &native_thread_id,
-                std::env::current_dir()?
-                    .canonicalize()?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("identity cwd must be valid UTF-8"))?,
             )?;
             out(&json!({
                 "canonical_root": route.canonical_root,
@@ -2091,16 +2087,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         "master status requires CODEX_SESSION_ID so the daemon can resolve the global binding"
                     )
                 })?;
-                let canonical_cwd = std::env::current_dir()?.canonicalize()?;
-                let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
-                    anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
-                })?;
-                let route = scope::route_for_native_thread(
-                    &host_paths,
-                    &session_id,
-                    &thread_id,
-                    identity_cwd,
-                )?;
+                let route = scope::route_for_native_thread(&host_paths, &session_id, &thread_id)?;
                 let scope = Scope { root: route.root };
                 let v: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),
@@ -2402,16 +2389,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "context requires CODEX_SESSION_ID so the daemon can resolve the global binding"
                 )
             })?;
-            let canonical_cwd = std::env::current_dir()?.canonicalize()?;
-            let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
-                anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
-            })?;
-            let route = match scope::route_for_native_thread(
-                &host_paths,
-                &session_id,
-                &thread_id,
-                identity_cwd,
-            ) {
+            let route = match scope::route_for_native_thread(&host_paths, &session_id, &thread_id) {
                 Ok(route) => route,
                 Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
                     out(&unregistered_context(None, None, Some(&error.to_string()))?);
@@ -3581,6 +3559,64 @@ mod tests {
             &identity
         )
         .unwrap());
+
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_thread_only_identity_is_not_reusable_and_must_re_register() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("registration-legacy-thread-only");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        let route = json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": identity::CLI_APP_SERVER_ID,
+            "project_scope": root.canonicalize().unwrap(),
+            "canonical_root": root.canonicalize().unwrap(),
+            "storage_root": root.canonicalize().unwrap(),
+            "registered_ms": 1
+        });
+        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+        // The pre-dual-key durable shape: a native thread with no session on
+        // either the runtime or the selected transport.
+        let runtime = RuntimeIdentity {
+            agent_id: identity::AgentId::new("worker-1").unwrap(),
+            runtime_id: identity::RuntimeId::new("runtime-legacy").unwrap(),
+            appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+            endpoint_generation: 1,
+            binding_id: identity::BindingId::new("binding-legacy").unwrap(),
+            session_id: None,
+            native_thread_id: Some(identity::NativeThreadId::new("thread-legacy").unwrap()),
+        };
+        let mut identity = identity_with_runtime(Some(runtime));
+        identity.project_scope = Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        );
+        identity.transport = Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: None,
+            thread_id: Some("thread-legacy".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        });
+
+        // A recovered legacy identity must not be reported as reusable: it
+        // cannot resolve its own route until it re-registers with the host
+        // session and upgrades to the strict dual-key binding.
+        assert!(
+            !persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap()
+        );
 
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
         std::fs::remove_dir_all(root).ok();

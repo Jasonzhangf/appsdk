@@ -2757,9 +2757,11 @@ fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
 #[test]
 fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     let (server, root) = test_server();
+    let server = Arc::new(server);
     let worker_registration = register(&server, "peer-a", "%a");
-    register(&server, "peer-b", "%b");
+    let target_registration = register(&server, "peer-b", "%b");
     assert_eq!(worker_registration.data["role_brief"]["role"], "worker");
+    assert_eq!(target_registration.data["role_brief"]["role"], "worker");
     assert!(worker_registration.data["role_brief"]["role_task"]
         .as_str()
         .unwrap()
@@ -2786,6 +2788,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
         .any(|line| line.as_str().unwrap().contains("assign tasks")));
     let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a");
+    assert_eq!(context.data["role_brief"]["role"], "master");
     let status = super::handle_master_status(&server);
     assert_eq!(status.data["master"]["worker_id"], "peer-a");
     assert_eq!(
@@ -2825,6 +2828,92 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
         super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
         Some("peer-b".into())
     );
+    assert_eq!(delegated.data["role_brief"]["role"], "master");
+    let target_context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
+    assert_eq!(target_context.data["identity"]["role"], "master");
+    assert_eq!(target_context.data["role_brief"]["role"], "master");
+    let workers = dispatch_with_route_context(&server, Req::Workers, None, None);
+    let target_worker = workers.data["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "peer-b")
+        .unwrap();
+    assert_eq!(target_worker["role_brief"]["role"], "master");
+    let status = dispatch_with_route_context(&server, Req::StatusAll, None, None);
+    let target_status = status.data["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "peer-b")
+        .unwrap();
+    assert_eq!(target_status["role_brief"], target_worker["role_brief"]);
+    assert_eq!(target_registration.data["role_brief"]["role"], "worker");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn role_contract_is_identical_across_context_workers_and_status() {
+    use crate::subagent::Record;
+
+    let (server, root) = test_server();
+    register(&server, "master", "%master");
+    register(&server, "worker", "%worker");
+    register(&server, "child", "%child");
+    promote_master(&server, "master", "user approved master");
+    server.commit(&[Event::SubagentUpdated {
+        subagent: Record {
+            id: "managed-role".into(),
+            parent: "master".into(),
+            peer: "child".into(),
+            status: "idle".into(),
+            thread_id: Some("thread-child".into()),
+            profile: None,
+            created_ms: now_ms(),
+            ready_deadline_ms: 0,
+            last_message: None,
+            error: None,
+            probe_failures: Vec::new(),
+            runtime: None,
+        },
+    }]);
+    let server = Arc::new(server);
+
+    let cases = [
+        ("master", "master"),
+        ("worker", "worker"),
+        ("child", "managed-subagent"),
+    ];
+    for (worker_id, expected_role) in cases {
+        let context = handle_context(&server, worker_id.into(), format!("token-{worker_id}"));
+        assert!(context.ok, "{context:?}");
+        assert_eq!(context.data["identity"]["role"], expected_role);
+        assert_eq!(context.data["role_brief"]["role"], expected_role);
+        assert_eq!(
+            context.data["authority"],
+            context.data["role_brief"]["authority"]
+        );
+        assert_eq!(
+            context.data["role_brief"]["derivation"]["parent"].as_str(),
+            (expected_role == "managed-subagent").then_some("master")
+        );
+    }
+
+    let workers = dispatch_with_route_context(&server, Req::Workers, None, None);
+    assert!(workers.ok, "{workers:?}");
+    let status = dispatch_with_route_context(&server, Req::StatusAll, None, None);
+    assert!(status.ok, "{status:?}");
+    for worker in workers.data["workers"].as_array().unwrap() {
+        let id = worker["id"].as_str().unwrap();
+        let status_worker = status.data["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["id"] == id)
+            .unwrap();
+        assert_eq!(worker["role"], worker["role_brief"]["role"]);
+        assert_eq!(status_worker["role_brief"], worker["role_brief"]);
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 

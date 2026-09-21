@@ -1556,6 +1556,7 @@ fn cli_project_context(root: &std::path::Path) -> anyhow::Result<ProjectContext>
 fn unregistered_context(
     scope: Option<&Scope>,
     identity: Option<&Identity>,
+    route_error: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let cwd = std::env::current_dir()?;
     let canonical_cwd = std::fs::canonicalize(&cwd)?;
@@ -1563,16 +1564,57 @@ fn unregistered_context(
         Some(scope) => scope.root.clone(),
         None => canonical_cwd.clone(),
     };
+    let legacy_daemon = route_error.is_some_and(|error| {
+        error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
+            && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
+    });
     let looks_like_worktree = canonical_cwd.ancestors().any(|ancestor| {
         ancestor
             .file_name()
             .is_some_and(|name| name == "playground")
     });
-    let next_action = if looks_like_worktree {
+    let next_action = if legacy_daemon {
+        "from the canonical project main checkout run `collab down`, then `collab up` once, then `appsdk init .`"
+    } else if looks_like_worktree {
         "return to the canonical project main checkout and run `appsdk init .`"
     } else {
         "appsdk init ."
     };
+    let recovery = route_error.map(|error| {
+        let steps = if legacy_daemon {
+            json!([
+                "From the canonical project main checkout run `collab down`, then `collab up` once so the installed daemon binary is loaded.",
+                "From that same checkout run `appsdk init .` to restore the resident registration and route.",
+                "Verify with `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work.",
+                "If any step fails, preserve its exact output and stop; do not loop initialization or replace transport with mailbox state."
+            ])
+        } else {
+            json!([
+                "From the canonical project main checkout run `appsdk init .`.",
+                "Rerun the original command, then verify with `collab context` and `collab route resolve --native-thread-id <thread-id>`.",
+                "If the error persists, preserve the exact output and stop; do not re-register a worktree."
+            ])
+        };
+        json!({
+            "kind": if legacy_daemon {
+                "legacy_daemon_restart_required"
+            } else {
+                "route_registration_required"
+            },
+            "reason": error,
+            "steps": steps,
+            "preserve": [
+                "~/.collab/ routes, journal, mailbox, identity, and bindings",
+                "the project .agent-collab/ journal and mailbox"
+            ],
+            "do_not": [
+                "edit routes.jsonl",
+                "copy or edit identity tokens",
+                "start a second daemon",
+                "treat mailbox persistence as transport delivery"
+            ]
+        })
+    });
     Ok(json!({
         "schema_version": 1,
         "registration": {
@@ -1590,6 +1632,7 @@ fn unregistered_context(
             "transport": serde_json::Value::Null,
             "thread_id": identity.runtime.as_ref().and_then(|runtime| runtime.native_thread_id.as_ref()),
         })),
+        "recovery": recovery,
         "next_action": next_action,
         "next_actions": [next_action],
         "daemon": {
@@ -1658,14 +1701,14 @@ fn main() {
     }
 }
 
+const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: the running daemon predates this CLI and did not replay resident registration; from the canonical project main checkout run `collab down`, then `collab up` once to load the installed binary, then run `appsdk init .`; verify `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work; preserve daemon state and do not re-register a worktree, edit routes.jsonl, or use mailbox state as transport delivery";
+
 fn format_cli_error(error: &str) -> String {
     if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
         && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
+        && !error.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
     {
-        return format!(
-            "{error}; {}",
-            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
-        );
+        return format!("{error}; {LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY}");
     }
     error.to_owned()
 }
@@ -2268,7 +2311,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let route = match scope::route_for_native_thread(&host_paths, &thread_id) {
                 Ok(route) => route,
                 Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
-                    out(&unregistered_context(None, None)?);
+                    out(&unregistered_context(None, None, Some(&error.to_string()))?);
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -2281,7 +2324,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 )
             })?;
             if ident.transport.is_none() {
-                out(&unregistered_context(Some(&scope), Some(&ident))?);
+                out(&unregistered_context(Some(&scope), Some(&ident), None)?);
                 return Ok(());
             }
             let v: serde_json::Value = call_project(
@@ -3149,7 +3192,7 @@ mod tests {
         let root = test_root("unregistered-context");
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let result = unregistered_context(None, None);
+        let result = unregistered_context(None, None, None);
         std::env::set_current_dir(previous).unwrap();
 
         let context = result.unwrap();
@@ -3168,14 +3211,69 @@ mod tests {
     }
 
     #[test]
+    fn context_route_error_points_to_controlled_legacy_daemon_recovery() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("legacy-route-recovery-context");
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let error = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon";
+        let result = unregistered_context(None, None, Some(error));
+        std::env::set_current_dir(previous).unwrap();
+
+        let context = result.unwrap();
+        assert_eq!(
+            context["recovery"]["kind"],
+            "legacy_daemon_restart_required"
+        );
+        assert_eq!(context["recovery"]["reason"], error);
+        let steps = context["recovery"]["steps"]
+            .as_array()
+            .expect("recovery steps");
+        for expected in [
+            "`collab down`",
+            "`collab up` once",
+            "`appsdk init .`",
+            "`collab context`",
+            "`collab route resolve --native-thread-id <thread-id>`",
+            "`collab master status`",
+        ] {
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step.as_str().is_some_and(|value| value.contains(expected))),
+                "missing recovery step {expected}: {steps:?}"
+            );
+        }
+        assert_eq!(
+            context["next_action"],
+            "from the canonical project main checkout run `collab down`, then `collab up` once, then `appsdk init .`"
+        );
+        assert!(!root.join(".agent-collab").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn cli_error_decorates_bare_route_resolve_not_found() {
         let bare = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon";
         let formatted = format_cli_error(bare);
         assert!(formatted.starts_with(bare), "{formatted}");
         assert!(
-            formatted.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY),
+            formatted.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY),
             "{formatted}"
         );
+        for expected in [
+            "`collab down`",
+            "`collab up` once",
+            "`appsdk init .`",
+            "`collab context`",
+            "`collab route resolve --native-thread-id <thread-id>`",
+            "`collab master status`",
+        ] {
+            assert!(
+                formatted.contains(expected),
+                "missing {expected}: {formatted}"
+            );
+        }
         assert_eq!(
             format_cli_error(&formatted),
             formatted,

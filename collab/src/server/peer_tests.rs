@@ -3407,6 +3407,133 @@ fn legacy_master_assignment_after_runtime_binding_is_migrated() {
 }
 
 #[test]
+fn legacy_master_assignment_without_runtime_binding_fails_replay_closed() {
+    use crate::identity::AppServerId;
+    use crate::server::global_state::ProjectRegistration;
+    use std::io::Write;
+
+    let root = std::env::temp_dir().join(format!(
+        "collab-legacy-master-missing-binding-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let server_dir = root.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let project_scope =
+        crate::server::global_state::GlobalState::canonical_project_scope(&root).unwrap();
+    let app_scope = AppServerId::new("tui-default").unwrap();
+    let registration = ProjectRegistration::new(project_scope, app_scope).unwrap();
+    let legacy = Event::MasterAssigned {
+        worker_id: "peer-a".into(),
+        assigned_by: "peer-a".into(),
+        approval: Some("legacy approval".into()),
+        assigned_ms: 1,
+    };
+    let unrelated_binding = crate::server::global_state::RuntimeBinding::new(
+        registration.project_scope.clone(),
+        registration.app_scope_id.clone(),
+        crate::identity::AgentId::new("peer-b").unwrap(),
+        crate::identity::RuntimeId::new("runtime-b").unwrap(),
+        crate::identity::BindingId::new("binding-b").unwrap(),
+        1,
+        None,
+    )
+    .unwrap();
+    let journal = server_dir.join("journal.jsonl");
+    let mut file = std::fs::File::create(&journal).unwrap();
+    for event in [
+        Event::GlobalProjectRegistered { registration },
+        Event::GlobalRuntimeBound {
+            binding: unrelated_binding,
+        },
+        legacy,
+    ] {
+        writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+    }
+    drop(file);
+
+    let error = match replay(&root) {
+        Ok(_) => panic!("missing binding must fail replay closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("MASTER_AUTHORITY_REQUIRES_RUNTIME_BINDING"),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_master_assignment_with_ambiguous_binding_fails_replay_closed() {
+    use crate::identity::{AppServerId, BindingId, RuntimeId};
+    use crate::server::global_state::{ProjectRegistration, RuntimeBinding};
+    use std::io::Write;
+
+    let root = std::env::temp_dir().join(format!(
+        "collab-legacy-master-ambiguous-binding-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let server_dir = root.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let project_scope =
+        crate::server::global_state::GlobalState::canonical_project_scope(&root).unwrap();
+    let app_scope = AppServerId::new("tui-default").unwrap();
+    let registration = ProjectRegistration::new(project_scope.clone(), app_scope.clone()).unwrap();
+    let first = RuntimeBinding::new(
+        project_scope.clone(),
+        app_scope.clone(),
+        crate::identity::AgentId::new("peer-a").unwrap(),
+        RuntimeId::new("runtime-a").unwrap(),
+        BindingId::new("binding-a").unwrap(),
+        1,
+        None,
+    )
+    .unwrap();
+    let second = RuntimeBinding::new(
+        project_scope,
+        app_scope,
+        crate::identity::AgentId::new("peer-a").unwrap(),
+        RuntimeId::new("runtime-b").unwrap(),
+        BindingId::new("binding-b").unwrap(),
+        1,
+        None,
+    )
+    .unwrap();
+    let legacy = Event::MasterAssigned {
+        worker_id: "peer-a".into(),
+        assigned_by: "peer-a".into(),
+        approval: Some("legacy approval".into()),
+        assigned_ms: 1,
+    };
+    let journal = server_dir.join("journal.jsonl");
+    let mut file = std::fs::File::create(&journal).unwrap();
+    for event in [
+        Event::GlobalProjectRegistered { registration },
+        Event::GlobalRuntimeBound { binding: first },
+        Event::GlobalRuntimeBound { binding: second },
+        legacy,
+    ] {
+        writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+    }
+    drop(file);
+
+    let error = match replay(&root) {
+        Ok(_) => panic!("ambiguous binding must fail replay closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("MASTER_AUTHORITY_AMBIGUOUS_BINDING"),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn journal_root_assigned_rewrites_to_master_on_replay() {
     let root = std::env::temp_dir().join(format!(
         "collab-root-to-master-{}-{}",
@@ -7292,6 +7419,26 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+            },
+        },
+        Event::NotificationSubscribed {
+            subscription: crate::server::state::NotificationSubscription {
+                id: "sub-master".into(),
+                worker_id: "master".into(),
+                event: "direct-message".into(),
+                subject: None,
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now.saturating_add(300_000),
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
             },
         },
         Event::WakeBound {

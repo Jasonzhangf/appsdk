@@ -707,6 +707,35 @@ pub struct State {
     pub worktree_bindings: HashMap<String, WorktreeBinding>,
 }
 
+fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> bool {
+    state.global.projects.values().any(|project| {
+        project.master_grants.values().any(|grant| {
+            grant.agent_id.as_str() == worker_id
+                && state
+                    .global
+                    .lookup_master_grant(&grant.project_scope, &grant.binding_id)
+                    .is_some_and(|current| current == grant)
+                && state
+                    .global
+                    .lookup_binding_for(
+                        &crate::scope::RouteScope {
+                            app_scope_id: grant.app_scope_id.clone(),
+                            project_scope_id: grant.project_scope.clone(),
+                        },
+                        &grant.binding_id,
+                    )
+                    .is_some_and(|binding| {
+                        binding.endpoint_generation == grant.endpoint_generation
+                            && binding.agent_id == grant.agent_id
+                            && binding
+                                .native_thread_id
+                                .as_ref()
+                                .is_some_and(|thread_id| thread_id.as_str() == target)
+                    })
+        })
+    })
+}
+
 impl State {
     pub(crate) fn restore_unique_current_thread_routes_from_bindings(
         &mut self,
@@ -1020,11 +1049,21 @@ impl State {
                     }
                 }
                 if ids.iter().any(|id| {
-                    self.wake_bindings.contains_key(id)
-                        && self.msgs.get(id).is_some_and(|message| {
-                            message.from == "collab-server"
-                                && self.master_worker_id.as_deref() == Some(message.to.as_str())
-                        })
+                    self.wake_bindings.get(id).is_some_and(|subscription_id| {
+                        self.notification_subscriptions
+                            .get(subscription_id)
+                            .is_some_and(|subscription| {
+                                self.msgs.get(id).is_some_and(|message| {
+                                    message.from == "collab-server"
+                                        && message.to == subscription.worker_id
+                                        && has_current_master_grant(
+                                            self,
+                                            &subscription.worker_id,
+                                            &subscription.target,
+                                        )
+                                })
+                            })
+                    })
                 }) {
                     super::notification_state::mark_master_wake_delivered(&mut self.master_wake);
                 }
@@ -1616,12 +1655,39 @@ mod tests {
     #[test]
     fn master_wake_accumulator_coalesces_generated_signals_until_decision() {
         let mut state = State::default();
-        state.apply(&Event::MasterAssigned {
-            worker_id: "master".into(),
-            assigned_by: "operator".into(),
-            approval: Some("approved".into()),
-            assigned_ms: 1,
-        });
+        let project_scope = ProjectScopeId::new("/master-wake-project").unwrap();
+        let app_scope = AppServerId::new("app-one").unwrap();
+        let agent = AgentId::new("master").unwrap();
+        let binding = RuntimeBinding::new(
+            project_scope.clone(),
+            app_scope.clone(),
+            agent.clone(),
+            RuntimeId::new("runtime-master-wake").unwrap(),
+            BindingId::new("binding-master-wake").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-master").unwrap()),
+        )
+        .unwrap();
+        let grant = crate::server::global_state::MasterGrant::new(
+            project_scope.clone(),
+            app_scope,
+            agent,
+            "project",
+            "operator",
+            "approved",
+            binding.binding_id.clone(),
+            1,
+            1,
+        )
+        .unwrap();
+        state
+            .global
+            .register_project(
+                ProjectRegistration::new(project_scope, binding.app_scope_id.clone()).unwrap(),
+            )
+            .unwrap();
+        state.global.bind_runtime(binding).unwrap();
+        state.apply(&Event::GlobalMasterGranted { grant });
         let generated = |id: &str, subject: &str, created_ms: i64| Message {
             id: id.into(),
             from: "collab-server".into(),
@@ -1675,6 +1741,26 @@ mod tests {
         };
         state.apply(&Event::Sent { msg: explicit });
         assert_eq!(state.master_wake.idle_workers, vec!["worker"]);
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-master".into(),
+                worker_id: "master".into(),
+                event: "direct-message".into(),
+                subject: None,
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 100,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
         state.apply(&Event::WakeBound {
             message_id: "idle-1".into(),
             subscription_id: "sub-master".into(),
@@ -1696,6 +1782,220 @@ mod tests {
         });
         assert!(state.master_wake.idle_workers.is_empty());
         assert_eq!(state.master_wake.delivery_state, "pending");
+    }
+
+    #[test]
+    fn delivered_master_wake_uses_current_typed_grant() {
+        let project_scope = ProjectScopeId::new("/project").unwrap();
+        let app_scope = AppServerId::new("app-one").unwrap();
+        let agent = AgentId::new("master").unwrap();
+        let binding = RuntimeBinding::new(
+            project_scope.clone(),
+            app_scope.clone(),
+            agent.clone(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-master").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-master").unwrap()),
+        )
+        .unwrap();
+        let grant = crate::server::global_state::MasterGrant::new(
+            project_scope.clone(),
+            app_scope,
+            agent,
+            "project",
+            "master",
+            "approved",
+            binding.binding_id.clone(),
+            1,
+            1,
+        )
+        .unwrap();
+
+        let mut state = State::default();
+        state
+            .global
+            .register_project(
+                ProjectRegistration::new(project_scope, binding.app_scope_id.clone()).unwrap(),
+            )
+            .unwrap();
+        state.global.bind_runtime(binding).unwrap();
+        state.apply(&Event::GlobalMasterGranted { grant });
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: 10,
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                from: "collab-server".into(),
+                to: "master".into(),
+                ..msg("master-wake", "master", "notify")
+            },
+        });
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-master".into(),
+                worker_id: "master".into(),
+                event: "direct-message".into(),
+                subject: None,
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 100,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: "master-wake".into(),
+            subscription_id: "sub-master".into(),
+        });
+
+        let replayed =
+            state
+                .snapshot_events()
+                .into_iter()
+                .fold(State::default(), |mut replayed, event| {
+                    replayed.apply(&event);
+                    replayed
+                });
+        assert_eq!(replayed.master_wake.delivery_state, "pending");
+
+        state.apply(&Event::Delivered {
+            ids: vec!["master-wake".into()],
+        });
+        let replayed =
+            state
+                .snapshot_events()
+                .into_iter()
+                .fold(State::default(), |mut replayed, event| {
+                    replayed.apply(&event);
+                    replayed
+                });
+        assert_eq!(state.master_wake.delivery_state, "notified_unconsumed");
+        assert_eq!(
+            replayed.master_wake.delivery_state,
+            state.master_wake.delivery_state
+        );
+    }
+
+    #[test]
+    fn delivered_master_wake_is_scoped_to_subscription_route() {
+        let first_scope = ProjectScopeId::new("/project-one").unwrap();
+        let second_scope = ProjectScopeId::new("/project-two").unwrap();
+        let app_scope = AppServerId::new("app-one").unwrap();
+        let first_binding = RuntimeBinding::new(
+            first_scope.clone(),
+            app_scope.clone(),
+            AgentId::new("first-master").unwrap(),
+            RuntimeId::new("runtime-first").unwrap(),
+            BindingId::new("binding-first").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-first").unwrap()),
+        )
+        .unwrap();
+        let second_binding = RuntimeBinding::new(
+            second_scope.clone(),
+            app_scope.clone(),
+            AgentId::new("second-master").unwrap(),
+            RuntimeId::new("runtime-second").unwrap(),
+            BindingId::new("binding-second").unwrap(),
+            1,
+            Some(NativeThreadId::new("thread-second").unwrap()),
+        )
+        .unwrap();
+        let first_grant = crate::server::global_state::MasterGrant::new(
+            first_scope.clone(),
+            app_scope.clone(),
+            first_binding.agent_id.clone(),
+            "project",
+            "operator",
+            "approved",
+            first_binding.binding_id.clone(),
+            1,
+            1,
+        )
+        .unwrap();
+        let second_grant = crate::server::global_state::MasterGrant::new(
+            second_scope.clone(),
+            app_scope.clone(),
+            second_binding.agent_id.clone(),
+            "project",
+            "operator",
+            "approved",
+            second_binding.binding_id.clone(),
+            1,
+            1,
+        )
+        .unwrap();
+
+        let mut state = State::default();
+        for (scope, binding, grant) in [
+            (first_scope, first_binding, first_grant),
+            (second_scope, second_binding, second_grant),
+        ] {
+            state
+                .global
+                .register_project(
+                    ProjectRegistration::new(scope, binding.app_scope_id.clone()).unwrap(),
+                )
+                .unwrap();
+            state.global.bind_runtime(binding).unwrap();
+            state.apply(&Event::GlobalMasterGranted { grant });
+        }
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::WorkerIdle {
+                worker_id: "worker".into(),
+            },
+            at_ms: 10,
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                from: "collab-server".into(),
+                to: "first-master".into(),
+                ..msg("master-wake", "first-master", "notify")
+            },
+        });
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-first-master".into(),
+                worker_id: "first-master".into(),
+                event: "direct-message".into(),
+                subject: None,
+                target: "thread-first".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 100,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: "master-wake".into(),
+            subscription_id: "sub-first-master".into(),
+        });
+
+        state.apply(&Event::Delivered {
+            ids: vec!["master-wake".into()],
+        });
+        assert_eq!(
+            state.master_wake.delivery_state, "notified_unconsumed",
+            "two project-scoped masters must not make delivery ambiguous"
+        );
     }
 
     #[test]

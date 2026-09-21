@@ -1385,15 +1385,6 @@ impl Server {
         st: &mut State,
         evs: &[Event],
     ) -> Result<(), notification_contract::JournalError> {
-        if evs
-            .iter()
-            .any(|event| matches!(event, Event::Delivered { .. }))
-        {
-            // The wake reducer still consumes this compatibility projection.
-            // Derive it from the typed grant before applying delivery events.
-            let route_scope = server_route_scope(self, st).ok().flatten();
-            st.master_worker_id = current_master_worker_id(st, route_scope.as_ref());
-        }
         for ev in evs {
             if let Err(error) = st.apply_checked(ev) {
                 st.journal_poison.get_or_insert(error.clone());
@@ -16609,7 +16600,7 @@ fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
                     })
                 });
             if !has_typed_grant {
-                if let Ok(grant) = master_grant_for_worker(
+                let grant = master_grant_for_worker(
                     &st,
                     &route_scope,
                     &worker_id,
@@ -16617,11 +16608,15 @@ fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
                     st.master_approval
                         .as_deref()
                         .unwrap_or("legacy master assignment imported"),
-                ) {
-                    st.global
-                        .grant_master(grant)
-                        .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
-                }
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "journal replay failed: legacy master assignment for {worker_id} cannot be migrated: {error}"
+                    )
+                })?;
+                st.global
+                    .grant_master(grant)
+                    .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
             }
             st.master_worker_id = None;
             st.master_assigned_by = None;

@@ -805,6 +805,48 @@ impl State {
         Ok(())
     }
 
+    /// Project every durable thread-only binding into the read-only legacy
+    /// compatibility index.
+    ///
+    /// This runs on every replay, independently of
+    /// `restore_unique_current_thread_routes_from_bindings`.  That helper only
+    /// backfills strict routes when a journal has no route event at all; a
+    /// journal whose route events are themselves thread-only (the live host
+    /// journal) would otherwise never index them, leaving every pre-dual-key
+    /// route unresolvable after a restart.
+    pub(crate) fn index_legacy_thread_routes_from_bindings(&mut self) -> Result<(), String> {
+        let mut bindings = self
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .filter(|binding| binding.native_thread_id.is_some() && binding.session_id.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        bindings.sort_by(|left, right| {
+            (
+                left.native_thread_id.as_ref().map(|thread| thread.as_str()),
+                left.binding_id.as_str(),
+            )
+                .cmp(&(
+                    right
+                        .native_thread_id
+                        .as_ref()
+                        .map(|thread| thread.as_str()),
+                    right.binding_id.as_str(),
+                ))
+        });
+        let mut recovered = self.global.clone();
+        for binding in bindings {
+            recovered
+                .set_legacy_thread_route(binding)
+                .map_err(|error| format!("journal replay rejected legacy thread route: {error}"))?;
+        }
+        recovered.set_counters(self.sequence, self.revision);
+        self.global = recovered;
+        Ok(())
+    }
+
     /// Keep the typed projection on the daemon journal's version axis.  The
     /// resident reducer is the only owner of these counters; the nested
     /// global state mirrors them for typed CAS and receipts.
@@ -2409,6 +2451,77 @@ mod tests {
             .all(|route| route.binding_id.as_str() != "binding-legacy"));
         replayed.global.validate().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_bindings_are_indexed_even_when_a_strict_route_is_present() {
+        // The live routecodex journal shape: durable thread-only bindings and a
+        // single strict route event.  The strict route makes
+        // `restore_unique_current_thread_routes_from_bindings` skip, so the
+        // legacy index must be built independently or every pre-dual-key route
+        // becomes unresolvable after a restart.
+        let scope = ProjectScopeId::new("/legacy-mixed").unwrap();
+        let legacy = RuntimeBinding {
+            project_scope: scope.clone(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new("agent-legacy").unwrap(),
+            runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
+            binding_id: BindingId::new("binding-legacy").unwrap(),
+            endpoint_generation: 1,
+            session_id: None,
+            native_thread_id: Some(NativeThreadId::new("thread-legacy-mixed").unwrap()),
+        };
+        let strict = RuntimeBinding {
+            project_scope: scope.clone(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new("agent-strict").unwrap(),
+            runtime_id: RuntimeId::new("runtime-strict").unwrap(),
+            binding_id: BindingId::new("binding-strict").unwrap(),
+            endpoint_generation: 1,
+            session_id: Some(crate::identity::SessionId::new("session-strict-mixed").unwrap()),
+            native_thread_id: Some(NativeThreadId::new("thread-strict-mixed").unwrap()),
+        };
+        let mut st = State::default();
+        st.apply(&Event::GlobalProjectRegistered {
+            registration: ProjectRegistration::new(
+                scope.clone(),
+                AppServerId::new("appserver-cli").unwrap(),
+            )
+            .unwrap(),
+        });
+        st.apply(&Event::GlobalRuntimeBound {
+            binding: legacy.clone(),
+        });
+        st.apply(&Event::GlobalRuntimeBound {
+            binding: strict.clone(),
+        });
+        st.apply(&Event::GlobalCurrentThreadRouteSet {
+            binding: strict.clone(),
+        });
+
+        // Precondition: a strict route exists, so the bindings-based restore
+        // path is skipped in replay.
+        assert!(st
+            .global
+            .lookup_current_thread_route(
+                &crate::identity::SessionId::new("session-strict-mixed").unwrap(),
+                &NativeThreadId::new("thread-strict-mixed").unwrap()
+            )
+            .is_some());
+        assert!(st
+            .global
+            .legacy_thread_route_matches(&NativeThreadId::new("thread-legacy-mixed").unwrap())
+            .is_empty());
+
+        st.index_legacy_thread_routes_from_bindings().unwrap();
+
+        assert_eq!(
+            st.global
+                .legacy_thread_route_matches(&NativeThreadId::new("thread-legacy-mixed").unwrap())
+                .len(),
+            1
+        );
+        st.global.validate().unwrap();
     }
 
     #[test]

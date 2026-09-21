@@ -1,11 +1,13 @@
 # collab workflow
 
 This project uses the local `collab` daemon for multi-agent coordination.
-The source and build truth lives in the AppSDK repository's `collab/` directory;
-the installed independent binaries are `~/.cargo/bin/collab` and
+AppSDK is the only source, review, merge, push, and release truth. The source
+and build truth lives in the AppSDK repository's `collab/` directory; `collab`
+is an independently compiled binary, not an independently maintained
+repository. The installed binaries are `~/.cargo/bin/collab` and
 `~/.cargo/bin/collab-mcp`. From an AppSDK checkout, use
-`scripts/install-global-collab.sh`; do not build a second copy from an external
-Collab checkout.
+`collab/scripts/install-global-collab.sh`; an external Collab checkout is
+reference-only and must not start a second source or delivery chain.
 
 The daemon is detached. Normal commands may start it when no explicit `DOWN`
 marker exists. `collab init` creates the global `~/.collab` persistence directory,

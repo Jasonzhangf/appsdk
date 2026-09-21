@@ -11,9 +11,17 @@ Bug：`508510a`
 
 AppSDK 与 Collab 作为一个产品维护，但职责保持单一：
 
-- `collab/`：注册、绑定、路由、live 查询、恢复和 App Server transport。
+- `appsdk/collab/`：注册、绑定、路由、live 查询、恢复和 App Server transport；它是本仓库内的独立目录和独立 binary。
 - AppSDK：Feature/Bug intake、角色约束、DAG、验证证据、main 集成和交付门禁。
 - 不新增第二套身份库、任务库、daemon 或 mailbox。
+
+### 仓库与发布边界
+
+`appsdk` 是唯一源码、review、merge 和 push 真源。`collab/` 虽然单独编译为
+`collab`/`collab-mcp` binary，但必须从 `appsdk/collab/` 构建和安装；独立
+Collab checkout 不是本计划的源码、交付或发布输入，不建立第二条 merge/push 链。
+所有 worker 都从 AppSDK main 建立 worktree，Collab 模块只修改该 worktree 下的
+`collab/**`；最终以 AppSDK main SHA、Collab binary SHA、安装和 daemon 重启证据收口。
 
 ## 稳定绑定模型
 

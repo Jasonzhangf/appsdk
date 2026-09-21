@@ -4404,6 +4404,127 @@ fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
 }
 
 #[test]
+fn live_master_closes_merged_task_with_verified_cleanup() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master close test");
+    initialize_main(&root);
+    let base = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "-b", "codex/master-cleanup"]);
+    std::fs::write(root.join("master-cleanup.txt"), "merged task\n").unwrap();
+    git_ok(&root, &["add", "master-cleanup.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "master cleanup task"]);
+    git_ok(&root, &["checkout", "-q", "main"]);
+    git_ok(&root, &["merge", "--ff-only", "codex/master-cleanup"]);
+    let main_commit = rev_parse(&root, "refs/heads/main");
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let worktree = root.join("playground/master-cleanup");
+    let worktree_string = worktree.display().to_string();
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &worktree_string,
+            "codex/master-cleanup",
+        ],
+    );
+
+    let registered = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "master-cleanup".into(),
+        None,
+        Some("feature".into()),
+        Some("playground/master-cleanup".into()),
+        Some("codex/master-cleanup".into()),
+        Some(base),
+        default_priority(),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    let registered_worktree = server.state.lock().unwrap().tasks["master-cleanup"]
+        .worktree_path
+        .clone()
+        .unwrap();
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "master-cleanup".into(),
+                Some(status.into()),
+                Some(format!("continue {status}")),
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "master-cleanup".into(),
+            Some("candidate verified".into()),
+            Some(registered_worktree),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_review(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "master-cleanup".into(),
+            true,
+            false,
+            "review pass".into(),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_integrated(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "master-cleanup".into(),
+            main_commit,
+            "main verified".into(),
+        )
+        .ok
+    );
+
+    let closed = handle_task_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "master-cleanup".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert!(!worktree.exists());
+    let branch_after_close = Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/codex/master-cleanup"])
+        .output()
+        .unwrap();
+    assert!(!branch_after_close.status.success());
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["master-cleanup"].owner, "owner");
+    assert_eq!(state.tasks["master-cleanup"].status, "closed");
+    assert_eq!(
+        state.cleanup_receipts["master-cleanup"].verification,
+        crate::server::state::CleanupVerification::Verified
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");

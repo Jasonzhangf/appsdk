@@ -8903,7 +8903,13 @@ fn handle_task_close(
         }));
     }
     if task.owner != worker_id {
-        return Resp::err("only the task owner may close its lifecycle");
+        let live_master = match live_master_id(server, &st) {
+            Ok(master) => master,
+            Err(error) => return Resp::err(error),
+        };
+        if live_master.as_deref() != Some(worker_id.as_str()) {
+            return Resp::err("task close requires task owner or live master authority");
+        }
     }
     if task.status != "merged" {
         return Resp::err(format!(

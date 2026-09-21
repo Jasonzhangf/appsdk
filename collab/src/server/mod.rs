@@ -5963,14 +5963,22 @@ pub(crate) fn scheduler_admit_subagent_start(
 
     // Snapshot the master identity, then probe outside the state mutex for the
     // same reason as registered_idle_peer_for_admission.
-    let Some(master) = ({
+    let master = {
         let state = server.state.lock().unwrap();
-        let route_scope = server_route_scope(server, &state).ok().flatten();
+        let route_scope = match server_route_scope(server, &state) {
+            Ok(route_scope) => route_scope,
+            Err(error) => {
+                return Err(Resp::err(format!(
+                    "scheduler admission requires a unique route scope: {error}"
+                )))
+            }
+        };
         current_master_worker_id(&state, route_scope.as_ref())
             .as_ref()
             .and_then(|id| state.workers.get(id))
             .cloned()
-    }) else {
+    };
+    let Some(master) = master else {
         return Ok(None);
     };
     if master.id != worker_id || worker_presence(server, &master) != IdentityPresence::Present {
@@ -6392,14 +6400,22 @@ pub(crate) fn handle_scheduler_dispatch(
     if !authenticated {
         return Resp::err("scheduler dispatch authentication failed");
     }
-    let Some(master) = ({
+    let master = {
         let state = server.state.lock().unwrap();
-        let route_scope = server_route_scope(server, &state).ok().flatten();
+        let route_scope = match server_route_scope(server, &state) {
+            Ok(route_scope) => route_scope,
+            Err(error) => {
+                return Resp::err(format!(
+                    "scheduler dispatch requires a unique route scope: {error}"
+                ))
+            }
+        };
         current_master_worker_id(&state, route_scope.as_ref())
             .as_ref()
             .and_then(|id| state.workers.get(id))
             .cloned()
-    }) else {
+    };
+    let Some(master) = master else {
         return Resp::err("scheduler dispatch requires a live master");
     };
     if master.id != worker_id || worker_presence(server, &master) != IdentityPresence::Present {
@@ -17899,6 +17915,89 @@ mod scheduler_admission_tests {
         assert!(state.subagents.is_empty());
         assert!(state.tasks.is_empty());
         assert!(state.msgs.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_admission_rejects_ambiguous_server_route_scope() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "idle-peer", "%idle-peer");
+        promote_master(&server);
+        let route_scope = {
+            let state = server.state.lock().unwrap();
+            let binding = state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+                .find(|binding| binding.agent_id.as_str() == "master")
+                .unwrap();
+            binding.route_scope()
+        };
+        let second_app = crate::identity::AppServerId::new("tui-second").unwrap();
+        let registration = crate::server::global_state::ProjectRegistration::new(
+            route_scope.project_scope_id.clone(),
+            second_app,
+        )
+        .unwrap();
+        let mut second_binding = {
+            let state = server.state.lock().unwrap();
+            state
+                .global
+                .lookup_binding_for(
+                    &route_scope,
+                    &crate::identity::BindingId::new("binding-master").unwrap(),
+                )
+                .unwrap()
+                .clone()
+        };
+        second_binding.app_scope_id = registration.app_scope_id.clone();
+        second_binding.binding_id = crate::identity::BindingId::new("binding-second").unwrap();
+        second_binding.runtime_id = crate::identity::RuntimeId::new("runtime-second").unwrap();
+        server.commit(&[
+            Event::GlobalProjectRegistered { registration },
+            Event::GlobalRuntimeBound {
+                binding: second_binding,
+            },
+        ]);
+
+        let admission =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"));
+        let error = admission
+            .expect_err("ambiguous route must not authorize scheduler admission")
+            .error
+            .unwrap_or_default();
+        assert!(
+            error.contains("scheduler admission requires a unique route scope"),
+            "{error}"
+        );
+
+        let server = Arc::new(server);
+        let dispatched = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Dispatch {
+                    request_id: "req-ambiguous".into(),
+                    subject: "subject".into(),
+                    body: "body".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: None,
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert!(!dispatched.ok);
+        assert!(dispatched
+            .error
+            .unwrap_or_default()
+            .contains("scheduler dispatch requires a unique route scope"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

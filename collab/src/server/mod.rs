@@ -18122,6 +18122,12 @@ fn replay_from_journal(root: &Path, journal: &Path) -> anyhow::Result<State> {
         st.restore_unique_current_thread_routes_from_bindings()
             .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
     }
+    // Always index durable thread-only bindings, whether or not this journal
+    // carried a strict route event.  A journal whose route events are all
+    // thread-only (the live host journal) must still expose them after a
+    // restart, and the strict-route guard above would otherwise skip them.
+    st.index_legacy_thread_routes_from_bindings()
+        .map_err(|error| anyhow::anyhow!("journal replay failed: {error}"))?;
     if legacy_master_is_current {
         let Some(worker_id) = st.master_worker_id.clone() else {
             unreachable!("legacy master event must leave a legacy master projection");

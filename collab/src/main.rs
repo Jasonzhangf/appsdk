@@ -571,11 +571,12 @@ fn register_with_runtime(
 fn me(scope: &Scope, worker: Option<String>) -> anyhow::Result<Identity> {
     let worker = worker.or_else(|| std::env::var("COLLAB_WORKER").ok());
     let mut ident = identity::load_or_create(scope, worker, None)?;
-    if ident.runtime.is_none() || ident.transport.is_none() {
-        let _ = register(scope, &mut ident)?;
-    } else {
-        runtime_for_request(&ident)?;
-    }
+    // Use the same admission decision as `init`/`register` so a recovered
+    // pre-dual-key identity is not treated as reusable.  A thread-backed
+    // binding with no persisted session cannot resolve its own route, so it
+    // must re-register and upgrade to the strict session+thread binding
+    // instead of sending an incomplete runtime context downstream.
+    let _ = ensure_registration(scope, &mut ident)?;
     Ok(ident)
 }
 
@@ -3554,6 +3555,64 @@ mod tests {
             &identity
         )
         .unwrap());
+
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_thread_only_identity_is_not_reusable_and_must_re_register() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("registration-legacy-thread-only");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        let route = json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": identity::CLI_APP_SERVER_ID,
+            "project_scope": root.canonicalize().unwrap(),
+            "canonical_root": root.canonicalize().unwrap(),
+            "storage_root": root.canonicalize().unwrap(),
+            "registered_ms": 1
+        });
+        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+        // The pre-dual-key durable shape: a native thread with no session on
+        // either the runtime or the selected transport.
+        let runtime = RuntimeIdentity {
+            agent_id: identity::AgentId::new("worker-1").unwrap(),
+            runtime_id: identity::RuntimeId::new("runtime-legacy").unwrap(),
+            appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+            endpoint_generation: 1,
+            binding_id: identity::BindingId::new("binding-legacy").unwrap(),
+            session_id: None,
+            native_thread_id: Some(identity::NativeThreadId::new("thread-legacy").unwrap()),
+        };
+        let mut identity = identity_with_runtime(Some(runtime));
+        identity.project_scope = Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        );
+        identity.transport = Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: None,
+            thread_id: Some("thread-legacy".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        });
+
+        // A recovered legacy identity must not be reported as reusable: it
+        // cannot resolve its own route until it re-registers with the host
+        // session and upgrades to the strict dual-key binding.
+        assert!(
+            !persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap()
+        );
 
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
         std::fs::remove_dir_all(root).ok();

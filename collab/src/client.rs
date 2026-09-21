@@ -329,7 +329,11 @@ fn spawn_server(sock: &Path) -> anyhow::Result<()> {
 }
 
 fn wait_for_server(sock: &Path) -> anyhow::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    // A cold daemon start on a loaded host can take longer than the
+    // historical 4s window before the socket accepts a typed Ping. Keep the
+    // window bounded but large enough that a starting daemon is not reported
+    // as DAEMON_UNAVAILABLE while it is still coming up.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if daemon_status(sock) == DaemonAvailability::Alive {
             return Ok(());
@@ -874,6 +878,39 @@ mod tests {
         .expect("explicit launcher should satisfy ensure_server");
 
         assert!(listener.lock().expect("listener fixture lock").is_some());
+    }
+
+    #[test]
+    fn ensure_server_waits_for_readiness_past_the_previous_deadline() {
+        let fixture = TempServerDir::new("delayed-readiness");
+        let delayed_socket = fixture.socket();
+
+        // A cold restart on this host needs several seconds before the socket
+        // accepts a typed Ping. Readiness that lands after the historical 4s
+        // window must still satisfy `collab up` instead of reporting
+        // DAEMON_STARTING while the daemon is actually coming up.
+        let delayed = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(5));
+            let bound = UnixListener::bind(&delayed_socket).expect("bind delayed socket");
+            let responder = bound.try_clone().expect("clone delayed listener");
+            thread::spawn(move || {
+                let (mut stream, _) = responder.accept().expect("accept readiness probe");
+                let mut request = String::new();
+                std::io::BufReader::new(&mut stream)
+                    .read_line(&mut request)
+                    .expect("read readiness request");
+                stream
+                    .write_all(
+                        b"{\"ok\":true,\"workers\":0,\"messages\":0,\"tasks\":0,\"now\":\"now\"}\n",
+                    )
+                    .expect("write readiness response");
+            });
+            bound
+        });
+
+        ensure_server_with_launcher(&fixture.socket(), move |_sock| Ok(()))
+            .expect("readiness after the previous deadline should still succeed");
+        delayed.join().expect("delayed readiness fixture");
     }
 
     #[test]

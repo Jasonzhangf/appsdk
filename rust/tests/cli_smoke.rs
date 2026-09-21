@@ -21425,3 +21425,64 @@ fn canonical_function_map_required_gates_resolve_exactly_once() {
         }
     }
 }
+
+#[test]
+fn canonical_zone_transition_and_promotion_schema_require_parallel_live_closure() {
+    let contracts_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../contracts");
+    let template_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/minimal/contracts");
+
+    for (label, root) in [("canonical", &contracts_root), ("minimal", &template_root)] {
+        let manifest: Value = serde_json::from_slice(
+            &fs::read(root.join("transitions/zone-transition.manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let promotion_transition = manifest["transitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|transition| {
+                transition["from"].as_str() == Some("playground")
+                    && transition["to"].as_str() == Some("active")
+            })
+            .unwrap_or_else(|| panic!("{label} manifest must declare playground -> active"));
+        let parallel_required = promotion_transition["record_required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            parallel_required.contains(&"CollabLiveClosureRecordWhenParallel"),
+            "{label} playground -> active transition must declare the parallel live closure record: {parallel_required:?}"
+        );
+
+        let promotion_schema: Value = serde_json::from_slice(
+            &fs::read(root.join("records/promotion-record.schema.json")).unwrap(),
+        )
+        .unwrap();
+        let conditional = promotion_schema["allOf"]
+            .as_array()
+            .unwrap_or_else(|| {
+                panic!("{label} promotion schema must declare a conditional requirement")
+            })
+            .iter()
+            .any(|clause| {
+                clause["if"]["required"].as_array().is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|field| field.as_str() == Some("collaboration_record_id"))
+                }) && clause["then"]["required"]
+                    .as_array()
+                    .is_some_and(|required| {
+                        required
+                            .iter()
+                            .any(|field| field.as_str() == Some("collab_live_closure_record_id"))
+                    })
+            });
+        assert!(
+            conditional,
+            "{label} promotion schema must conditionally require collab_live_closure_record_id for collaboration promotion"
+        );
+    }
+}

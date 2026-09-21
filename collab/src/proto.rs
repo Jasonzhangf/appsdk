@@ -373,11 +373,11 @@ pub enum Req {
     },
     /// Resolve the unique registered project route for one native App Server
     /// thread. This is a daemon-owned read-only lookup: callers must not
-    /// select a route by cwd or by reading routes.jsonl directly.
+    /// select a route by cwd or by reading routes.jsonl directly. cwd is
+    /// execution context and is deliberately absent from this request.
     RouteResolve {
         session_id: String,
         native_thread_id: String,
-        identity_cwd: String,
     },
     MsgStatus {
         msg_id: String,

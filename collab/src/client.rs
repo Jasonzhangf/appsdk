@@ -95,14 +95,12 @@ pub fn resolve_route(
     sock: &Path,
     session_id: &str,
     native_thread_id: &str,
-    identity_cwd: &str,
 ) -> anyhow::Result<RouteResolution> {
     let route: RouteResolution = call(
         sock,
         &Req::RouteResolve {
             session_id: session_id.to_owned(),
             native_thread_id: native_thread_id.to_owned(),
-            identity_cwd: identity_cwd.to_owned(),
         },
     )?;
     route.validate()?;
@@ -118,13 +116,6 @@ pub fn resolve_route(
             "ROUTE_RESOLVE_INVALID: daemon returned thread {} for requested thread {}",
             route.native_thread_id,
             native_thread_id
-        );
-    }
-    if route.canonical_root != identity_cwd {
-        anyhow::bail!(
-            "ROUTE_RESOLVE_INVALID: daemon returned project root {} for requested cwd {}",
-            route.canonical_root,
-            identity_cwd
         );
     }
     Ok(route)
@@ -338,7 +329,11 @@ fn spawn_server(sock: &Path) -> anyhow::Result<()> {
 }
 
 fn wait_for_server(sock: &Path) -> anyhow::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    // A cold daemon start on a loaded host can take longer than the
+    // historical 4s window before the socket accepts a typed Ping. Keep the
+    // window bounded but large enough that a starting daemon is not reported
+    // as DAEMON_UNAVAILABLE while it is still coming up.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if daemon_status(sock) == DaemonAvailability::Alive {
             return Ok(());
@@ -821,13 +816,8 @@ mod tests {
                 .expect("write route response");
         });
 
-        let error = resolve_route(
-            &fixture.socket(),
-            "session-requested",
-            "thread-requested",
-            env!("CARGO_MANIFEST_DIR"),
-        )
-        .unwrap_err();
+        let error =
+            resolve_route(&fixture.socket(), "session-requested", "thread-requested").unwrap_err();
         assert!(
             error.to_string().contains("ROUTE_RESOLVE_INVALID"),
             "{error}"
@@ -853,13 +843,7 @@ mod tests {
                 .expect("write partial route response");
         });
 
-        let error = resolve_route(
-            &fixture.socket(),
-            "session-1",
-            "thread-1",
-            env!("CARGO_MANIFEST_DIR"),
-        )
-        .unwrap_err();
+        let error = resolve_route(&fixture.socket(), "session-1", "thread-1").unwrap_err();
         assert!(
             error.to_string().contains("unexpected response shape"),
             "{error}"
@@ -894,6 +878,39 @@ mod tests {
         .expect("explicit launcher should satisfy ensure_server");
 
         assert!(listener.lock().expect("listener fixture lock").is_some());
+    }
+
+    #[test]
+    fn ensure_server_waits_for_readiness_past_the_previous_deadline() {
+        let fixture = TempServerDir::new("delayed-readiness");
+        let delayed_socket = fixture.socket();
+
+        // A cold restart on this host needs several seconds before the socket
+        // accepts a typed Ping. Readiness that lands after the historical 4s
+        // window must still satisfy `collab up` instead of reporting
+        // DAEMON_STARTING while the daemon is actually coming up.
+        let delayed = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(5));
+            let bound = UnixListener::bind(&delayed_socket).expect("bind delayed socket");
+            let responder = bound.try_clone().expect("clone delayed listener");
+            thread::spawn(move || {
+                let (mut stream, _) = responder.accept().expect("accept readiness probe");
+                let mut request = String::new();
+                std::io::BufReader::new(&mut stream)
+                    .read_line(&mut request)
+                    .expect("read readiness request");
+                stream
+                    .write_all(
+                        b"{\"ok\":true,\"workers\":0,\"messages\":0,\"tasks\":0,\"now\":\"now\"}\n",
+                    )
+                    .expect("write readiness response");
+            });
+            bound
+        });
+
+        ensure_server_with_launcher(&fixture.socket(), move |_sock| Ok(()))
+            .expect("readiness after the previous deadline should still succeed");
+        delayed.join().expect("delayed readiness fixture");
     }
 
     #[test]

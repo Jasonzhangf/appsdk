@@ -191,24 +191,31 @@ pub(crate) fn is_linked_worktree_root(root: &Path) -> anyhow::Result<bool> {
 
 /// Resolve the route bound to one registered peer identity at the exact cwd.
 ///
-/// Identity is bound to the canonical project root as well as the App Server
-/// scope. A worktree is an execution directory, not an identity context, so it
-/// must not inherit or select the main route.
+/// The identity's App Server scope is authoritative. The caller's cwd may be
+/// a Git worktree, so it must be inside the route's canonical root but is not
+/// allowed to select a different project by itself.
 pub fn canonical_route_for_identity(
     host_paths: &HostPaths,
     cwd: &Path,
     app_scope_id: &AppServerId,
 ) -> anyhow::Result<CanonicalProjectRoute> {
     let cwd = std::fs::canonicalize(cwd)?;
-    let mut matches = load_route_records(host_paths)?
+    let matches = load_route_records(host_paths)?
         .into_iter()
-        .filter(|route| &route.app_scope_id == app_scope_id && cwd == route.root)
+        .filter(|route| {
+            &route.app_scope_id == app_scope_id && cwd.strip_prefix(&route.root).is_ok()
+        })
         .collect::<Vec<_>>();
+    let (mut matches, git_roots) = narrow_routes_for_git_worktree(&cwd, matches)?;
     match matches.len() {
         1 => Ok(matches.pop().unwrap()),
         0 => anyhow::bail!(
-            "no registered Collab route matches app scope {} at exact canonical cwd {}",
+            "no registered Collab route matches app scope {} for the Git main worktree {} containing cwd {}",
             app_scope_id,
+            git_roots
+                .as_ref()
+                .map(|roots| roots.main_root.display().to_string())
+                .unwrap_or_else(|| "not detected".into()),
             cwd.display()
         ),
         _ => {
@@ -217,7 +224,7 @@ pub fn canonical_route_for_identity(
                 .map(|route| route.root.display().to_string())
                 .collect::<Vec<_>>();
             anyhow::bail!(
-                "multiple canonical Collab routes match app scope {} at cwd {}: {}",
+                "multiple canonical Collab routes match app scope {} and contain cwd {}: {}",
                 app_scope_id,
                 cwd.display(),
                 roots.join(", ")
@@ -234,14 +241,9 @@ pub fn route_for_native_thread(
     host_paths: &HostPaths,
     session_id: &str,
     native_thread_id: &str,
-    identity_cwd: &str,
 ) -> anyhow::Result<CanonicalProjectRoute> {
-    let response = crate::client::resolve_route(
-        &host_paths.socket_path(),
-        session_id,
-        native_thread_id,
-        identity_cwd,
-    )?;
+    let response =
+        crate::client::resolve_route(&host_paths.socket_path(), session_id, native_thread_id)?;
     let root = PathBuf::from(&response.canonical_root);
     Ok(CanonicalProjectRoute {
         root,
@@ -249,20 +251,25 @@ pub fn route_for_native_thread(
     })
 }
 
-/// Resolve the canonical registered project route for an exact-root recovery
-/// command. This lookup never maps a worktree to its Git main root.
+/// Resolve the canonical registered project route for a read-only command.
+///
+/// This lookup is deliberately identity-free so `master status` can answer
+/// from a linked worktree or a freshly reset project before the caller has a
+/// local route. It still requires an exact registered route and never guesses
+/// a project from an ancestor directory.
 pub fn canonical_route_for_cwd(
     host_paths: &HostPaths,
     cwd: &Path,
 ) -> anyhow::Result<CanonicalProjectRoute> {
     let cwd = std::fs::canonicalize(cwd)?;
-    let mut matches = load_route_records(host_paths)?
+    let matches = load_route_records(host_paths)?
         .into_iter()
-        .filter(|route| cwd == route.root)
+        .filter(|route| cwd.strip_prefix(&route.root).is_ok())
         .collect::<Vec<_>>();
+    let (mut matches, _) = narrow_routes_for_git_worktree(&cwd, matches)?;
     match matches.len() {
         1 => Ok(matches.pop().unwrap()),
-        0 => anyhow::bail!("no registered Collab route at exact cwd {}", cwd.display()),
+        0 => anyhow::bail!("no registered Collab route contains cwd {}", cwd.display()),
         _ => {
             let roots = matches
                 .iter()
@@ -275,6 +282,105 @@ pub fn canonical_route_for_cwd(
             )
         }
     }
+}
+
+fn narrow_routes_for_git_worktree(
+    cwd: &Path,
+    mut matches: Vec<CanonicalProjectRoute>,
+) -> anyhow::Result<(Vec<CanonicalProjectRoute>, Option<GitWorktreeRoots>)> {
+    let git_roots = git_worktree_roots_if_any(cwd)?;
+    if let Some(git_roots) = &git_roots {
+        let nested_matches = matches
+            .iter()
+            .filter(|route| {
+                route.root != git_roots.main_root
+                    && route.root != git_roots.worktree_root
+                    && route.root.starts_with(&git_roots.worktree_root)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !nested_matches.is_empty() {
+            return Ok((nested_matches, Some(git_roots.clone())));
+        }
+        if matches
+            .iter()
+            .any(|route| route.root == git_roots.main_root)
+        {
+            matches.retain(|route| route.root == git_roots.main_root);
+        } else if matches
+            .iter()
+            .any(|route| route.root == git_roots.worktree_root)
+            && git_roots.worktree_root != git_roots.main_root
+        {
+            // A linked worktree may not register its own route. When the
+            // route is rooted at the worktree itself, fail closed instead of
+            // treating it as a second project.
+            matches.retain(|route| route.root != git_roots.worktree_root);
+        }
+    }
+    Ok((matches, git_roots))
+}
+
+#[derive(Clone)]
+struct GitWorktreeRoots {
+    main_root: PathBuf,
+    worktree_root: PathBuf,
+}
+
+fn git_worktree_roots_if_any(cwd: &Path) -> anyhow::Result<Option<GitWorktreeRoots>> {
+    let worktree_output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()?;
+    if !worktree_output.status.success() {
+        let stderr = String::from_utf8_lossy(&worktree_output.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "cannot resolve Git worktree root from {}: {}",
+            cwd.display(),
+            stderr.trim()
+        );
+    }
+    let worktree_root = PathBuf::from(String::from_utf8_lossy(&worktree_output.stdout).trim());
+    if !worktree_root.is_absolute() {
+        anyhow::bail!(
+            "Git worktree root is not absolute for {}: {}",
+            cwd.display(),
+            worktree_root.display()
+        );
+    }
+    let worktree_root = std::fs::canonicalize(worktree_root)?;
+
+    let worktrees_output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(cwd)
+        .output()?;
+    if !worktrees_output.status.success() {
+        anyhow::bail!(
+            "cannot list Git worktrees from {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&worktrees_output.stderr).trim()
+        );
+    }
+
+    let main_root = std::fs::canonicalize(
+        String::from_utf8_lossy(&worktrees_output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree "))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Git worktree list has no worktree entry for {}",
+                    cwd.display()
+                )
+            })?,
+    )?;
+
+    Ok(Some(GitWorktreeRoots {
+        main_root,
+        worktree_root,
+    }))
 }
 
 fn apply_endpoint_overrides(
@@ -889,23 +995,23 @@ impl Scope {
         host_paths: &HostPaths,
         worker_id: Option<String>,
     ) -> anyhow::Result<Self> {
-        let session_id = std::env::var("CODEX_SESSION_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
         if let Some(thread_id) = std::env::var_os("CODEX_THREAD_ID")
             .and_then(|value| value.into_string().ok())
             .filter(|value| !value.trim().is_empty())
         {
-            let session_id = session_id.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects an App Server route"
-                )
-            })?;
-            let canonical_cwd = cwd.canonicalize()?;
-            let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
-                anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
-            })?;
-            let route = route_for_native_thread(host_paths, &session_id, &thread_id, identity_cwd)?;
+            // cwd is execution context only; the daemon selects the route from
+            // the App Server dual key. The host session is required for a
+            // thread-backed route; a legacy thread-only binding is recovered
+            // by the daemon through the unique thread, still under this session.
+            let session_id = std::env::var("CODEX_SESSION_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects an App Server route; recovery: read the host session from the live App Server environment and re-run with both keys; if the peer's durable record predates the dual key, the daemon still resolves it by the unique thread once this session is present; do not infer a session from the thread or edit route state by hand"
+                    )
+                })?;
+            let route = route_for_native_thread(host_paths, &session_id, &thread_id)?;
             return Ok(Scope { root: route.root });
         }
         Self::resolve_from_cwd_without_thread(cwd, host_paths, worker_id)
@@ -1058,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_route_resolves_only_for_its_app_scope_at_the_exact_cwd() {
+    fn identity_route_resolves_only_for_its_app_scope_and_contains_cwd() {
         let root = test_root("worktree-route");
         let canonical = root.join("project");
         let worktree = canonical.join("playground/task-a");
@@ -1084,10 +1190,9 @@ mod tests {
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let app_scope = AppServerId::new("appserver-cli").unwrap();
-        let resolved = canonical_route_for_identity(&host_paths, &canonical, &app_scope).unwrap();
+        let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
         assert_eq!(resolved.root, canonical.canonicalize().unwrap());
         assert_eq!(resolved.app_scope_id.as_str(), "appserver-cli");
-        assert!(canonical_route_for_identity(&host_paths, &worktree, &app_scope).is_err());
         assert!(canonical_route_for_identity(
             &host_paths,
             &unrelated,
@@ -1111,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_resolve_rejects_identity_route_from_a_worktree() {
+    fn scope_resolve_reuses_identity_route_from_a_worktree() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         std::env::remove_var("CODEX_THREAD_ID");
@@ -1201,15 +1306,14 @@ mod tests {
         .unwrap();
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-        let error = match Scope::resolve_from_cwd_with_host_paths(
+        let resolved = Scope::resolve_from_cwd_with_host_paths(
             &worktree,
             &host_paths,
             Some("worker-a".into()),
-        ) {
-            Ok(_) => panic!("worktree cwd must not inherit the canonical main identity"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("exact canonical cwd"), "{error}");
+        )
+        .unwrap();
+
+        assert_eq!(resolved.root, canonical);
         match previous_thread {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
             None => std::env::remove_var("CODEX_THREAD_ID"),
@@ -1238,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_scope_rejects_a_worktree_without_a_native_thread_route() {
+    fn recovery_scope_uses_canonical_route_without_a_native_thread_route() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
         let previous_cwd = std::env::current_dir().unwrap();
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
@@ -1302,11 +1406,9 @@ mod tests {
         std::env::set_current_dir(&worktree).unwrap();
         std::env::set_var("CODEX_THREAD_ID", "missing-native-route");
 
-        let error = match resolve_for_recovery() {
-            Ok(_) => panic!("worktree cwd must not resolve the canonical main route"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("exact cwd"), "{error}");
+        let resolved = resolve_for_recovery().unwrap();
+
+        assert_eq!(resolved.root, canonical);
         std::env::set_current_dir(previous_cwd).unwrap();
         match previous_thread {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
@@ -1372,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_resolve_preserves_an_exact_nested_project_inside_a_linked_worktree() {
+    fn scope_resolve_preserves_a_nested_project_inside_a_linked_worktree() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         std::env::remove_var("CODEX_THREAD_ID");
@@ -1494,9 +1596,8 @@ mod tests {
         std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-        let error = canonical_route_for_cwd(&host_paths, &worktree).unwrap_err();
-        assert!(error.to_string().contains("exact cwd"), "{error}");
-        let resolved = canonical_route_for_cwd(&host_paths, &canonical).unwrap();
+        let resolved = canonical_route_for_cwd(&host_paths, &worktree).unwrap();
+
         assert_eq!(resolved.root, canonical);
         assert_eq!(resolved.app_scope_id.as_str(), "appserver-vscode");
         std::fs::remove_dir_all(root).ok();
@@ -1643,12 +1744,15 @@ mod tests {
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let error = canonical_route_for_cwd(&host_paths, &worktree).unwrap_err();
-        assert!(error.to_string().contains("exact cwd"), "{error}");
+        assert!(
+            error.to_string().contains("no registered Collab route"),
+            "unexpected error: {error}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn identity_route_rejects_a_worktree_even_when_the_main_route_exists() {
+    fn identity_route_prefers_git_main_root_when_worktree_route_is_stale() {
         let root = test_root("worktree-route-disambiguation");
         let canonical = root.join("project");
         let worktree = canonical.join("playground/task-a");
@@ -1713,9 +1817,8 @@ mod tests {
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let app_scope = AppServerId::new("appserver-cli").unwrap();
-        let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
-        assert!(error.to_string().contains("exact canonical cwd"), "{error}");
-        let resolved = canonical_route_for_identity(&host_paths, &canonical, &app_scope).unwrap();
+        let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
+
         assert_eq!(resolved.root, canonical);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1787,12 +1890,15 @@ mod tests {
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let app_scope = AppServerId::new("appserver-cli").unwrap();
         let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
-        assert!(error.to_string().contains("exact canonical cwd"), "{error}");
+        assert!(
+            error.to_string().contains("Git main worktree"),
+            "unexpected error: {error}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn identity_route_rejects_the_worktree_route_when_both_exist() {
+    fn identity_route_selects_canonical_main_when_worktree_route_also_exists() {
         let root = test_root("worktree-route-both");
         let canonical = root.join("project");
         let worktree = canonical.join("playground/task-a");
@@ -1867,9 +1973,8 @@ mod tests {
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let app_scope = AppServerId::new("appserver-cli").unwrap();
-        let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
-        assert!(error.to_string().contains("exact canonical cwd"), "{error}");
-        let resolved = canonical_route_for_identity(&host_paths, &canonical, &app_scope).unwrap();
+        let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
+
         assert_eq!(resolved.root, canonical);
         std::fs::remove_dir_all(root).ok();
     }
@@ -1938,9 +2043,8 @@ mod tests {
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let app_scope = AppServerId::new("appserver-cli").unwrap();
-        let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
-        assert!(error.to_string().contains("exact canonical cwd"), "{error}");
-        let resolved = canonical_route_for_identity(&host_paths, &project, &app_scope).unwrap();
+        let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
+
         assert_eq!(resolved.root, project);
         std::fs::remove_dir_all(root).ok();
     }
@@ -2394,9 +2498,8 @@ mod tests {
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let app_scope = AppServerId::new("appserver-cli").unwrap();
-        let error = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap_err();
-        assert!(error.to_string().contains("exact canonical cwd"), "{error}");
-        let resolved = canonical_route_for_identity(&host_paths, &canonical, &app_scope).unwrap();
+        let resolved = canonical_route_for_identity(&host_paths, &worktree, &app_scope).unwrap();
+
         assert_eq!(resolved.root, canonical);
 
         std::fs::remove_dir_all(root).ok();

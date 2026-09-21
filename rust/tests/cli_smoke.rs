@@ -10073,6 +10073,79 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
 }
 
 #[test]
+fn init_refreshes_stale_project_record_contracts() {
+    let root = temp_root("init-record-contract-refresh");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let live_closure = root.join("contracts/records/collab-live-closure-record.schema.json");
+    let project_owned_plan = root.join("contracts/records/plan-record.schema.json");
+    let project_owned_plan_content = b"{\n  \"project_owned\": true\n}\n";
+    fs::remove_file(&live_closure).unwrap();
+    fs::write(&project_owned_plan, project_owned_plan_content).unwrap();
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    let mut legacy = serde_json::Value::Array(Vec::new());
+    for entry in project["governance"]["record_contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+    {
+        let entry_str = entry.as_str().unwrap();
+        if entry_str != "contracts/records/collab-live-closure-record.schema.json" {
+            legacy.as_array_mut().unwrap().push(entry.clone());
+        }
+    }
+    project["governance"]["record_contracts"] = legacy;
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let init = run(&["init", root_text]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    assert_eq!(
+        after["governance"]["record_contracts"],
+        serde_json::json!([
+            "contracts/records/worktree-record.schema.json",
+            "contracts/records/reproduction-record.schema.json",
+            "contracts/records/evidence-record.schema.json",
+            "contracts/records/fix-candidate-record.schema.json",
+            "contracts/records/goal-clarification-record.schema.json",
+            "contracts/records/review-record.schema.json",
+            "contracts/records/effectiveness-record.schema.json",
+            "contracts/records/pre-review-validation-record.schema.json",
+            "contracts/records/collaboration-record.schema.json",
+            "contracts/records/collaboration-index.schema.json",
+            "contracts/records/merge-queue-record.schema.json",
+            "contracts/records/merge-queue-state.schema.json",
+            "contracts/records/integration-record.schema.json",
+            "contracts/records/mainline-receipt-record.schema.json",
+            "contracts/records/collab-live-closure-record.schema.json",
+            "contracts/records/merge-record.schema.json",
+            "contracts/records/promotion-record.schema.json",
+            "contracts/records/regression-report.schema.json",
+            "contracts/records/freeze-record.schema.json",
+            "contracts/records/record-graph.contract.json"
+        ])
+    );
+    assert!(live_closure.is_file());
+    assert_eq!(
+        fs::read(&project_owned_plan).unwrap(),
+        project_owned_plan_content
+    );
+    assert!(run(&["verify", root_text]).status.success());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_migrates_stale_project_record_contracts() {
     let root = temp_root("record-contract-migration");
     let root_text = root.to_str().unwrap();

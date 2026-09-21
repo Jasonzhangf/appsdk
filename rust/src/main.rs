@@ -42,6 +42,28 @@ const GOVERNANCE_MAP_NAMES: [&str; 4] = [
     "mainline-call-map.json",
     "verification-map.json",
 ];
+const CANONICAL_RECORD_CONTRACTS: [&str; 20] = [
+    "contracts/records/worktree-record.schema.json",
+    "contracts/records/reproduction-record.schema.json",
+    "contracts/records/evidence-record.schema.json",
+    "contracts/records/fix-candidate-record.schema.json",
+    "contracts/records/goal-clarification-record.schema.json",
+    "contracts/records/review-record.schema.json",
+    "contracts/records/effectiveness-record.schema.json",
+    "contracts/records/pre-review-validation-record.schema.json",
+    "contracts/records/collaboration-record.schema.json",
+    "contracts/records/collaboration-index.schema.json",
+    "contracts/records/merge-queue-record.schema.json",
+    "contracts/records/merge-queue-state.schema.json",
+    "contracts/records/integration-record.schema.json",
+    "contracts/records/mainline-receipt-record.schema.json",
+    "contracts/records/collab-live-closure-record.schema.json",
+    "contracts/records/merge-record.schema.json",
+    "contracts/records/promotion-record.schema.json",
+    "contracts/records/regression-report.schema.json",
+    "contracts/records/freeze-record.schema.json",
+    "contracts/records/record-graph.contract.json",
+];
 const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "contracts/sdk-bundle.manifest.json",
@@ -13955,9 +13977,26 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
     }
     // `init` is also the supported idempotent SDK refresh entrypoint.  The
     // Bundle owns `.appsdk/contracts`, `.appsdk/docs`, `.appsdk/skills`, and
-    // the resource manifest; project contract, maps, records, Active, and
-    // Protected state remain project-owned and are not overwritten here.
+    // the resource manifest. Project-owned maps, records, Active, and
+    // Protected state remain untouched; SDK-owned record contract files and
+    // declarations are refreshed here.
     install_bundle_resources(root);
+    if !fresh_governance {
+        let mut project = read_project(root);
+        let records_changed = install_canonical_record_contracts(root);
+        let canonical_records = Value::Array(
+            CANONICAL_RECORD_CONTRACTS
+                .iter()
+                .map(|path| Value::String((*path).into()))
+                .collect(),
+        );
+        if records_changed
+            || project.pointer("/governance/record_contracts") != Some(&canonical_records)
+        {
+            project["governance"]["record_contracts"] = canonical_records;
+            write_project(root, &project);
+        }
+    }
     write_current_sdk_lock(root);
     install_standard_template_reference(root);
     try_register_global_project(root);
@@ -15080,7 +15119,7 @@ fn install_current_project_contract(
     relative: &str,
     canonical: &str,
     replace_legacy: bool,
-) {
+) -> bool {
     let target = root.join(relative);
     assert_no_symlink_components(root, &target, "governance_contract_migration");
     let canonical: Value = serde_json::from_str(canonical)
@@ -15093,31 +15132,51 @@ fn install_current_project_contract(
             )
             .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_READ_FAILED"));
             if current == canonical {
-                return;
+                return false;
             }
         }
     }
     let mut content = serde_json::to_vec_pretty(&canonical)
         .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
     content.push(b'\n');
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|_| fail("SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED"));
+        assert_no_symlink_components(root, parent, "governance_contract_migration");
+    }
     atomic_write_bytes(
         &target,
         &content,
         "SDK_RECORD_CONTRACT_MIGRATION_WRITE_FAILED",
     );
+    true
 }
 
-fn install_current_project_contracts(root: &Path, prefixes: &[&str], replace_legacy: bool) {
+fn install_current_project_contracts(root: &Path, prefixes: &[&str], replace_legacy: bool) -> bool {
+    let mut changed = false;
     for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
         .iter()
         .filter(|(path, _, _)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
     {
-        install_current_project_contract(root, relative, canonical, replace_legacy);
+        changed |= install_current_project_contract(root, relative, canonical, replace_legacy);
     }
+    changed
 }
 
-fn install_current_record_contracts(root: &Path) {
-    install_current_project_contracts(root, &["contracts/records/"], false);
+fn install_current_record_contracts(root: &Path) -> bool {
+    install_current_project_contracts(root, &["contracts/records/"], false)
+}
+
+fn install_canonical_record_contracts(root: &Path) -> bool {
+    let mut changed = false;
+    for relative in CANONICAL_RECORD_CONTRACTS {
+        let canonical = SDK_BUNDLE_RESOURCES
+            .iter()
+            .find_map(|(path, _, content)| (*path == relative).then_some(*content))
+            .unwrap_or_else(|| fail("INVALID_SDK_BUNDLE_RESOURCE_SET"));
+        changed |= install_current_project_contract(root, relative, canonical, false);
+    }
+    changed
 }
 
 fn assert_fresh_project_contract_target(root: &Path, relative: &str) {

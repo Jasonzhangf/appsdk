@@ -1853,6 +1853,28 @@ impl ProjectRuntimeManager {
                     || storage_roots_equal(&storage_root, &host.storage_root)
                         .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?);
             if resident_self_route {
+                let registration = ProjectRegistration::new(
+                    ProjectScopeId::new(key.1.clone())
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                    AppServerId::new(key.0.clone())
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                )
+                .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+                if host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_registration(&registration.project_scope, &registration.app_scope_id)
+                    .is_none()
+                {
+                    host.commit_checked(&[Event::GlobalProjectRegistered { registration }])
+                        .map_err(|error| {
+                            format!(
+                                "HOST_ROUTE_REPLAY_FAILED: restore resident project registration: {error}"
+                            )
+                        })?;
+                }
                 routes.insert(
                     key,
                     RuntimeRoute {
@@ -13789,6 +13811,19 @@ mod host_route_registry_tests {
         assert_eq!(
             std::fs::read_to_string(&route_journal).unwrap(),
             format!("{}\n", serde_json::to_string(&record).unwrap())
+        );
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_registration(
+                    &GlobalState::canonical_project_scope(&root).unwrap(),
+                    &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()
+                )
+                .map(|registration| registration.project_scope.as_str().to_owned()),
+            Some(canonical_root.to_string_lossy().into_owned())
         );
 
         std::fs::remove_dir_all(root).unwrap();

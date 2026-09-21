@@ -424,6 +424,46 @@ fn validate_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     Ok(canonical_candidate)
 }
 
+fn cleanup_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    if raw.trim().is_empty() {
+        return Err("worktree path must be non-empty".into());
+    }
+    let path = Path::new(raw);
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("worktree path may not contain '..'".into());
+    }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let relative = raw.strip_prefix("./").unwrap_or(raw);
+        root.join(relative)
+    };
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("project root cannot be canonicalized: {error}"))?;
+    let canonical_playground = canonical_root.join("playground");
+    let mut existing = candidate.as_path();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| "worktree path has no existing parent".to_string())?;
+    }
+    let canonical_existing = existing
+        .canonicalize()
+        .map_err(|error| format!("worktree path cannot be canonicalized: {error}"))?;
+    let suffix = candidate
+        .strip_prefix(existing)
+        .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
+    let canonical_candidate = canonical_existing.join(suffix);
+    if !canonical_candidate.starts_with(&canonical_playground) {
+        return Err("worktree path must be inside ./playground".into());
+    }
+    Ok(canonical_candidate)
+}
+
 fn task_claim_held(status: &str) -> bool {
     matches!(
         status,
@@ -8343,71 +8383,80 @@ fn close_task_resources(
     branch: Option<&str>,
 ) -> Result<(), String> {
     if let Some(branch) = branch {
-        let merged = Command::new("git")
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_exists = Command::new("git")
             .current_dir(root)
-            .args(["merge-base", "--is-ancestor", branch, "HEAD"])
+            .args(["rev-parse", "--verify", &branch_ref])
             .output()
             .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
-        if !merged.status.success() {
-            return Err(format!(
-                "branch {branch} is not merged into HEAD; refusing delete"
-            ));
+        if branch_exists.status.success() {
+            let main_ref = "refs/heads/main";
+            let merged = Command::new("git")
+                .current_dir(root)
+                .args(["merge-base", "--is-ancestor", &branch_ref, main_ref])
+                .output()
+                .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
+            if !merged.status.success() {
+                return Err(format!(
+                    "branch {branch} is not merged into {main_ref}; refusing delete"
+                ));
+            }
         }
     }
     if let Some(relative) = worktree_path {
-        let worktree = root.join(relative);
-        let allowed_root = root
-            .canonicalize()
-            .unwrap_or_else(|_| root.to_path_buf())
-            .join("playground");
-        let canonical_worktree = worktree
-            .canonicalize()
-            .map_err(|e| format!("declared worktree {} is missing: {e}", relative))?;
-        if !canonical_worktree.starts_with(allowed_root) {
-            return Err(format!("refusing cleanup outside playground: {}", relative));
-        }
-        let dirty = Command::new("git")
-            .arg("-C")
-            .arg(&worktree)
-            .args(["status", "--porcelain"])
-            .output()
-            .map_err(|e| format!("cannot inspect worktree {}: {e}", relative))?;
-        if !dirty.status.success() {
-            return Err(format!(
-                "cannot verify clean worktree {}: {}",
-                relative,
-                String::from_utf8_lossy(&dirty.stderr).trim()
-            ));
-        }
-        if !dirty.stdout.is_empty() {
-            return Err(format!("worktree {} has uncommitted changes", relative));
-        }
+        let worktree = cleanup_worktree_path(root, relative)?;
+        if worktree.exists() {
+            let dirty = Command::new("git")
+                .arg("-C")
+                .arg(&worktree)
+                .args(["status", "--porcelain"])
+                .output()
+                .map_err(|e| format!("cannot inspect worktree {}: {e}", relative))?;
+            if !dirty.status.success() {
+                return Err(format!(
+                    "cannot verify clean worktree {}: {}",
+                    relative,
+                    String::from_utf8_lossy(&dirty.stderr).trim()
+                ));
+            }
+            if !dirty.stdout.is_empty() {
+                return Err(format!("worktree {} has uncommitted changes", relative));
+            }
 
-        let removed = Command::new("git")
-            .current_dir(root)
-            .args(["worktree", "remove", &worktree.display().to_string()])
-            .output()
-            .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
-        if !removed.status.success() {
-            return Err(format!(
-                "worktree cleanup failed for {}: {}",
-                relative,
-                String::from_utf8_lossy(&removed.stderr).trim()
-            ));
+            let removed = Command::new("git")
+                .current_dir(root)
+                .args(["worktree", "remove", &worktree.display().to_string()])
+                .output()
+                .map_err(|e| format!("cannot remove worktree {}: {e}", relative))?;
+            if !removed.status.success() {
+                return Err(format!(
+                    "worktree cleanup failed for {}: {}",
+                    relative,
+                    String::from_utf8_lossy(&removed.stderr).trim()
+                ));
+            }
         }
     }
 
     if let Some(branch) = branch {
-        let deleted = Command::new("git")
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_exists = Command::new("git")
             .current_dir(root)
-            .args(["branch", "-d", branch])
+            .args(["rev-parse", "--verify", &branch_ref])
             .output()
-            .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
-        if !deleted.status.success() {
-            return Err(format!(
-                "branch cleanup failed for {branch}: {}",
-                String::from_utf8_lossy(&deleted.stderr).trim()
-            ));
+            .map_err(|e| format!("cannot verify branch {branch}: {e}"))?;
+        if branch_exists.status.success() {
+            let deleted = Command::new("git")
+                .current_dir(root)
+                .args(["branch", "-D", branch])
+                .output()
+                .map_err(|e| format!("cannot delete branch {branch}: {e}"))?;
+            if !deleted.status.success() {
+                return Err(format!(
+                    "branch cleanup failed for {branch}: {}",
+                    String::from_utf8_lossy(&deleted.stderr).trim()
+                ));
+            }
         }
     }
     Ok(())

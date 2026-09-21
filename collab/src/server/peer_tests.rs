@@ -699,10 +699,14 @@ fn initialize_main(root: &Path) {
 }
 
 fn current_head(root: &Path) -> String {
+    rev_parse(root, "HEAD")
+}
+
+fn rev_parse(root: &Path, rev: &str) -> String {
     String::from_utf8(
         Command::new("git")
             .current_dir(root)
-            .args(["rev-parse", "HEAD"])
+            .args(["rev-parse", rev])
             .output()
             .unwrap()
             .stdout,
@@ -710,6 +714,20 @@ fn current_head(root: &Path) -> String {
     .unwrap()
     .trim()
     .to_owned()
+}
+
+fn git_ok(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -4261,6 +4279,238 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
     assert!(
         state.msgs.is_empty(),
         "normal lifecycle must not report to peers"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
+    let (server, root) = test_server();
+    register(&server, "peer", "%peer");
+    initialize_main(&root);
+    let base = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "-b", "codex/cleanup-live"]);
+    std::fs::write(root.join("cleanup-live.txt"), "merged task\n").unwrap();
+    git_ok(&root, &["add", "cleanup-live.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "cleanup task"]);
+    git_ok(&root, &["checkout", "-q", "main"]);
+    git_ok(&root, &["merge", "--ff-only", "codex/cleanup-live"]);
+    let main_commit = rev_parse(&root, "refs/heads/main");
+    git_ok(&root, &["checkout", "-q", "-b", "root-snapshot", &base]);
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let worktree = root.join("playground/cleanup-live");
+    let worktree_string = worktree.display().to_string();
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &worktree_string,
+            "codex/cleanup-live",
+        ],
+    );
+
+    let registered = handle_task_register(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "cleanup-live".into(),
+        None,
+        Some("feature".into()),
+        Some("playground/cleanup-live".into()),
+        Some("codex/cleanup-live".into()),
+        Some(base),
+        default_priority(),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    let registered_worktree = server.state.lock().unwrap().tasks["cleanup-live"]
+        .worktree_path
+        .clone()
+        .unwrap();
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "peer".into(),
+                "token-peer".into(),
+                "cleanup-live".into(),
+                Some(status.into()),
+                Some(format!("continue {status}")),
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "cleanup-live".into(),
+            Some("candidate verified".into()),
+            Some(registered_worktree),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_review(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "cleanup-live".into(),
+            true,
+            false,
+            "review pass".into(),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_integrated(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "cleanup-live".into(),
+            main_commit,
+            "main verified".into(),
+        )
+        .ok
+    );
+
+    let closed = handle_task_close(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "cleanup-live".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert!(!worktree.exists());
+    let branch_after_close = Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/codex/cleanup-live"])
+        .output()
+        .unwrap();
+    assert!(!branch_after_close.status.success());
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["cleanup-live"].status, "closed");
+    assert_eq!(
+        state.cleanup_receipts["cleanup-live"].verification,
+        crate::server::state::CleanupVerification::Verified
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
+    let (server, root) = test_server();
+    register(&server, "peer", "%peer");
+    initialize_main(&root);
+    let base = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "-b", "codex/already-clean"]);
+    std::fs::write(root.join("already-clean.txt"), "merged task\n").unwrap();
+    git_ok(&root, &["add", "already-clean.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "already clean task"]);
+    git_ok(&root, &["checkout", "-q", "main"]);
+    git_ok(&root, &["merge", "--ff-only", "codex/already-clean"]);
+    let main_commit = rev_parse(&root, "refs/heads/main");
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let worktree = root.join("playground/already-clean");
+    let worktree_string = worktree.display().to_string();
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &worktree_string,
+            "codex/already-clean",
+        ],
+    );
+
+    let registered = handle_task_register(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "already-clean".into(),
+        None,
+        Some("feature".into()),
+        Some("playground/already-clean".into()),
+        Some("codex/already-clean".into()),
+        Some(base),
+        default_priority(),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    let registered_worktree = server.state.lock().unwrap().tasks["already-clean"]
+        .worktree_path
+        .clone()
+        .unwrap();
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "peer".into(),
+                "token-peer".into(),
+                "already-clean".into(),
+                Some(status.into()),
+                Some(format!("continue {status}")),
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "already-clean".into(),
+            Some("candidate verified".into()),
+            Some(registered_worktree),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_review(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "already-clean".into(),
+            true,
+            false,
+            "review pass".into(),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_integrated(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "already-clean".into(),
+            main_commit,
+            "main verified".into(),
+        )
+        .ok
+    );
+    git_ok(&root, &["worktree", "remove", &worktree_string]);
+    git_ok(&root, &["branch", "-D", "codex/already-clean"]);
+
+    let closed = handle_task_close(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "already-clean".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["already-clean"].status, "closed");
+    assert_eq!(
+        state.cleanup_receipts["already-clean"].verification,
+        crate::server::state::CleanupVerification::Verified
     );
     drop(state);
     std::fs::remove_dir_all(root).ok();

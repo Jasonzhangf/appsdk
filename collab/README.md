@@ -1,5 +1,11 @@
 # collab
 
+This directory is the canonical Collab source and build owner inside the
+AppSDK repository. Collab is compiled as the separate `collab` and
+`collab-mcp` binaries, but it is not maintained or released from a separate
+repository. Review, merge, push, install, and daemon restart all use the
+containing AppSDK `main`.
+
 Project-local coordination for independent coding agents. One Rust daemon owns
 the append-only journal, durable mailbox, task/resource state, and migration
 transaction. The server selects the App Server transport. Each subscribed

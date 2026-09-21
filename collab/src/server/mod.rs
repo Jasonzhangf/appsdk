@@ -11653,6 +11653,7 @@ mod host_route_registry_tests {
             Req::RouteResolve {
                 native_thread_id: "thread-wire-route".into(),
             },
+            tokio::sync::watch::channel(false).1,
         )
         .await;
         assert!(response.ok, "{response:?}");
@@ -12162,6 +12163,7 @@ mod host_route_registry_tests {
                 token: recipient_token.into(),
                 timeout_ms: 0,
             },
+            tokio::sync::watch::channel(false).1,
         )
         .await;
         assert!(polled.ok, "{polled:?}");
@@ -12444,6 +12446,7 @@ mod host_route_registry_tests {
                     token: token.into(),
                     timeout_ms: 0,
                 },
+                tokio::sync::watch::channel(false).1,
             )
             .await;
             assert!(polled.ok, "{suffix} poll: {polled:?}");
@@ -12735,6 +12738,7 @@ mod host_route_registry_tests {
                 token: token_b.into(),
                 timeout_ms: 0,
             },
+            tokio::sync::watch::channel(false).1,
         )
         .await;
         assert!(received.ok, "{received:?}");
@@ -12952,6 +12956,7 @@ mod host_route_registry_tests {
                 token: recipient_token.into(),
                 timeout_ms: 0,
             },
+            tokio::sync::watch::channel(false).1,
         )
         .await;
         assert!(polled.ok, "{polled:?}");
@@ -16226,6 +16231,7 @@ async fn dispatch_wire_routed(
     manager: Arc<ProjectRuntimeManager>,
     project_context: Option<ProjectContext>,
     req: Req,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<Server>, Resp) {
     match req {
         Req::RouteResolve { native_thread_id } => {
@@ -16278,14 +16284,18 @@ async fn dispatch_wire_routed(
             let response = match admission {
                 Some(response) => response,
                 None => {
-                    handle_poll_async_with_context(
+                    let poll = handle_poll_async_with_context(
                         server.clone(),
                         worker_id,
                         Some(token),
                         timeout_ms,
                         Some(context),
-                    )
-                    .await
+                    );
+                    tokio::pin!(poll);
+                    tokio::select! {
+                        response = poll.as_mut() => response,
+                        _ = shutdown.changed() => Resp::err("DAEMON_SHUTTING_DOWN"),
+                    }
                 }
             };
             (server, response)
@@ -16367,7 +16377,8 @@ async fn conn_task_routed(
             Ok((project_context, req)) => {
                 let activity_req = req.clone();
                 let (runtime, resp) =
-                    dispatch_wire_routed(manager.clone(), project_context, req).await;
+                    dispatch_wire_routed(manager.clone(), project_context, req, shutdown.clone())
+                        .await;
                 let _ = record_activity(
                     &runtime.storage_root,
                     "request",

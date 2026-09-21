@@ -16344,11 +16344,22 @@ async fn conn_task(server: Arc<Server>, stream: tokio::net::UnixStream) {
     }
 }
 
-async fn conn_task_routed(manager: Arc<ProjectRuntimeManager>, stream: tokio::net::UnixStream) {
+async fn conn_task_routed(
+    manager: Arc<ProjectRuntimeManager>,
+    stream: tokio::net::UnixStream,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = tokio::select! {
+            _ = shutdown.changed() => break,
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => line,
+                _ => break,
+            },
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -17009,7 +17020,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     let sched = runtime_manager.clone();
     let (scheduler_stop, scheduler_stop_rx) = tokio::sync::mpsc::channel::<()>(1);
     let scheduler_interval_ms = sched.host.config.timers.tick_interval_ms;
-    let mut scheduler = tokio::spawn(run_timer_scheduler(
+    let scheduler = tokio::spawn(run_timer_scheduler(
         scheduler_stop_rx,
         scheduler_interval_ms,
         move || sched.runtimes(),
@@ -17023,6 +17034,7 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     ));
 
     let mut connection_tasks = tokio::task::JoinSet::new();
+    let (connection_shutdown, connection_shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::select! {
         _ = interrupt.as_mut() => {}
         _ = terminate.as_mut() => {}
@@ -17032,7 +17044,11 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let manager = runtime_manager.clone();
-                        connection_tasks.spawn(conn_task_routed(manager, stream));
+                        connection_tasks.spawn(conn_task_routed(
+                            manager,
+                            stream,
+                            connection_shutdown_rx.clone(),
+                        ));
                     }
                     Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),
                 }
@@ -17041,14 +17057,8 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
     }
 
     let _ = scheduler_stop.try_send(());
-    if tokio::time::timeout(Duration::from_secs(5), &mut scheduler)
-        .await
-        .is_err()
-    {
-        scheduler.abort();
-        let _ = scheduler.await;
-    }
-    connection_tasks.abort_all();
+    let _ = scheduler.await;
+    connection_shutdown.send_replace(true);
     while connection_tasks.join_next().await.is_some() {}
 
     let _ = remove_listener_socket(&sock_path, &socket_metadata);

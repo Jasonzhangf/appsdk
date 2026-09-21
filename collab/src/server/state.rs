@@ -598,8 +598,20 @@ pub enum Event {
     GlobalRuntimeBound {
         binding: super::global_state::RuntimeBinding,
     },
+    GlobalRuntimeBindingRollback {
+        failed: super::global_state::RuntimeBinding,
+        previous: Option<super::global_state::RuntimeBinding>,
+        previous_grant: Option<super::global_state::MasterGrant>,
+        #[serde(default)]
+        previous_worker: Option<WorkerRec>,
+        #[serde(default)]
+        previous_subscriptions: Vec<NotificationSubscription>,
+    },
     GlobalCurrentThreadRouteSet {
         binding: super::global_state::RuntimeBinding,
+    },
+    GlobalCurrentThreadRouteTombstoneSet {
+        tombstone: super::global_state::RuntimeBindingTombstone,
     },
     GlobalMigrationCommitEvidence {
         evidence: super::global_state::MigrationCommitEvidence,
@@ -649,6 +661,21 @@ impl State {
     pub(crate) fn restore_unique_current_thread_routes_from_bindings(
         &mut self,
     ) -> Result<(), String> {
+        for binding in self
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+        {
+            if binding.native_thread_id.is_some() && binding.session_id.is_none() {
+                return Err(format!(
+                    "SESSION_THREAD_BINDING_MIGRATION_REQUIRED: legacy binding {} for agent {} has native thread {} but no session id; obtain the host session id, then explicitly rebind the same identity and runtime; do not edit the journal or infer the session id",
+                    binding.binding_id,
+                    binding.agent_id,
+                    binding.native_thread_id.as_ref().unwrap()
+                ));
+            }
+        }
         let mut bindings = self
             .global
             .projects
@@ -671,7 +698,8 @@ impl State {
         let mut recovered = self.global.clone();
         for binding in bindings {
             let thread = binding.native_thread_id.clone().unwrap();
-            if let Some(existing) = recovered.lookup_current_thread_route(&thread) {
+            let session = binding.session_id.clone().unwrap();
+            if let Some(existing) = recovered.lookup_current_thread_route(&session, &thread) {
                 if existing == &binding {
                     continue;
                 }
@@ -1056,9 +1084,46 @@ impl State {
                     binding: binding.clone(),
                 })?;
             }
+            Event::GlobalRuntimeBindingRollback {
+                failed,
+                previous,
+                previous_grant,
+                previous_worker,
+                previous_subscriptions,
+            } => {
+                let worker_id = failed.agent_id.as_str().to_owned();
+                let mut next = self.global.clone();
+                next.rollback_runtime_binding(
+                    failed.clone(),
+                    previous.clone(),
+                    previous_grant.clone(),
+                )
+                .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
+                if let Some(previous_worker) = previous_worker {
+                    self.workers
+                        .insert(worker_id.clone(), previous_worker.clone());
+                } else {
+                    self.workers.remove(&worker_id);
+                }
+                self.notification_subscriptions
+                    .retain(|_, subscription| subscription.worker_id != worker_id);
+                for subscription in previous_subscriptions {
+                    self.notification_subscriptions
+                        .insert(subscription.id.clone(), subscription.clone());
+                }
+            }
             Event::GlobalCurrentThreadRouteSet { binding } => {
                 let mut next = self.global.clone();
                 next.set_current_thread_route(binding.clone())
+                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
+            }
+            Event::GlobalCurrentThreadRouteTombstoneSet { tombstone } => {
+                let mut next = self.global.clone();
+                next.record_current_thread_route_tombstone(tombstone.clone())
                     .map_err(|error| format!("global reducer rejected event: {error}"))?;
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
@@ -1268,6 +1333,13 @@ impl State {
                 .values()
                 .cloned()
                 .map(|binding| Event::GlobalCurrentThreadRouteSet { binding }),
+        );
+        events.extend(
+            self.global
+                .current_thread_route_tombstones
+                .values()
+                .cloned()
+                .map(|tombstone| Event::GlobalCurrentThreadRouteTombstoneSet { tombstone }),
         );
         let mut migration_commit_evidence: Vec<_> = self
             .global
@@ -1658,13 +1730,14 @@ mod tests {
         let registration =
             ProjectRegistration::new(scope.clone(), AppServerId::new("appserver-cli").unwrap())
                 .unwrap();
-        let binding = RuntimeBinding::new(
+        let binding = RuntimeBinding::new_with_session(
             scope,
             AppServerId::new("appserver-cli").unwrap(),
             AgentId::new("agent-replay").unwrap(),
             RuntimeId::new("runtime-replay").unwrap(),
             BindingId::new("binding-replay").unwrap(),
             4,
+            Some(crate::identity::SessionId::new("session-replay").unwrap()),
             Some(NativeThreadId::new("thread-replay").unwrap()),
         )
         .unwrap();
@@ -1682,9 +1755,10 @@ mod tests {
         std::fs::write(&journal, format!("{body}\n")).unwrap();
         let replayed = crate::server::replay(&root).unwrap();
         assert_eq!(
-            replayed
-                .global
-                .lookup_current_thread_route(binding.native_thread_id.as_ref().unwrap()),
+            replayed.global.lookup_current_thread_route(
+                binding.session_id.as_ref().unwrap(),
+                binding.native_thread_id.as_ref().unwrap(),
+            ),
             Some(&binding)
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -1697,23 +1771,25 @@ mod tests {
         std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
         let first_scope = ProjectScopeId::new("/replay-project-a").unwrap();
         let second_scope = ProjectScopeId::new("/replay-project-b").unwrap();
-        let first = RuntimeBinding::new(
+        let first = RuntimeBinding::new_with_session(
             first_scope.clone(),
             AppServerId::new("appserver-cli").unwrap(),
             AgentId::new("agent-a").unwrap(),
             RuntimeId::new("runtime-a").unwrap(),
             BindingId::new("binding-a").unwrap(),
             1,
+            Some(crate::identity::SessionId::new("session-shared").unwrap()),
             Some(NativeThreadId::new("thread-shared").unwrap()),
         )
         .unwrap();
-        let second = RuntimeBinding::new(
+        let second = RuntimeBinding::new_with_session(
             second_scope.clone(),
             AppServerId::new("appserver-cli").unwrap(),
             AgentId::new("agent-b").unwrap(),
             RuntimeId::new("runtime-b").unwrap(),
             BindingId::new("binding-b").unwrap(),
             1,
+            Some(crate::identity::SessionId::new("session-shared").unwrap()),
             Some(NativeThreadId::new("thread-shared").unwrap()),
         )
         .unwrap();
@@ -1749,6 +1825,51 @@ mod tests {
             error.contains("ambiguous current thread route thread-shared"),
             "{error}"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_binding_replay_rejects_legacy_thread_only_binding_with_migration_action() {
+        let root = replay_test_root("legacy-thread-only");
+        let journal = root.join(".agent-collab/server/journal.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let scope = ProjectScopeId::new("/replay-project").unwrap();
+        let binding = RuntimeBinding {
+            project_scope: scope.clone(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new("agent-legacy").unwrap(),
+            runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
+            binding_id: BindingId::new("binding-legacy").unwrap(),
+            endpoint_generation: 1,
+            session_id: None,
+            native_thread_id: Some(NativeThreadId::new("thread-legacy").unwrap()),
+        };
+        let events = vec![
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(
+                    scope,
+                    AppServerId::new("appserver-cli").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound { binding },
+        ];
+        let body = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&journal, format!("{body}\n")).unwrap();
+        let error = crate::server::replay(&root)
+            .err()
+            .expect("legacy thread-only replay must fail explicitly")
+            .to_string();
+        assert!(
+            error.contains("SESSION_THREAD_BINDING_MIGRATION_REQUIRED"),
+            "{error}"
+        );
+        assert!(error.contains("thread-legacy"), "{error}");
+        assert!(error.contains("explicitly rebind"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -77,14 +77,15 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 ## Identity and role
 
-- The current client is Codex only. Identity is bound to the Codex sessionID
-  through the internal App Server native thread.
-- A Git worktree does not inherit `.agent-collab/`. In a worktree, resolve the
-  canonical project route through the daemon's global-identity lookup for the
-  same Codex sessionID/App Server thread. The identity's current binding is
-  authoritative; historical routes are not candidates and `routes.jsonl` must
-  not be read to guess one. Never register the worktree as a second peer or
-  create a second route.
+- The current client is Codex only. Identity is bound to the Codex sessionID,
+  the internal App Server native thread, and the canonical project cwd.
+- A Git worktree does not inherit `.agent-collab/` and is not an identity
+  context. Resolve `collab context`, `collab master status`, registration, and
+  recovery from the canonical project main tree. The daemon requires
+  sessionID, threadID, and canonical cwd to match the same current binding;
+  historical routes are not candidates and `routes.jsonl` must not be read to
+  guess one. Never register the worktree as a second peer or create a second
+  route.
 - Default role is `peer`; master is explicit and user-approved.
 - `collab context` is the single information endpoint for the current peer,
   binding, role, transport, liveness, tasks, and peers.
@@ -111,8 +112,9 @@ Run `collab context`. If it says unregistered, run the idempotent
 `appsdk init .` (or `collab init` for a standalone project), then run
 `collab context` again. Registration must run from the canonical project main
 tree, not a `playground/` worktree. `collab context` itself is read-only and
-must remain safe in a worktree: it resolves the canonical route from global
-state and never creates a route or identity.
+must be run from that same canonical root: it resolves the route from global
+state and never creates a route or identity. A worktree cwd fails closed with
+`ROUTE_RESOLVE_INVALID`; do not retry it as a second registration.
 
 `collab init` success is not delivery proof. Verify the live binding, selected
 transport, endpoint liveness, presence, and role through `collab context`.
@@ -138,7 +140,7 @@ Diagnose read-only from the canonical project main checkout:
 
 ```sh
 collab context
-collab route resolve
+collab route resolve --session-id <session-id> --native-thread-id <thread-id>
 collab worker status <peer-id>
 ```
 
@@ -164,6 +166,6 @@ exact error. The recovery owner must then prove the endpoint owner:
    `identity_valid=true`, `presence=present`, and a loaded thread. A command
    acceptance without those fields is not recovery.
 
-For a worktree, run only `collab context` and `collab route resolve`; the
-canonical project main checkout owns registration and recovery. Never create a
-worktree-local peer or endpoint to make the route appear live.
+The canonical project main checkout owns identity lookup, registration, and
+recovery. Never create a worktree-local peer or endpoint to make the route
+appear live.

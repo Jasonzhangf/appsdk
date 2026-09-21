@@ -1,5 +1,5 @@
 use super::*;
-use crate::identity::{runtime_from_registration_receipt, BindingId, RuntimeId};
+use crate::identity::{runtime_from_registration_receipt, BindingId, RuntimeId, SessionId};
 use crate::server::notification_contract::JournalError;
 use crate::server::state::{default_priority, is_goal_deadline, TaskRec};
 use std::process::Command;
@@ -53,6 +53,7 @@ pub(crate) fn test_appserver_transport(thread_id: &str) -> SelectedTransport {
         kind: TransportKind::AppServer,
         endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
         namespace: Some("codex_tui".into()),
+        session_id: Some(format!("session-{thread_id}")),
         thread_id: Some(thread_id.into()),
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
@@ -63,7 +64,9 @@ pub(crate) fn test_appserver_candidate(thread_id: &str) -> crate::proto::AppServ
     crate::proto::AppServerCandidate {
         endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
         namespace: "codex_tui".into(),
+        session_id: format!("session-{thread_id}"),
         thread_id: thread_id.into(),
+        cwd: env!("CARGO_MANIFEST_DIR").into(),
     }
 }
 
@@ -1191,6 +1194,96 @@ fn typed_dispatch_rejects_wrong_principal_and_scope() {
             .unwrap()
             .trim()
             .is_empty()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn typed_token_rotation_rejects_dual_key_session_mismatch() {
+    let (server, root) = test_server();
+    let cwd = root.to_str().unwrap();
+    let project_scope = crate::server::global_state::GlobalState::canonical_project_scope(
+        std::path::Path::new(cwd),
+    )
+    .unwrap();
+    let app_scope = crate::identity::AppServerId::new("tui-default").unwrap();
+    let shared_thread = "thread-dual-key-worker";
+    let transport_first = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some(format!("session-{shared_thread}")),
+        thread_id: Some(shared_thread.into()),
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    };
+    let first = server
+        .typed_register_envelope_for_scope(
+            "dual-key-worker",
+            "old-token-dual-key-worker",
+            &transport_first,
+            project_scope.clone(),
+            cwd,
+            app_scope.clone(),
+            false,
+        )
+        .unwrap();
+    server
+        .typed_dispatch(first)
+        .expect("initial typed register must succeed");
+    let before_journal =
+        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    let before_global = server.state.lock().unwrap().global.clone();
+
+    let other_session = "session-dual-key-worker-other";
+    let transport_second = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some(other_session.into()),
+        thread_id: Some(shared_thread.into()),
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    };
+    let mut second = server
+        .typed_register_envelope_for_scope(
+            "dual-key-worker",
+            "new-token-dual-key-worker",
+            &transport_second,
+            project_scope,
+            cwd,
+            app_scope,
+            false,
+        )
+        .unwrap();
+    if let crate::server::state::TypedCommand::RegisterWorker {
+        binding, worker, ..
+    } = &mut second.command
+    {
+        binding.session_id = SessionId::new(other_session).ok();
+        if let Some(transport) = worker.transport.as_mut() {
+            transport.session_id = Some(other_session.into());
+        }
+    }
+
+    let error = server.typed_dispatch(second).expect_err(
+        "a same-thread register with a different session must be rejected as a dual-key mismatch",
+    );
+    let error_message = error.to_string();
+    assert!(
+        error_message.contains("worker token does not belong to the registered runtime identity"),
+        "unexpected error: {error_message}"
+    );
+    let after_journal =
+        std::fs::read_to_string(root.join(".agent-collab/server/journal.jsonl")).unwrap();
+    assert_eq!(
+        after_journal, before_journal,
+        "a rejected dual-key mismatch must not append a journal event"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().global,
+        before_global,
+        "a rejected dual-key mismatch must not mutate the global reducer"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -2794,7 +2887,9 @@ fn register_appserver(server: &mut Server, id: &str, thread_id: &str) -> Resp {
     let candidate = crate::proto::AppServerCandidate {
         endpoint: format!("unix:///tmp/collab-appserver-{id}.sock"),
         namespace: "codex_tui".into(),
+        session_id: format!("session-{thread_id}"),
         thread_id: thread_id.into(),
+        cwd: server.root.display().to_string(),
     };
     let candidate_for_closure = candidate.clone();
     let checked = {
@@ -2805,6 +2900,7 @@ fn register_appserver(server: &mut Server, id: &str, thread_id: &str) -> Resp {
                 kind: TransportKind::AppServer,
                 endpoint: Some(candidate.endpoint.clone()),
                 namespace: Some(candidate.namespace.clone()),
+                session_id: Some(candidate.session_id.clone()),
                 thread_id: Some(candidate.thread_id.clone()),
                 capabilities: vec!["send_message_to_thread".into()],
                 self_check: "test App Server candidate".into(),
@@ -2831,7 +2927,10 @@ fn init_registration_result_exposes_persisted_runtime_identity() {
     assert!(registration.ok, "{registration:?}");
     let runtime =
         runtime_from_registration_receipt(&registration.data, "peer-init", &root).unwrap();
-    assert_eq!(runtime.runtime_id.as_str(), "runtime-appserver-thread-init");
+    assert_eq!(
+        runtime.runtime_id.as_str(),
+        "runtime-appserver-session-thread-init-thread-init"
+    );
     assert_eq!(
         runtime.native_thread_id.as_ref().unwrap().as_str(),
         "thread-init"
@@ -4356,7 +4455,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
         Req::Register {
             worker_id: "peer".into(),
             token: "token-peer".into(),
-            cwd: "/tmp/rebound".into(),
+            cwd: root.display().to_string(),
             candidates: Some(crate::proto::TransportCandidates {
                 appserver: Some(test_appserver_candidate("thread-peer")),
             }),
@@ -4368,7 +4467,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
         Req::Register {
             worker_id: "new-peer".into(),
             token: "token-new-peer".into(),
-            cwd: "/tmp".into(),
+            cwd: root.display().to_string(),
             candidates: Some(crate::proto::TransportCandidates {
                 appserver: Some(test_appserver_candidate("thread-new-peer")),
             }),
@@ -4385,8 +4484,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
 #[test]
 fn authenticated_send_uses_registered_cwd_for_authoritative_route_scope() {
     let (server, root) = test_server();
-    let registered_cwd = root.join("registered");
-    std::fs::create_dir_all(&registered_cwd).unwrap();
+    let registered_cwd = root.clone();
     assert!(
         handle_register_with_app_scope(
             &server,

@@ -252,6 +252,12 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
     else {
         return Ok(None);
     };
+    let session_id = std::env::var("CODEX_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AdapterError::InvalidBinding {
+            detail: "CODEX_SESSION_ID is required when an App Server thread is selected".into(),
+        })?;
     NativeThreadId::new(thread_id.clone()).map_err(|error| AdapterError::InvalidBinding {
         detail: format!("CODEX_THREAD_ID is invalid: {error}"),
     })?;
@@ -262,10 +268,23 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "codex_tui".into());
+    let cwd = std::env::current_dir()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| AdapterError::InvalidBinding {
+            detail: format!("cannot resolve candidate cwd: {error}"),
+        })?;
+    let cwd = cwd
+        .to_str()
+        .ok_or_else(|| AdapterError::InvalidBinding {
+            detail: "candidate cwd must be valid UTF-8".into(),
+        })?
+        .to_owned();
     Ok(Some(AppServerCandidate {
         endpoint: format!("unix://{}", socket_path.display()),
         namespace,
+        session_id,
         thread_id,
+        cwd,
     }))
 }
 
@@ -286,6 +305,21 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             detail: format!("unsupported App Server namespace {}", candidate.namespace),
         });
     }
+    if candidate.session_id.trim().is_empty() {
+        return Err(AdapterError::InvalidBinding {
+            detail: "candidate session_id is required".into(),
+        });
+    }
+    let candidate_cwd =
+        std::fs::canonicalize(&candidate.cwd).map_err(|error| AdapterError::InvalidBinding {
+            detail: format!("candidate cwd is invalid: {error}"),
+        })?;
+    let candidate_cwd = candidate_cwd
+        .to_str()
+        .ok_or_else(|| AdapterError::InvalidBinding {
+            detail: "candidate cwd must be valid UTF-8".into(),
+        })?;
+    let candidate_cwd = candidate_cwd.to_owned();
     let thread_id = NativeThreadId::new(candidate.thread_id.clone()).map_err(|error| {
         AdapterError::InvalidBinding {
             detail: format!("candidate thread_id is invalid: {error}"),
@@ -329,19 +363,59 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             }
             error => error,
         })?;
-    let observed = response
+    let observed_thread_id = response
         .pointer("/thread/id")
         .and_then(Value::as_str)
         .ok_or_else(|| AdapterError::Unknown {
             operation: "thread/read",
             detail: "response is missing thread.id".into(),
         })?;
-    if observed != thread_id.as_str() {
+    if observed_thread_id != thread_id.as_str() {
         return Err(AdapterError::Unknown {
             operation: "thread/read",
             detail: format!(
                 "thread identity mismatch: expected {}, observed {}",
-                thread_id, observed
+                thread_id, observed_thread_id
+            ),
+        });
+    }
+    let observed_session_id = response
+        .pointer("/thread/sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AdapterError::Unknown {
+            operation: "thread/read",
+            detail: "response is missing thread.sessionId".into(),
+        })?;
+    if observed_session_id != candidate.session_id {
+        return Err(AdapterError::Unknown {
+            operation: "thread/read",
+            detail: format!(
+                "thread session mismatch: expected {}, observed {}",
+                candidate.session_id, observed_session_id
+            ),
+        });
+    }
+    let observed_cwd = response
+        .pointer("/thread/cwd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AdapterError::Unknown {
+            operation: "thread/read",
+            detail: "response is missing thread.cwd".into(),
+        })?;
+    let observed_cwd =
+        std::fs::canonicalize(observed_cwd).map_err(|error| AdapterError::Unknown {
+            operation: "thread/read",
+            detail: format!("cannot canonicalize thread.cwd {observed_cwd}: {error}"),
+        })?;
+    let observed_cwd = observed_cwd.to_str().ok_or_else(|| AdapterError::Unknown {
+        operation: "thread/read",
+        detail: "thread.cwd must be valid UTF-8".into(),
+    })?;
+    if observed_cwd != candidate_cwd {
+        return Err(AdapterError::Unknown {
+            operation: "thread/read",
+            detail: format!(
+                "thread cwd mismatch: expected {candidate_cwd}, observed {observed_cwd}"
             ),
         });
     }
@@ -419,6 +493,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         kind: TransportKind::AppServer,
         endpoint: Some(format!("unix://{}", socket_path.display())),
         namespace: Some(candidate.namespace.clone()),
+        session_id: Some(candidate.session_id.clone()),
         thread_id: Some(thread_id.to_string()),
         capabilities: vec![
             "session_status".into(),
@@ -1350,7 +1425,16 @@ mod tests {
                         json!({"id": id, "result": {"data": ["thread-1"]}})
                     }
                     "thread/read" => {
-                        json!({"id": id, "result": {"thread": {"id": "thread-1"}}})
+                        json!({
+                            "id": id,
+                            "result": {
+                                "thread": {
+                                    "id": "thread-1",
+                                    "sessionId": "session-1",
+                                    "cwd": env!("CARGO_MANIFEST_DIR")
+                                }
+                            }
+                        })
                     }
                     "thread/items/list" => {
                         json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
@@ -1382,7 +1466,9 @@ mod tests {
         let candidate = AppServerCandidate {
             endpoint: format!("unix://{}", socket.display()),
             namespace: "codex_tui".into(),
+            session_id: "session-1".into(),
             thread_id: "thread-1".into(),
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
         };
         let error = verify_candidate(&candidate).unwrap_err();
         assert!(
@@ -1450,7 +1536,9 @@ mod tests {
         let candidate = AppServerCandidate {
             endpoint: format!("unix://{}", socket.display()),
             namespace: "codex_tui".into(),
+            session_id: "session-1".into(),
             thread_id: "missing-thread".into(),
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
         };
         let error = verify_candidate(&candidate).unwrap_err();
         assert!(matches!(error, AdapterError::RouteUnavailable { .. }));
@@ -1491,7 +1579,9 @@ mod tests {
         let candidate = AppServerCandidate {
             endpoint: format!("unix://{}", socket.display()),
             namespace: "codex_tui".into(),
+            session_id: "session-1".into(),
             thread_id: "persisted-thread".into(),
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
         };
         let error = verify_candidate(&candidate).unwrap_err();
         assert!(matches!(error, AdapterError::RouteUnavailable { .. }));
@@ -1530,7 +1620,14 @@ mod tests {
                 &mut stream,
                 json!({
                     "id": read["id"],
-                    "result": {"thread": {"id": "thread-1", "status": {"type": "idle"}}}
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "sessionId": "session-1",
+                            "cwd": env!("CARGO_MANIFEST_DIR"),
+                            "status": {"type": "idle"}
+                        }
+                    }
                 }),
             );
             let items = next_request(&mut stream);
@@ -1569,11 +1666,120 @@ mod tests {
         let candidate = AppServerCandidate {
             endpoint: format!("unix://{}", socket.display()),
             namespace: "codex_tui".into(),
+            session_id: "session-1".into(),
             thread_id: "thread-1".into(),
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
         };
         let selected = verify_candidate(&candidate).unwrap();
         assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
         assert!(selected.self_check.contains("thread/loaded/list"));
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn candidate_rejects_thread_session_mismatch() {
+        let socket = PathBuf::from("/tmp").join(format!(
+            "c-session-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let loaded = next_request(&mut stream);
+            respond(
+                &mut stream,
+                json!({"id": loaded["id"], "result": {"data": ["thread-1"]}}),
+            );
+            let read = next_request(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "sessionId": "different-session",
+                            "cwd": env!("CARGO_MANIFEST_DIR")
+                        }
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let candidate = AppServerCandidate {
+            endpoint: format!("unix://{}", socket.display()),
+            namespace: "codex_tui".into(),
+            session_id: "session-1".into(),
+            thread_id: "thread-1".into(),
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
+        };
+        let error = verify_candidate(&candidate).unwrap_err();
+        assert!(
+            error.to_string().contains("thread session mismatch"),
+            "{error}"
+        );
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn candidate_rejects_thread_cwd_mismatch() {
+        let socket = PathBuf::from("/tmp").join(format!(
+            "c-cwd-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let loaded = next_request(&mut stream);
+            respond(
+                &mut stream,
+                json!({"id": loaded["id"], "result": {"data": ["thread-1"]}}),
+            );
+            let read = next_request(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read["id"],
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "sessionId": "session-1",
+                            "cwd": "/tmp"
+                        }
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let candidate = AppServerCandidate {
+            endpoint: format!("unix://{}", socket.display()),
+            namespace: "codex_tui".into(),
+            session_id: "session-1".into(),
+            thread_id: "thread-1".into(),
+            cwd: env!("CARGO_MANIFEST_DIR").into(),
+        };
+        let error = verify_candidate(&candidate).unwrap_err();
+        assert!(error.to_string().contains("thread cwd mismatch"), "{error}");
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -1613,7 +1819,16 @@ mod tests {
                                 json!({"id": id, "result": {"data": ["thread-1"]}})
                             }
                             "thread/read" => {
-                                json!({"id": id, "result": {"thread": {"id": "thread-1"}}})
+                                json!({
+                                    "id": id,
+                                    "result": {
+                                        "thread": {
+                                            "id": "thread-1",
+                                            "sessionId": "session-1",
+                                            "cwd": env!("CARGO_MANIFEST_DIR")
+                                        }
+                                    }
+                                })
                             }
                             "thread/items/list" => {
                                 json!({"id": id, "error": {"code": -32601, "message": "unsupported"}})
@@ -1640,7 +1855,9 @@ mod tests {
             let candidate = AppServerCandidate {
                 endpoint: format!("unix://{}", socket.display()),
                 namespace: "codex_tui".into(),
+                session_id: "session-1".into(),
                 thread_id: "thread-1".into(),
+                cwd: env!("CARGO_MANIFEST_DIR").into(),
             };
             let error = verify_candidate(&candidate).unwrap_err();
             assert!(
@@ -2275,6 +2492,7 @@ mod tests {
             kind: TransportKind::AppServer,
             endpoint: Some(format!("unix://{}", socket.display())),
             namespace: Some("codex_tui".into()),
+            session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test".into(),

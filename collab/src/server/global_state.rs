@@ -6,7 +6,7 @@
 //! these types without creating a second journal or notification store.
 
 use crate::identity::{
-    AgentId, AppServerId, BindingId, CommandId, NativeThreadId, OperationId, RuntimeId,
+    AgentId, AppServerId, BindingId, CommandId, NativeThreadId, OperationId, RuntimeId, SessionId,
 };
 use crate::scope::{ProjectScopeId, RouteScope};
 use serde::{Deserialize, Serialize};
@@ -217,6 +217,8 @@ pub struct RuntimeBinding {
     pub binding_id: BindingId,
     pub endpoint_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<NativeThreadId>,
 }
 
@@ -231,6 +233,35 @@ impl RuntimeBinding {
         endpoint_generation: u64,
         native_thread_id: Option<NativeThreadId>,
     ) -> Result<Self, StateError> {
+        if native_thread_id.is_some() {
+            return Err(StateError::invalid(
+                "runtime binding",
+                "a thread-backed binding requires new_with_session and a verified session id",
+            ));
+        }
+        Self::new_with_session(
+            project_scope,
+            app_scope_id,
+            agent_id,
+            runtime_id,
+            binding_id,
+            endpoint_generation,
+            None,
+            native_thread_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_session(
+        project_scope: ProjectScopeId,
+        app_scope_id: AppServerId,
+        agent_id: AgentId,
+        runtime_id: RuntimeId,
+        binding_id: BindingId,
+        endpoint_generation: u64,
+        session_id: Option<SessionId>,
+        native_thread_id: Option<NativeThreadId>,
+    ) -> Result<Self, StateError> {
         let binding = Self {
             project_scope,
             app_scope_id,
@@ -238,6 +269,7 @@ impl RuntimeBinding {
             runtime_id,
             binding_id,
             endpoint_generation,
+            session_id,
             native_thread_id,
         };
         binding.validate()?;
@@ -257,6 +289,9 @@ impl RuntimeBinding {
         validate_agent_id(&self.agent_id)?;
         validate_runtime_id(&self.runtime_id)?;
         validate_binding_id(&self.binding_id)?;
+        if let Some(session_id) = &self.session_id {
+            validate_session_id(session_id)?;
+        }
         if let Some(thread_id) = &self.native_thread_id {
             validate_native_thread_id(thread_id)?;
         }
@@ -267,6 +302,121 @@ impl RuntimeBinding {
         self.project_scope == other.project_scope
             && self.app_scope_id == other.app_scope_id
             && self.agent_id == other.agent_id
+    }
+}
+
+/// A retired session/thread address. The replacement is deliberately a
+/// binding, not only a route: recovery callers need the exact identity and
+/// generation to use without making the old address live again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeBindingTombstone {
+    pub project_scope: ProjectScopeId,
+    pub app_scope_id: AppServerId,
+    pub agent_id: AgentId,
+    pub runtime_id: RuntimeId,
+    pub binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub session_id: SessionId,
+    pub native_thread_id: NativeThreadId,
+    #[serde(rename = "reboundTo")]
+    pub rebound_to: RuntimeBinding,
+}
+
+impl RuntimeBindingTombstone {
+    pub fn new(old: &RuntimeBinding, rebound_to: &RuntimeBinding) -> Result<Self, StateError> {
+        old.validate()?;
+        rebound_to.validate()?;
+        if old.route_scope() != rebound_to.route_scope()
+            || old.agent_id != rebound_to.agent_id
+            || old.binding_id != rebound_to.binding_id
+        {
+            return Err(StateError::BindingConflict(
+                "session/thread rebind must preserve project, app scope, agent and binding"
+                    .to_owned(),
+            ));
+        }
+        let old_session_id = old.session_id.clone().ok_or_else(|| {
+            StateError::invalid("runtime binding tombstone", "old binding has no session id")
+        })?;
+        let old_native_thread_id = old.native_thread_id.clone().ok_or_else(|| {
+            StateError::invalid(
+                "runtime binding tombstone",
+                "old binding has no native thread id",
+            )
+        })?;
+        let replacement_session_id = rebound_to.session_id.as_ref().ok_or_else(|| {
+            StateError::invalid(
+                "runtime binding tombstone",
+                "replacement binding has no session id",
+            )
+        })?;
+        let replacement_native_thread_id =
+            rebound_to.native_thread_id.as_ref().ok_or_else(|| {
+                StateError::invalid(
+                    "runtime binding tombstone",
+                    "replacement binding has no native thread id",
+                )
+            })?;
+        if old_session_id == *replacement_session_id
+            && old_native_thread_id == *replacement_native_thread_id
+        {
+            return Err(StateError::BindingConflict(
+                "session/thread rebind must change the address".to_owned(),
+            ));
+        }
+        if rebound_to.endpoint_generation <= old.endpoint_generation {
+            return Err(StateError::StaleBinding {
+                binding_id: old.binding_id.as_str().to_owned(),
+                expected_generation: old.endpoint_generation,
+                observed_generation: rebound_to.endpoint_generation,
+            });
+        }
+        Ok(Self {
+            project_scope: old.project_scope.clone(),
+            app_scope_id: old.app_scope_id.clone(),
+            agent_id: old.agent_id.clone(),
+            runtime_id: old.runtime_id.clone(),
+            binding_id: old.binding_id.clone(),
+            endpoint_generation: old.endpoint_generation,
+            session_id: old_session_id,
+            native_thread_id: old_native_thread_id,
+            rebound_to: rebound_to.clone(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), StateError> {
+        validate_project_scope(&self.project_scope)?;
+        validate_app_scope(&self.app_scope_id)?;
+        validate_agent_id(&self.agent_id)?;
+        validate_runtime_id(&self.runtime_id)?;
+        validate_binding_id(&self.binding_id)?;
+        validate_session_id(&self.session_id)?;
+        validate_native_thread_id(&self.native_thread_id)?;
+        self.rebound_to.validate()?;
+        if self.project_scope != self.rebound_to.project_scope
+            || self.app_scope_id != self.rebound_to.app_scope_id
+            || self.agent_id != self.rebound_to.agent_id
+            || self.binding_id != self.rebound_to.binding_id
+        {
+            return Err(StateError::Invariant(
+                "tombstone replacement does not preserve identity".to_owned(),
+            ));
+        }
+        let replacement_session_id = self.rebound_to.session_id.as_ref().ok_or_else(|| {
+            StateError::Invariant("tombstone replacement has no session id".to_owned())
+        })?;
+        let replacement_native_thread_id =
+            self.rebound_to.native_thread_id.as_ref().ok_or_else(|| {
+                StateError::Invariant("tombstone replacement has no native thread id".to_owned())
+            })?;
+        if self.session_id == *replacement_session_id
+            && self.native_thread_id == *replacement_native_thread_id
+        {
+            return Err(StateError::Invariant(
+                "tombstone replacement has the same address".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -739,6 +889,8 @@ pub struct MigrationRuntimeRebindReceipt {
     pub binding_id: BindingId,
     pub endpoint_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<NativeThreadId>,
     pub operation_id: OperationId,
     pub fencing_token: u64,
@@ -764,6 +916,45 @@ impl MigrationRuntimeRebindReceipt {
         fencing_token: u64,
         committed_revision: u64,
     ) -> Result<Self, StateError> {
+        Self::new_with_session(
+            migration_id,
+            source_project_id,
+            project_scope,
+            source_epoch,
+            target_epoch,
+            source_snapshot_digest,
+            agent_id,
+            app_scope_id,
+            runtime_id,
+            binding_id,
+            endpoint_generation,
+            None,
+            native_thread_id,
+            operation_id,
+            fencing_token,
+            committed_revision,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_session(
+        migration_id: impl Into<String>,
+        source_project_id: impl Into<String>,
+        project_scope: ProjectScopeId,
+        source_epoch: Option<u64>,
+        target_epoch: u64,
+        source_snapshot_digest: impl Into<String>,
+        agent_id: AgentId,
+        app_scope_id: AppServerId,
+        runtime_id: RuntimeId,
+        binding_id: BindingId,
+        endpoint_generation: u64,
+        session_id: Option<SessionId>,
+        native_thread_id: Option<NativeThreadId>,
+        operation_id: OperationId,
+        fencing_token: u64,
+        committed_revision: u64,
+    ) -> Result<Self, StateError> {
         let receipt = Self {
             migration_id: migration_id.into(),
             source_project_id: source_project_id.into(),
@@ -776,6 +967,7 @@ impl MigrationRuntimeRebindReceipt {
             runtime_id,
             binding_id,
             endpoint_generation,
+            session_id,
             native_thread_id,
             operation_id,
             fencing_token,
@@ -804,6 +996,9 @@ impl MigrationRuntimeRebindReceipt {
         )?;
         if let Some(native_thread_id) = &self.native_thread_id {
             validate_native_thread_id(native_thread_id)?;
+        }
+        if let Some(session_id) = &self.session_id {
+            validate_session_id(session_id)?;
         }
         Ok(())
     }
@@ -1000,7 +1195,9 @@ pub struct GlobalState {
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectState>,
     #[serde(default)]
-    pub current_thread_routes: BTreeMap<String, RuntimeBinding>,
+    pub current_thread_routes: BTreeMap<(String, String), RuntimeBinding>,
+    #[serde(default)]
+    pub current_thread_route_tombstones: BTreeMap<String, RuntimeBindingTombstone>,
     #[serde(default)]
     pub command_receipts: BTreeMap<String, CommandReceipt>,
     #[serde(default)]
@@ -1024,6 +1221,7 @@ impl GlobalState {
             revision: 0,
             projects: BTreeMap::new(),
             current_thread_routes: BTreeMap::new(),
+            current_thread_route_tombstones: BTreeMap::new(),
             command_receipts: BTreeMap::new(),
             migration_commit_evidence: BTreeMap::new(),
         })
@@ -1057,16 +1255,39 @@ impl GlobalState {
             }
         }
 
-        for (thread_key, binding) in &self.current_thread_routes {
+        for ((session_key, thread_key), binding) in &self.current_thread_routes {
             binding.validate()?;
-            let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
+            let Some(session_id) = binding.session_id.as_ref() else {
                 return Err(StateError::Invariant(format!(
-                    "current thread route {thread_key} has no native thread id"
+                    "current thread route {session_key}/{thread_key} has no session id"
                 )));
             };
-            if thread_key != native_thread_id.as_str() {
+            let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
                 return Err(StateError::Invariant(format!(
-                    "current thread route key {thread_key} does not match native thread {native_thread_id}"
+                    "current thread route {session_key}/{thread_key} has no native thread id"
+                )));
+            };
+            if session_key != session_id.as_str() || thread_key != native_thread_id.as_str() {
+                return Err(StateError::Invariant(format!(
+                    "current thread route key {session_key}/{thread_key} does not match session {session_id} and native thread {native_thread_id}"
+                )));
+            }
+        }
+        for (key, tombstone) in &self.current_thread_route_tombstones {
+            tombstone.validate()?;
+            if key != &current_thread_route_key(&tombstone.session_id, &tombstone.native_thread_id)
+            {
+                return Err(StateError::Invariant(format!(
+                    "current thread route tombstone key {key} does not match old address {}/{}",
+                    tombstone.session_id, tombstone.native_thread_id
+                )));
+            }
+            if self
+                .lookup_current_thread_route(&tombstone.session_id, &tombstone.native_thread_id)
+                .is_some()
+            {
+                return Err(StateError::Invariant(format!(
+                    "current thread route tombstone {key} is also live"
                 )));
             }
         }
@@ -1408,15 +1629,47 @@ impl GlobalState {
 
     pub fn lookup_current_thread_route(
         &self,
+        session_id: &SessionId,
         native_thread_id: &NativeThreadId,
     ) -> Option<&RuntimeBinding> {
-        self.current_thread_routes.get(native_thread_id.as_str())
+        self.current_thread_routes.get(&(
+            session_id.as_str().to_owned(),
+            native_thread_id.as_str().to_owned(),
+        ))
     }
 
-    /// Advance the one current route for a native App Server thread.
+    pub fn lookup_current_thread_route_tombstone(
+        &self,
+        session_id: &SessionId,
+        native_thread_id: &NativeThreadId,
+    ) -> Option<&RuntimeBindingTombstone> {
+        self.current_thread_route_tombstones
+            .get(&current_thread_route_key(session_id, native_thread_id))
+    }
+
+    pub fn record_current_thread_route_tombstone(
+        &mut self,
+        tombstone: RuntimeBindingTombstone,
+    ) -> Result<StateVersion, StateError> {
+        tombstone.validate()?;
+        let key = current_thread_route_key(&tombstone.session_id, &tombstone.native_thread_id);
+        if self
+            .current_thread_route_tombstones
+            .get(&key)
+            .is_some_and(|existing| existing == &tombstone)
+        {
+            return Ok(self.version());
+        }
+        self.mutate(|next| {
+            next.current_thread_route_tombstones.insert(key, tombstone);
+            Ok(())
+        })
+    }
+
+    /// Advance the one current route for one session/thread pair.
     ///
     /// Runtime history remains in `projects`; this index is the only route
-    /// selector and retires the prior thread entry for the same binding.
+    /// selector and retires the prior entry for the same binding.
     pub fn set_current_thread_route(
         &mut self,
         binding: RuntimeBinding,
@@ -1425,20 +1678,67 @@ impl GlobalState {
         let native_thread_id = binding.native_thread_id.clone().ok_or_else(|| {
             StateError::invalid("current thread route", "requires a native thread id")
         })?;
+        let session_id = binding
+            .session_id
+            .clone()
+            .ok_or_else(|| StateError::invalid("current thread route", "requires a session id"))?;
         if self
             .current_thread_routes
-            .get(native_thread_id.as_str())
+            .get(&(
+                session_id.as_str().to_owned(),
+                native_thread_id.as_str().to_owned(),
+            ))
             .is_some_and(|existing| existing == &binding)
         {
             return Ok(self.version());
         }
         self.mutate(|next| {
+            let retired = next
+                .current_thread_routes
+                .iter()
+                .filter(|(_, existing)| {
+                    existing.route_scope() == binding.route_scope()
+                        && existing.binding_id == binding.binding_id
+                        && existing != &&binding
+                })
+                .map(|(_, existing)| existing.clone())
+                .collect::<Vec<_>>();
             next.current_thread_routes.retain(|_, existing| {
                 existing.route_scope() != binding.route_scope()
                     || existing.binding_id != binding.binding_id
             });
-            next.current_thread_routes
-                .insert(native_thread_id.as_str().to_owned(), binding);
+            for old in retired {
+                // A higher endpoint generation on the same session/thread is
+                // a transport refresh, not an address rebind. Keep the route
+                // current and do not create a tombstone for the same address.
+                if old.session_id == binding.session_id
+                    && old.native_thread_id == binding.native_thread_id
+                {
+                    continue;
+                }
+                let old_session_id = old.session_id.clone().ok_or_else(|| {
+                    StateError::invalid(
+                        "current thread route tombstone",
+                        "old binding has no session id",
+                    )
+                })?;
+                let old_native_thread_id = old.native_thread_id.clone().ok_or_else(|| {
+                    StateError::invalid(
+                        "current thread route tombstone",
+                        "old binding has no native thread id",
+                    )
+                })?;
+                let key = current_thread_route_key(&old_session_id, &old_native_thread_id);
+                next.current_thread_route_tombstones
+                    .insert(key, RuntimeBindingTombstone::new(&old, &binding)?);
+            }
+            next.current_thread_routes.insert(
+                (
+                    session_id.as_str().to_owned(),
+                    native_thread_id.as_str().to_owned(),
+                ),
+                binding,
+            );
             Ok(())
         })
     }
@@ -1672,6 +1972,103 @@ impl GlobalState {
             // the same binding ID therefore revokes the old capability in
             // the same candidate transaction.
             project.master_grants.remove(&binding_key);
+            Ok(())
+        })
+    }
+
+    /// Restore one exact runtime binding after a registration transaction
+    /// fails to publish its host route. This is not a general rollback: the
+    /// failed binding must still be current and the previous binding must be
+    /// the same principal with a lower generation.
+    pub fn rollback_runtime_binding(
+        &mut self,
+        failed: RuntimeBinding,
+        previous: Option<RuntimeBinding>,
+        previous_grant: Option<MasterGrant>,
+    ) -> Result<StateVersion, StateError> {
+        failed.validate()?;
+        if let Some(previous) = &previous {
+            previous.validate()?;
+            if !previous.same_principal(&failed) {
+                return Err(StateError::BindingConflict(format!(
+                    "rollback binding {} does not preserve the registered principal",
+                    failed.binding_id
+                )));
+            }
+            if previous.endpoint_generation >= failed.endpoint_generation {
+                return Err(StateError::StaleBinding {
+                    binding_id: failed.binding_id.as_str().to_owned(),
+                    expected_generation: failed.endpoint_generation,
+                    observed_generation: previous.endpoint_generation,
+                });
+            }
+        }
+        if let Some(grant) = &previous_grant {
+            grant.validate()?;
+            let Some(previous) = previous.as_ref() else {
+                return Err(StateError::MasterGrantBindingMismatch(format!(
+                    "grant {} has no previous runtime binding",
+                    grant.binding_id
+                )));
+            };
+            if grant.project_scope != previous.project_scope
+                || grant.app_scope_id != previous.app_scope_id
+                || grant.agent_id != previous.agent_id
+                || grant.binding_id != previous.binding_id
+                || grant.endpoint_generation != previous.endpoint_generation
+            {
+                return Err(StateError::MasterGrantBindingMismatch(format!(
+                    "grant {} does not match the previous runtime binding",
+                    grant.binding_id
+                )));
+            }
+        }
+
+        let scope_key = failed.project_scope.as_str().to_owned();
+        let binding_key = failed.binding_id.as_str().to_owned();
+        let project = self
+            .lookup_project(&failed.project_scope)
+            .ok_or_else(|| StateError::ProjectNotRegistered(scope_key.clone()))?;
+        let current = project
+            .lookup_binding(&failed.binding_id)
+            .ok_or_else(|| StateError::BindingNotFound(binding_key.clone()))?;
+        if current != &failed {
+            return Err(StateError::BindingConflict(format!(
+                "binding {} is not the failed generation being rolled back",
+                failed.binding_id
+            )));
+        }
+        let current_grant = project.lookup_master_grant(&failed.binding_id);
+        if current_grant.is_some() {
+            return Err(StateError::MasterGrantConflict(format!(
+                "binding {} master grant is not the failed transaction state",
+                failed.binding_id
+            )));
+        }
+
+        self.mutate(|next| {
+            let project = next
+                .projects
+                .get_mut(&scope_key)
+                .ok_or_else(|| StateError::ProjectNotRegistered(scope_key.clone()))?;
+            match previous {
+                Some(previous) => {
+                    project
+                        .runtime_bindings
+                        .insert(binding_key.clone(), previous);
+                }
+                None => {
+                    project.runtime_bindings.remove(&binding_key);
+                }
+            }
+            match previous_grant {
+                Some(grant) => {
+                    project.master_grants.insert(binding_key.clone(), grant);
+                }
+                None => {
+                    project.master_grants.remove(&binding_key);
+                }
+            }
             Ok(())
         })
     }
@@ -1949,6 +2346,10 @@ fn validate_project_scope(scope: &ProjectScopeId) -> Result<(), StateError> {
         .map(|_| ())
 }
 
+fn current_thread_route_key(session_id: &SessionId, native_thread_id: &NativeThreadId) -> String {
+    format!("{}\0{}", session_id, native_thread_id)
+}
+
 fn validate_route_scope(scope: &RouteScope) -> Result<(), StateError> {
     validate_app_scope(&scope.app_scope_id)?;
     validate_project_scope(&scope.project_scope_id)
@@ -1982,6 +2383,23 @@ fn validate_native_thread_id(id: &NativeThreadId) -> Result<(), StateError> {
     NativeThreadId::new(id.as_str().to_owned())
         .map_err(|error| StateError::invalid("native thread id", error.to_string()))
         .map(|_| ())
+}
+
+fn validate_session_id(id: &SessionId) -> Result<(), StateError> {
+    let value = id.as_str();
+    if value.is_empty() {
+        return Err(StateError::invalid("session id", "must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(StateError::invalid("session id", "exceeds 256 bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(StateError::invalid(
+            "session id",
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_command_id(id: &CommandId) -> Result<(), StateError> {
@@ -2696,6 +3114,161 @@ mod tests {
             .unwrap();
         assert_eq!(state.version(), after_revoke);
         state.validate_binding(&reconnected).unwrap();
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn runtime_binding_rollback_restores_only_the_exact_previous_generation_and_grant() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let previous = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-one",
+            "binding-one",
+            4,
+        );
+        let previous_grant = grant(&scope, "app-one", "agent-one", "binding-one", 4);
+        state.bind_runtime(previous.clone()).unwrap();
+        state.grant_master(previous_grant.clone()).unwrap();
+        let failed = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-two",
+            "binding-one",
+            5,
+        );
+        state.bind_runtime(failed.clone()).unwrap();
+        assert!(state
+            .lookup_master_grant(&scope, &failed.binding_id)
+            .is_none());
+
+        state
+            .rollback_runtime_binding(
+                failed.clone(),
+                Some(previous.clone()),
+                Some(previous_grant.clone()),
+            )
+            .unwrap();
+        assert_eq!(state.lookup_binding(&previous.binding_id), Some(&previous));
+        assert_eq!(
+            state.lookup_master_grant(&scope, &previous.binding_id),
+            Some(&previous_grant)
+        );
+        assert_eq!(
+            state.role_for_binding(&scope, &previous.binding_id),
+            PeerRole::Master
+        );
+        state.validate().unwrap();
+
+        let before = state.version();
+        assert!(matches!(
+            state.rollback_runtime_binding(
+                failed,
+                Some(previous.clone()),
+                Some(previous_grant.clone()),
+            ),
+            Err(StateError::BindingConflict(_))
+        ));
+        assert_eq!(state.version(), before);
+    }
+
+    #[test]
+    fn current_thread_routes_keep_distinct_sessions_for_one_native_thread() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let thread_id = NativeThreadId::new("thread-shared").unwrap();
+        let first = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            1,
+            Some(SessionId::new("session-one").unwrap()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        let second = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-two").unwrap(),
+            RuntimeId::new("runtime-two").unwrap(),
+            BindingId::new("binding-two").unwrap(),
+            1,
+            Some(SessionId::new("session-two").unwrap()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+
+        state.bind_runtime(first.clone()).unwrap();
+        state.bind_runtime(second.clone()).unwrap();
+        state.set_current_thread_route(first.clone()).unwrap();
+        state.set_current_thread_route(second.clone()).unwrap();
+
+        assert_eq!(
+            state.lookup_current_thread_route(first.session_id.as_ref().unwrap(), &thread_id,),
+            Some(&first)
+        );
+        assert_eq!(
+            state.lookup_current_thread_route(second.session_id.as_ref().unwrap(), &thread_id,),
+            Some(&second)
+        );
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn same_address_generation_refresh_replaces_the_route_without_a_tombstone() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let thread_id = NativeThreadId::new("thread-refresh").unwrap();
+        let session_id = SessionId::new("session-refresh").unwrap();
+        let first = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            1,
+            Some(session_id.clone()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        let refreshed = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            2,
+            Some(session_id.clone()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+
+        state.bind_runtime(first.clone()).unwrap();
+        state.set_current_thread_route(first).unwrap();
+        state.bind_runtime(refreshed.clone()).unwrap();
+        state.set_current_thread_route(refreshed.clone()).unwrap();
+
+        assert_eq!(
+            state.lookup_current_thread_route(&session_id, &thread_id),
+            Some(&refreshed)
+        );
+        assert!(state
+            .lookup_current_thread_route_tombstone(&session_id, &thread_id)
+            .is_none());
         state.validate().unwrap();
     }
 

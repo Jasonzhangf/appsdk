@@ -1653,9 +1653,21 @@ fn subagent_observe_query(command: &subagent::Action) -> Option<(Option<String>,
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
-        eprintln!("collab: {}", e);
+        eprintln!("collab: {}", format_cli_error(&e.to_string()));
         std::process::exit(1);
     }
+}
+
+fn format_cli_error(error: &str) -> String {
+    if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
+        && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
+    {
+        return format!(
+            "{error}; {}",
+            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
+        );
+    }
+    error.to_owned()
 }
 
 fn run(cmd: Cmd) -> anyhow::Result<()> {
@@ -3153,6 +3165,22 @@ mod tests {
         assert_eq!(context["next_action"], "appsdk init .");
         assert!(!root.join(".agent-collab").exists());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cli_error_decorates_bare_route_resolve_not_found() {
+        let bare = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon";
+        let formatted = format_cli_error(bare);
+        assert!(formatted.starts_with(bare), "{formatted}");
+        assert!(
+            formatted.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY),
+            "{formatted}"
+        );
+        assert_eq!(
+            format_cli_error(&formatted),
+            formatted,
+            "recovery guidance must not be duplicated"
+        );
     }
 
     #[test]

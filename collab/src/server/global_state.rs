@@ -1691,6 +1691,28 @@ impl GlobalState {
             .collect()
     }
 
+    /// Every session-bound binding that owns this native thread, across all
+    /// projects.  A legacy candidate may only be used when the thread has no
+    /// strict owner: a newer session-bound binding means the legacy record is
+    /// superseded and a request carrying a different session must not be
+    /// silently routed through the older project.
+    pub fn strict_bindings_for_native_thread(
+        &self,
+        native_thread_id: &NativeThreadId,
+    ) -> Vec<&RuntimeBinding> {
+        self.projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .filter(|binding| {
+                binding.session_id.is_some()
+                    && binding
+                        .native_thread_id
+                        .as_ref()
+                        .is_some_and(|thread| thread.as_str() == native_thread_id.as_str())
+            })
+            .collect()
+    }
+
     /// Project one durable thread-only binding into the read-only
     /// compatibility index.  A higher `endpoint_generation` for the same app
     /// scope, thread, and binding is a transport refresh and replaces the
@@ -3532,6 +3554,52 @@ mod tests {
             ),
             Some(&strict)
         );
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn a_session_bound_thread_is_reported_as_strictly_owned() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let thread_id = NativeThreadId::new("thread-strict-owner").unwrap();
+
+        // A legacy record for the thread and a distinct strict binding for the
+        // same thread must both be visible, so the resolver can refuse to use
+        // the legacy fallback once the thread has a live strict owner.
+        let legacy = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-legacy").unwrap(),
+            RuntimeId::new("runtime-legacy").unwrap(),
+            BindingId::new("binding-legacy").unwrap(),
+            1,
+            None,
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        let strict = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-strict").unwrap(),
+            RuntimeId::new("runtime-strict").unwrap(),
+            BindingId::new("binding-strict").unwrap(),
+            1,
+            Some(SessionId::new("session-strict-owner").unwrap()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        state.bind_runtime(legacy.clone()).unwrap();
+        state.bind_runtime(strict.clone()).unwrap();
+        state.set_legacy_thread_route(legacy.clone()).unwrap();
+
+        assert_eq!(
+            state.strict_bindings_for_native_thread(&thread_id),
+            vec![&strict]
+        );
+        assert_eq!(state.legacy_thread_route_matches(&thread_id), vec![&legacy]);
         state.validate().unwrap();
     }
 

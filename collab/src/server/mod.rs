@@ -2311,6 +2311,19 @@ impl ProjectRuntimeManager {
                 .legacy_thread_route_matches(&native_thread_id)
                 .is_empty()
             {
+                // A legacy record is only a fallback for a thread with no live
+                // strict owner.  If the thread is already session-bound to
+                // another identity, a request carrying a different session
+                // must not be routed through the older project.
+                if !state
+                    .global
+                    .strict_bindings_for_native_thread(&native_thread_id)
+                    .is_empty()
+                {
+                    return Err(format!(
+                        "ROUTE_RESOLVE_AMBIGUOUS: App Server thread {native_thread_id} already has a session-bound binding, so it is not resolvable under session {session_id}; recovery: use the thread's current session/thread pair, or explicitly rebind the intended identity with the current host session/thread pair before retrying; never guess a session or edit route state by hand"
+                    ));
+                }
                 let matches = state.global.legacy_thread_route_matches(&native_thread_id);
                 if matches.len() > 1 {
                     return Err(format!(

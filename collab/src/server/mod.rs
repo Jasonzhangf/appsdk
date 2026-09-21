@@ -16951,6 +16951,23 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         json!({"pid": std::process::id()}),
     );
 
+    let mut interrupt = Box::pin(tokio::signal::ctrl_c());
+    let mut terminate = Box::pin(async {
+        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        signal.recv().await;
+        Ok::<(), std::io::Error>(())
+    });
+    let mut state_root_removed = Box::pin(async {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !host_paths.state_root().is_dir() {
+                return;
+            }
+        }
+    });
+
     // Background scheduler: bounded waits and explicitly registered notifications.
     let sched = runtime_manager.clone();
     tokio::spawn(async move {
@@ -16967,15 +16984,31 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         }
     });
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let manager = runtime_manager.clone();
-                tokio::spawn(conn_task_routed(manager, stream));
+    tokio::select! {
+        _ = interrupt.as_mut() => {}
+        _ = terminate.as_mut() => {}
+        _ = state_root_removed.as_mut() => {}
+        result = async {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let manager = runtime_manager.clone();
+                        tokio::spawn(conn_task_routed(manager, stream));
+                    }
+                    Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),
+                }
             }
-            Err(e) => append_log(&host_paths.log_path(), &format!("accept error: {}", e)),
-        }
+        } => result,
     }
+
+    let _ = remove_listener_socket(&sock_path, &socket_metadata);
+    if std::fs::read_to_string(host_paths.pid_path())
+        .ok()
+        .is_some_and(|pid| pid.trim() == std::process::id().to_string())
+    {
+        let _ = std::fs::remove_file(host_paths.pid_path());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -17498,6 +17531,69 @@ mod startup_tests {
             .to_string()
             .contains("server already running"));
         assert_eq!(journal_before, std::fs::read(&journal).unwrap());
+
+        running.abort();
+        let _ = running.await;
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn daemon_exits_when_its_owned_state_root_is_removed() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("owned-state-root-removed");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let socket = host_paths.socket_path();
+        let running = tokio::spawn(run_with_host_paths(
+            Scope { root: root.clone() },
+            host_paths.clone(),
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && !crate::client::alive(&socket) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(crate::client::alive(&socket), "daemon did not start");
+
+        std::fs::remove_dir_all(host_paths.state_root()).expect("remove owned state root");
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("daemon did not exit after its state root disappeared")
+            .expect("daemon task failed")
+            .expect("daemon returned an error");
+
+        assert!(!socket.exists());
+        assert!(!host_paths.pid_path().exists());
+        std::fs::remove_dir_all(root).expect("remove startup test root");
+    }
+
+    #[tokio::test]
+    async fn removing_an_unrelated_directory_does_not_stop_the_daemon() {
+        let _startup_test_lock = startup_test_lock();
+        let root = test_root("unrelated-root-removed");
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        host_paths.ensure_root().unwrap();
+        let socket = host_paths.socket_path();
+        let unrelated = root.join("unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let running = tokio::spawn(run_with_host_paths(
+            Scope { root: root.clone() },
+            host_paths.clone(),
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && !crate::client::alive(&socket) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(crate::client::alive(&socket), "daemon did not start");
+
+        std::fs::remove_dir_all(&unrelated).expect("remove unrelated directory");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !running.is_finished(),
+            "daemon exited for an unrelated directory removal"
+        );
+        assert!(crate::client::alive(&socket));
 
         running.abort();
         let _ = running.await;

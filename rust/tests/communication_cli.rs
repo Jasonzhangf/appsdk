@@ -88,6 +88,10 @@ fn delivery_attempt_fields(root: &Path, message_id: &str) -> (String, String) {
         .unwrap()
 }
 
+fn count_events(events: &[Value], kind: &str) -> usize {
+    events.iter().filter(|event| event["kind"] == kind).count()
+}
+
 fn retain_mailbox_through(root: &Path, event_kind: &str) {
     let mailbox = root.join(".appsdk-control/communication/mailbox.jsonl");
     let contents = fs::read_to_string(&mailbox).unwrap();
@@ -5623,6 +5627,299 @@ fn master_wake_crash_after_queue_reuses_message_and_notification_identity() {
 }
 
 #[test]
+fn agent_rebind_reconciles_emitted_direct_wake_after_dispatch_mark_crash() {
+    let root = temp_root("agent-rebind-emitted-direct-wake");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    call(
+        &root,
+        json!({
+            "op": "accumulate_wake",
+            "master": { "scopeId": "scope", "sessionId": "master-old" },
+            "signal": {
+                "key": "bug:rebind-direct-crash",
+                "kind": "bug",
+                "title": "rebind direct crash",
+                "priority": "p0",
+                "summary": "direct delivery already emitted before the dispatch mark",
+                "issueId": "bug-direct-crash",
+                "observedAt": "2026-01-01T00:00:00Z"
+            }
+        }),
+    );
+    // Crash window: the direct notification reached `emitted`, but the
+    // accumulator's `directDispatched` mark was never committed.
+    retain_mailbox_through_last(&root, "notification.emitted");
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    let ticked = call(
+        &root,
+        json!({ "op": "tick", "now": "2026-01-01T00:02:00Z" }),
+    );
+    assert!(ticked["masterWake"][0]["signals"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|signal| signal["directDispatched"] == true));
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(count_events(&events, "message.created"), 1);
+    assert_eq!(count_events(&events, "notification.emitted"), 1);
+    assert_eq!(count_events(&events, "master_wake.briefing"), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_reuses_worker_sourced_wake_signal_identity() {
+    let root = temp_root("agent-rebind-worker-signal-identity");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master", "worker-old", "worker-new"],
+    );
+    register_agent(&root, "scope", "master", "master", "master", None);
+    register_agent(&root, "scope", "worker-old", "worker", "peer", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "accumulate_wake",
+            "master": { "scopeId": "scope", "sessionId": "master" },
+            "signal": {
+                "key": "worker-idle:rebind",
+                "kind": "worker_idle",
+                "title": "worker idle: worker",
+                "priority": "p0",
+                "summary": "worker sourced breakthrough signal",
+                "source": { "scopeId": "scope", "sessionId": "worker-old" },
+                "observedAt": at
+            }
+        }),
+    );
+    // Crash window: the direct delivery was emitted but the accumulator's
+    // dispatch mark was not yet committed when the worker rebinds.
+    retain_mailbox_through_last(&root, "notification.emitted");
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "worker-old" },
+                "to": { "scopeId": "scope", "sessionId": "worker-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    call(&root, json!({ "op": "tick", "now": after(at, 120) }));
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(count_events(&events, "message.created"), 1);
+    assert_eq!(count_events(&events, "master_wake.briefing"), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_reuses_queued_wakeup_reminder_identity() {
+    let root = temp_root("agent-rebind-queued-wakeup-reminder");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master-old" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    let due = after(at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    // Crash after the reminder was queued, before the emit and wakeup advance.
+    retain_mailbox_through_last(&root, "notification.queued");
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    call(&root, json!({ "op": "tick", "now": due }));
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    // The reminder was queued pre-rebind; replaying its tick must recover that
+    // projection rather than minting a second reminder message for the new address.
+    assert_eq!(count_events(&events, "message.created"), 1);
+    assert_eq!(count_events(&events, "notification.queued"), 1);
+    let message_id = events
+        .iter()
+        .find(|event| event["kind"] == "message.created")
+        .unwrap()["data"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message_id.contains("master-old"), "{message_id}");
+    let reminder = events
+        .iter()
+        .find(|event| event["kind"] == "wakeup.reminder")
+        .expect("wakeup reminder committed");
+    assert_eq!(
+        reminder["data"]["message"]["messageId"],
+        message_id.as_str()
+    );
+    assert_eq!(
+        reminder["data"]["wakeup"]["address"]["sessionId"],
+        "master-new"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_reuses_queued_wake_briefing_identity() {
+    let root = temp_root("agent-rebind-queued-wake-briefing");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    let at = "2026-01-01T00:00:00Z";
+    call(
+        &root,
+        json!({
+            "op": "set_agent_state",
+            "address": { "scopeId": "scope", "sessionId": "master-old" },
+            "state": "idle",
+            "at": at
+        }),
+    );
+    call(
+        &root,
+        json!({
+            "op": "accumulate_wake",
+            "master": { "scopeId": "scope", "sessionId": "master-old" },
+            "signal": {
+                "key": "bug:rebind-briefing",
+                "kind": "bug",
+                "title": "rebind queued briefing",
+                "priority": "p1",
+                "summary": "queued briefing must keep its identity across rebind",
+                "issueId": "bug-queued-briefing",
+                "observedAt": at
+            }
+        }),
+    );
+    let due = after(at, 120);
+    call(&root, json!({ "op": "tick", "now": due }));
+    retain_mailbox_through_last(&root, "notification.queued");
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    let retry = call(&root, json!({ "op": "tick", "now": due }));
+    assert_eq!(retry["masterWake"][0]["remindersSent"], 1);
+    assert_eq!(retry["masterWake"][0]["address"]["sessionId"], "master-new");
+    let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(count_events(&events, "master_wake.briefing"), 1);
+    assert_eq!(count_events(&events, "notification.delivery_attempt"), 1);
+    assert_eq!(count_events(&events, "notification.emitted"), 1);
+    // The briefing was queued before the rebind; replaying its tick must recover
+    // that projection instead of minting a second message for the new address.
+    assert_eq!(count_events(&events, "message.created"), 1);
+    assert_eq!(count_events(&events, "notification.queued"), 1);
+    let queued_message_id = events
+        .iter()
+        .find(|event| event["kind"] == "notification.queued")
+        .unwrap()["data"]["notification"]["messageId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        queued_message_id.contains("master-old"),
+        "{queued_message_id}"
+    );
+    let briefing = events
+        .iter()
+        .find(|event| event["kind"] == "master_wake.briefing")
+        .unwrap();
+    assert_eq!(
+        briefing["data"]["notification"]["recipient"]["sessionId"],
+        "master-new"
+    );
+    assert_eq!(
+        briefing["data"]["message"]["messageId"],
+        queued_message_id.as_str()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn address_keys_and_message_ids_fail_closed_on_collisions() {
     let root = temp_root("collision");
     register_scope(&root, "a", "app-a", "/project-a", &["b/c"]);
@@ -6247,6 +6544,165 @@ fn agent_rebind_preserves_identity_updates_master_and_replays() {
 
     let raw = fs::read_to_string(root.join(".appsdk-control/communication/mailbox.jsonl")).unwrap();
     assert_eq!(raw.matches("\"kind\":\"agent.rebound\"").count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_preserves_existing_wakeup_message_delivery_identity() {
+    let root = temp_root("agent-rebind-wakeup-message-identity");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    let emitted = call(
+        &root,
+        json!({
+            "op": "accumulate_wake",
+            "master": { "scopeId": "scope", "sessionId": "master-old" },
+            "signal": {
+                "key": "bug:rebind-p0",
+                "kind": "bug",
+                "title": "rebind p0",
+                "priority": "p0",
+                "summary": "preserve message delivery identity",
+                "issueId": "bug-p0-rebind",
+                "source": { "scopeId": "scope", "sessionId": "master-old" },
+                "observedAt": "2026-09-19T00:00:00.000Z"
+            }
+        }),
+    );
+    assert_eq!(emitted["idempotent"], false);
+    let status = call(&root, json!({ "op": "status" }));
+    let message_id = status["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["title"] == "rebind p0")
+        .and_then(|message| message["messageId"].as_str())
+        .unwrap()
+        .to_owned();
+    let (attempt_id, nonce) = delivery_attempt_fields(&root, &message_id);
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    let receipt = call(
+        &root,
+        json!({
+            "op": "record_delivery",
+            "delivery": {
+                "messageId": message_id,
+                "attemptId": attempt_id,
+                "nonce": nonce,
+                "state": "delivered",
+                "runtimeId": "runtime-scope",
+                "evidence": {
+                    "durable": true,
+                    "format": "jsonl",
+                    "receiptId": "master-old-receipt"
+                }
+            }
+        }),
+    );
+    assert_eq!(receipt["message"]["state"], "delivered");
+    assert_eq!(receipt["message"]["messageId"], message_id);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agent_rebind_rekeys_pending_coalesced_notifications_without_losing_identity() {
+    let root = temp_root("agent-rebind-coalesced-notification");
+    register_scope(
+        &root,
+        "scope",
+        "app",
+        "/project",
+        &["master-old", "master-new", "peer"],
+    );
+    register_agent(&root, "scope", "master-old", "master", "master", None);
+    register_agent(&root, "scope", "peer", "peer", "peer", None);
+    call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "peer" },
+                "title": "first pending",
+                "priority": "p2",
+                "body": "first update",
+                "deliveryMode": "idle",
+                "coalesceKey": "progress",
+                "messageId": "pending-first",
+                "createdAt": "2026-09-19T00:00:00.000Z"
+            }
+        }),
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "rebind_agent",
+            "rebind": {
+                "from": { "scopeId": "scope", "sessionId": "master-old" },
+                "to": { "scopeId": "scope", "sessionId": "master-new" },
+                "runtimeId": "runtime-scope"
+            }
+        }),
+    );
+
+    call(
+        &root,
+        json!({
+            "op": "send",
+            "message": {
+                "from": { "scopeId": "scope", "sessionId": "master-new" },
+                "to": { "scopeId": "scope", "sessionId": "peer" },
+                "title": "second pending",
+                "priority": "p2",
+                "body": "second update",
+                "deliveryMode": "idle",
+                "coalesceKey": "progress",
+                "messageId": "pending-second",
+                "createdAt": "2026-09-19T00:01:00.000Z"
+            }
+        }),
+    );
+
+    let status = call(&root, json!({ "op": "status" }));
+    let pending = status["notificationProjection"]["pending"]
+        .as_array()
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["messageId"], "pending-second");
+    assert_eq!(pending[0]["recipient"]["sessionId"], "peer");
+
+    let flushed = call(
+        &root,
+        json!({
+            "op": "flush_notifications",
+            "now": "2026-09-19T00:03:00.000Z"
+        }),
+    );
+    assert_eq!(flushed["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(flushed["batches"][0]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        flushed["batches"][0]["items"][0]["messageId"],
+        "pending-second"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

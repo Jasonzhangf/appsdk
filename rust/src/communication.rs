@@ -669,6 +669,16 @@ struct NotificationBatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WakeupRecord {
     address: Address,
+    /// Address the wakeup's generated reminder identities were minted from.
+    /// Rebinding moves `address` (the delivery target) while queued/emitted
+    /// reminder messages keep their original identity, so reminder replay must
+    /// resolve identities through this origin.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "identityOrigin"
+    )]
+    identity_origin: Option<Address>,
     #[serde(rename = "idleSince")]
     idle_since: Option<String>,
     #[serde(rename = "remindersSent")]
@@ -685,6 +695,23 @@ struct MasterWakeSignal {
     #[serde(rename = "signalId")]
     signal_id: String,
     key: String,
+    /// `key`/`signal_id` as they were when any message for this signal was
+    /// minted. Worker-sourced signals remap both when their worker rebinds so
+    /// the wake bookkeeping follows the new address, while already minted
+    /// messages keep their original identity. Pinning the pre-remap pair keeps
+    /// that message identity resolvable after the remap.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "identityKey"
+    )]
+    identity_key: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "identitySignalId"
+    )]
+    identity_signal_id: Option<String>,
     kind: String,
     title: String,
     priority: Priority,
@@ -701,6 +728,17 @@ struct MasterWakeSignal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MasterWakeAccumulator {
     address: Address,
+    /// Address the accumulator's generated message identities were minted from.
+    /// Rebinding moves `address`, which is only the current delivery target, while
+    /// persisted messages, notifications and delivery attempts keep the identity
+    /// they were minted with, so every wake replay path must resolve identities
+    /// through this origin instead of the rebound address.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "identityOrigin"
+    )]
+    identity_origin: Option<Address>,
     generation: u64,
     pending: bool,
     #[serde(rename = "firstObservedAt")]
@@ -722,6 +760,12 @@ struct MasterWakeAccumulator {
     signals: BTreeMap<String, MasterWakeSignal>,
     #[serde(default, rename = "consumedSignals")]
     consumed_signals: BTreeMap<String, MasterWakeSignal>,
+}
+
+impl MasterWakeAccumulator {
+    fn identity_address(&self) -> &Address {
+        self.identity_origin.as_ref().unwrap_or(&self.address)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2297,6 +2341,7 @@ impl CommunicationStore {
             let wakeup = if next == AgentState::Idle {
                 WakeupRecord {
                     address: current.address(),
+                    identity_origin: None,
                     idle_since: Some(at.clone()),
                     reminders_sent: 0,
                     next_due_at: Some(add_seconds(&at, DEFAULT_BATCH_WINDOW_SECONDS)?),
@@ -2306,6 +2351,7 @@ impl CommunicationStore {
             } else {
                 WakeupRecord {
                     address: current.address(),
+                    identity_origin: None,
                     idle_since: None,
                     reminders_sent: 0,
                     next_due_at: None,
@@ -2359,6 +2405,8 @@ impl CommunicationStore {
         let signal = MasterWakeSignal {
             signal_id: worker_idle_message_id(worker, at),
             key,
+            identity_key: None,
+            identity_signal_id: None,
             kind: "worker_idle".into(),
             title: format!("worker idle: {}", worker.agent_id),
             priority: Priority::P2,
@@ -2450,6 +2498,7 @@ impl CommunicationStore {
 
         let mut accumulator = existing.unwrap_or_else(|| MasterWakeAccumulator {
             address: master.clone(),
+            identity_origin: None,
             generation: 0,
             pending: false,
             first_observed_at: None,
@@ -2611,6 +2660,8 @@ impl CommunicationStore {
                 .signal_id
                 .unwrap_or_else(|| structured_key(&[&request.kind, &request.key, &observed_at])),
             key,
+            identity_key: None,
+            identity_signal_id: None,
             kind: request.kind,
             title: request.title,
             priority,
@@ -2665,7 +2716,8 @@ impl CommunicationStore {
         let Some(agent) = self.require_live_agent(master).ok().cloned() else {
             return Ok(accumulator);
         };
-        let (message_id, conversation_id) = master_wake_direct_message_identity(master, &signal);
+        let (message_id, conversation_id) =
+            master_wake_direct_message_identity(&accumulator, &signal);
         let message = if let Some(existing) = self.projection.messages.get(&message_id).cloned() {
             if existing.conversation_id != conversation_id
                 || existing.to != agent.address()
@@ -2908,10 +2960,10 @@ impl CommunicationStore {
 
     fn master_wake_signal_delivery_unknown(
         &self,
-        master: &Address,
+        accumulator: &MasterWakeAccumulator,
         signal: &MasterWakeSignal,
     ) -> bool {
-        let (message_id, _) = master_wake_direct_message_identity(master, signal);
+        let (message_id, _) = master_wake_direct_message_identity(accumulator, signal);
         self.projection.notifications.values().any(|notification| {
             notification.message_id == message_id && notification.status == "unknown"
         })
@@ -2919,10 +2971,10 @@ impl CommunicationStore {
 
     fn master_wake_signal_delivery_emitted(
         &self,
-        master: &Address,
+        accumulator: &MasterWakeAccumulator,
         signal: &MasterWakeSignal,
     ) -> bool {
-        let (message_id, _) = master_wake_direct_message_identity(master, signal);
+        let (message_id, _) = master_wake_direct_message_identity(accumulator, signal);
         self.projection.notifications.values().any(|notification| {
             notification.message_id == message_id && notification.status == "emitted"
         })
@@ -2937,7 +2989,7 @@ impl CommunicationStore {
         for (signal_key, signal) in accumulator.signals.iter() {
             if signal.priority.is_breakthrough()
                 && !signal.direct_dispatched
-                && self.master_wake_signal_delivery_emitted(&accumulator.address, signal)
+                && self.master_wake_signal_delivery_emitted(accumulator, signal)
             {
                 if let Some(stored) = updated.signals.get_mut(signal_key) {
                     stored.direct_dispatched = true;
@@ -3007,9 +3059,9 @@ impl CommunicationStore {
         {
             return Ok(None);
         }
-        if !accumulator.signals.values().any(|signal| {
-            !signal.direct_dispatched
-                && !self.master_wake_signal_delivery_unknown(&accumulator.address, signal)
+        if !accumulator.signals.values().any(|candidate| {
+            !candidate.direct_dispatched
+                && !self.master_wake_signal_delivery_unknown(&accumulator, candidate)
         }) {
             // An uncertain direct delivery is never replayed as a briefing. Keep the
             // signal in the accumulator for explicit recovery or a new signal generation.
@@ -3168,7 +3220,7 @@ impl CommunicationStore {
             .values()
             .filter(|signal| {
                 !signal.direct_dispatched
-                    && !self.master_wake_signal_delivery_unknown(&accumulator.address, signal)
+                    && !self.master_wake_signal_delivery_unknown(accumulator, signal)
             })
             .collect();
         signals.sort_by(|left, right| {
@@ -3316,6 +3368,7 @@ impl CommunicationStore {
                 }
                 WakeupRecord {
                     address: current.address(),
+                    identity_origin: None,
                     idle_since: None,
                     reminders_sent: 0,
                     next_due_at: None,
@@ -3376,6 +3429,7 @@ impl CommunicationStore {
                 }
                 WakeupRecord {
                     address: current.address(),
+                    identity_origin: None,
                     idle_since: Some(idle_since),
                     reminders_sent,
                     next_due_at: Some(next_due_at),
@@ -3432,6 +3486,7 @@ impl CommunicationStore {
             let stopped = reminders_sent >= DEFAULT_MASTER_REMINDER_LIMIT;
             let next_wakeup = WakeupRecord {
                 address: wakeup.address.clone(),
+                identity_origin: wakeup.identity_origin.clone(),
                 idle_since: wakeup.idle_since.clone(),
                 reminders_sent,
                 next_due_at: if stopped {
@@ -5930,61 +5985,22 @@ impl CommunicationStore {
         }
 
         let old_messages = self.projection.messages.clone();
-        let mut message_id_updates = BTreeMap::new();
-        let mut conversation_id_updates = BTreeMap::new();
         let old_master_wake = self.projection.master_wake.clone();
         let mut migrated_master_wake = BTreeMap::new();
         for old_accumulator in old_master_wake.values() {
             let mut new_accumulator = old_accumulator.clone();
             if new_accumulator.address == *from {
+                // The rebound address is the new delivery target; the identities of
+                // already persisted wake messages stay bound to the address they
+                // were minted from, so pin that origin before the address moves.
+                new_accumulator
+                    .identity_origin
+                    .get_or_insert_with(|| old_accumulator.address.clone());
                 new_accumulator.address = to.clone();
             }
             new_accumulator.signals = migrate_wake_signal_map(&old_accumulator.signals, from, to)?;
             new_accumulator.consumed_signals =
                 migrate_wake_signal_map(&old_accumulator.consumed_signals, from, to)?;
-            for old_signal in old_accumulator
-                .signals
-                .values()
-                .chain(old_accumulator.consumed_signals.values())
-            {
-                let new_signal = migrate_wake_signal(old_signal, from, to);
-                let (old_message_id, old_conversation_id) =
-                    master_wake_direct_message_identity(&old_accumulator.address, old_signal);
-                let (new_message_id, new_conversation_id) =
-                    master_wake_direct_message_identity(&new_accumulator.address, &new_signal);
-                insert_identity_update(
-                    &mut message_id_updates,
-                    old_message_id,
-                    new_message_id,
-                    "master wake message",
-                )?;
-                insert_identity_update(
-                    &mut conversation_id_updates,
-                    old_conversation_id,
-                    new_conversation_id,
-                    "master wake conversation",
-                )?;
-            }
-            if old_accumulator.address != new_accumulator.address {
-                for reminder in 1..=DEFAULT_MASTER_REMINDER_LIMIT {
-                    let (old_message_id, old_conversation_id) =
-                        master_wake_message_identity(old_accumulator, reminder);
-                    let (new_message_id, new_conversation_id) =
-                        master_wake_message_identity(&new_accumulator, reminder);
-                    insert_identity_update(
-                        &mut message_id_updates,
-                        old_message_id,
-                        new_message_id,
-                        "master wake briefing message",
-                    )?;
-                    insert_identity_update(
-                        &mut conversation_id_updates,
-                        old_conversation_id,
-                        new_conversation_id,
-                        "master wake briefing conversation",
-                    )?;
-                }
-            }
             migrated_master_wake.insert(new_accumulator.address.key(), new_accumulator);
         }
 
@@ -5993,41 +6009,12 @@ impl CommunicationStore {
         for old_record in old_wakeup.values() {
             let mut new_record = old_record.clone();
             if new_record.address == *from {
+                new_record
+                    .identity_origin
+                    .get_or_insert_with(|| old_record.address.clone());
                 new_record.address = to.clone();
-                for reminder in 1..=DEFAULT_MASTER_REMINDER_LIMIT {
-                    let (old_message_id, old_conversation_id) =
-                        wakeup_message_identity(old_record, reminder)?;
-                    let (new_message_id, new_conversation_id) =
-                        wakeup_message_identity(&new_record, reminder)?;
-                    insert_identity_update(
-                        &mut message_id_updates,
-                        old_message_id,
-                        new_message_id,
-                        "wakeup message",
-                    )?;
-                    insert_identity_update(
-                        &mut conversation_id_updates,
-                        old_conversation_id,
-                        new_conversation_id,
-                        "wakeup conversation",
-                    )?;
-                }
             }
             migrated_wakeup.insert(new_record.address.key(), new_record);
-        }
-
-        for message in old_messages.values() {
-            if message.from == *from
-                && message.coalesce_key.as_deref() == Some(worker_idle_coalesce_key(from).as_str())
-            {
-                let new_message_id = worker_idle_message_id_for_address(to, &message.created_at);
-                insert_identity_update(
-                    &mut message_id_updates,
-                    message.message_id.clone(),
-                    new_message_id,
-                    "worker idle message",
-                )?;
-            }
         }
 
         let messages = std::mem::take(&mut self.projection.messages);
@@ -6049,13 +6036,6 @@ impl CommunicationStore {
             {
                 message.coalesce_key = Some(worker_idle_coalesce_key(to));
             }
-            if let Some(new_message_id) = message_id_updates.get(&old_key) {
-                message.message_id = new_message_id.clone();
-            }
-            if let Some(new_conversation_id) = conversation_id_updates.get(&message.conversation_id)
-            {
-                message.conversation_id = new_conversation_id.clone();
-            }
             let new_key = message.message_id.clone();
             if self.projection.messages.insert(new_key, message).is_some() {
                 return Err(CommError::new(
@@ -6063,33 +6043,10 @@ impl CommunicationStore {
                     "agent rebound creates duplicate message projection keys",
                 ));
             }
-            if old_message.message_id != old_key
-                && old_message.message_id
-                    != message_id_updates
-                        .get(&old_key)
-                        .cloned()
-                        .unwrap_or(old_key.clone())
-            {
+            if old_message.message_id != old_key {
                 return Err(CommError::new(
                     "event_data_invalid",
                     "message projection key does not match message identity",
-                ));
-            }
-        }
-
-        let delivery_attempts = std::mem::take(&mut self.projection.message_delivery_attempts);
-        for (old_key, mut attempt) in delivery_attempts {
-            let new_key = message_id_updates.get(&old_key).cloned().unwrap_or(old_key);
-            attempt.message_id = new_key.clone();
-            if self
-                .projection
-                .message_delivery_attempts
-                .insert(new_key, attempt)
-                .is_some()
-            {
-                return Err(CommError::new(
-                    "event_data_invalid",
-                    "agent rebound creates duplicate message delivery attempts",
                 ));
             }
         }
@@ -6108,21 +6065,13 @@ impl CommunicationStore {
             if batch.recipient == *from {
                 batch.recipient = to.clone();
             }
-            for item in &mut batch.items {
-                if let Some(new_message_id) = message_id_updates.get(&item.message_id) {
-                    item.message_id = new_message_id.clone();
-                }
-            }
         }
 
         let mut notification_key_updates = BTreeMap::new();
         let notifications = std::mem::take(&mut self.projection.notifications);
-        for (key, mut notification) in notifications {
+        for (old_key, mut notification) in notifications {
             let old_message = old_messages.get(&notification.message_id);
             let old_notification_key = old_message.map(message_notification_key_for);
-            if let Some(new_message_id) = message_id_updates.get(&notification.message_id) {
-                notification.message_id = new_message_id.clone();
-            }
             if notification.recipient == *from {
                 notification.recipient = to.clone();
             }
@@ -6131,7 +6080,7 @@ impl CommunicationStore {
             {
                 notification.coalesce_key = Some(worker_idle_coalesce_key(to));
             }
-            let new_key = if old_notification_key.as_deref() == Some(key.as_str()) {
+            let new_key = if old_notification_key.as_deref() == Some(old_key.as_str()) {
                 let message = self
                     .projection
                     .messages
@@ -6148,13 +6097,13 @@ impl CommunicationStore {
                 let new_key = message_notification_key_for(message);
                 insert_identity_update(
                     &mut notification_key_updates,
-                    key.clone(),
+                    old_key.clone(),
                     new_key.clone(),
                     "notification",
                 )?;
                 new_key
             } else {
-                key
+                old_key
             };
             if self
                 .projection
@@ -7872,6 +7821,12 @@ fn migrate_wake_signal(
     if migrated.source.as_ref() == Some(from) {
         migrated.source = Some(to.clone());
         if migrated.kind == "worker_idle" {
+            let pre_remap_key = migrated.key.clone();
+            let pre_remap_signal_id = migrated.signal_id.clone();
+            migrated.identity_key.get_or_insert(pre_remap_key);
+            migrated
+                .identity_signal_id
+                .get_or_insert(pre_remap_signal_id);
             migrated.key = worker_idle_signal_key(to);
             migrated.signal_id = worker_idle_message_id_for_address(to, &migrated.observed_at);
         }
@@ -7940,6 +7895,8 @@ fn bug_wake_signal(bug: &BugRecord, direct_dispatched: bool) -> MasterWakeSignal
     MasterWakeSignal {
         signal_id: format!("bug:{}:{}:{}", bug.bug_id, bug.status, bug.updated_at),
         key: bug_wake_signal_key(&bug.bug_id),
+        identity_key: None,
+        identity_signal_id: None,
         kind: "bug".into(),
         title: format!("bug {}: {}", bug.status, bug.title),
         priority: bug.priority.clone(),
@@ -7955,6 +7912,8 @@ fn loop_error_wake_signal(loop_record: &LoopRecord, error: &ErrorRecord) -> Mast
     MasterWakeSignal {
         signal_id: format!("loop-error:{}:{}", loop_record.loop_id, error.at),
         key: format!("loop-error:{}", loop_record.loop_id),
+        identity_key: None,
+        identity_signal_id: None,
         kind: "loop_error".into(),
         title: format!("loop blocked: {}", loop_record.loop_id),
         priority: Priority::P1,
@@ -8041,10 +8000,11 @@ fn master_wake_message_identity(
     accumulator: &MasterWakeAccumulator,
     reminder: u8,
 ) -> (String, String) {
+    let identity_address = accumulator.identity_address().key().to_owned();
     let generation = accumulator.generation.to_string();
     let reminder = reminder.to_string();
-    let cycle = structured_key(&[&accumulator.address.key(), &generation, &reminder]);
-    let conversation = structured_key(&[&accumulator.address.key(), &generation]);
+    let cycle = structured_key(&[&identity_address, &generation, &reminder]);
+    let conversation = structured_key(&[&identity_address, &generation]);
     (
         format!("master-wake-message-{cycle}"),
         format!("master-wake-conversation-{conversation}"),
@@ -8052,14 +8012,32 @@ fn master_wake_message_identity(
 }
 
 fn master_wake_direct_message_identity(
-    master: &Address,
+    accumulator: &MasterWakeAccumulator,
     signal: &MasterWakeSignal,
 ) -> (String, String) {
-    let identity = structured_key(&[&master.key(), &signal.key, &signal.signal_id]);
-    let conversation = structured_key(&[&master.key(), &signal.key]);
+    let identity_address = accumulator.identity_address().key().to_owned();
+    let (signal_key, signal_id) = master_wake_signal_identity(signal);
+    let identity = structured_key(&[&identity_address, &signal_key, &signal_id]);
+    let conversation = structured_key(&[&identity_address, &signal_key]);
     (
         format!("master-wake-signal-message-{identity}"),
         format!("master-wake-signal-conversation-{conversation}"),
+    )
+}
+
+/// Signal key/id as they were when the signal's messages were minted. Only
+/// worker-sourced signals remap their key/id on rebind, so the pinned pre-remap
+/// pair reproduces the identity that existing messages were stored under.
+fn master_wake_signal_identity(signal: &MasterWakeSignal) -> (String, String) {
+    (
+        signal
+            .identity_key
+            .clone()
+            .unwrap_or_else(|| signal.key.clone()),
+        signal
+            .identity_signal_id
+            .clone()
+            .unwrap_or_else(|| signal.signal_id.clone()),
     )
 }
 
@@ -8435,6 +8413,11 @@ fn wakeup_message_identity(
     wakeup: &WakeupRecord,
     reminder_number: u8,
 ) -> CommResult<(String, String)> {
+    let identity_address = wakeup
+        .identity_origin
+        .as_ref()
+        .unwrap_or(&wakeup.address)
+        .key();
     let idle_since = wakeup.idle_since.as_deref().ok_or_else(|| {
         CommError::new(
             "wakeup_cycle_missing",
@@ -8442,8 +8425,8 @@ fn wakeup_message_identity(
         )
     })?;
     let reminder_number = reminder_number.to_string();
-    let cycle = structured_key(&[&wakeup.address.key(), idle_since, &reminder_number]);
-    let conversation = structured_key(&[&wakeup.address.key(), idle_since]);
+    let cycle = structured_key(&[identity_address.as_str(), idle_since, &reminder_number]);
+    let conversation = structured_key(&[identity_address.as_str(), idle_since]);
     Ok((
         format!("wakeup-message-{cycle}"),
         format!("wakeup-conversation-{conversation}"),

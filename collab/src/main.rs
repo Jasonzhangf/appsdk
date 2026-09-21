@@ -1564,29 +1564,27 @@ fn unregistered_context(
         Some(scope) => scope.root.clone(),
         None => canonical_cwd.clone(),
     };
-    let legacy_daemon = route_error.is_some_and(|error| {
-        error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
-            && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
-    });
+    let route_recovery_required =
+        route_error.is_some_and(|error| error.starts_with("ROUTE_RESOLVE_NOT_FOUND:"));
     let looks_like_worktree = canonical_cwd.ancestors().any(|ancestor| {
         ancestor
             .file_name()
             .is_some_and(|name| name == "playground")
     });
-    let next_action = if legacy_daemon {
-        "from the canonical project main checkout run `collab down`, then `collab up` once, then `appsdk init .`"
+    let next_action = if route_recovery_required {
+        "from the canonical project main checkout, if the running daemon predates the installed collab binary run `collab down`, then `collab up` once; then run `appsdk init .`"
     } else if looks_like_worktree {
         "return to the canonical project main checkout and run `appsdk init .`"
     } else {
         "appsdk init ."
     };
     let recovery = route_error.map(|error| {
-        let steps = if legacy_daemon {
+        let steps = if route_recovery_required {
             json!([
-                "From the canonical project main checkout run `collab down`, then `collab up` once so the installed daemon binary is loaded.",
+                "If the running daemon was started before the current `collab` binary was installed, it may predate resident-route replay. From the canonical project main checkout run `collab down`, then `collab up` once so the installed daemon binary is loaded.",
                 "From that same checkout run `appsdk init .` to restore the resident registration and route.",
                 "Verify with `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work.",
-                "If any step fails, preserve its exact output and stop; do not loop initialization or replace transport with mailbox state."
+                "Only then rerun the original command. If any step fails, preserve its exact output and stop; do not loop initialization or replace transport with mailbox state."
             ])
         } else {
             json!([
@@ -1596,8 +1594,8 @@ fn unregistered_context(
             ])
         };
         json!({
-            "kind": if legacy_daemon {
-                "legacy_daemon_restart_required"
+            "kind": if route_recovery_required {
+                "route_recovery_required"
             } else {
                 "route_registration_required"
             },
@@ -1701,14 +1699,21 @@ fn main() {
     }
 }
 
-const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: the running daemon predates this CLI and did not replay resident registration; from the canonical project main checkout run `collab down`, then `collab up` once to load the installed binary, then run `appsdk init .`; verify `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work; preserve daemon state and do not re-register a worktree, edit routes.jsonl, or use mailbox state as transport delivery";
+const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
+const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: if the running daemon predates the installed collab binary, run `collab down`, then `collab up` once to load the installed binary; then verify `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
 
 fn format_cli_error(error: &str) -> String {
     if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
         && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
-        && !error.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
+        && !error.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE)
     {
-        return format!("{error}; {LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY}");
+        if error.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY) {
+            return format!("{error}; {LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE}");
+        }
+        return format!(
+            "{error}; {}",
+            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
+        );
     }
     error.to_owned()
 }
@@ -3217,15 +3222,12 @@ mod tests {
         let root = test_root("legacy-route-recovery-context");
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let error = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon";
+        let error = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon; recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
         let result = unregistered_context(None, None, Some(error));
         std::env::set_current_dir(previous).unwrap();
 
         let context = result.unwrap();
-        assert_eq!(
-            context["recovery"]["kind"],
-            "legacy_daemon_restart_required"
-        );
+        assert_eq!(context["recovery"]["kind"], "route_recovery_required");
         assert_eq!(context["recovery"]["reason"], error);
         let steps = context["recovery"]["steps"]
             .as_array()
@@ -3247,21 +3249,31 @@ mod tests {
         }
         assert_eq!(
             context["next_action"],
-            "from the canonical project main checkout run `collab down`, then `collab up` once, then `appsdk init .`"
+            "from the canonical project main checkout, if the running daemon predates the installed collab binary run `collab down`, then `collab up` once; then run `appsdk init .`"
         );
         assert!(!root.join(".agent-collab").exists());
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn cli_error_decorates_bare_route_resolve_not_found() {
-        let bare = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon";
-        let formatted = format_cli_error(bare);
-        assert!(formatted.starts_with(bare), "{formatted}");
-        assert!(
-            formatted.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY),
-            "{formatted}"
+    fn context_route_error_from_current_server_keeps_recovery_steps() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("current-route-recovery-context");
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        let error = format!(
+            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-current-daemon; {}",
+            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
         );
+        let result = unregistered_context(None, None, Some(&error));
+        std::env::set_current_dir(previous).unwrap();
+
+        let context = result.unwrap();
+        assert_eq!(context["recovery"]["kind"], "route_recovery_required");
+        assert_eq!(context["recovery"]["reason"], error);
+        let steps = context["recovery"]["steps"]
+            .as_array()
+            .expect("recovery steps");
         for expected in [
             "`collab down`",
             "`collab up` once",
@@ -3271,14 +3283,58 @@ mod tests {
             "`collab master status`",
         ] {
             assert!(
-                formatted.contains(expected),
-                "missing {expected}: {formatted}"
+                steps
+                    .iter()
+                    .any(|step| step.as_str().is_some_and(|value| value.contains(expected))),
+                "missing recovery step {expected}: {steps:?}"
             );
         }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cli_error_decorates_route_resolve_not_found_from_current_and_legacy_daemons() {
+        for error in [
+            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon",
+            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon; recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl",
+        ] {
+            let formatted = format_cli_error(error);
+            assert!(formatted.starts_with(error), "{formatted}");
+            assert!(
+                formatted.contains("`collab down`"),
+                "{formatted}"
+            );
+            for expected in [
+                "`collab down`",
+                "`collab up` once",
+                "`appsdk init .`",
+                "`collab context`",
+                "`collab route resolve --native-thread-id <thread-id>`",
+                "`collab master status`",
+            ] {
+                assert!(
+                    formatted.contains(expected),
+                    "missing {expected}: {formatted}"
+                );
+            }
+            assert_eq!(
+                format_cli_error(&formatted),
+                formatted,
+                "recovery guidance must not be duplicated"
+            );
+        }
+
+        let current = format!(
+            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-current-daemon; {}",
+            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
+        );
+        assert_eq!(format_cli_error(&current), current);
         assert_eq!(
-            format_cli_error(&formatted),
-            formatted,
-            "recovery guidance must not be duplicated"
+            current
+                .matches(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
+                .count(),
+            1,
+            "{current}"
         );
     }
 

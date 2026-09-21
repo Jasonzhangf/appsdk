@@ -328,51 +328,12 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
     let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut client = Client::connect(&socket_path, timeout)?;
     client.initialize()?;
-    let loaded = client.call("thread/loaded/list", json!({}))?;
-    let loaded = loaded
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| AdapterError::Unknown {
-            operation: "thread/loaded/list",
-            detail: "response is missing data array".into(),
-        })?;
-    let mut loaded_ids = Vec::with_capacity(loaded.len());
-    for (index, value) in loaded.iter().enumerate() {
-        let loaded_id = value
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| AdapterError::Unknown {
-                operation: "thread/loaded/list",
-                detail: format!("data[{index}] must be a non-empty thread id"),
-            })?;
-        loaded_ids.push(loaded_id);
-    }
-    if !loaded_ids.contains(&thread_id.as_str()) {
-        // The thread may simply be cold on this endpoint.  Run the explicit
-        // load step before refusing: `thread/resume` either puts the thread
-        // into the loaded set, or the App Server answers that another live
-        // process already owns the writer, which is itself proof of liveness.
-        // Anything else stays a refusal with the exact server error.
-        match load_persisted_thread(&mut client, thread_id.as_str())? {
-            ThreadLoad::Loaded => {}
-            ThreadLoad::OwnedElsewhere { detail } => {
-                return Err(AdapterError::RouteUnavailable {
-                    detail: format!(
-                        "thread {} is persisted but not loaded by the App Server on this endpoint: {detail}",
-                        thread_id.as_str()
-                    ),
-                })
-            }
-            ThreadLoad::Refused { detail } => {
-                return Err(AdapterError::RouteUnavailable {
-                    detail: format!(
-                        "thread {} is persisted but not loaded by the App Server, and the explicit load step was refused: {detail}",
-                        thread_id.as_str()
-                    ),
-                })
-            }
-        }
-    }
+    // Thread identity is established from `thread/read`, which serves
+    // persisted threads.  `thread/loaded/list` is not usable as an admission
+    // gate: on the host control endpoint it is always empty because threads
+    // are owned by the client process, so requiring membership there would
+    // reject every genuine thread.  A cold thread is loaded by the native
+    // load-and-start call at delivery time instead.
     let response = match client.call("thread/read", json!({"threadId": thread_id.as_str()})) {
         Ok(response) => response,
         Err(AdapterError::Unknown { operation, detail })
@@ -448,18 +409,9 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             ),
         });
     }
-    if response
-        .pointer("/thread/status/type")
-        .and_then(Value::as_str)
-        == Some("notLoaded")
-    {
-        return Err(AdapterError::RouteUnavailable {
-            detail: format!(
-                "thread {} is persisted but not loaded by the App Server",
-                thread_id.as_str()
-            ),
-        });
-    }
+    // `notLoaded` is a normal state for a persisted thread on this endpoint
+    // and is not a rejection reason: delivery uses `turn/start`, which loads
+    // the thread.  Identity above is what registration must actually prove.
     // Item history is a diagnostic capability, not a registration or wake
     // requirement. Some App Server builds expose thread/read and notification
     // methods but return method-not-found for items/list; that must not block peer
@@ -528,7 +480,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             "wait_reply".into(),
         ],
         self_check:
-            "initialize, thread/loaded/list/read identity, turn/start, turn/steer, and thread/turns/list method probes passed"
+            "initialize, thread/read identity, turn/start, turn/steer, and thread/turns/list method probes passed"
                 .into(),
     })
 }
@@ -633,44 +585,6 @@ pub fn immediate_notify(
 fn is_thread_not_loaded_error(operation: &str, detail: &str, thread_id: &str) -> bool {
     operation == "rpc"
         && (detail == "thread not loaded" || detail == format!("thread not loaded: {thread_id}"))
-}
-
-/// Outcome of the explicit load step for a persisted-but-cold thread.
-enum ThreadLoad {
-    /// The App Server now reports the thread in its loaded set.
-    Loaded,
-    /// Another live process holds the thread writer, so this endpoint cannot
-    /// and must not adopt it.  The thread is live, just not reachable here.
-    OwnedElsewhere { detail: String },
-    /// The load step failed for any other reason; the exact server error is
-    /// preserved so admission can refuse without guessing a recovery.
-    Refused { detail: String },
-}
-
-/// Ask the App Server to load one persisted thread into memory.
-///
-/// `thread/resume` is the native load step.  A thread that is already loaded
-/// needs no call.  A conflicting live writer is reported as `OwnedElsewhere`
-/// rather than retried, so admission never invents a second route.
-fn load_persisted_thread(client: &mut Client, thread_id: &str) -> Result<ThreadLoad, AdapterError> {
-    let params = json!({"threadId": thread_id});
-    match client.call("thread/resume", params) {
-        Ok(_) => Ok(ThreadLoad::Loaded),
-        Err(AdapterError::Unknown { detail, .. })
-            if detail.contains("already has an active writer") =>
-        {
-            Ok(ThreadLoad::OwnedElsewhere { detail })
-        }
-        Err(AdapterError::Unknown { operation, detail })
-            if is_thread_not_found_error(&operation, &detail, thread_id) =>
-        {
-            Ok(ThreadLoad::Refused { detail })
-        }
-        Err(AdapterError::CapabilityUnavailable { .. }) => Ok(ThreadLoad::Refused {
-            detail: "App Server does not expose thread/resume for a persisted thread".into(),
-        }),
-        Err(error) => Err(error),
-    }
 }
 
 fn is_thread_not_found_error(operation: &str, detail: &str, thread_id: &str) -> bool {
@@ -1531,13 +1445,23 @@ mod tests {
                     .capabilities
                     .iter()
                     .any(|capability| capability == "send_message_to_thread"));
-                assert!(selected.self_check.contains("thread/loaded/list"));
+                assert!(selected.self_check.contains("thread/read"));
                 assert!(selected.self_check.contains("turn/start"));
                 assert!(selected.self_check.contains("turn/steer"));
                 assert!(selected.self_check.contains("thread/turns/list"));
             }
             Err(AdapterError::RouteUnavailable { detail }) => {
                 assert!(detail.contains("persisted but not loaded"), "{detail}");
+            }
+            // A live probe runs from whatever cwd the developer is in, so a
+            // thread bound to another project root is a correct rejection.
+            Err(AdapterError::Unknown { detail, .. }) if detail.contains("thread cwd mismatch") => {
+                assert!(detail.contains("cwd mismatch"), "{detail}");
+            }
+            Err(AdapterError::Unknown { detail, .. })
+                if detail.contains("thread session mismatch") =>
+            {
+                assert!(detail.contains("session mismatch"), "{detail}");
             }
             Err(error) => panic!("unexpected live App Server self-check error: {error}"),
         }
@@ -1690,7 +1614,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_rejects_persisted_thread_that_is_not_loaded() {
+    fn candidate_verifies_persisted_cold_thread_through_thread_read() {
         let socket = std::env::temp_dir().join(format!(
             "collab-unloaded-thread-{}-{}.sock",
             std::process::id(),
@@ -1706,37 +1630,33 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
-            let loaded = next_request(&mut stream);
-            assert_eq!(loaded["method"], "thread/loaded/list");
+            // Identity is established from `thread/read`, which serves
+            // persisted threads.  A cold thread reports notLoaded status and
+            // is loaded later by the native load-and-start call.
+            let read = next_request(&mut stream);
+            assert_eq!(read["method"], "thread/read");
+            assert_eq!(read["params"]["threadId"], "persisted-thread");
             respond(
                 &mut stream,
                 json!({
-                    "id": loaded["id"],
-                    "result": {"data": ["some-other-thread"]}
-                }),
-            );
-            // A persisted thread that is cold on this endpoint gets one
-            // explicit load attempt; the server reports a conflicting live
-            // writer, which admission must surface instead of retrying.
-            let resume = next_request(&mut stream);
-            assert_eq!(resume["method"], "thread/resume");
-            assert_eq!(resume["params"]["threadId"], "persisted-thread");
-            respond(
-                &mut stream,
-                json!({
-                    "id": resume["id"],
-                    "error": {
-                        "code": -32600,
-                        "message": "thread persisted-thread already has an active writer"
+                    "id": read["id"],
+                    "result": {
+                        "thread": {
+                            "id": "persisted-thread",
+                            "sessionId": "session-1",
+                            "cwd": env!("CARGO_MANIFEST_DIR"),
+                            "status": {"type": "notLoaded"}
+                        }
                     }
                 }),
             );
-            let mut byte = [0_u8; 1];
-            assert_eq!(
-                stream.read(&mut byte).unwrap(),
-                0,
-                "a thread owned by another live writer must not issue another method"
-            );
+            for _ in 0..4 {
+                let probe = next_request(&mut stream);
+                respond(
+                    &mut stream,
+                    json!({"id": probe["id"], "result": {"data": []}}),
+                );
+            }
             stream.shutdown(Shutdown::Both).ok();
         });
 
@@ -1747,18 +1667,15 @@ mod tests {
             thread_id: "persisted-thread".into(),
             cwd: env!("CARGO_MANIFEST_DIR").into(),
         };
-        let error = verify_candidate(&candidate).unwrap_err();
-        assert!(
-            matches!(error, AdapterError::RouteUnavailable { .. }),
-            "{error}"
-        );
-        assert!(error.to_string().contains("persisted but not loaded"));
+        let selected = verify_candidate(&candidate).unwrap();
+        assert_eq!(selected.thread_id.as_deref(), Some("persisted-thread"));
+        assert_eq!(selected.session_id.as_deref(), Some("session-1"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
 
     #[test]
-    fn candidate_rejects_thread_that_unloads_after_loaded_list() {
+    fn candidate_rejects_thread_whose_read_reports_not_loaded() {
         let socket = std::env::temp_dir().join(format!(
             "collab-unloaded-race-{}-{}.sock",
             std::process::id(),
@@ -1774,15 +1691,6 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
-            let loaded = next_request(&mut stream);
-            assert_eq!(loaded["method"], "thread/loaded/list");
-            respond(
-                &mut stream,
-                json!({
-                    "id": loaded["id"],
-                    "result": {"data": ["persisted-thread"]}
-                }),
-            );
             let read = next_request(&mut stream);
             assert_eq!(read["method"], "thread/read");
             assert_eq!(read["params"]["threadId"], "persisted-thread");
@@ -1800,7 +1708,7 @@ mod tests {
             assert_eq!(
                 stream.read(&mut byte).unwrap(),
                 0,
-                "thread that unloads after loaded/list must not issue another App Server method"
+                "a thread whose read reports notLoaded must not issue another method"
             );
             stream.shutdown(Shutdown::Both).ok();
         });
@@ -1823,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_accepts_loaded_thread_after_loaded_list_identity_check() {
+    fn candidate_accepts_thread_verified_by_thread_read_identity() {
         let socket = PathBuf::from("/tmp").join(format!(
             "collab-candidate-loaded-thread-{}-{}.sock",
             std::process::id(),
@@ -1839,12 +1747,6 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
-            let loaded = next_request(&mut stream);
-            assert_eq!(loaded["method"], "thread/loaded/list");
-            respond(
-                &mut stream,
-                json!({"id": loaded["id"], "result": {"data": ["thread-1"]}}),
-            );
             let read = next_request(&mut stream);
             assert_eq!(read["method"], "thread/read");
             assert_eq!(read["params"]["threadId"], "thread-1");
@@ -1898,7 +1800,7 @@ mod tests {
         };
         let selected = verify_candidate(&candidate).unwrap();
         assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
-        assert!(selected.self_check.contains("thread/loaded/list"));
+        assert!(selected.self_check.contains("thread/read"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -1920,12 +1822,8 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
-            let loaded = next_request(&mut stream);
-            respond(
-                &mut stream,
-                json!({"id": loaded["id"], "result": {"data": ["thread-1"]}}),
-            );
             let read = next_request(&mut stream);
+            assert_eq!(read["method"], "thread/read");
             respond(
                 &mut stream,
                 json!({
@@ -1975,12 +1873,8 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
-            let loaded = next_request(&mut stream);
-            respond(
-                &mut stream,
-                json!({"id": loaded["id"], "result": {"data": ["thread-1"]}}),
-            );
             let read = next_request(&mut stream);
+            assert_eq!(read["method"], "thread/read");
             respond(
                 &mut stream,
                 json!({

@@ -1591,6 +1591,8 @@ pub(crate) struct HostRouteRecord {
     pub(crate) registered_ms: i64,
 }
 
+pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
+
 struct RuntimeRoute {
     root: PathBuf,
     storage_root: PathBuf,
@@ -1689,6 +1691,92 @@ fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
         )
     })?;
     std::fs::File::open(parent)?.sync_all()
+}
+
+fn append_host_route_record(path: &Path, record: &HostRouteRecord) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| {
+        "HOST_ROUTE_DURABILITY_FAILED: route journal has no parent directory".to_string()
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!("HOST_ROUTE_DURABILITY_FAILED: create route journal directory: {error}")
+    })?;
+    let existing = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(format!(
+                "HOST_ROUTE_DURABILITY_FAILED: read route journal: {error}"
+            ))
+        }
+    };
+    let existing_records = load_host_route_records(path).map_err(|error| {
+        format!("HOST_ROUTE_DURABILITY_FAILED: validate route journal: {error}")
+    })?;
+    if existing_records.iter().any(|existing| {
+        existing.app_scope_id == record.app_scope_id
+            && existing.project_scope == record.project_scope
+    }) {
+        return Err(format!(
+            "HOST_ROUTE_DURABILITY_FAILED: route key ({}, {}) is already durable",
+            record.app_scope_id, record.project_scope
+        ));
+    }
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        return Err("HOST_ROUTE_DURABILITY_FAILED: route journal must end with a newline".into());
+    }
+    use std::io::Write;
+    let mut line = serde_json::to_vec(record)
+        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: serialize route: {error}"))?;
+    line.push(b'\n');
+    let mut body = existing;
+    body.extend_from_slice(&line);
+
+    // Replace the complete JSONL file after syncing a private temporary file.
+    // A crash or short write therefore leaves either the previous valid route
+    // set or the complete new route set, never a partial JSON object.
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        "{}.tmp-{}-{sequence}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("routes.jsonl"),
+        std::process::id()
+    ));
+    let mut tmp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|error| {
+            format!("HOST_ROUTE_DURABILITY_FAILED: create route journal temp: {error}")
+        })?;
+    if let Err(error) = tmp_file.write_all(&body) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "HOST_ROUTE_DURABILITY_FAILED: write route journal temp: {error}"
+        ));
+    }
+    if let Err(error) = tmp_file.sync_data() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "HOST_ROUTE_DURABILITY_FAILED: flush route journal temp: {error}"
+        ));
+    }
+    drop(tmp_file);
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "HOST_ROUTE_DURABILITY_FAILED: publish route journal: {error}"
+        ));
+    }
+    if let Err(error) = sync_parent_dir(path) {
+        return Err(format!(
+            "HOST_ROUTE_DURABILITY_FAILED: sync route journal directory: {error}"
+        ));
+    }
+    load_host_route_records(path)
+        .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: verify route journal: {error}"))?;
+    Ok(())
 }
 
 fn validate_runtime_storage_root(
@@ -1803,6 +1891,18 @@ impl ProjectRuntimeManager {
                 route_records.push(record);
             }
         }
+        Self::restore_resident_route_record(
+            &host,
+            host_root.as_str(),
+            &route_journal,
+            &route_records,
+        )?;
+        route_records.clear();
+        for record in load_host_route_records(&route_journal)? {
+            if route_record_is_replayable(&record)? {
+                route_records.push(record);
+            }
+        }
         // A route record is only usable when its storage path has one owner.
         // The host resident reducer is an owner even when it has no entry in
         // routes.jsonl; otherwise replay could admit a second reducer on the
@@ -1853,6 +1953,29 @@ impl ProjectRuntimeManager {
                     || storage_roots_equal(&storage_root, &host.storage_root)
                         .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?);
             if resident_self_route {
+                let registration = ProjectRegistration::with_registered_at(
+                    ProjectScopeId::new(key.1.clone())
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                    AppServerId::new(key.0.clone())
+                        .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?,
+                    record.registered_ms,
+                )
+                .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+                if host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_registration(&registration.project_scope, &registration.app_scope_id)
+                    .is_none()
+                {
+                    host.commit_checked(&[Event::GlobalProjectRegistered { registration }])
+                        .map_err(|error| {
+                            format!(
+                                "HOST_ROUTE_REPLAY_FAILED: restore resident project registration: {error}"
+                            )
+                        })?;
+                }
                 routes.insert(
                     key,
                     RuntimeRoute {
@@ -1904,6 +2027,48 @@ impl ProjectRuntimeManager {
             let _ = manager.ensure_runtime(&key, &root, &storage_root);
         }
         Ok(manager)
+    }
+
+    fn restore_resident_route_record(
+        host: &Arc<Server>,
+        host_root: &str,
+        route_journal: &Path,
+        route_records: &[HostRouteRecord],
+    ) -> Result<(), String> {
+        let project_scope = ProjectScopeId::new(host_root.to_owned())
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+        let app_scope = AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+        let registration = host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_registration(&project_scope, &app_scope)
+            .cloned();
+        let Some(registration) = registration else {
+            return Ok(());
+        };
+        if route_records.iter().any(|record| {
+            record.app_scope_id == registration.app_scope_id.as_str()
+                && record.project_scope == registration.project_scope.as_str()
+        }) {
+            return Ok(());
+        }
+
+        let storage_root = storage_owner_path(&host.storage_root)
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: {error}"))?;
+        let record = HostRouteRecord {
+            version: 1,
+            op: "register".into(),
+            app_scope_id: registration.app_scope_id.as_str().into(),
+            project_scope: registration.project_scope.as_str().into(),
+            canonical_root: host_root.to_owned(),
+            storage_root: storage_root.to_string_lossy().into_owned(),
+            registered_ms: registration.registered_at_ms,
+        };
+        append_host_route_record(route_journal, &record)
+            .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: restore resident route: {error}"))
     }
 
     fn native_thread_binding(&self, thread_id: &str) -> Result<Option<RuntimeBinding>, String> {
@@ -2026,7 +2191,7 @@ impl ProjectRuntimeManager {
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id}"
+                    "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread {native_thread_id}; {ROUTE_RESOLVE_NOT_FOUND_RECOVERY}"
                 )
             })?;
         let key = (
@@ -2371,33 +2536,9 @@ impl ProjectRuntimeManager {
             storage_root: storage_root.to_string_lossy().into_owned(),
             registered_ms: now_ms(),
         };
-        let parent = self.route_journal.parent().ok_or_else(|| {
-            "HOST_ROUTE_DURABILITY_FAILED: route journal has no parent directory".to_string()
-        })?;
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!("HOST_ROUTE_DURABILITY_FAILED: create route journal directory: {error}")
-        })?;
-        let existing = match std::fs::read(&self.route_journal) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => {
-                return Err(format!(
-                    "HOST_ROUTE_DURABILITY_FAILED: read route journal: {error}"
-                ))
-            }
-        };
         let existing_records = load_host_route_records(&self.route_journal).map_err(|error| {
             format!("HOST_ROUTE_DURABILITY_FAILED: validate route journal: {error}")
         })?;
-        if existing_records.iter().any(|existing| {
-            existing.app_scope_id == record.app_scope_id
-                && existing.project_scope == record.project_scope
-        }) {
-            return Err(format!(
-                "HOST_ROUTE_DURABILITY_FAILED: route key ({}, {}) is already durable",
-                record.app_scope_id, record.project_scope
-            ));
-        }
         if let Some(owner) = self
             .storage_owner(&storage_root, &existing_records)
             .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: {error}"))?
@@ -2408,67 +2549,7 @@ impl ProjectRuntimeManager {
                 record.storage_root, owner
             ));
         }
-        if !existing.is_empty() && !existing.ends_with(b"\n") {
-            return Err(
-                "HOST_ROUTE_DURABILITY_FAILED: route journal must end with a newline".into(),
-            );
-        }
-        use std::io::Write;
-        let mut line = serde_json::to_vec(&record)
-            .map_err(|error| format!("HOST_ROUTE_DURABILITY_FAILED: serialize route: {error}"))?;
-        line.push(b'\n');
-        let mut body = existing;
-        body.extend_from_slice(&line);
-
-        // Replace the complete JSONL file after syncing a private temporary
-        // file.  A process crash or short write therefore leaves either the
-        // previous valid route set or the complete new route set; it cannot
-        // leave a half JSON object for the next daemon replay.
-        static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = self.route_journal.with_file_name(format!(
-            "{}.tmp-{}-{sequence}",
-            self.route_journal
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("routes.jsonl"),
-            std::process::id()
-        ));
-        let mut tmp_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|error| {
-                format!("HOST_ROUTE_DURABILITY_FAILED: create route journal temp: {error}")
-            })?;
-        if let Err(error) = tmp_file.write_all(&body) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "HOST_ROUTE_DURABILITY_FAILED: write route journal temp: {error}"
-            ));
-        }
-        if let Err(error) = tmp_file.sync_data() {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "HOST_ROUTE_DURABILITY_FAILED: flush route journal temp: {error}"
-            ));
-        }
-        drop(tmp_file);
-        if let Err(error) = std::fs::rename(&tmp, &self.route_journal) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "HOST_ROUTE_DURABILITY_FAILED: publish route journal: {error}"
-            ));
-        }
-        if let Err(error) = sync_parent_dir(&self.route_journal) {
-            return Err(format!(
-                "HOST_ROUTE_DURABILITY_FAILED: sync route journal directory: {error}"
-            ));
-        }
-        load_host_route_records(&self.route_journal).map_err(|error| {
-            format!("HOST_ROUTE_DURABILITY_FAILED: verify route journal: {error}")
-        })?;
-        Ok(())
+        append_host_route_record(&self.route_journal, &record)
     }
 
     fn select_runtime(&self, context: &ProjectContext) -> Result<Arc<Server>, String> {
@@ -2734,9 +2815,6 @@ impl ProjectRuntimeManager {
         if context_root == self.host_root
             && !self.has_project_route(&context.project_scope.as_str())
         {
-            if let Err(error) = self.append_resident_route_record(&context) {
-                return (self.host.clone(), Resp::err(error));
-            }
             let response =
                 if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
                     Resp::err(error)
@@ -2748,10 +2826,33 @@ impl ProjectRuntimeManager {
                         Some(self.host.as_ref()),
                     )
                 };
-            if response.ok && is_register {
-                self.install_runtime(&key, self.host.clone(), None);
-            } else if !response.ok {
+            if !response.ok {
                 return (self.host.clone(), response);
+            }
+            if is_register {
+                if let Err(error) = self.append_resident_route_record(&context) {
+                    let worker_id = register_worker_id
+                        .as_deref()
+                        .expect("resident registration worker id must exist");
+                    let cleanup = retire_runtime_binding_after_route_failure(
+                        self.host.as_ref(),
+                        worker_id,
+                        context.project_scope.as_str(),
+                        Some(&context.app_scope_id),
+                        worker_id,
+                        "resident route publication failed",
+                    );
+                    let cleanup_status = cleanup
+                        .map(|_| "registration binding retired".to_owned())
+                        .unwrap_or_else(|cleanup_error| {
+                            format!("registration cleanup failed: {cleanup_error}")
+                        });
+                    return (
+                        self.host.clone(),
+                        Resp::err(format!("{error}; {cleanup_status}")),
+                    );
+                }
+                self.install_runtime(&key, self.host.clone(), None);
             }
             return self.finalize_registration(
                 self.host.clone(),
@@ -11346,6 +11447,12 @@ mod host_route_registry_tests {
             .resolve_route_by_native_thread("thread-missing")
             .unwrap_err();
         assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
+        assert!(
+            missing.contains(
+                "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl"
+            ),
+            "{missing}"
+        );
         let current = manager
             .resolve_route_by_native_thread("thread-duplicate")
             .unwrap();
@@ -13790,6 +13897,210 @@ mod host_route_registry_tests {
             std::fs::read_to_string(&route_journal).unwrap(),
             format!("{}\n", serde_json::to_string(&record).unwrap())
         );
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_registration(
+                    &GlobalState::canonical_project_scope(&root).unwrap(),
+                    &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()
+                )
+                .map(|registration| registration.project_scope.as_str().to_owned()),
+            Some(canonical_root.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_registration(
+                    &GlobalState::canonical_project_scope(&root).unwrap(),
+                    &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()
+                )
+                .map(|registration| registration.registered_at_ms),
+            Some(1)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_repairs_from_host_registration_after_crash() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let registered = handle_register_with_app_scope_unfinalized(
+            &server,
+            "resident-repair-worker".into(),
+            "token-resident-repair-worker".into(),
+            root.display().to_string(),
+            Some(AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()),
+            test_candidates("thread-resident-repair-worker"),
+        );
+        assert!(registered.ok, "{registered:?}");
+        assert!(
+            !route_journal.exists(),
+            "unfinalized registration unexpectedly published a route"
+        );
+
+        let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
+        let registration = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_registration(
+                &project_scope,
+                &AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
+            )
+            .cloned()
+            .unwrap();
+
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].registered_ms, registration.registered_at_ms);
+        assert_eq!(
+            records[0].storage_root,
+            root.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(manager
+            .routes
+            .lock()
+            .unwrap()
+            .get(&(
+                crate::identity::CLI_APP_SERVER_ID.into(),
+                root.canonicalize().unwrap().to_string_lossy().into_owned(),
+            ))
+            .and_then(|route| route.runtime.as_ref())
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, &server)));
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &RouteScope {
+                    app_scope_id: AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap(),
+                    project_scope_id: project_scope.clone(),
+                },
+                &BindingId::new("binding-resident-repair-worker").unwrap(),
+            )
+            .is_some());
+
+        let retried = manager.dispatch_sync(
+            Some(context_with_runtime(
+                &root,
+                crate::identity::CLI_APP_SERVER_ID,
+                &RuntimeIdentity::cli_adapter("resident-repair-worker").unwrap(),
+            )),
+            Req::Register {
+                worker_id: "resident-repair-worker".into(),
+                token: "token-resident-repair-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-resident-repair-worker"),
+            },
+        );
+        assert!(retried.1.ok, "{:?}", retried.1);
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            "resident-repair-worker",
+            &root.display().to_string(),
+            Some(&AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            manager
+                .resolve_route_by_native_thread("thread-resident-repair-worker")
+                .unwrap()
+                .agent_id
+                .as_str(),
+            "resident-repair-worker"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_repair_failure_blocks_startup() {
+        let (server, root, _) = test_server();
+        register_known_project_with_app(&server, &root, crate::identity::CLI_APP_SERVER_ID);
+        let blocker = root.join("route-journal-state-root");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let blocked_host_paths = HostPaths::for_state_root(blocker).unwrap();
+
+        let error = match ProjectRuntimeManager::new(server, &blocked_host_paths) {
+            Ok(_) => panic!("route repair failure must block daemon startup"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("HOST_ROUTE_REPLAY_FAILED:"), "{error}");
+        assert!(error.contains("route journal"), "{error}");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resident_route_publish_failure_restores_admission_without_reviving_thread() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let route_journal = host_paths.state_root().join("routes.jsonl");
+        let mut manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let route_journal_blocker = root.join("route-journal-blocker");
+        std::fs::create_dir_all(&route_journal_blocker).unwrap();
+        Arc::get_mut(&mut manager).unwrap().route_journal = route_journal_blocker;
+
+        let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
+        let (_, failed) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "resident-route-failure-worker".into(),
+                token: "token-resident-route-failure-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: test_candidates("thread-resident-route-failure-worker"),
+            },
+        );
+        assert!(!failed.ok, "{failed:?}");
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("HOST_ROUTE_DURABILITY_FAILED:")),
+            "{failed:?}"
+        );
+        assert!(
+            !route_journal.exists(),
+            "failed route publish wrote a route journal"
+        );
+
+        drop(manager);
+        let replayed = ProjectRuntimeManager::new(server, &host_paths).unwrap();
+        let records = load_host_route_records(&route_journal).unwrap();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            records[0].storage_root,
+            root.canonicalize().unwrap().to_string_lossy()
+        );
+        let key = (
+            crate::identity::CLI_APP_SERVER_ID.into(),
+            root.canonicalize().unwrap().to_string_lossy().into_owned(),
+        );
+        assert!(replayed
+            .routes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .and_then(|route| route.runtime.as_ref())
+            .is_some());
+        let missing = replayed
+            .resolve_route_by_native_thread("thread-resident-route-failure-worker")
+            .unwrap_err();
+        assert!(missing.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{missing}");
 
         std::fs::remove_dir_all(root).unwrap();
     }

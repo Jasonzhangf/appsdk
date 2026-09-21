@@ -135,6 +135,13 @@ pub enum AdapterError {
     RouteUnavailable {
         detail: String,
     },
+    /// The App Server refused to load the thread because another live writer
+    /// already owns its rollout.  This is terminal for the current endpoint:
+    /// the thread belongs to a different App Server process and this
+    /// connection can never take it over.
+    ThreadWriterConflict {
+        detail: String,
+    },
     CapabilityUnavailable {
         endpoint: EndpointKind,
         operation: &'static str,
@@ -178,6 +185,10 @@ impl fmt::Display for AdapterError {
             Self::RouteUnavailable { detail } => {
                 write!(f, "ADAPTER_ROUTE_UNAVAILABLE: {detail}")
             }
+            Self::ThreadWriterConflict { detail } => write!(
+                f,
+                "APPSERVER_THREAD_WRITER_CONFLICT: {detail} (the recipient thread is owned by another live App Server client; this endpoint can only observe it. Deliver through the App Server instance that owns the thread, or wait for the owning process to exit)"
+            ),
             Self::CapabilityUnavailable {
                 endpoint,
                 operation,

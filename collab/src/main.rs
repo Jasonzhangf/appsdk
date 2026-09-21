@@ -658,7 +658,7 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         // The route journal on disk is not the live truth: after a daemon
         // restart or re-registration the running daemon may hold no route for
         // this address even though the file still lists one.  Reuse is only
-        // valid when the live daemon resolves the same session/thread/cwd.
+        // valid when the live daemon resolves the same session/thread.
         let Some(thread_id) = runtime
             .native_thread_id
             .as_ref()
@@ -673,12 +673,7 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         else {
             return Ok(false);
         };
-        let resolved = client::resolve_route(
-            &scope.sock_path(),
-            session_id,
-            thread_id,
-            &scope_root.to_string_lossy(),
-        );
+        let resolved = client::resolve_route(&scope.sock_path(), session_id, thread_id);
         Ok(resolved.is_ok())
     })
 }

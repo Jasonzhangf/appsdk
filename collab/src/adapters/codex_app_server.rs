@@ -617,6 +617,13 @@ fn is_thread_not_loaded_error(operation: &str, detail: &str, thread_id: &str) ->
         && (detail == "thread not loaded" || detail == format!("thread not loaded: {thread_id}"))
 }
 
+/// The App Server holds one writer per thread.  A second client is refused
+/// with this message, which is terminal for the current endpoint: the thread
+/// belongs to another live process, and no retry can take it over.
+pub fn is_thread_writer_conflict(detail: &str) -> bool {
+    detail.contains("already has an active writer")
+}
+
 fn is_thread_not_found_error(operation: &str, detail: &str, thread_id: &str) -> bool {
     operation == "rpc"
         && (detail == "thread not found"
@@ -1176,6 +1183,15 @@ impl Client {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, AdapterError> {
         match self.call_raw(method, params)? {
             Ok(value) => Ok(value),
+            // One thread admits one writer.  The refusal means a different
+            // live App Server process owns the rollout, so this endpoint can
+            // never take the thread over; report it as its own terminal class
+            // instead of an opaque rpc failure.
+            Err(error) if is_thread_writer_conflict(&error.message) => {
+                Err(AdapterError::ThreadWriterConflict {
+                    detail: error.message,
+                })
+            }
             Err(error) => Err(AdapterError::Unknown {
                 operation: "rpc",
                 detail: error.message,
@@ -2722,6 +2738,82 @@ mod tests {
         );
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn immediate_notify_reports_thread_writer_conflict_as_terminal() {
+        let socket = temp_socket("notify-writer-conflict");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            let request = next_request(&mut stream);
+            assert_eq!(request["method"], "thread/resume");
+            respond(
+                &mut stream,
+                json!({
+                    "id": request["id"],
+                    "error": {
+                        "code": -32600,
+                        "message": "thread thread-1 already has an active writer"
+                    }
+                }),
+            );
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).unwrap(),
+                0,
+                "a writer conflict must not issue another App Server method"
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let error = immediate_notify(
+            &selected_transport(&socket),
+            Some("sender-thread"),
+            "notify body",
+            "message-start",
+        )
+        .unwrap_err();
+        // The recipient is owned by another live App Server process, so this
+        // endpoint must report a terminal conflict instead of an opaque rpc
+        // failure or a retryable route error.
+        assert!(
+            matches!(error, AdapterError::ThreadWriterConflict { .. }),
+            "{error}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("APPSERVER_THREAD_WRITER_CONFLICT: "),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("thread thread-1 already has an active writer"),
+            "{rendered}"
+        );
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn thread_writer_conflict_detection_matches_only_the_writer_refusal() {
+        assert!(is_thread_writer_conflict(
+            "thread 01a0a530-cca3-76e3-9364-699d66ded6f0 already has an active writer"
+        ));
+        assert!(is_thread_writer_conflict(
+            "thread-store conflict: thread thread-1 already has an active writer"
+        ));
+        for detail in [
+            "thread not found: thread-1",
+            "thread not loaded: thread-1",
+            "thread thread-1 is closing; retry thread/resume after the thread is closed",
+            "",
+        ] {
+            assert!(!is_thread_writer_conflict(detail), "{detail}");
+        }
     }
 
     #[test]

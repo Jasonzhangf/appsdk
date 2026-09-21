@@ -1196,6 +1196,13 @@ pub struct GlobalState {
     pub projects: BTreeMap<String, ProjectState>,
     #[serde(default)]
     pub current_thread_routes: BTreeMap<(String, String), RuntimeBinding>,
+    /// Read-only compatibility index for durable bindings that carry a native
+    /// App Server thread but no session id.  These records predate the strict
+    /// dual key, so replay must keep them resolvable instead of aborting the
+    /// host journal.  They are keyed by thread id only and never satisfy the
+    /// strict `current_thread_routes` contract.
+    #[serde(default)]
+    pub legacy_thread_routes: BTreeMap<String, RuntimeBinding>,
     #[serde(default)]
     pub current_thread_route_tombstones: BTreeMap<String, RuntimeBindingTombstone>,
     #[serde(default)]
@@ -1221,6 +1228,7 @@ impl GlobalState {
             revision: 0,
             projects: BTreeMap::new(),
             current_thread_routes: BTreeMap::new(),
+            legacy_thread_routes: BTreeMap::new(),
             current_thread_route_tombstones: BTreeMap::new(),
             command_receipts: BTreeMap::new(),
             migration_commit_evidence: BTreeMap::new(),
@@ -1270,6 +1278,24 @@ impl GlobalState {
             if session_key != session_id.as_str() || thread_key != native_thread_id.as_str() {
                 return Err(StateError::Invariant(format!(
                     "current thread route key {session_key}/{thread_key} does not match session {session_id} and native thread {native_thread_id}"
+                )));
+            }
+        }
+        for (thread_key, binding) in &self.legacy_thread_routes {
+            binding.validate()?;
+            if binding.session_id.is_some() {
+                return Err(StateError::Invariant(format!(
+                    "legacy thread route {thread_key} must not carry a session id"
+                )));
+            }
+            let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
+                return Err(StateError::Invariant(format!(
+                    "legacy thread route {thread_key} has no native thread id"
+                )));
+            };
+            if thread_key != native_thread_id.as_str() {
+                return Err(StateError::Invariant(format!(
+                    "legacy thread route key {thread_key} does not match native thread {native_thread_id}"
                 )));
             }
         }
@@ -1638,6 +1664,56 @@ impl GlobalState {
         ))
     }
 
+    /// Read-only fallback for a durable thread-only binding.  Callers may use
+    /// this only when the strict dual-key lookup missed and the host supplied
+    /// the thread id; the returned binding has no session id, so the caller
+    /// keeps the host-provided session for the live address.
+    pub fn lookup_legacy_thread_route(
+        &self,
+        native_thread_id: &NativeThreadId,
+    ) -> Option<&RuntimeBinding> {
+        self.legacy_thread_routes.get(native_thread_id.as_str())
+    }
+
+    /// Project one durable thread-only binding into the read-only
+    /// compatibility index.  A second distinct binding for the same thread is
+    /// ambiguous and fails closed; replay must not pick one.
+    pub fn set_legacy_thread_route(
+        &mut self,
+        binding: RuntimeBinding,
+    ) -> Result<StateVersion, StateError> {
+        binding.validate()?;
+        if binding.session_id.is_some() {
+            return Err(StateError::invalid(
+                "legacy thread route",
+                "must not carry a session id",
+            ));
+        }
+        let native_thread_id = binding.native_thread_id.clone().ok_or_else(|| {
+            StateError::invalid("legacy thread route", "requires a native thread id")
+        })?;
+        if self
+            .legacy_thread_routes
+            .get(native_thread_id.as_str())
+            .is_some_and(|existing| existing == &binding)
+        {
+            return Ok(self.version());
+        }
+        self.mutate(|next| {
+            if let Some(existing) = next.legacy_thread_routes.get(native_thread_id.as_str()) {
+                if existing != &binding {
+                    return Err(StateError::BindingConflict(format!(
+                        "App Server thread {native_thread_id} has multiple legacy thread-only bindings"
+                    )));
+                }
+                return Ok(());
+            }
+            next.legacy_thread_routes
+                .insert(native_thread_id.as_str().to_owned(), binding);
+            Ok(())
+        })
+    }
+
     pub fn lookup_current_thread_route_tombstone(
         &self,
         session_id: &SessionId,
@@ -1739,6 +1815,9 @@ impl GlobalState {
                 ),
                 binding,
             );
+            // Installing the strict dual-key route for a thread upgrades that
+            // identity off the legacy compatibility index.
+            next.legacy_thread_routes.remove(native_thread_id.as_str());
             Ok(())
         })
     }
@@ -3266,6 +3345,93 @@ mod tests {
             Err(StateError::BindingConflict(_))
         ));
         assert_eq!(state.version(), before);
+    }
+
+    #[test]
+    fn legacy_thread_route_is_indexed_read_only_and_upgraded_by_a_strict_route() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let thread_id = NativeThreadId::new("thread-legacy-upgrade").unwrap();
+        let legacy = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-legacy").unwrap(),
+            RuntimeId::new("runtime-legacy").unwrap(),
+            BindingId::new("binding-legacy").unwrap(),
+            1,
+            None,
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+
+        state.bind_runtime(legacy.clone()).unwrap();
+        state.set_legacy_thread_route(legacy.clone()).unwrap();
+        assert_eq!(state.lookup_legacy_thread_route(&thread_id), Some(&legacy));
+        assert!(state
+            .lookup_current_thread_route(
+                &SessionId::new("session-legacy-upgrade").unwrap(),
+                &thread_id
+            )
+            .is_none());
+        state.validate().unwrap();
+
+        // A strict dual-key route for the same thread is the upgrade; the
+        // legacy record must not remain as a second live selector.
+        let strict = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-legacy").unwrap(),
+            RuntimeId::new("runtime-legacy").unwrap(),
+            BindingId::new("binding-legacy").unwrap(),
+            2,
+            Some(SessionId::new("session-legacy-upgrade").unwrap()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        state.bind_runtime(strict.clone()).unwrap();
+        state.set_current_thread_route(strict.clone()).unwrap();
+        assert!(state.lookup_legacy_thread_route(&thread_id).is_none());
+        assert_eq!(
+            state.lookup_current_thread_route(
+                &SessionId::new("session-legacy-upgrade").unwrap(),
+                &thread_id
+            ),
+            Some(&strict)
+        );
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_thread_route_rejects_a_second_binding_for_the_same_thread() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let thread_id = NativeThreadId::new("thread-legacy-conflict").unwrap();
+        let mut legacy = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            1,
+            None,
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        state.set_legacy_thread_route(legacy.clone()).unwrap();
+
+        legacy.agent_id = AgentId::new("agent-two").unwrap();
+        legacy.binding_id = BindingId::new("binding-two").unwrap();
+        legacy.runtime_id = RuntimeId::new("runtime-two").unwrap();
+        assert!(matches!(
+            state.set_legacy_thread_route(legacy),
+            Err(StateError::BindingConflict(_))
+        ));
     }
 
     #[test]

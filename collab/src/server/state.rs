@@ -752,21 +752,6 @@ impl State {
     pub(crate) fn restore_unique_current_thread_routes_from_bindings(
         &mut self,
     ) -> Result<(), String> {
-        for binding in self
-            .global
-            .projects
-            .values()
-            .flat_map(|project| project.runtime_bindings.values())
-        {
-            if binding.native_thread_id.is_some() && binding.session_id.is_none() {
-                return Err(format!(
-                    "SESSION_THREAD_BINDING_MIGRATION_REQUIRED: legacy binding {} for agent {} has native thread {} but no session id; obtain the host session id, then explicitly rebind the same identity and runtime; do not edit the journal or infer the session id",
-                    binding.binding_id,
-                    binding.agent_id,
-                    binding.native_thread_id.as_ref().unwrap()
-                ));
-            }
-        }
         let mut bindings = self
             .global
             .projects
@@ -789,7 +774,18 @@ impl State {
         let mut recovered = self.global.clone();
         for binding in bindings {
             let thread = binding.native_thread_id.clone().unwrap();
-            let session = binding.session_id.clone().unwrap();
+            let Some(session) = binding.session_id.clone() else {
+                // A durable thread-only binding is a legacy record.  Keep it
+                // resolvable through the read-only compatibility index instead
+                // of aborting the whole host journal; the next explicit
+                // registration or rebind upgrades it to the strict dual key.
+                recovered
+                    .set_legacy_thread_route(binding)
+                    .map_err(|error| {
+                        format!("journal replay rejected legacy thread route: {error}")
+                    })?;
+                continue;
+            };
             if let Some(existing) = recovered.lookup_current_thread_route(&session, &thread) {
                 if existing == &binding {
                     continue;
@@ -1288,8 +1284,19 @@ impl State {
             }
             Event::GlobalCurrentThreadRouteSet { binding } => {
                 let mut next = self.global.clone();
-                next.set_current_thread_route(binding.clone())
-                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                if binding.session_id.is_none() {
+                    // A durable thread-only route predates the strict dual key.
+                    // Replay must keep it resolvable through the read-only
+                    // compatibility index instead of aborting the host
+                    // journal; the next explicit rebind upgrades it.
+                    next.set_legacy_thread_route(binding.clone())
+                        .map_err(|error| {
+                            format!("global reducer rejected legacy thread route: {error}")
+                        })?;
+                } else {
+                    next.set_current_thread_route(binding.clone())
+                        .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                }
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
             }
@@ -2321,7 +2328,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_binding_replay_rejects_legacy_thread_only_binding_with_migration_action() {
+    fn runtime_binding_replay_keeps_a_legacy_thread_only_binding_resolvable() {
         let root = replay_test_root("legacy-thread-only");
         let journal = root.join(".agent-collab/server/journal.jsonl");
         std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
@@ -2339,7 +2346,7 @@ mod tests {
         let events = vec![
             Event::GlobalProjectRegistered {
                 registration: ProjectRegistration::new(
-                    scope,
+                    scope.clone(),
                     AppServerId::new("appserver-cli").unwrap(),
                 )
                 .unwrap(),
@@ -2352,16 +2359,128 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(&journal, format!("{body}\n")).unwrap();
+
+        // The durable record predates the strict dual key. Replay must keep it
+        // resolvable through the read-only compatibility index instead of
+        // aborting the whole host journal, and it must not synthesize a
+        // session id or fabricate a strict current route.
+        let replayed = crate::server::replay(&root).expect("legacy replay must not abort");
+        let thread = NativeThreadId::new("thread-legacy").unwrap();
+        let legacy = replayed
+            .global
+            .lookup_legacy_thread_route(&thread)
+            .expect("legacy binding must stay resolvable");
+        assert_eq!(legacy.agent_id.as_str(), "agent-legacy");
+        assert_eq!(legacy.binding_id.as_str(), "binding-legacy");
+        assert!(legacy.session_id.is_none());
+        assert!(replayed
+            .global
+            .current_thread_routes
+            .values()
+            .all(|route| route.binding_id.as_str() != "binding-legacy"));
+        replayed.global.validate().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_binding_replay_keeps_a_legacy_thread_only_route_event_resolvable() {
+        // The live host journal shape: route events written before the dual
+        // key existed, carrying a native thread but no session id.
+        let root = replay_test_root("legacy-thread-only-route-event");
+        let journal = root.join(".agent-collab/server/journal.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let scope = ProjectScopeId::new("/replay-project").unwrap();
+        let binding = RuntimeBinding {
+            project_scope: scope.clone(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new("agent-legacy").unwrap(),
+            runtime_id: RuntimeId::new("runtime-legacy").unwrap(),
+            binding_id: BindingId::new("binding-legacy").unwrap(),
+            endpoint_generation: 4,
+            session_id: None,
+            native_thread_id: Some(NativeThreadId::new("thread-legacy-live").unwrap()),
+        };
+        let events = vec![
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(
+                    scope.clone(),
+                    AppServerId::new("appserver-cli").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound {
+                binding: binding.clone(),
+            },
+            Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            },
+        ];
+        let body = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&journal, format!("{body}\n")).unwrap();
+
+        let replayed = crate::server::replay(&root).expect("legacy route replay must not abort");
+        let thread = NativeThreadId::new("thread-legacy-live").unwrap();
+        let legacy = replayed
+            .global
+            .lookup_legacy_thread_route(&thread)
+            .expect("legacy route event must stay resolvable");
+        assert_eq!(legacy.agent_id.as_str(), "agent-legacy");
+        assert_eq!(legacy.endpoint_generation, 4);
+        assert!(legacy.session_id.is_none());
+        assert!(replayed.global.current_thread_routes.is_empty());
+        replayed.global.validate().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_binding_replay_rejects_ambiguous_legacy_thread_only_routes() {
+        let root = replay_test_root("legacy-thread-ambiguous");
+        let journal = root.join(".agent-collab/server/journal.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let scope = ProjectScopeId::new("/replay-project").unwrap();
+        let binding = |agent: &str, binding_id: &str, runtime_id: &str| RuntimeBinding {
+            project_scope: scope.clone(),
+            app_scope_id: AppServerId::new("appserver-cli").unwrap(),
+            agent_id: AgentId::new(agent).unwrap(),
+            runtime_id: RuntimeId::new(runtime_id).unwrap(),
+            binding_id: BindingId::new(binding_id).unwrap(),
+            endpoint_generation: 1,
+            session_id: None,
+            native_thread_id: Some(NativeThreadId::new("thread-shared").unwrap()),
+        };
+        let events = vec![
+            Event::GlobalProjectRegistered {
+                registration: ProjectRegistration::new(
+                    scope.clone(),
+                    AppServerId::new("appserver-cli").unwrap(),
+                )
+                .unwrap(),
+            },
+            Event::GlobalRuntimeBound {
+                binding: binding("agent-one", "binding-one", "runtime-one"),
+            },
+            Event::GlobalRuntimeBound {
+                binding: binding("agent-two", "binding-two", "runtime-two"),
+            },
+        ];
+        let body = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&journal, format!("{body}\n")).unwrap();
         let error = crate::server::replay(&root)
             .err()
-            .expect("legacy thread-only replay must fail explicitly")
+            .expect("two legacy bindings for one thread must fail closed")
             .to_string();
         assert!(
-            error.contains("SESSION_THREAD_BINDING_MIGRATION_REQUIRED"),
+            error.contains("multiple legacy thread-only bindings"),
             "{error}"
         );
-        assert!(error.contains("thread-legacy"), "{error}");
-        assert!(error.contains("explicitly rebind"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

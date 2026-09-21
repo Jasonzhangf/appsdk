@@ -95,14 +95,12 @@ pub fn resolve_route(
     sock: &Path,
     session_id: &str,
     native_thread_id: &str,
-    identity_cwd: &str,
 ) -> anyhow::Result<RouteResolution> {
     let route: RouteResolution = call(
         sock,
         &Req::RouteResolve {
             session_id: session_id.to_owned(),
             native_thread_id: native_thread_id.to_owned(),
-            identity_cwd: identity_cwd.to_owned(),
         },
     )?;
     route.validate()?;
@@ -118,13 +116,6 @@ pub fn resolve_route(
             "ROUTE_RESOLVE_INVALID: daemon returned thread {} for requested thread {}",
             route.native_thread_id,
             native_thread_id
-        );
-    }
-    if route.canonical_root != identity_cwd {
-        anyhow::bail!(
-            "ROUTE_RESOLVE_INVALID: daemon returned project root {} for requested cwd {}",
-            route.canonical_root,
-            identity_cwd
         );
     }
     Ok(route)
@@ -821,13 +812,8 @@ mod tests {
                 .expect("write route response");
         });
 
-        let error = resolve_route(
-            &fixture.socket(),
-            "session-requested",
-            "thread-requested",
-            env!("CARGO_MANIFEST_DIR"),
-        )
-        .unwrap_err();
+        let error =
+            resolve_route(&fixture.socket(), "session-requested", "thread-requested").unwrap_err();
         assert!(
             error.to_string().contains("ROUTE_RESOLVE_INVALID"),
             "{error}"
@@ -853,13 +839,7 @@ mod tests {
                 .expect("write partial route response");
         });
 
-        let error = resolve_route(
-            &fixture.socket(),
-            "session-1",
-            "thread-1",
-            env!("CARGO_MANIFEST_DIR"),
-        )
-        .unwrap_err();
+        let error = resolve_route(&fixture.socket(), "session-1", "thread-1").unwrap_err();
         assert!(
             error.to_string().contains("unexpected response shape"),
             "{error}"

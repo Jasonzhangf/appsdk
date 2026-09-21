@@ -610,21 +610,42 @@ fn identities_by_runtime_key_at(
             identities.insert(identity.worker_id.clone(), identity);
         }
     }
-    Ok(identities
+    let thread_matches = identities
         .into_values()
         .filter(|identity| {
-            let Some(runtime) = identity.runtime.as_ref() else {
-                return false;
-            };
-            let thread_matches = runtime
-                .native_thread_id
+            identity
+                .runtime
                 .as_ref()
-                .is_some_and(|thread_id| thread_id.as_str() == native_thread_id);
-            thread_matches
-                && runtime
-                    .session_id
-                    .as_ref()
-                    .is_some_and(|candidate| candidate.as_str() == session_id)
+                .and_then(|runtime| runtime.native_thread_id.as_ref())
+                .is_some_and(|thread_id| thread_id.as_str() == native_thread_id)
+        })
+        .collect::<Vec<_>>();
+    let strict = thread_matches
+        .iter()
+        .filter(|identity| {
+            identity
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.session_id.as_ref())
+                .is_some_and(|candidate| candidate.as_str() == session_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !strict.is_empty() {
+        return Ok(strict);
+    }
+    // No persisted identity carries this exact session/thread pair. A durable
+    // record with the same native thread but no session id is a legacy
+    // identity from before the dual key existed; it is recoverable only when
+    // the thread match is unique. A different non-null session is never
+    // treated as legacy.
+    Ok(thread_matches
+        .into_iter()
+        .filter(|identity| {
+            identity
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.session_id.is_none())
         })
         .collect())
 }
@@ -910,6 +931,127 @@ mod tests {
             None => std::env::remove_var("COLLAB_WORKER"),
         }
 
+        assert!(resolved.is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn identity_selection_recovers_a_legacy_thread_only_binding_by_unique_thread() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("ci-legacy-thread-recover");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        // A durable record from before the dual key existed: it has a native
+        // thread but no persisted session id. It is written directly because
+        // the current registration validator refuses to create that shape;
+        // only the upgrade path may transition an existing record forward.
+        let mut runtime = runtime_identity(3, "binding-legacy");
+        runtime.session_id = None;
+        runtime.native_thread_id = Some(NativeThreadId::new("thread-legacy").unwrap());
+        write_identity(
+            &identity_path_at(&host_paths, "legacy-worker").unwrap(),
+            &Identity {
+                worker_id: "legacy-worker".into(),
+                token: "legacy-token".into(),
+                project_scope: None,
+                runtime: Some(runtime),
+                transport: Some(SelectedTransport {
+                    kind: TransportKind::AppServer,
+                    endpoint: Some("unix:///tmp/codex.sock".into()),
+                    namespace: Some("codex_tui".into()),
+                    session_id: Some("session-host".into()),
+                    thread_id: Some("thread-legacy".into()),
+                    capabilities: vec!["send_message".into()],
+                    self_check: "ok".into(),
+                }),
+            },
+        )
+        .unwrap();
+
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("CODEX_THREAD_ID", "thread-legacy");
+        std::env::set_var("CODEX_SESSION_ID", "session-host");
+        std::env::remove_var("COLLAB_WORKER");
+        let resolved = load_existing_at(&host_paths, &scope, None).unwrap();
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+
+        // The legacy identity is recovered by its unique thread; the host
+        // session is not written back into the durable record.
+        let resolved = resolved.expect("legacy thread-only identity must be recoverable");
+        assert_eq!(resolved.worker_id, "legacy-worker");
+        assert!(resolved
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.session_id.is_none()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn identity_selection_does_not_treat_a_different_session_as_legacy() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("ci-legacy-session-mismatch");
+        let state_root = root.join("global");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let mut identity =
+            load_or_create_resolved_at(&host_paths, &scope, Some("dual-worker".into())).unwrap();
+        let mut runtime = runtime_identity(4, "binding-dual");
+        runtime.session_id = Some(SessionId::new("session-bound").unwrap());
+        runtime.native_thread_id = Some(NativeThreadId::new("thread-bound").unwrap());
+        persist_registration_at(
+            &host_paths,
+            &scope,
+            &mut identity,
+            runtime,
+            SelectedTransport {
+                kind: TransportKind::AppServer,
+                endpoint: Some("unix:///tmp/codex.sock".into()),
+                namespace: Some("codex_tui".into()),
+                session_id: Some("session-bound".into()),
+                thread_id: Some("thread-bound".into()),
+                capabilities: vec!["send_message".into()],
+                self_check: "ok".into(),
+            },
+        )
+        .unwrap();
+
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("CODEX_THREAD_ID", "thread-bound");
+        std::env::set_var("CODEX_SESSION_ID", "session-other");
+        std::env::remove_var("COLLAB_WORKER");
+        let resolved = load_existing_at(&host_paths, &scope, None).unwrap();
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+
+        // A record with a different non-null session is not a legacy record.
         assert!(resolved.is_none());
         std::fs::remove_dir_all(root).ok();
     }

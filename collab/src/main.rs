@@ -2022,10 +2022,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 &host_paths.socket_path(),
                 &session_id,
                 &native_thread_id,
-                std::env::current_dir()?
-                    .canonicalize()?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("identity cwd must be valid UTF-8"))?,
             )?;
             out(&json!({
                 "canonical_root": route.canonical_root,
@@ -2086,16 +2082,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                         "master status requires CODEX_SESSION_ID so the daemon can resolve the global binding"
                     )
                 })?;
-                let canonical_cwd = std::env::current_dir()?.canonicalize()?;
-                let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
-                    anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
-                })?;
-                let route = scope::route_for_native_thread(
-                    &host_paths,
-                    &session_id,
-                    &thread_id,
-                    identity_cwd,
-                )?;
+                let route = scope::route_for_native_thread(&host_paths, &session_id, &thread_id)?;
                 let scope = Scope { root: route.root };
                 let v: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),
@@ -2397,16 +2384,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     "context requires CODEX_SESSION_ID so the daemon can resolve the global binding"
                 )
             })?;
-            let canonical_cwd = std::env::current_dir()?.canonicalize()?;
-            let identity_cwd = canonical_cwd.to_str().ok_or_else(|| {
-                anyhow::anyhow!("current directory must be valid UTF-8 for identity binding")
-            })?;
-            let route = match scope::route_for_native_thread(
-                &host_paths,
-                &session_id,
-                &thread_id,
-                identity_cwd,
-            ) {
+            let route = match scope::route_for_native_thread(&host_paths, &session_id, &thread_id) {
                 Ok(route) => route,
                 Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
                     out(&unregistered_context(None, None, Some(&error.to_string()))?);

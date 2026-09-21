@@ -18597,6 +18597,46 @@ fn bug_command_lifecycle() {
 }
 
 #[test]
+fn bug_intake_accepts_inline_json_input() {
+    let root = temp_root("bug-intake-inline");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("README.md"), "# Inline Intake Test\n").unwrap();
+    init_git(&root);
+
+    let input = serde_json::json!({
+        "execution_bound": true,
+        "classification": "bug",
+        "title": "Fix inline intake input",
+        "original_input": "appsdk bug intake --input should accept inline JSON.",
+        "scope": ["rust/src/main.rs", "rust/tests/cli_smoke.rs"],
+        "owner": "appsdk::development_intake",
+        "parent_id": "bug-inline-intake",
+        "acceptance": ["inline JSON creates or deduplicates the governed bug"],
+        "status": "received",
+        "evidence_links": ["collab://m1790005209517-9"],
+        "dedup_query": "Fix inline intake input"
+    });
+    let inline = serde_json::to_string(&input).unwrap();
+
+    let created = run_bug_in(&root, &["bug", "intake", "--input", &inline]);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created_json: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created_json["classification"], "bug");
+    assert_eq!(created_json["created"], true);
+    assert_eq!(created_json["deduplicated"], false);
+    assert_eq!(
+        created_json["bug_triage"]["query"],
+        "git-bug bug \"Fix inline intake input\" -f json"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bug_intake_deduplicates_execution_work_and_rejects_read_only_conversation() {
     let root = temp_root("bug-intake");
     fs::create_dir_all(&root).unwrap();

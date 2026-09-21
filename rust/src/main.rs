@@ -18937,16 +18937,24 @@ fn bug_intake_reuse(
     (true, !already_recorded)
 }
 
-fn bug_intake(git_bug: &Path, root: &Path, input_path: &str, ensure_identity: &dyn Fn(&Path)) {
-    let input_path = if Path::new(input_path).is_absolute() {
-        PathBuf::from(input_path)
+fn bug_intake_input_bytes(root: &Path, input: &str) -> Vec<u8> {
+    let input_path = if Path::new(input).is_absolute() {
+        PathBuf::from(input)
     } else {
-        root.join(input_path)
+        root.join(input)
     };
-    let input: Value = serde_json::from_slice(
-        &fs::read(input_path).unwrap_or_else(|_| fail("BUG_INTAKE_INPUT_READ_FAILED")),
-    )
-    .unwrap_or_else(|_| fail("BUG_INTAKE_INPUT_INVALID_JSON"));
+    match fs::read(&input_path) {
+        Ok(bytes) => bytes,
+        Err(_) if input.trim_start().starts_with('{') || input.trim_start().starts_with('[') => {
+            input.as_bytes().to_vec()
+        }
+        Err(_) => fail("BUG_INTAKE_INPUT_READ_FAILED"),
+    }
+}
+
+fn bug_intake(git_bug: &Path, root: &Path, input_arg: &str, ensure_identity: &dyn Fn(&Path)) {
+    let input: Value = serde_json::from_slice(&bug_intake_input_bytes(root, input_arg))
+        .unwrap_or_else(|_| fail("BUG_INTAKE_INPUT_INVALID_JSON"));
     if input.get("execution_bound").and_then(Value::as_bool) != Some(true) {
         fail("DEVELOPMENT_INTAKE_READ_ONLY_CONVERSATION");
     }
@@ -19137,7 +19145,8 @@ where
                     _ => fail(format!("UNKNOWN_BUG_INTAKE_OPTION:{}", arg)),
                 }
             }
-            let input = input.unwrap_or_else(|| fail("USAGE: appsdk bug intake --input <json>"));
+            let input =
+                input.unwrap_or_else(|| fail("USAGE: appsdk bug intake --input <json|json-file>"));
             bug_intake(&git_bug, root, &input, &ensure_identity);
         }
         "new" => {

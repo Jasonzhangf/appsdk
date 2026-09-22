@@ -3,7 +3,7 @@ use crate::identity::{runtime_from_registration_receipt, BindingId, RuntimeId, S
 use crate::server::notification_contract::JournalError;
 use crate::server::state::{default_priority, is_goal_deadline, TaskRec};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 #[test]
@@ -688,6 +688,7 @@ fn cancelling_master_idle_subscription_supersedes_pending_wake() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::WakeBound {
@@ -4639,6 +4640,7 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
                 state: "read".into(),
                 wake_attempt_count: 1,
                 last_wake_attempt_ms: now - 8 * 86_400_000,
+                retry_attempted: false,
             },
         },
         Event::Sent {
@@ -4654,6 +4656,7 @@ fn expired_mailbox_and_journal_are_removed_and_do_not_replay() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::DeliveryMode {
@@ -4716,6 +4719,7 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     assert_eq!(purge_expired_storage(&server, now), 0);
@@ -4734,6 +4738,7 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
             state: "read".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     server.commit(&[Event::MigrationUpdated {
@@ -4812,7 +4817,7 @@ fn fresh_default_does_not_skip_legacy_duplicate_cleanup() {
 }
 
 #[test]
-fn default_subscription_renews_and_rebinds_without_new_ids() {
+fn default_subscription_renews_matching_target_and_keeps_stale_target_visible() {
     let mut state = State::default();
     for event in default_direct_message_events(
         &state,
@@ -4829,11 +4834,7 @@ fn default_subscription_renews_and_rebinds_without_new_ids() {
         .unwrap()
         .clone();
     let ttl = DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000;
-    for (thread_id, time) in [
-        ("thread-one", ttl),
-        ("thread-one", ttl * 3),
-        ("thread-two", ttl * 4),
-    ] {
+    for (thread_id, time) in [("thread-one", ttl), ("thread-one", ttl * 3)] {
         for event in default_direct_message_events(
             &state,
             "peer",
@@ -4848,6 +4849,19 @@ fn default_subscription_renews_and_rebinds_without_new_ids() {
         assert_eq!(sub.status, "armed");
         assert_eq!(sub.expires_ms, time + ttl);
     }
+
+    // A changed App Server thread must not silently rewrite the armed lease
+    // target from a re-registration path; the stale target stays visible until
+    // an explicit rebind/recovery decides the new address.
+    let events = default_direct_message_events(
+        &state,
+        "peer",
+        &test_appserver_transport("thread-two"),
+        ttl * 4,
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(state.notification_subscriptions[&id].target, "thread-one");
+    assert_eq!(state.notification_subscriptions.len(), 1);
 }
 
 #[test]
@@ -5594,6 +5608,7 @@ fn finalize_preserves_unread_direct_message_payloads() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let finalized = handle_task_finalize_cleanup(
@@ -6831,6 +6846,7 @@ async fn poll_wakes_when_a_message_is_committed() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
 
@@ -6865,6 +6881,7 @@ async fn recv_consumes_messages_without_a_follow_up_ack() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let server = Arc::new(server);
@@ -6894,6 +6911,7 @@ fn seeded_receive_peer(server: &Server, root: &Path, id: &str, worker: &str) -> 
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     root.display().to_string()
@@ -7121,6 +7139,7 @@ fn appserver_notification_contains_id_subject_and_original_body() {
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     })
     .unwrap();
     assert_eq!(
@@ -7146,6 +7165,7 @@ fn appserver_notification_classifies_priority_and_names_one_action() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         })
         .unwrap()
     };
@@ -7212,6 +7232,7 @@ fn appserver_notification_truncates_body_without_dropping_the_action_contract() 
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     })
     .unwrap();
 
@@ -7237,6 +7258,7 @@ fn appserver_notification_abbreviates_subject_and_escapes_body_controls() {
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     })
     .unwrap();
     assert_eq!(
@@ -7261,6 +7283,7 @@ fn appserver_notification_long_goal_deadline_subjects_keep_the_typed_prefix() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         })
         .unwrap();
         assert!(
@@ -7506,15 +7529,22 @@ fn explicit_send_reports_appserver_rejection_after_durable_commit() {
 }
 
 #[test]
-fn explicit_send_duplicate_after_rejection_does_not_report_success() {
+fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
-    server.appserver_notification_sink = Arc::new(|_, _, _, _, _| {
-        Err(
-            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
-                .into(),
-        )
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_for_sink = Arc::clone(&attempts);
+    server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+        let attempt = attempts_for_sink.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            Err(
+                "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+                    .into(),
+            )
+        } else {
+            Ok(json!({"accepted": true}))
+        }
     });
 
     let first = handle_send(
@@ -7529,6 +7559,12 @@ fn explicit_send_duplicate_after_rejection_does_not_report_success() {
     );
     assert!(!first.ok);
     let message_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+        assert!(!state.msgs[&message_id].retry_attempted);
+        assert!(state.notification_delivery_failures[&message_id].retryable);
+    }
 
     let duplicate = handle_send(
         &server,
@@ -7540,30 +7576,200 @@ fn explicit_send_duplicate_after_rejection_does_not_report_success() {
         None,
         "immediate".into(),
     );
-    assert!(!duplicate.ok);
+    assert!(duplicate.ok, "{duplicate:?}");
     assert_eq!(duplicate.data["msg_id"], message_id);
     assert_eq!(duplicate.data["durable"], true);
-    assert_eq!(duplicate.data["notification"], "subscribed-not-sent");
+    assert_eq!(duplicate.data["deduplicated"], true);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 2);
+        assert!(state.msgs[&message_id].retry_attempted);
+    }
+
+    let third = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready for your review.".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!third.ok);
+    assert_eq!(third.data["msg_id"], message_id);
+    assert_eq!(
+        third.error.as_deref(),
+        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let replayed = replay(&root).unwrap();
+    assert_eq!(replayed.msgs[&message_id].wake_attempt_count, 2);
+    assert!(replayed.msgs[&message_id].retry_attempted);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
+    let (server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    let first = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "accepted once".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(first.ok, "{first:?}");
+    let message_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state
+            .notification_delivery_accepted
+            .contains_key(&message_id));
+        assert!(!state.msgs[&message_id].retry_attempted);
+    }
+
+    let duplicate = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "accepted once".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!duplicate.ok, "{duplicate:?}");
+    assert_eq!(duplicate.data["msg_id"], message_id);
     assert_eq!(
         duplicate.error.as_deref(),
         Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
     );
-    assert_eq!(
-        duplicate.data["notification_error"],
-        "no notification batch is ready"
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+    assert!(!state.msgs[&message_id].retry_attempted);
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    server.appserver_notification_sink =
+        Arc::new(|_, _, _, _, _| Err("ADAPTER_TIMEOUT: turn/start timed out".into()));
+    let first = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "unknown outcome".into(),
+        None,
+        "immediate".into(),
     );
+    assert!(!first.ok);
+    let message_id = first.data["msg_id"].as_str().unwrap().to_owned();
     {
         let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs.len(), 1);
-        assert_eq!(
-            state.notification_delivery_failures[&message_id].error,
-            "no notification batch is ready"
-        );
+        assert!(!state.notification_delivery_failures[&message_id].retryable);
     }
-    assert_eq!(
-        replay(&root).unwrap().notification_delivery_failures[&message_id].operation,
-        "notification.not_attempted"
+
+    let duplicate = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "unknown outcome".into(),
+        None,
+        "immediate".into(),
     );
+    assert!(!duplicate.ok);
+    assert_eq!(
+        duplicate.error.as_deref(),
+        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+    assert!(!state.msgs[&message_id].retry_attempted);
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_retry_is_refused_for_a_decode_failure() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+        Err("ADAPTER_UNKNOWN: decode response: missing result payload".into())
+    });
+    let first = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "undecodable outcome".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!first.ok);
+    let message_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    {
+        let state = server.state.lock().unwrap();
+        assert!(!state.notification_delivery_failures[&message_id].retryable);
+    }
+
+    let duplicate = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "undecodable outcome".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!duplicate.ok);
+    assert_eq!(
+        duplicate.error.as_deref(),
+        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+    assert!(!state.msgs[&message_id].retry_attempted);
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn reregistration_does_not_overwrite_a_stale_default_target() {
+    let (server, root) = test_server();
+    assert!(register(&server, "peer", "%peer").ok);
+    {
+        let mut state = server.state.lock().unwrap();
+        state
+            .notification_subscriptions
+            .get_mut("sub-default-direct-message-peer")
+            .unwrap()
+            .target = "thread-stale".into();
+    }
+    assert!(register(&server, "peer", "%peer").ok);
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_subscriptions["sub-default-direct-message-peer"].target,
+        "thread-stale"
+    );
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -7639,6 +7845,7 @@ fn recipient_jsonl_records_latest_delivery_and_journal_replay() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::Delivered {
@@ -7712,6 +7919,7 @@ fn recipient_jsonl_failure_is_logged_without_panicking() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     assert!(
@@ -7744,6 +7952,7 @@ fn recipient_jsonl_accepts_legacy_bare_message_before_new_append() {
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     };
     std::fs::write(
         &path,
@@ -7763,6 +7972,7 @@ fn recipient_jsonl_accepts_legacy_bare_message_before_new_append() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let projection = read_recipient_mailbox(&path, "recipient").unwrap();
@@ -7792,6 +8002,7 @@ fn recipient_jsonl_separates_complete_unterminated_legacy_record() {
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     };
     std::fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
     server.commit(&[Event::Sent {
@@ -7807,6 +8018,7 @@ fn recipient_jsonl_separates_complete_unterminated_legacy_record() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let projection = read_recipient_mailbox(&path, "recipient").unwrap();
@@ -7860,6 +8072,7 @@ fn partial_recipient_tail_is_repaired_before_append_and_replay_preserves_assignm
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let mut content = std::fs::read_to_string(&path).unwrap();
@@ -7878,6 +8091,7 @@ fn partial_recipient_tail_is_repaired_before_append_and_replay_preserves_assignm
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let projection = read_recipient_mailbox(&path, "recipient").unwrap();
@@ -7941,6 +8155,7 @@ fn malformed_recipient_jsonl_does_not_block_future_append_or_journal_replay() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let content = std::fs::read_to_string(&path).unwrap();
@@ -8003,6 +8218,7 @@ fn interior_malformed_recipient_jsonl_preserves_bad_line_and_appends_later_messa
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let malformed_line = "not-json-interior-record-preserve-this-line";
@@ -8019,6 +8235,7 @@ fn interior_malformed_recipient_jsonl_preserves_bad_line_and_appends_later_messa
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
 
@@ -8039,6 +8256,7 @@ fn interior_malformed_recipient_jsonl_preserves_bad_line_and_appends_later_messa
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
 
@@ -8632,6 +8850,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
 
@@ -9305,6 +9524,7 @@ fn typed_master_wake_delivery_marks_accumulator_notified() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::NotificationSubscribed {
@@ -9374,6 +9594,7 @@ fn typed_master_wake_delivery_does_not_depend_on_legacy_master_projection() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::WakeBound {
@@ -10266,6 +10487,7 @@ fn mailbox_read_all_chronological_sort_asc_and_desc() {
                 state: "delivered".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::Sent {
@@ -10281,6 +10503,7 @@ fn mailbox_read_all_chronological_sort_asc_and_desc() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
         Event::Sent {
@@ -10296,6 +10519,7 @@ fn mailbox_read_all_chronological_sort_asc_and_desc() {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         },
     ]);
@@ -10363,6 +10587,7 @@ async fn recv_clears_keepalive_unacked_counter() {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         },
     }]);
     let mut keepalive = crate::server::keepalive::Record::default();

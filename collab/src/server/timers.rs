@@ -185,6 +185,7 @@ fn tick_with_deadline_readiness_at(
                         state: "pending".into(),
                         wake_attempt_count: 0,
                         last_wake_attempt_ms: 0,
+                retry_attempted: false,
                     },
                 });
                 if let Some(subscription) =
@@ -366,6 +367,7 @@ fn tick_with_deadline_readiness_at(
                         state: "pending".into(),
                         wake_attempt_count: 0,
                         last_wake_attempt_ms: 0,
+                retry_attempted: false,
                     },
                 },
                 Event::WakeBound {
@@ -714,6 +716,7 @@ mod tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             },
             Event::WakeBound {
@@ -966,6 +969,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         }]);
         tick_with_idle(&server, &|_| true);
@@ -1151,6 +1155,7 @@ mod tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             },
             Event::WakeBound {
@@ -2205,6 +2210,7 @@ mod tests {
             Event::WakeAttempted {
                 ids: vec![first_message_id.clone()],
                 attempted_ms: attempted_at,
+                retry: false,
             },
             Event::Delivered {
                 ids: vec![first_message_id.clone()],

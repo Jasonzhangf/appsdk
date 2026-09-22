@@ -166,6 +166,80 @@ pub enum AdapterError {
     },
 }
 
+/// How far a failed App Server notification can be known to have progressed.
+///
+/// `AutoNotifyFailedBeforeDelivery` is the strongest usable class: the native
+/// transport refused or could not reach `turn/start`, so no recipient turn was
+/// submitted. `AutoNotifyAccepted` and `AutoNotifyUnknown` must never be
+/// resent silently because the recipient may already hold the wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationDeliveryClass {
+    KnownNotDelivered,
+    Unknown,
+    KnownDelivered,
+}
+
+impl AdapterError {
+    pub fn notification_delivery_class(&self) -> NotificationDeliveryClass {
+        match self {
+            Self::RouteUnavailable { .. }
+            | Self::EndpointUnavailable { .. }
+            | Self::UnknownEndpoint { .. }
+            | Self::CapabilityUnavailable { .. }
+            | Self::InvalidBinding { .. }
+            | Self::StaleBinding { .. }
+            | Self::WrongTurn { .. } => NotificationDeliveryClass::KnownNotDelivered,
+            // A timeout, a thread-writer conflict on another endpoint, or any
+            // unclassified decode/transport failure leaves the native outcome
+            // unknown; the recipient may already have the notification.
+            Self::Timeout { .. } | Self::ThreadWriterConflict { .. } | Self::Unknown { .. } => {
+                NotificationDeliveryClass::Unknown
+            }
+        }
+    }
+}
+
+const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 7] = [
+    "ADAPTER_ROUTE_UNAVAILABLE:",
+    "ADAPTER_ENDPOINT_UNAVAILABLE:",
+    "ADAPTER_UNKNOWN_ENDPOINT:",
+    "ADAPTER_CAPABILITY_UNAVAILABLE:",
+    "ADAPTER_INVALID_BINDING:",
+    "ADAPTER_STALE_BINDING:",
+    "ADAPTER_WRONG_TURN:",
+];
+
+/// Classify a sink error by the exact `AdapterError` display contract.
+///
+/// The notification sink boundary is a plain string because it is a pluggable
+/// callback, so callers must not infer "retryable" from an arbitrary error
+/// body. Only the documented pre-delivery prefixes count as known not
+/// delivered; decode, missing-result, timeout, and thread-conflict errors stay
+/// unknown and are never resent.
+impl AdapterError {
+    pub fn notification_class_from_display(error: &str) -> NotificationDeliveryClass {
+        // The default App Server sink preflights the explicit sender thread
+        // before any native call, so this text cannot have been submitted.
+        if error
+            .starts_with("explicit App Server notification requires the sender native thread id")
+        {
+            return NotificationDeliveryClass::KnownNotDelivered;
+        }
+        if error.starts_with("payload is missing result")
+            || error.starts_with("ADAPTER_UNKNOWN: decode")
+        {
+            return NotificationDeliveryClass::Unknown;
+        }
+        if KNOWN_NOT_DELIVERED_PREFIXES
+            .iter()
+            .any(|prefix| error.starts_with(prefix))
+        {
+            return NotificationDeliveryClass::KnownNotDelivered;
+        }
+        NotificationDeliveryClass::Unknown
+    }
+}
+
 impl fmt::Display for AdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

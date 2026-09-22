@@ -3398,6 +3398,83 @@ fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
 }
 
 #[test]
+fn same_runtime_registration_recovery_preserves_master_authority() {
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
+    assert!(registered.ok, "{registered:?}");
+    let promoted = super::handle_master_promote(
+        &server,
+        "peer-appserver".into(),
+        "token-peer-appserver".into(),
+        "user approved peer-appserver as appserver master".into(),
+    );
+    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+
+    let (scope, generation) = {
+        let state = server.state.lock().unwrap();
+        let binding = state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "peer-appserver")
+            .unwrap()
+            .clone();
+        (binding.route_scope(), binding.endpoint_generation)
+    };
+
+    let recovered = super::handle_register_with_app_scope_inner(
+        &server,
+        "peer-appserver".into(),
+        "token-peer-appserver".into(),
+        root.display().to_string(),
+        Some(AppServerId::new("appserver-test").unwrap()),
+        Some(TransportCandidates {
+            appserver: Some(crate::proto::AppServerCandidate {
+                endpoint: "unix:///tmp/collab-appserver-peer-appserver.sock".into(),
+                namespace: "codex_tui".into(),
+                session_id: "session-thread-appserver".into(),
+                thread_id: "thread-appserver".into(),
+                cwd: root.display().to_string(),
+            }),
+        }),
+        true,
+    );
+    assert!(recovered.ok, "{recovered:?}");
+    assert_eq!(recovered.data["reused"], true);
+    assert_eq!(recovered.data["role_brief"]["role"], "master");
+
+    {
+        let state = server.state.lock().unwrap();
+        let binding = state
+            .global
+            .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
+            .unwrap();
+        assert_eq!(binding.endpoint_generation, generation);
+        let grant = state
+            .global
+            .lookup_master_grant_for(&scope, &binding.binding_id)
+            .expect("same-runtime recovery must preserve the master grant");
+        assert_eq!(grant.endpoint_generation, generation);
+    }
+    let status = super::handle_master_status(&server);
+    assert!(status.ok, "{status:?}");
+    assert_eq!(status.data["master"]["worker_id"], "peer-appserver");
+
+    let replayed = super::replay(&root).unwrap();
+    let binding = replayed
+        .global
+        .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
+        .unwrap();
+    assert_eq!(binding.endpoint_generation, generation);
+    assert!(replayed
+        .global
+        .lookup_master_grant_for(&scope, &binding.binding_id)
+        .is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn legacy_master_assignment_cannot_override_typed_grant_on_replay() {
     use std::io::Write;
 

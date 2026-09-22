@@ -13629,6 +13629,33 @@ fn existing_init_target(workspace: &Path, project_root: Option<&str>) -> Option<
     Some(root)
 }
 
+fn existing_collab_control_target(workspace: &Path, project_root: Option<&str>) -> Option<PathBuf> {
+    let relative = project_root.unwrap_or(".");
+    let relative_path = Path::new(relative);
+    if relative.is_empty()
+        || relative_path.is_absolute()
+        || (relative != "."
+            && relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            }))
+    {
+        fail("INVALID_PROJECT_ROOT");
+    }
+    let root = if relative == "." {
+        workspace.to_path_buf()
+    } else {
+        workspace.join(relative_path)
+    };
+    if !root.join(".agent-collab").is_dir() && !root.join(".appsdk-control").is_dir() {
+        return None;
+    }
+    assert_no_symlink_components(workspace, &root, "existing_collab_control_project");
+    Some(root)
+}
+
 fn canonical_init_target(workspace: &Path, project_root: Option<&str>) -> PathBuf {
     let root = if let Some(project_root) = project_root {
         resolve_init_target(workspace, Some(project_root))
@@ -14200,6 +14227,14 @@ fn init_project(root: &Path, fresh: bool, discard_legacy: bool) {
             "then appsdk guide init --task <task-id> --mode <develop|debug> --module <module-id>"
         );
     }
+}
+
+fn init_collab_control_project(root: &Path) {
+    assert_ordinary_init_canonical_project_main_tree(root, false);
+    fs::create_dir_all(root).unwrap_or_else(|_| fail("PROJECT_CREATE_FAILED"));
+    try_register_global_project(root);
+    initialize_collab_peer(root);
+    println!("initialized collab identity {}", root.display());
 }
 
 fn new_project(root: &Path, register: bool) {
@@ -22377,6 +22412,10 @@ fn main() {
             } else if let Some(root) = existing_init_target(workspace_path, project_root.as_deref())
             {
                 init_project(&root, false, false);
+            } else if let Some(root) =
+                existing_collab_control_target(workspace_path, project_root.as_deref())
+            {
+                init_collab_control_project(&root);
             } else {
                 let (preparation, preparation_workspace) = read_init_preparation(workspace_path);
                 let prepared_root = preparation

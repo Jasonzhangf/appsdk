@@ -4031,6 +4031,51 @@ fn init_existing_project_creates_layout_and_manages_gitignore_idempotently() {
 }
 
 #[test]
+fn init_existing_collab_control_project_recovers_identity_without_preparation() {
+    let root = temp_root("init-existing-collab-control");
+    fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" != \"init\" ]; then exit 64; fi\nprintf '%s\\n' '{{\"ok\":true,\"runtime\":{{\"runtimeId\":\"runtime-existing-collab-control\",\"appserverId\":\"appserver-cli\",\"namespace\":\"codex_tui\",\"endpoint\":\"unix:///tmp/codex.sock\",\"projectRoot\":\"{}\",\"capabilities\":[\"send_message_to_thread\"],\"processId\":4242}},\"transport_selected\":{{\"kind\":\"appserver\",\"endpoint\":\"unix:///tmp/codex.sock\",\"namespace\":\"codex_tui\",\"thread_id\":\"thread-existing-collab-control\",\"capabilities\":[\"send_message_to_thread\"],\"self_check\":\"test\"}}}}'\n",
+            root.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &fake_bin)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("collab-channel"), "{stdout}");
+    assert!(stdout.contains("initialized collab identity"), "{stdout}");
+    assert!(
+        stdout.contains("thread-existing-collab-control"),
+        "{stdout}"
+    );
+    assert!(!root.join(".appsdk/project.json").exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("PREPARATION_MISSING"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_sdk_source_workspace_uses_canonical_zone_transition_contract() {
     let root = temp_root("init-sdk-source-workspace");
     fs::create_dir_all(root.join("contracts/transitions")).unwrap();

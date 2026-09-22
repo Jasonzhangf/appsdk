@@ -8827,6 +8827,53 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
 }
 
 #[test]
+fn presence_edge_probes_appserver_status_outside_state_mutex() {
+    let (server, root) = test_server();
+    register(&server, "master-worker", "thread-master");
+    register(&server, "edge-worker", "thread-edge");
+    let mut server_arc = std::sync::Arc::new(server);
+    let promote_resp = dispatch(
+        &server_arc,
+        Req::MasterPromote {
+            worker_id: "master-worker".into(),
+            token: "token-master-worker".into(),
+            approval: "approved".into(),
+        },
+    );
+    assert!(promote_resp.ok);
+
+    let server_for_probe: Arc<StdMutex<Option<Arc<Server>>>> = Arc::new(StdMutex::new(None));
+    let server_for_probe_closure = server_for_probe.clone();
+    let server_mut = Arc::get_mut(&mut server_arc).unwrap();
+    server_mut.appserver_thread_status = Arc::new(move |_, thread_id| {
+        if let Some(server) = server_for_probe_closure.lock().unwrap().as_ref() {
+            assert!(
+                server.state.try_lock().is_ok(),
+                "App Server status probes must not run under server.state mutex"
+            );
+        }
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "idle"},
+                "canAcceptDirectInput": true
+            }
+        }))
+    });
+    *server_for_probe.lock().unwrap() = Some(server_arc.clone());
+
+    let status = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("edge-worker".into()),
+        },
+    );
+    assert!(status.ok, "{status:?}");
+    assert_eq!(status.data["workers"][0]["status"], "idle");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn closed_and_delivered_tasks_do_not_trigger_keepalives() {
     let (server, root) = test_server();
     register(&server, "worker-a", "thread-worker-a");

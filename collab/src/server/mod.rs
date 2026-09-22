@@ -6432,6 +6432,27 @@ pub(crate) fn live_master_id(
     }
 }
 
+fn live_master_worker_snapshot(server: &Server) -> Result<Option<WorkerRec>, &'static str> {
+    let worker = {
+        let state = server.state.lock().unwrap();
+        let route_scope = server_route_scope(server, &state)?;
+        current_master_worker_id(&state, route_scope.as_ref())
+            .as_ref()
+            .and_then(|id| state.workers.get(id))
+            .cloned()
+    };
+    let Some(worker) = worker else {
+        return Ok(None);
+    };
+    match worker_presence(server, &worker) {
+        IdentityPresence::Present => Ok(Some(worker)),
+        IdentityPresence::Cold | IdentityPresence::Missing => Ok(None),
+        IdentityPresence::Unknown => Err(
+            "master identity is unknown; defer authority changes until transport probes succeed",
+        ),
+    }
+}
+
 fn is_managed_subagent(state: &State, worker_id: &str) -> bool {
     state
         .subagents
@@ -6448,6 +6469,10 @@ fn ordinary_peer_presence_label(presence: IdentityPresence) -> Option<&'static s
 }
 
 fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&str>) {
+    let master = match live_master_worker_snapshot(server) {
+        Ok(Some(master)) => master,
+        _ => return,
+    };
     let observations: Vec<(WorkerRec, &'static str)> = {
         let state = server.state.lock().unwrap();
         state
@@ -6478,11 +6503,17 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
         if current_worker != &worker || is_managed_subagent(&state, &worker.id) {
             continue;
         }
-        let master_id = match live_master_id(server, &state) {
-            Ok(Some(master_id)) => master_id,
-            _ => continue,
+        let route_scope = match server_route_scope(server, &state) {
+            Ok(route_scope) => route_scope,
+            Err(_) => continue,
         };
-        if master_id == worker.id {
+        if current_master_worker_id(&state, route_scope.as_ref()).as_deref()
+            != Some(master.id.as_str())
+            || state.workers.get(&master.id) != Some(&master)
+        {
+            continue;
+        }
+        if master.id == worker.id {
             continue;
         }
         let old = state
@@ -6517,7 +6548,7 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
             });
             if server.config.notifications.enabled {
                 if let Some(subscription) = state
-                    .matching_subscription(&master_id, "direct-message", None, now)
+                    .matching_subscription(&master.id, "direct-message", None, now)
                     .cloned()
                 {
                     let message_id = gen_msg_id();
@@ -6525,7 +6556,7 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
                         msg: Message {
                             id: message_id.clone(),
                             from: "collab-server".into(),
-                            to: master_id.clone(),
+                            to: master.id.clone(),
                             mtype: "notify".into(),
                             subject: Some(if offline {
                                 format!("worker-unresponsive: {}", worker.id)

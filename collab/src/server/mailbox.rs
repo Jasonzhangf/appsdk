@@ -1163,6 +1163,7 @@ mod tests {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         }
     }
 
@@ -1470,6 +1471,7 @@ mod tests {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         };
         server.commit(&[
             Event::Sent {

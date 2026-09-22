@@ -257,6 +257,10 @@ pub struct Message {
     pub wake_attempt_count: u32,
     #[serde(default, alias = "last_nudge_ms")]
     pub last_wake_attempt_ms: i64,
+    /// One explicit recovery attempt may follow a known-undelivered attempt;
+    /// this marker makes that budget durable and replayable.
+    #[serde(default)]
+    pub retry_attempted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -265,6 +269,8 @@ pub struct NotificationDeliveryFailure {
     pub operation: String,
     pub error: String,
     pub failed_ms: i64,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// Durable identity of one committed receive batch. The receive identity is
@@ -555,12 +561,23 @@ pub enum Event {
         ids: Vec<String>,
         #[serde(default)]
         attempted_ms: i64,
+        #[serde(default)]
+        retry: bool,
     },
     NotificationDeliveryFailed {
         message_id: String,
         operation: String,
         error: String,
         failed_ms: i64,
+        #[serde(default)]
+        retryable: bool,
+    },
+    /// The native transport accepted the notification for this message. A
+    /// later explicit recovery must refuse to resend it even though the
+    /// mailbox row still reads `pending` until the recipient consumes it.
+    NotificationDeliveryAccepted {
+        message_id: String,
+        accepted_ms: i64,
     },
     NotificationSubscribed {
         subscription: NotificationSubscription,
@@ -721,6 +738,8 @@ pub struct State {
     pub workers: HashMap<String, WorkerRec>,
     pub msgs: HashMap<String, Message>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
+    /// Last native attempt accepted for a durable message, if any.
+    pub notification_delivery_accepted: HashMap<String, i64>,
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
@@ -1065,11 +1084,16 @@ impl State {
                         .insert(msg_id.clone(), source_thread_id.clone());
                 }
             }
-            Event::WakeAttempted { ids, attempted_ms } => {
+            Event::WakeAttempted {
+                ids,
+                attempted_ms,
+                retry,
+            } => {
                 for id in ids {
                     if let Some(message) = self.msgs.get_mut(id) {
                         message.wake_attempt_count = message.wake_attempt_count.saturating_add(1);
                         message.last_wake_attempt_ms = *attempted_ms;
+                        message.retry_attempted |= *retry;
                     }
                 }
             }
@@ -1078,6 +1102,7 @@ impl State {
                 operation,
                 error,
                 failed_ms,
+                retryable,
             } => {
                 let failed_master_wake = self.msgs.get(message_id).is_some_and(|message| {
                     message.from == "collab-server" && message.mtype == "notification"
@@ -1102,8 +1127,16 @@ impl State {
                         operation: operation.clone(),
                         error: error.clone(),
                         failed_ms: *failed_ms,
+                        retryable: *retryable,
                     },
                 );
+            }
+            Event::NotificationDeliveryAccepted {
+                message_id,
+                accepted_ms,
+            } => {
+                self.notification_delivery_accepted
+                    .insert(message_id.clone(), *accepted_ms);
             }
             Event::NotificationSubscribed { subscription } => {
                 self.notification_subscriptions
@@ -1633,6 +1666,19 @@ impl State {
                 operation: failure.operation,
                 error: failure.error,
                 failed_ms: failure.failed_ms,
+                retryable: failure.retryable,
+            }
+        }));
+        let mut accepted: Vec<_> = self
+            .notification_delivery_accepted
+            .iter()
+            .map(|(message_id, accepted_ms)| (message_id.clone(), *accepted_ms))
+            .collect();
+        accepted.sort_by(|a, b| (a.1, a.0.as_str()).cmp(&(b.1, b.0.as_str())));
+        events.extend(accepted.into_iter().map(|(message_id, accepted_ms)| {
+            Event::NotificationDeliveryAccepted {
+                message_id,
+                accepted_ms,
             }
         }));
         let mut messages: Vec<_> = self.msgs.values().cloned().collect();
@@ -1887,6 +1933,7 @@ mod tests {
             operation: "notification.emitted".into(),
             error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
             failed_ms: 42,
+            retryable: true,
         };
         state.apply(&event);
         assert_eq!(
@@ -1896,6 +1943,7 @@ mod tests {
                 operation: "notification.emitted".into(),
                 error: "ADAPTER_ROUTE_UNAVAILABLE: persisted failure".into(),
                 failed_ms: 42,
+                retryable: true,
             }
         );
 
@@ -1908,10 +1956,12 @@ mod tests {
                     operation,
                     error,
                     failed_ms,
+                    retryable,
                 } if message_id == "msg-persisted-failure"
                     && operation == "notification.emitted"
                     && error == "ADAPTER_ROUTE_UNAVAILABLE: persisted failure"
                     && *failed_ms == 42
+                    && *retryable
             )
         }));
         let mut replayed = State::default();
@@ -2009,6 +2059,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         });
         state.apply(&Event::WakeBound {
@@ -2020,6 +2071,7 @@ mod tests {
             operation: "notification.emitted".into(),
             error: "ADAPTER_ROUTE_UNAVAILABLE: failed".into(),
             failed_ms: 12,
+            retryable: true,
         });
         assert_eq!(state.master_wake.generation, 0);
         assert_eq!(state.master_wake.delivery_state, "delivery_failed");
@@ -2080,6 +2132,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         });
         state.apply(&Event::WakeBound {
@@ -2091,6 +2144,7 @@ mod tests {
             operation: "notification.emitted".into(),
             error: "ADAPTER_UNKNOWN: native frame exceeds maximum size".into(),
             failed_ms: 12,
+            retryable: false,
         });
 
         assert_eq!(state.master_wake.delivery_state, "pending");
@@ -2136,6 +2190,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         });
         state.apply(&Event::WakeBound {
@@ -2147,6 +2202,7 @@ mod tests {
             operation: "notification.emitted".into(),
             error: "ADAPTER_UNKNOWN: native frame exceeds maximum size".into(),
             failed_ms: 12,
+            retryable: false,
         });
 
         assert_eq!(state.master_wake.delivery_state, initial_delivery_state);
@@ -2240,6 +2296,7 @@ mod tests {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         };
         state.apply(&Event::MasterWakeSignal {
             signal: MasterWakeSignal::WorkerIdle {
@@ -2596,6 +2653,7 @@ mod tests {
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         }
     }
 
@@ -3469,6 +3527,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         });
         state.apply(&Event::WakeBound {
@@ -3544,6 +3603,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         });
         state.apply(&Event::WakeBound {
@@ -3618,6 +3678,7 @@ mod tests {
                 state: "pending".into(),
                 wake_attempt_count: 0,
                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
             },
         });
         state.apply(&Event::WakeBound {

@@ -3741,25 +3741,58 @@ fn default_direct_message_events(
     }
     let refresh_after_ms = DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;
     let mut current_is_fresh = false;
+    let mut current_is_armed = false;
+    let mut refresh_due = false;
     for subscription in state.notification_subscriptions.values().filter(|sub| {
         sub.worker_id == worker_id && sub.event == "direct-message" && sub.status == "armed"
     }) {
-        if subscription.id == default_id
-            && subscription_matches_transport(subscription, transport)
-            && subscription.expires_ms - now >= refresh_after_ms
-        {
-            current_is_fresh = true;
+        if subscription.id == default_id {
+            current_is_armed = true;
+            if subscription_matches_transport(subscription, transport) {
+                current_is_fresh = true;
+                refresh_due = subscription.expires_ms - now < refresh_after_ms;
+            }
             continue;
         }
-        if subscription.id != default_id {
-            events.push(Event::NotificationStatus {
-                subscription_id: subscription.id.clone(),
-                status: "rebound".into(),
-                updated_ms: now,
-            });
-        }
+        events.push(Event::NotificationStatus {
+            subscription_id: subscription.id.clone(),
+            status: "rebound".into(),
+            updated_ms: now,
+        });
     }
     if current_is_fresh {
+        if refresh_due {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return events;
+            };
+            events.push(Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: default_id,
+                    worker_id: worker_id.into(),
+                    event: "direct-message".into(),
+                    subject: None,
+                    target: thread_id.into(),
+                    method: "appserver".into(),
+                    trigger_ms: None,
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: None,
+                    repeat_count: 1,
+                    fired_count: 0,
+                    expires_ms: now
+                        .saturating_add(DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000),
+                    status: "armed".into(),
+                    created_ms: now,
+                    updated_ms: now,
+                    status_reason: None,
+                },
+            });
+        }
+        return events;
+    }
+    // An armed default lease with a stale target is never silently rewritten
+    // by re-registration: the transport mismatch must stay visible so an
+    // explicit rebind or recovery decides the new target.
+    if current_is_armed {
         return events;
     }
     let Some(thread_id) = transport.thread_id.as_deref() else {
@@ -3884,6 +3917,7 @@ fn attempt_appserver_notification_with_at(
     delay: i64,
     explicit: bool,
     now: i64,
+    explicit_retry: bool,
     deliver: &dyn Fn(
         &SelectedTransport,
         Option<&str>,
@@ -3903,6 +3937,7 @@ fn attempt_appserver_notification_with_at(
         explicit,
         now,
         false,
+        explicit_retry,
         deliver,
     )
 }
@@ -3918,6 +3953,7 @@ fn attempt_appserver_notification_with_retry(
     explicit: bool,
     now: i64,
     allow_retry: bool,
+    retry: bool,
     deliver: &dyn Fn(
         &SelectedTransport,
         Option<&str>,
@@ -3970,7 +4006,11 @@ fn attempt_appserver_notification_with_retry(
                     &server.config.notifications,
                 ) == delay
                 && message.state == "pending"
-                && (allow_retry || message.wake_attempt_count < MAX_WAKE_ATTEMPTS)
+                && (if retry {
+                    message.id == seed_id
+                } else {
+                    allow_retry || message.wake_attempt_count < MAX_WAKE_ATTEMPTS
+                })
                 && sub.worker_id == recipient
                 && subscription_matches_transport(sub, transport)
                 && sub.status == "armed"
@@ -4028,6 +4068,7 @@ fn attempt_appserver_notification_with_retry(
         &[Event::WakeAttempted {
             ids: batch.iter().map(|message| message.1.clone()).collect(),
             attempted_ms: now,
+            retry,
         }],
     );
     drop(state);
@@ -4052,6 +4093,18 @@ fn attempt_appserver_notification_with_retry(
                     seed_id
                 ),
             );
+            let accepted_ms = now_ms();
+            let mut state = server.state.lock().unwrap();
+            server.commit_locked(
+                &mut state,
+                &batch
+                    .iter()
+                    .map(|message| Event::NotificationDeliveryAccepted {
+                        message_id: message.1.clone(),
+                        accepted_ms,
+                    })
+                    .collect::<Vec<_>>(),
+            );
             NotificationAttempt::Accepted
         }
         Err(error) => {
@@ -4074,6 +4127,12 @@ fn attempt_appserver_notification_with_retry(
                     },
                     error: error.clone(),
                     failed_ms: now,
+                    retryable: matches!(
+                        crate::client::adapters::AdapterError::notification_class_from_display(
+                            &error
+                        ),
+                        crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
+                    ),
                 }],
             );
             NotificationAttempt::Rejected(error)
@@ -4106,6 +4165,16 @@ fn attempt_notification_detailed_with_at(
     message_id: &str,
     subscription_id: &str,
     now: i64,
+) -> NotificationAttempt {
+    attempt_notification_detailed_with_mode_at(server, message_id, subscription_id, now, false)
+}
+
+fn attempt_notification_detailed_with_mode_at(
+    server: &Server,
+    message_id: &str,
+    subscription_id: &str,
+    now: i64,
+    explicit_retry: bool,
 ) -> NotificationAttempt {
     if !server.config.notifications.enabled {
         return NotificationAttempt::NotAttempted("notifications are disabled".into());
@@ -4159,6 +4228,7 @@ fn attempt_notification_detailed_with_at(
                         error: "subscription does not match the selected App Server transport"
                             .into(),
                         failed_ms: now,
+                        retryable: true,
                     },
                 ],
             );
@@ -4190,6 +4260,7 @@ fn attempt_notification_detailed_with_at(
         delay,
         explicit,
         now,
+        explicit_retry,
         &|transport, source_thread_id, text, message_id, explicit| {
             (server.appserver_notification_sink)(
                 transport,
@@ -4202,15 +4273,24 @@ fn attempt_notification_detailed_with_at(
     );
     if let NotificationAttempt::NotAttempted(error) = &attempt {
         let mut state = server.state.lock().unwrap();
-        server.commit_locked(
-            &mut state,
-            &[Event::NotificationDeliveryFailed {
-                message_id: message_id.to_string(),
-                operation: "notification.not_attempted".into(),
-                error: error.clone(),
-                failed_ms: now,
-            }],
-        );
+        // Never let a later pre-delivery skip overwrite the class of an
+        // earlier native attempt. Accepted attempts leave no failure record
+        // at all; unknown and decode failures keep their non-retryable class.
+        if !state
+            .notification_delivery_failures
+            .contains_key(message_id)
+        {
+            server.commit_locked(
+                &mut state,
+                &[Event::NotificationDeliveryFailed {
+                    message_id: message_id.to_string(),
+                    operation: "notification.not_attempted".into(),
+                    error: error.clone(),
+                    failed_ms: now,
+                    retryable: true,
+                }],
+            );
+        }
     }
     attempt
 }
@@ -4224,6 +4304,30 @@ fn notification_delivery_delay_ms(
     match state.delivery_modes.get(message_id).map(String::as_str) {
         Some("explicit-notification" | DAEMON_LIVE_CLOSURE_MODE | RESTART_REPLAY_PENDING_MODE) => 0,
         _ => config.delay_ms(event),
+    }
+}
+
+/// Why one explicit recovery attempt may or may not be issued for a durable
+/// message. A refusal is kept as a precise machine-readable reason so a caller
+/// never has to guess that an accepted or unknown native attempt was skipped.
+fn explicit_retry_refusal(state: &State, message_id: &str) -> Option<&'static str> {
+    let message = state.msgs.get(message_id)?;
+    if message.state != "pending" {
+        return Some("original message is no longer pending");
+    }
+    if message.retry_attempted {
+        return Some("original message was already explicitly retried");
+    }
+    if state
+        .notification_delivery_accepted
+        .contains_key(message_id)
+    {
+        return Some("original native attempt was accepted");
+    }
+    match state.notification_delivery_failures.get(message_id) {
+        Some(failure) if failure.retryable => None,
+        Some(_) => Some("original attempt is not known to be undelivered"),
+        None => Some("original attempt has no durable delivery failure"),
     }
 }
 
@@ -4308,6 +4412,11 @@ fn attempt_scheduler_notification(
     let delivery = {
         let state = server.state.lock().unwrap();
         state.msgs.get(message_id).and_then(|seed| {
+            // A scheduler recovery may re-knock once after a known-undelivered
+            // attempt. An accepted or unknown native outcome has no retryable
+            // durable failure, so it must stop instead of resending blindly.
+            let allow_retry = seed.wake_attempt_count >= MAX_WAKE_ATTEMPTS
+                && explicit_retry_refusal(&state, message_id).is_none();
             let recipient = seed.to.clone();
             let subscription = state.notification_subscriptions.get(subscription_id)?;
             if subscription.worker_id != recipient {
@@ -4343,10 +4452,12 @@ fn attempt_scheduler_notification(
                 source_thread_id,
                 delay,
                 is_explicit_notification(&state, seed),
+                allow_retry,
             ))
         })
     };
-    let Some((recipient, transport, source_thread_id, delay, explicit)) = delivery else {
+    let Some((recipient, transport, source_thread_id, delay, explicit, allow_retry)) = delivery
+    else {
         clear_scheduler_notification_claim(server, request_id, claim_ms);
         return SchedulerNotificationAttempt::Rejected;
     };
@@ -4360,7 +4471,8 @@ fn attempt_scheduler_notification(
         delay,
         explicit,
         now_ms(),
-        true,
+        allow_retry,
+        false,
         &|transport, source_thread_id, text, message_id, explicit| {
             (server.appserver_notification_sink)(
                 transport,
@@ -4554,6 +4666,7 @@ mod notification_batch_tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             },
             Event::WakeBound {
@@ -4583,6 +4696,7 @@ mod notification_batch_tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             },
             Event::WakeBound {
@@ -4989,6 +5103,7 @@ pub(crate) fn attempt_notification_with_default(
         delay,
         explicit,
         now_ms(),
+        false,
         &|transport, source_thread_id, text, message_id, explicit| {
             let target = transport.thread_id.as_deref().unwrap_or("appserver");
             if !can_receive(target) {
@@ -6799,6 +6914,7 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
                             state: "pending".into(),
                             wake_attempt_count: 0,
                             last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                         },
                     });
                     events.push(Event::WakeBound {
@@ -7043,6 +7159,50 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             .get(&pending.message_id)
             .map(|message| message.state.as_str())
             .unwrap_or("missing");
+        // A native attempt that was already accepted cannot be resent. Its
+        // stale notifying claim is reconciled to the accepted outcome instead
+        // of opening a retry window; unknown outcomes keep their failure class
+        // and are reported rather than silently resent.
+        if state
+            .notification_delivery_accepted
+            .contains_key(&pending.message_id)
+        {
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: request_id.into(),
+                    status: "succeeded".into(),
+                    error: None,
+                    updated_ms: now_ms(),
+                }],
+            );
+            let admission = state.scheduler_admissions.get(request_id).cloned()?;
+            return Some(Resp::data(json!({
+                "request_id": admission.request_id,
+                "decision": admission.decision,
+                "admission": {
+                    "request_id": admission.request_id,
+                    "decision": admission.decision,
+                    "worker_id": admission.worker_id,
+                    "managed_subagent_id": admission.managed_subagent_id,
+                    "message_id": admission.message_id,
+                    "task_id": admission.task_id,
+                    "status": "succeeded",
+                },
+                "message_id": admission.message_id,
+                "task_id": admission.task_id,
+                "target": task.owner,
+                "status": task.status,
+                "managed_subagent_id": admission.managed_subagent_id,
+                "managed_subagent": admission
+                    .managed_subagent_id
+                    .as_ref()
+                    .map(|id| json!({"id": id, "worker_id": task.owner}))
+                    .unwrap_or(serde_json::Value::Null),
+                "notification": "already-accepted",
+                "recovered": true,
+            })));
+        }
         if matches!(message_state, "read" | "delivered") {
             server.commit_locked(
                 &mut state,
@@ -7376,6 +7536,7 @@ pub(crate) fn handle_scheduler_dispatch(
             state: "pending".into(),
             wake_attempt_count: 0,
             last_wake_attempt_ms: 0,
+            retry_attempted: false,
         };
         let task = TaskRec {
             id: task_id.clone(),
@@ -8142,6 +8303,7 @@ pub(crate) fn handle_send_with_task(
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     };
     if let Some(existing) = st.msgs.values().find(|m| {
         m.from == from
@@ -8164,15 +8326,17 @@ pub(crate) fn handle_send_with_task(
             let subscription = st
                 .matching_subscription(&to, "direct-message", None, now_ms())
                 .cloned();
+            let explicit_retry = explicit_retry_refusal(&st, &existing_id).is_none();
             drop(st);
             let notification = subscription
                 .as_ref()
                 .map(|subscription| {
-                    attempt_notification_detailed_with_at(
+                    attempt_notification_detailed_with_mode_at(
                         server,
                         &existing_id,
                         &subscription.id,
                         now_ms(),
+                        explicit_retry,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -8318,6 +8482,7 @@ fn handle_live_closure_daemon_send(
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     };
     let mid = msg.id.clone();
     let subscription = st
@@ -8430,6 +8595,7 @@ fn handle_cross_project_send(
         state: "pending".into(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     };
     let mid = msg.id.clone();
     let subscription = st
@@ -9635,6 +9801,7 @@ fn release_dependents_of_closed_task(
                         state: "pending".into(),
                         wake_attempt_count: 0,
                         last_wake_attempt_ms: 0,
+                        retry_attempted: false,
                     },
                 },
                 Event::WakeBound {
@@ -12631,6 +12798,7 @@ mod host_route_registry_tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             },
             Event::WakeBound {
@@ -12658,6 +12826,7 @@ mod host_route_registry_tests {
             0,
             true,
             now_ms(),
+            false,
             &|transport, source_thread_id, text, message_id, explicit| {
                 (server.appserver_notification_sink)(
                     transport,
@@ -18811,6 +18980,7 @@ mod host_route_registry_tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             }]);
             response
@@ -20551,6 +20721,7 @@ mod scheduler_admission_tests {
     use crate::server::peer_tests::{register, test_server};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Condvar, Mutex};
     use std::thread;
@@ -21166,7 +21337,10 @@ mod scheduler_admission_tests {
         let reject_once_for_sink = reject_once.clone();
         server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
             if reject_once_for_sink.swap(false, Ordering::SeqCst) {
-                Err("ADAPTER_UNKNOWN: rpc unknown: thread not found".into())
+                Err(
+                    "ADAPTER_ROUTE_UNAVAILABLE: recipient thread is not loaded by the App Server"
+                        .into(),
+                )
             } else {
                 Ok(json!({"accepted": true}))
             }
@@ -21255,6 +21429,60 @@ mod scheduler_admission_tests {
             },
         );
         assert!(accepted.ok, "{accepted:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_unknown_notification_outcome_is_not_resent() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        promote_master(&server);
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_for_sink = calls.clone();
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+            calls_for_sink.fetch_add(1, Ordering::SeqCst);
+            Err("ADAPTER_TIMEOUT: turn/start timed out".into())
+        });
+        let server = Arc::new(server);
+        let request = || {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-notify-unknown-1".into(),
+                        subject: "Unknown notification".into(),
+                        body: "Must not be resent".into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p0".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+
+        let first = request();
+        assert!(!first.ok, "{first:?}");
+        assert_eq!(first.data["admission"]["status"], "pending");
+        let message_id = first.data["message_id"].as_str().unwrap().to_owned();
+        {
+            let state = server.state.lock().unwrap();
+            assert!(!state.notification_delivery_failures[&message_id].retryable);
+        }
+
+        let retry = request();
+        assert!(!retry.ok, "{retry:?}");
+        assert_eq!(retry.data["admission"]["status"], "pending");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+        drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21601,6 +21829,7 @@ mod scheduler_admission_tests {
                     state: "pending".into(),
                     wake_attempt_count: 0,
                     last_wake_attempt_ms: 0,
+                    retry_attempted: false,
                 },
             },
             Event::TaskCreated {
@@ -22004,6 +22233,69 @@ mod scheduler_admission_tests {
             state.scheduler_admissions["req-stale-notifying"].status,
             "succeeded"
         );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_unknown_notification_claim_is_not_resent_after_cooldown() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        promote_master(&server);
+        let sink_calls = Arc::new(AtomicU64::new(0));
+        let sink_calls_for_sink = Arc::clone(&sink_calls);
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+            sink_calls_for_sink.fetch_add(1, Ordering::SeqCst);
+            Err("ADAPTER_TIMEOUT: turn/start timed out".into())
+        });
+        let server = Arc::new(server);
+        let request = || {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-stale-unknown".into(),
+                        subject: "Unknown outcome".into(),
+                        body: "Must not be resent".into(),
+                        feature_id: None,
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p1".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+        let first = request();
+        assert!(!first.ok, "{first:?}");
+        let message_id = first.data["message_id"].as_str().unwrap().to_owned();
+        {
+            let mut state = server.state.lock().unwrap();
+            let stale_ms = now_ms() - state::REQUEST_COOLDOWN_MS;
+            server.commit_locked(
+                &mut state,
+                &[Event::SchedulerAdmissionStatus {
+                    request_id: "req-stale-unknown".into(),
+                    status: "notifying".into(),
+                    error: None,
+                    updated_ms: stale_ms,
+                }],
+            );
+        }
+
+        let retry = request();
+        assert!(!retry.ok, "{retry:?}");
+        assert_eq!(sink_calls.load(Ordering::SeqCst), 1);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
+        assert!(!state.msgs[&message_id].retry_attempted);
+        assert!(!state.notification_delivery_failures[&message_id].retryable);
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -286,6 +286,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                                     state: "pending".into(),
                                     wake_attempt_count: 0,
                                     last_wake_attempt_ms: 0,
+                retry_attempted: false,
                                 },
                             });
                             events.push(Event::WakeBound {
@@ -317,6 +318,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                                 state: "pending".into(),
                                 wake_attempt_count: 0,
                                 last_wake_attempt_ms: 0,
+                retry_attempted: false,
                             },
                         });
                         record.idle_episode_notices = record.idle_episode_notices.saturating_add(1);

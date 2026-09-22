@@ -2228,6 +2228,7 @@ mod tests {
             Event::WakeAttempted {
                 ids: vec!["message-1".into()],
                 attempted_ms: 42,
+                retry: false,
             },
             None,
             None,
@@ -2248,6 +2249,7 @@ mod tests {
             Event::WakeAttempted {
                 ids: vec!["message-1".into()],
                 attempted_ms: 42,
+                retry: false,
             },
             Some("event-1"),
             Some(1),
@@ -2257,6 +2259,7 @@ mod tests {
             Event::WakeAttempted {
                 ids: vec!["message-2".into()],
                 attempted_ms: 43,
+                retry: false,
             },
             Some("event-2"),
             Some(2),
@@ -2278,6 +2281,7 @@ mod tests {
             Event::WakeAttempted {
                 ids: vec!["message-1".into()],
                 attempted_ms: 42,
+                retry: false,
             },
             Some("event-1"),
             Some(1),

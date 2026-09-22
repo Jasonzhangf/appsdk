@@ -987,6 +987,7 @@ fn live_closure_expected_native_inputs(
             .to_owned(),
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
+        retry_attempted: false,
     };
     let notification = server::mailbox::notification_text(&message)
         .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_NATIVE_INPUT_UNAVAILABLE"))?;

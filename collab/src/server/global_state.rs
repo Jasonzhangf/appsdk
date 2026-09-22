@@ -2210,11 +2210,21 @@ impl GlobalState {
             )));
         }
         let current_grant = project.lookup_master_grant(&failed.binding_id);
-        if current_grant.is_some() {
-            return Err(StateError::MasterGrantConflict(format!(
-                "binding {} master grant is not the failed transaction state",
-                failed.binding_id
-            )));
+        if let Some(grant) = current_grant {
+            // A same-principal recovery reissues the master grant for the new
+            // generation, so the failed transaction legitimately owns a grant
+            // at exactly this tuple.  Any other grant still fails closed.
+            if grant.project_scope != failed.project_scope
+                || grant.app_scope_id != failed.app_scope_id
+                || grant.agent_id != failed.agent_id
+                || grant.binding_id != failed.binding_id
+                || grant.endpoint_generation != failed.endpoint_generation
+            {
+                return Err(StateError::MasterGrantConflict(format!(
+                    "binding {} master grant is not the failed transaction state",
+                    failed.binding_id
+                )));
+            }
         }
 
         self.mutate(|next| {
@@ -3370,9 +3380,14 @@ mod tests {
             5,
         );
         state.bind_runtime(failed.clone()).unwrap();
-        assert!(state
-            .lookup_master_grant(&scope, &failed.binding_id)
-            .is_none());
+        // A same-principal recovery reissues the grant for the new
+        // generation, which is exactly the transaction rollback must undo.
+        let failed_grant = grant(&scope, "app-one", "agent-one", "binding-one", 5);
+        state.grant_master(failed_grant.clone()).unwrap();
+        assert_eq!(
+            state.lookup_master_grant(&scope, &failed.binding_id),
+            Some(&failed_grant)
+        );
 
         state
             .rollback_runtime_binding(
@@ -3402,6 +3417,62 @@ mod tests {
             Err(StateError::BindingConflict(_))
         ));
         assert_eq!(state.version(), before);
+    }
+
+    #[test]
+    fn runtime_binding_rollback_rejects_a_grant_that_is_not_the_failed_transaction_state() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let previous = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-one",
+            "binding-one",
+            4,
+        );
+        state.bind_runtime(previous.clone()).unwrap();
+        let failed = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-two",
+            "binding-one",
+            5,
+        );
+        state.bind_runtime(failed.clone()).unwrap();
+
+        // A grant on the same binding whose generation does not match the
+        // failed transaction is not this transaction's state, so rollback
+        // must still fail closed instead of silently restoring it.
+        let mismatched = MasterGrant::new(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            "project",
+            "operator",
+            "user approved",
+            BindingId::new("binding-one").unwrap(),
+            failed.endpoint_generation + 1,
+            1,
+        )
+        .unwrap();
+        let mut with_mismatched = state.clone();
+        with_mismatched
+            .projects
+            .get_mut(scope.as_str())
+            .unwrap()
+            .master_grants
+            .insert(failed.binding_id.as_str().to_owned(), mismatched);
+        assert!(matches!(
+            with_mismatched.rollback_runtime_binding(failed.clone(), Some(previous), None),
+            Err(StateError::MasterGrantConflict(_))
+        ));
+        assert_eq!(with_mismatched.version(), state.version());
+        state.validate().unwrap();
     }
 
     #[test]

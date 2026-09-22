@@ -785,20 +785,49 @@ impl Server {
                         current.same_principal(&binding)
                             && current.endpoint_generation < binding.endpoint_generation
                     });
+                    // A same-principal generation replacement is the
+                    // reconnect/recovery path, so the capability fence must
+                    // reissue the previous grant for the new generation in
+                    // this same transaction.  An unrelated binding never
+                    // carries a previous grant here, so its reconnect cannot
+                    // touch the current master.
+                    let reissued_master_grant = previous
+                        .filter(|_| replaces_generation)
+                        .and_then(|current| {
+                            st.global
+                                .lookup_master_grant_for(
+                                    &binding.route_scope(),
+                                    &binding.binding_id,
+                                )
+                                .filter(|grant| {
+                                    grant.endpoint_generation == current.endpoint_generation
+                                        && grant.project_scope == binding.project_scope
+                                        && grant.app_scope_id == binding.app_scope_id
+                                        && grant.agent_id == binding.agent_id
+                                        && grant.binding_id == binding.binding_id
+                                })
+                                .cloned()
+                        })
+                        .map(|mut grant| {
+                            grant.endpoint_generation = binding.endpoint_generation;
+                            grant
+                        });
                     if replaces_generation {
-                        if let Some(worker_id) = st
-                            .master_worker_id
-                            .as_ref()
-                            .filter(|worker_id| worker_id.as_str() == binding.agent_id.as_str())
-                        {
-                            let _ = worker_id;
+                        let legacy_master_replaced = reissued_master_grant.is_none()
+                            && st.master_worker_id.as_ref().is_some_and(|worker_id| {
+                                worker_id.as_str() == binding.agent_id.as_str()
+                            });
+                        if legacy_master_replaced {
                             events.push(Event::GlobalMasterRevoked {
                                 project_scope: binding.project_scope.clone(),
                                 binding_id: binding.binding_id.clone(),
                             });
                         }
                     }
-                    events.push(Event::GlobalRuntimeBound { binding })
+                    events.push(Event::GlobalRuntimeBound { binding });
+                    if let Some(grant) = reissued_master_grant {
+                        events.push(Event::GlobalMasterGranted { grant });
+                    }
                 }
                 GlobalEvent::MasterGranted { grant } => {
                     events.push(Event::GlobalMasterGranted { grant })

@@ -3368,32 +3368,39 @@ fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
             .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
             .unwrap();
         assert_eq!(binding.endpoint_generation, generation + 1);
-        assert!(state
+        // A same-principal generation replacement is the recovery path, so
+        // the grant is reissued for the new generation in the same
+        // transaction instead of being dropped.
+        let reissued = state
             .global
             .lookup_master_grant_for(&scope, &binding.binding_id)
-            .is_none());
+            .expect("same-principal reconnect must reissue the master grant");
+        assert_eq!(reissued.endpoint_generation, binding.endpoint_generation);
         assert_eq!(
             state
                 .global
                 .role_for_binding(&scope.project_scope_id, &binding.binding_id),
-            crate::server::global_state::PeerRole::Peer
+            crate::server::global_state::PeerRole::Master
         );
     }
     let status = super::handle_master_status(&server);
     assert!(status.ok, "{status:?}");
-    assert!(status.data["master"].is_null(), "{status:?}");
+    assert_eq!(status.data["master"]["worker_id"], "peer-appserver");
     assert!(status.data["recorded_unusable"].is_null(), "{status:?}");
 
     let replayed = super::replay(&root).unwrap();
-    assert!(replayed.master_worker_id.is_none());
     let binding = replayed
         .global
         .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
         .unwrap();
-    assert!(replayed
+    let replayed_grant = replayed
         .global
         .lookup_master_grant_for(&scope, &binding.binding_id)
-        .is_none());
+        .expect("replay must keep the reissued grant");
+    assert_eq!(
+        replayed_grant.endpoint_generation,
+        binding.endpoint_generation
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -3441,7 +3448,7 @@ fn same_runtime_registration_recovery_preserves_master_authority() {
         true,
     );
     assert!(recovered.ok, "{recovered:?}");
-    assert_eq!(recovered.data["reused"], true);
+    assert_eq!(recovered.data["recovered"], true);
     assert_eq!(recovered.data["role_brief"]["role"], "master");
 
     {
@@ -3450,12 +3457,12 @@ fn same_runtime_registration_recovery_preserves_master_authority() {
             .global
             .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
             .unwrap();
-        assert_eq!(binding.endpoint_generation, generation);
+        assert_eq!(binding.endpoint_generation, generation + 1);
         let grant = state
             .global
             .lookup_master_grant_for(&scope, &binding.binding_id)
-            .expect("same-runtime recovery must preserve the master grant");
-        assert_eq!(grant.endpoint_generation, generation);
+            .expect("same-principal recovery must reissue the master grant");
+        assert_eq!(grant.endpoint_generation, binding.endpoint_generation);
     }
     let status = super::handle_master_status(&server);
     assert!(status.ok, "{status:?}");
@@ -3466,11 +3473,188 @@ fn same_runtime_registration_recovery_preserves_master_authority() {
         .global
         .lookup_binding_for(&scope, &BindingId::new("binding-peer-appserver").unwrap())
         .unwrap();
-    assert_eq!(binding.endpoint_generation, generation);
-    assert!(replayed
+    assert_eq!(binding.endpoint_generation, generation + 1);
+    let replayed_grant = replayed
         .global
         .lookup_master_grant_for(&scope, &binding.binding_id)
-        .is_some());
+        .expect("replay must keep the reissued master grant");
+    assert_eq!(
+        replayed_grant.endpoint_generation,
+        binding.endpoint_generation
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Rebind one registered worker onto a new App Server thread, which is the
+/// generation replacement a real registration recovery performs.
+fn recover_worker_on_new_thread(server: &mut Server, id: &str, thread_id: &str) -> Resp {
+    let app_scope = AppServerId::new("appserver-test").unwrap();
+    let candidate = crate::proto::AppServerCandidate {
+        endpoint: format!("unix:///tmp/collab-appserver-{id}.sock"),
+        namespace: "codex_tui".into(),
+        session_id: format!("session-{thread_id}"),
+        thread_id: thread_id.into(),
+        cwd: server.root.display().to_string(),
+    };
+    server.appserver_candidate_check = Arc::new(|candidate: &crate::proto::AppServerCandidate| {
+        Ok(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some(candidate.endpoint.clone()),
+            namespace: Some(candidate.namespace.clone()),
+            session_id: Some(candidate.session_id.clone()),
+            thread_id: Some(candidate.thread_id.clone()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test App Server candidate".into(),
+        })
+    });
+    handle_register_with_app_scope(
+        server,
+        id.into(),
+        format!("token-{id}"),
+        server.root.display().to_string(),
+        Some(app_scope),
+        Some(TransportCandidates {
+            appserver: Some(candidate),
+        }),
+    )
+}
+
+fn registered_binding(server: &Server, id: &str) -> crate::server::global_state::RuntimeBinding {
+    server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .find(|binding| binding.agent_id.as_str() == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("{id} has no runtime binding"))
+}
+
+#[test]
+fn wire_master_recover_reissues_master_grant_for_new_generation() {
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "recover-master", "thread-recover-master-old");
+    assert!(registered.ok, "{registered:?}");
+    promote_master(&server, "recover-master", "user approved recover-master");
+
+    let previous = registered_binding(&server, "recover-master");
+    let recovered =
+        recover_worker_on_new_thread(&mut server, "recover-master", "thread-recover-master-new");
+    assert!(recovered.ok, "{recovered:?}");
+
+    let state = server.state.lock().unwrap();
+    let route_scope = previous.route_scope();
+    let current = state
+        .global
+        .lookup_binding_for(&route_scope, &previous.binding_id)
+        .cloned()
+        .expect("recovery keeps the binding id");
+    assert_eq!(
+        current.endpoint_generation,
+        previous.endpoint_generation + 1
+    );
+    let grant = state
+        .global
+        .lookup_master_grant_for(&route_scope, &previous.binding_id)
+        .expect("same-principal recovery must reissue the master grant");
+    assert_eq!(grant.endpoint_generation, current.endpoint_generation);
+    assert_eq!(
+        state
+            .global
+            .role_for_route(&route_scope, &current.binding_id),
+        crate::server::global_state::PeerRole::Master
+    );
+    drop(state);
+
+    let status = super::handle_master_status(&server);
+    assert!(status.ok, "{status:?}");
+    assert_eq!(status.data["master"]["worker_id"], "recover-master");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wire_peer_recover_does_not_revoke_unrelated_master() {
+    let (mut server, root) = test_server();
+    let master = register_appserver(&mut server, "recover-keep-master", "thread-keep-master");
+    assert!(master.ok, "{master:?}");
+    let peer = recover_worker_on_new_thread(&mut server, "recover-plain-peer", "thread-plain-peer");
+    assert!(peer.ok, "{peer:?}");
+    promote_master(
+        &server,
+        "recover-keep-master",
+        "user approved recover-keep-master",
+    );
+    let master_binding = registered_binding(&server, "recover-keep-master");
+
+    let recovered =
+        recover_worker_on_new_thread(&mut server, "recover-plain-peer", "thread-plain-peer-new");
+    assert!(recovered.ok, "{recovered:?}");
+
+    let state = server.state.lock().unwrap();
+    let route_scope = master_binding.route_scope();
+    let grant = state
+        .global
+        .lookup_master_grant_for(&route_scope, &master_binding.binding_id)
+        .expect("an unrelated peer recovery must not remove the master grant");
+    assert_eq!(
+        grant.endpoint_generation,
+        master_binding.endpoint_generation
+    );
+    assert_eq!(
+        state
+            .global
+            .role_for_route(&route_scope, &master_binding.binding_id),
+        crate::server::global_state::PeerRole::Master
+    );
+    let grants: Vec<_> = state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.master_grants.values())
+        .collect();
+    assert_eq!(
+        grants.len(),
+        1,
+        "recovery must not create a duplicate grant"
+    );
+    assert_eq!(grants[0].binding_id, master_binding.binding_id);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recovered_master_keeps_goal_deadline_scheduling() {
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "recover-deadline", "thread-deadline-old");
+    assert!(registered.ok, "{registered:?}");
+    promote_master(
+        &server,
+        "recover-deadline",
+        "user approved recover-deadline",
+    );
+    let recovered =
+        recover_worker_on_new_thread(&mut server, "recover-deadline", "thread-deadline-new");
+    assert!(recovered.ok, "{recovered:?}");
+
+    let scheduled = handle_notification_subscribe(
+        &server,
+        "recover-deadline".into(),
+        "token-recover-deadline".into(),
+        "deadline".into(),
+        Some("goal:recover-deadline".into()),
+        Some(now_ms() + 60_000),
+        Vec::new(),
+        None,
+        1,
+        86_400,
+    );
+    assert!(
+        scheduled.ok,
+        "recovered master must still schedule goal deadlines: {scheduled:?}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

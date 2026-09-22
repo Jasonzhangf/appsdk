@@ -6511,7 +6511,7 @@ fn worker_presence_with_view(
     (presence, agent_view)
 }
 
-fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
+pub(crate) fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
     worker_presence_with_view(server, worker).0
 }
 

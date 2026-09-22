@@ -1621,6 +1621,184 @@ fn subagent_req(command: crate::subagent::Action) -> Req {
 }
 
 #[test]
+fn missing_subagent_retires_without_snapshot_when_responsibilities_are_resolved() {
+    let (mut server, root) = test_server();
+    register(&server, "parent", "%parent");
+    register(&server, "child", "%child");
+    server.commit(&[Event::SubagentUpdated {
+        subagent: subagent_record("missing-retire", "idle", "child"),
+    }]);
+    let archive_calls = Arc::new(AtomicU32::new(0));
+    let archive_calls_for_stub = Arc::clone(&archive_calls);
+    server.appserver_candidate_check = Arc::new(|_| {
+        Err(
+            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+                .into(),
+        )
+    });
+    server.appserver_thread_archive = Arc::new(move |_, _| {
+        archive_calls_for_stub.fetch_add(1, Ordering::SeqCst);
+        Ok(json!({"archived": true}))
+    });
+    let child = server.state.lock().unwrap().workers["child"].clone();
+    assert_eq!(
+        worker_presence(&server, &child),
+        IdentityPresence::Missing,
+        "route-unavailable identity must classify as definitive Missing"
+    );
+    let server = Arc::new(server);
+    let response = dispatch(
+        &server,
+        subagent_req(crate::subagent::Action::Close {
+            id: "missing-retire".into(),
+        }),
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["subagent"]["status"], "closed");
+    assert!(response.data["snapshot_captured_ms"].is_null());
+    assert_eq!(archive_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        server.state.lock().unwrap().subagents["missing-retire"].status,
+        "closed"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cold_subagent_still_requires_a_snapshot_before_close() {
+    let (mut server, root) = test_server();
+    register(&server, "parent", "%parent");
+    register(&server, "child", "%child");
+    server.commit(&[Event::SubagentUpdated {
+        subagent: subagent_record("cold-retire", "idle", "child"),
+    }]);
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "notLoaded"},
+                "canAcceptDirectInput": false
+            }
+        }))
+    });
+    let child = server.state.lock().unwrap().workers["child"].clone();
+    assert_eq!(
+        worker_presence(&server, &child),
+        IdentityPresence::Cold,
+        "notLoaded thread must stay Cold, not Missing"
+    );
+    let server = Arc::new(server);
+    let response = dispatch(
+        &server,
+        subagent_req(crate::subagent::Action::Close {
+            id: "cold-retire".into(),
+        }),
+    );
+    assert!(!response.ok, "{response:?}");
+    assert!(response
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("requires a successful snapshot"));
+    assert_eq!(
+        server.state.lock().unwrap().subagents["cold-retire"].status,
+        "idle"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
+    let (mut server, root) = test_server();
+    register(&server, "parent", "%parent");
+    register(&server, "child", "%child");
+    server.commit(&[
+        Event::SubagentUpdated {
+            subagent: subagent_record("missing-busy", "idle", "child"),
+        },
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "task-missing-busy".into(),
+                owner: "child".into(),
+                created_by: "parent".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p1".into(),
+                status: "working".into(),
+                next_step: None,
+                wait: None,
+                created_ms: now_ms(),
+                updated_ms: now_ms(),
+            },
+        },
+    ]);
+    server.appserver_candidate_check = Arc::new(|_| {
+        Err(
+            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+                .into(),
+        )
+    });
+    let child = server.state.lock().unwrap().workers["child"].clone();
+    assert_eq!(worker_presence(&server, &child), IdentityPresence::Missing);
+    let server = Arc::new(server);
+    let response = dispatch(
+        &server,
+        subagent_req(crate::subagent::Action::Close {
+            id: "missing-busy".into(),
+        }),
+    );
+    assert!(!response.ok, "{response:?}");
+    assert!(response
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("requires a successful snapshot"));
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.subagents["missing-busy"].status, "idle");
+    assert_eq!(state.tasks["task-missing-busy"].status, "working");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unknown_subagent_still_requires_a_snapshot_before_close() {
+    let (mut server, root) = test_server();
+    register(&server, "parent", "%parent");
+    register(&server, "child", "%child");
+    server.commit(&[Event::SubagentUpdated {
+        subagent: subagent_record("unknown-retire", "idle", "child"),
+    }]);
+    server.appserver_candidate_check =
+        Arc::new(|_| Err("ADAPTER_TIMEOUT: candidate self-check timed out".into()));
+    let child = server.state.lock().unwrap().workers["child"].clone();
+    assert_eq!(
+        worker_presence(&server, &child),
+        IdentityPresence::Unknown,
+        "inconclusive probe must stay Unknown"
+    );
+    let server = Arc::new(server);
+    let response = dispatch(
+        &server,
+        subagent_req(crate::subagent::Action::Close {
+            id: "unknown-retire".into(),
+        }),
+    );
+    assert!(!response.ok, "{response:?}");
+    assert!(response
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("requires a successful snapshot"));
+    assert_eq!(
+        server.state.lock().unwrap().subagents["unknown-retire"].status,
+        "idle"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn subagent_start_journal_failure_does_not_launch_or_write_success() {
     use crate::server::SubagentJournalFault::{StartAppend, StartSync};
 

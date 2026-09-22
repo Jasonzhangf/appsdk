@@ -19978,6 +19978,90 @@ mod scheduler_admission_tests {
     }
 
     #[test]
+    fn scheduler_dispatch_prefers_idle_registered_peer_over_idle_managed_child() {
+        let (server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "idle-peer", "%idle-peer");
+        register(&server, "managed-peer", "%managed-peer");
+        promote_master(&server);
+        server.commit(&[Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "managed-child".into(),
+                parent: "master".into(),
+                peer: "managed-peer".into(),
+                status: "idle".into(),
+                thread_id: Some("thread-managed".into()),
+                profile: None,
+                created_ms: now_ms(),
+                ready_deadline_ms: now_ms() + 10_000,
+                last_message: None,
+                error: None,
+                probe_failures: vec![],
+                runtime: Some("codex".into()),
+            },
+        }]);
+        let server = Arc::new(server);
+        let request = || {
+            dispatch(
+                &server,
+                Req::Subagent {
+                    worker_id: "master".into(),
+                    token: "token-master".into(),
+                    command: crate::subagent::Action::Dispatch {
+                        request_id: "req-peer-before-managed".into(),
+                        subject: "Peer first".into(),
+                        body: "Use the ordinary peer before managed child".into(),
+                        feature_id: Some("c5eb401".into()),
+                        worktree_path: None,
+                        branch: None,
+                        base_commit: None,
+                        priority: "p0".into(),
+                        next_step: None,
+                    },
+                    launch_env: Default::default(),
+                },
+            )
+        };
+
+        let first = request();
+        assert!(first.ok, "{first:?}");
+        assert_eq!(first.data["decision"], "use-registered-peer");
+        assert_eq!(first.data["target"], "idle-peer");
+        assert!(first.data["managed_subagent_id"].is_null());
+
+        let retry = request();
+        assert!(retry.ok, "{retry:?}");
+        assert_eq!(retry.data["decision"], "deduplicated");
+        assert_eq!(retry.data["task_id"], first.data["task_id"]);
+        assert_eq!(retry.data["message_id"], first.data["message_id"]);
+        assert!(retry.data["managed_subagent_id"].is_null());
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(
+            state.tasks["task-scheduler-req-peer-before-managed"].owner,
+            "idle-peer"
+        );
+        assert_eq!(state.subagents["managed-child"].status, "idle");
+        assert_eq!(state.subagents["managed-child"].last_message, None);
+        assert_eq!(
+            state.scheduler_admissions["req-peer-before-managed"].decision,
+            "use-registered-peer"
+        );
+        drop(state);
+        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.contains("scheduler_admission") && line.contains("req-peer-before-managed")
+            })
+            .count();
+        assert_eq!(audit_count, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn scheduler_dispatch_notification_rejection_keeps_retryable_reservation() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");

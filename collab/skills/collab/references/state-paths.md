@@ -155,9 +155,9 @@ exact error. The recovery owner must then prove the endpoint owner:
    managed endpoint, the route endpoint must be corrected through the
    supported peer rebind/recovery path. Do not point the route at a test or
    disposable socket.
-3. If the selected App Server reports the thread as not loaded, do not call
-   `turn/start`, `turn/steer`, or `thread/queue/add`. The current contract
-   requires a loaded thread before notification.
+3. If the selected App Server reports the thread as not loaded after recovery
+   on the current connection, do not call `turn/start` or `turn/steer`. The
+   current contract fails closed when native recovery cannot load the thread.
 4. If the endpoint reports an active writer conflict, identify the exact
    lock/owner and resolve the runtime ownership. Do not kill a process by name,
    remove a lock by hand, or start a second daemon.

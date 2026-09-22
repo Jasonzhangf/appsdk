@@ -44,9 +44,10 @@ collab notify unsubscribe <subscription-id>
   to prevent notification storms. `absent` and `unknown` produce zero
   transport input.
 - Timer ticks, restart, replay, re-registration, or delivery mode cannot reset
-  the one-attempt lifetime cap. Delivery requires the agent to be in a prompt/idle
-  `waiting` state; actively `working` agents defer delivery without burning
-  attempts, protecting active execution from pollution.
+  the one-attempt lifetime cap. App Server automatic delivery is a bounded
+  interrupt: `turn/steer` for exactly one in-progress turn, otherwise
+  `turn/start`. Acceptance by either method only proves the wake was submitted;
+  it is not execution, read, reply, task progress, or lifecycle evidence.
 - Unacknowledged notification throttling (Backpressure): To prevent notification
   storms and terminal pollution, push knocks pause when unacknowledged notifications
   reach `max_unacked` (default 3, range 1-5). Run `collab ack <id>` or `collab ack --all`
@@ -68,10 +69,11 @@ collab notify unsubscribe <subscription-id>
   reclassified as a P0 interrupt by subject text alone.
 - One safe preview contains notification ID, abbreviated subject, and one-line
   original body. Control characters are escaped. An explicit
-  `collab sendmessage` is delivered through App Server `turn/start`, which
-  starts or steers the target turn. Daemon-generated wakeup and long-horizon
-  notifications use `thread/queue/add`; queue acceptance is not execution,
-  read, or reply. The server owns both operation choices.
+  `collab sendmessage` is delivered through the App Server immediate path.
+  Daemon-generated wakeup and long-horizon notifications use that same path
+  after readiness gates: `turn/steer` for exactly one in-progress turn,
+  otherwise `turn/start`. Turn acceptance is not execution, read, or reply.
+  The server owns both operation choices.
 - Full subject/body remains in the mailbox without a matching subscription.
   This outcome is not a sender-selected `mailbox-only` mode.
 - A failed/lost/delayed/duplicate wake never rolls back mailbox truth or counts

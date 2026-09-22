@@ -1882,7 +1882,7 @@ mod tests {
             .any(|bound| bound == &subscription_id));
         assert_eq!(
             state.notification_subscriptions[&subscription_id].fired_count, 0,
-            "queueing a pending automatic wake must not consume the one-shot before delivery"
+            "staging a pending automatic wake must not consume the one-shot before delivery"
         );
         drop(state);
         std::fs::remove_dir_all(root).ok();

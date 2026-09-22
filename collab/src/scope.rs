@@ -915,8 +915,8 @@ the current task. Query durable state before acting when the notice is relevant.
 or asynchronous-result notices. Never type peer messages into a terminal. After the
 receiving Agent registers a finite subscription, the daemon may send one id,
 abbreviated subject, safe one-line original body preview, and final submit as
-one App Server queue operation. The direct-message lease is reusable until expiry;
-resource, deadline, and async-result subscriptions remain one-shot.
+one App Server immediate turn submission. The direct-message lease is reusable
+until expiry; resource, deadline, and async-result subscriptions remain one-shot.
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a
 registered App Server thread becomes unavailable; mailbox state remains

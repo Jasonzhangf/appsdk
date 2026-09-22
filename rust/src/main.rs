@@ -5492,6 +5492,88 @@ fn atomic_write_bytes(target: &Path, bytes: &[u8], error: &str) {
     fs::rename(&staging, target).unwrap_or_else(|_| fail(error));
 }
 
+/// Materialize the ignored `.appsdk/sdk.bin` witness from the exact pinned
+/// AppSDK executable. The witness must stay byte-identical to the lock digest
+/// and keep the executable mode a consumer gate expects, so callers resolving
+/// a missing witness in a fresh checkout do not have to hand-copy a binary.
+fn write_sdk_witness(root: &Path, source: &Path) {
+    let witness = root.join(".appsdk/sdk.bin");
+    if fs::symlink_metadata(&witness)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:sdk_binary");
+    }
+    let bytes = fs::read(source).unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
+    atomic_write_bytes(&witness, &bytes, "SDK_BINARY_WRITE_FAILED");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(source)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0o755);
+        let mode = if mode & 0o111 == 0 {
+            mode | 0o755
+        } else {
+            mode
+        };
+        let _ = fs::set_permissions(&witness, fs::Permissions::from_mode(mode));
+    }
+}
+
+/// Recreate the ignored `.appsdk/sdk.bin` witness in a clean checkout from the
+/// exact pinned AppSDK executable.
+///
+/// A Git worktree inherits the tracked `.appsdk/sdk.lock` but never the ignored
+/// witness, so a legacy lock that still carries `binary_ref: "project-sdk"`
+/// cannot satisfy a consumer gate that inspects the witness. Only a project
+/// whose lock still pins the historical `project-sdk` reference is affected;
+/// current locks omit the pin and resolve nothing. The witness must stay
+/// byte-identical to the locked digest, so a genuinely missing or mismatched
+/// pinned binary fails closed instead of writing an unverifiable witness.
+fn resolve_sdk_witness(root: &Path, source: &Path) {
+    assert_project_root_safe(root);
+    assert_mutation_worktree(root);
+    let lock_path = root.join(".appsdk/sdk.lock");
+    if fs::symlink_metadata(&lock_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        fail("GOVERNANCE_PATH_SYMLINK:sdk_lock");
+    }
+    let lock: Value = serde_json::from_str(
+        &fs::read_to_string(&lock_path).unwrap_or_else(|_| fail("MISSING_SDK_LOCK")),
+    )
+    .unwrap_or_else(|_| fail("INVALID_SDK_LOCK"));
+    if lock.get("binary_ref").and_then(Value::as_str) != Some("project-sdk") {
+        println!("no project-sdk witness required for this lock");
+        return;
+    }
+    let expected = lock
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|digest| {
+            digest.len() == 71
+                && digest.starts_with("sha256:")
+                && digest[7..].chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .unwrap_or_else(|| fail("INVALID_SDK_LOCK_DIGEST"));
+    assert_no_symlink_components(root, &root.join(".appsdk"), "appsdk_control");
+    let bytes = fs::read(source).unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
+    let actual = digest_bytes(&bytes);
+    if actual != expected {
+        fail(format!(
+            "SDK_WITNESS_BINARY_MISMATCH:{expected}:{actual}; supply the pinned AppSDK binary with --binary"
+        ));
+    }
+    write_sdk_witness(root, source);
+    println!(
+        "resolved {} from {}",
+        root.join(".appsdk/sdk.bin").display(),
+        source.display()
+    );
+}
+
 fn atomic_write_json(target: &Path, value: &Value, error: &str) {
     atomic_write_bytes(
         target,
@@ -17769,14 +17851,7 @@ fn pin_lock(root: &Path, binary: &Path) {
             ),
         );
     }
-    let pinned_binary = root.join(".appsdk/sdk.bin");
-    if fs::symlink_metadata(&pinned_binary)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        fail("GOVERNANCE_PATH_SYMLINK:sdk_binary");
-    }
-    atomic_write_bytes(&pinned_binary, &bytes, "SDK_BINARY_WRITE_FAILED");
+    write_sdk_witness(root, &binary);
     install_bundle_resources(root);
     lock.insert("binary_ref".into(), Value::String("project-sdk".into()));
     lock.insert(
@@ -21987,6 +22062,7 @@ fn print_cli_help(command: Option<&str>) {
             "Usage: appsdk produce-lifecycle-chain [project] --module <id> --phase <architecture|effectiveness|merge|promotion> --input <json>"
         }
         Some("pin-lock") => "Usage: appsdk pin-lock [project] --binary <path>",
+        Some("sdk-witness") => "Usage: appsdk sdk-witness [project] [--binary <path>]",
         Some("reset-governance") => {
             "Usage: appsdk reset-governance [project] --discard-legacy"
         }
@@ -22188,6 +22264,22 @@ fn main() {
                 fail("USAGE: appsdk pin-lock [project] --binary <path>");
             }
             pin_lock(&root, Path::new(&binary));
+        }
+        Some("sdk-witness") => {
+            let root = project_root_or_cwd(&mut args);
+            let usage = "USAGE: appsdk sdk-witness [project] [--binary <path>]";
+            let mut binary = env::current_exe().unwrap_or_else(|_| fail("SDK_BINARY_MISSING"));
+            match args.next().as_deref() {
+                None => {}
+                Some("--binary") => {
+                    binary = PathBuf::from(args.next().unwrap_or_else(|| fail(usage)));
+                }
+                Some(_) => fail(usage),
+            }
+            if args.next().is_some() {
+                fail(usage);
+            }
+            resolve_sdk_witness(&root, &binary);
         }
         Some("reset-governance") => {
             let root = project_root_or_cwd(&mut args);

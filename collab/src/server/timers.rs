@@ -2061,6 +2061,89 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_master_idle_subscription_stays_cancelled_after_read_and_replay() {
+        let (server, root) = test_server();
+        register_master(&server);
+        let subscription_id = master_idle_subscription(&server, 15 * 60 * 1000);
+        let created_ms =
+            server.state.lock().unwrap().notification_subscriptions[&subscription_id].created_ms;
+        let mut record = server.state.lock().unwrap().keepalives["master"].clone();
+        record.idle_since_ms = created_ms + 1;
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record,
+        }]);
+
+        tick_with_idle(&server, &|_| false);
+        let message_id = server
+            .state
+            .lock()
+            .unwrap()
+            .wake_bindings
+            .iter()
+            .find_map(|(message_id, bound)| {
+                (bound == &subscription_id).then_some(message_id.clone())
+            })
+            .expect("master idle wake");
+        let cancelled = super::super::handle_notification_unsubscribe(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            subscription_id.clone(),
+        );
+        assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
+
+        server.commit(&[
+            Event::Delivered {
+                ids: vec![message_id.clone()],
+            },
+            Event::Acked {
+                ids: vec![message_id.clone()],
+            },
+        ]);
+        tick_with_idle(&server, &|_| false);
+
+        let state = server.state.lock().unwrap();
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "cancelled");
+        assert_eq!(subscription.fired_count, 0);
+        assert_eq!(
+            state
+                .wake_bindings
+                .values()
+                .filter(|bound| *bound == &subscription_id)
+                .count(),
+            1,
+            "a cancelled master idle subscription cannot create another wake"
+        );
+        let snapshot = state.snapshot_events();
+        drop(state);
+
+        let (replayed, replay_root) = test_server();
+        for event in &snapshot {
+            replayed.commit(std::slice::from_ref(event));
+        }
+        tick_with_idle(&replayed, &|_| false);
+        let replayed_state = replayed.state.lock().unwrap();
+        assert_eq!(
+            replayed_state.notification_subscriptions[&subscription_id].status,
+            "cancelled"
+        );
+        assert_eq!(
+            replayed_state
+                .wake_bindings
+                .values()
+                .filter(|bound| *bound == &subscription_id)
+                .count(),
+            1,
+            "cancellation must survive replay without re-arming the timer"
+        );
+        drop(replayed_state);
+        std::fs::remove_dir_all(replay_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn master_idle_subscription_emits_at_15_minutes_only_for_live_idle_master() {
         let (server, root) = test_server();
         register_master(&server);

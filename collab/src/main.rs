@@ -781,18 +781,32 @@ fn live_closure_target_transport(worker: &serde_json::Value) -> anyhow::Result<S
     })
 }
 
-fn live_closure_item_contains_challenge(item: &serde_json::Value, challenge: &str) -> bool {
+#[derive(Debug)]
+struct LiveClosureExpectedNativeInputs {
+    exact: Vec<String>,
+    batch_category: String,
+}
+
+fn live_closure_item_text(item: &serde_json::Value) -> Option<&str> {
     let payload = live_closure_item_payload(item);
     let item_type = payload.get("type").and_then(serde_json::Value::as_str);
     if !matches!(item_type, Some("userMessage") | Some("user_message")) {
-        return false;
+        return None;
     }
-    let Some(content) = payload.get("content").and_then(serde_json::Value::as_array) else {
-        return false;
-    };
-    content.len() == 1
-        && content[0].get("type").and_then(serde_json::Value::as_str) == Some("text")
-        && content[0].get("text").and_then(serde_json::Value::as_str) == Some(challenge)
+    let content = payload
+        .get("content")
+        .and_then(serde_json::Value::as_array)?;
+    if content.len() != 1
+        || content[0].get("type").and_then(serde_json::Value::as_str) != Some("text")
+    {
+        return None;
+    }
+    content[0].get("text").and_then(serde_json::Value::as_str)
+}
+
+#[cfg(test)]
+fn live_closure_item_contains_challenge(item: &serde_json::Value, challenge: &str) -> bool {
+    live_closure_item_text(item) == Some(challenge)
 }
 
 fn live_closure_item_payload(item: &serde_json::Value) -> &serde_json::Value {
@@ -881,28 +895,46 @@ fn live_closure_function_call_output_fields(item: &serde_json::Value) -> Option<
 
 fn live_closure_item_matches_input(
     item: &serde_json::Value,
-    expected_input: &str,
+    expected_inputs: &LiveClosureExpectedNativeInputs,
     message_id: &str,
 ) -> bool {
     live_closure_item_turn_id(item).is_some()
-        && (live_closure_item_message_id(item) == Some(message_id)
-            && live_closure_item_contains_challenge(item, expected_input)
-            || live_closure_function_call_output_fields(item).is_some_and(
-                |(observed_message_id, observed)| {
-                    observed_message_id == message_id
-                        && observed
+        && (live_closure_item_text(item).is_some_and(|text| {
+            (live_closure_item_message_id(item) == Some(message_id)
+                && expected_inputs
+                    .exact
+                    .iter()
+                    .any(|expected_input| text == expected_input))
+                || live_closure_batch_input_contains_message(
+                    text,
+                    message_id,
+                    &expected_inputs.batch_category,
+                    false,
+                )
+        }) || live_closure_function_call_output_fields(item).is_some_and(
+            |(observed_message_id, observed)| {
+                (observed_message_id == message_id
+                    && expected_inputs.exact.iter().any(|expected_input| {
+                        observed
                             == client::adapters::codex_app_server::escape_delegated_text(
                                 expected_input,
                             )
-                },
-            ))
+                    }))
+                    || live_closure_batch_input_contains_message(
+                        observed,
+                        message_id,
+                        &expected_inputs.batch_category,
+                        true,
+                    )
+            },
+        ))
 }
 
-fn live_closure_expected_native_input(
+fn live_closure_expected_native_inputs(
     receipt: &serde_json::Value,
     message_id: &str,
     challenge: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<LiveClosureExpectedNativeInputs> {
     if receipt.get("id").and_then(serde_json::Value::as_str) != Some(message_id)
         || receipt.get("body").and_then(serde_json::Value::as_str) != Some(challenge)
         || receipt.get("subject").and_then(serde_json::Value::as_str) != Some(challenge)
@@ -937,8 +969,63 @@ fn live_closure_expected_native_input(
         wake_attempt_count: 0,
         last_wake_attempt_ms: 0,
     };
-    server::mailbox::notification_text(&message)
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_NATIVE_INPUT_UNAVAILABLE"))
+    let notification = server::mailbox::notification_text(&message)
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_NATIVE_INPUT_UNAVAILABLE"))?;
+    let batch_category = live_closure_notification_category(&notification)
+        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_NATIVE_INPUT_UNAVAILABLE"))?
+        .to_owned();
+    let batch = server::mailbox::truncate_notification(server::mailbox::compose_notification(
+        message_id,
+        "notification-batch",
+        &server::mailbox::batch_notification_text(
+            &[(
+                0,
+                message_id.to_owned(),
+                String::new(),
+                "direct-message".to_owned(),
+                notification.clone(),
+            )],
+            0,
+        ),
+    ));
+    Ok(LiveClosureExpectedNativeInputs {
+        exact: vec![notification, batch],
+        batch_category,
+    })
+}
+
+fn live_closure_notification_category(notification: &str) -> Option<&str> {
+    notification
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(category, _)| category)
+}
+
+fn live_closure_batch_input_contains_message(
+    observed: &str,
+    message_id: &str,
+    expected_category: &str,
+    xml_escaped: bool,
+) -> bool {
+    let expected_category = if xml_escaped {
+        client::adapters::codex_app_server::escape_delegated_text(expected_category)
+    } else {
+        expected_category.to_owned()
+    };
+    let Some((_, body)) = observed.split_once(" [notification-batch] Batch wake: message_ids=")
+    else {
+        return false;
+    };
+    let Some((ids, rest)) = body.split_once(" task_ids=none action_categories=") else {
+        return false;
+    };
+    let Some((categories, _)) = rest.split_once(". Read full durable details from collab inbox;")
+    else {
+        return false;
+    };
+    ids.split(',')
+        .zip(categories.split(','))
+        .any(|(id, category)| id == message_id && category == expected_category)
 }
 
 fn live_closure_page_cursor(page: &serde_json::Value) -> anyhow::Result<Option<String>> {
@@ -1096,7 +1183,7 @@ where
 fn observe_live_closure_target(
     transport: &SelectedTransport,
     challenge: &str,
-    expected_input: &str,
+    expected_inputs: &LiveClosureExpectedNativeInputs,
     message_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     let thread_id = transport
@@ -1112,7 +1199,7 @@ fn observe_live_closure_target(
     let items = live_closure_turn_items(&turns)?;
     let input = items
         .iter()
-        .find(|item| live_closure_item_matches_input(item, expected_input, message_id));
+        .find(|item| live_closure_item_matches_input(item, expected_inputs, message_id));
     let Some(input) = input else {
         anyhow::bail!(
             "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:challenge_or_message_not_observed"
@@ -1208,11 +1295,11 @@ fn live_closure_observe(
             msg_id: message_id.clone(),
         },
     )?;
-    let expected_input =
-        live_closure_expected_native_input(&message_status, &message_id, &challenge)?;
+    let expected_inputs =
+        live_closure_expected_native_inputs(&message_status, &message_id, &challenge)?;
     let observation_deadline = Instant::now() + live_closure_timeout()?;
     let target_execution = wait_live_closure_fresh_thread_materialization(
-        || observe_live_closure_target(&transport, &challenge, &expected_input, &message_id),
+        || observe_live_closure_target(&transport, &challenge, &expected_inputs, &message_id),
         observation_deadline,
         Duration::from_millis(500),
     )?;
@@ -1511,8 +1598,8 @@ fn live_closure_probe(
             },
         )?
     };
-    let expected_input =
-        live_closure_expected_native_input(&message_status, message_id, &challenge)?;
+    let expected_inputs =
+        live_closure_expected_native_inputs(&message_status, message_id, &challenge)?;
     let target_transport = live_closure_target_transport(target).map_err(|error| {
         first_failure(
             "COLLAB_LIVE_CLOSURE_TARGET_TRANSPORT_INVALID",
@@ -1525,7 +1612,7 @@ fn live_closure_probe(
         match observe_live_closure_target(
             &target_transport,
             &challenge,
-            &expected_input,
+            &expected_inputs,
             message_id,
         ) {
             Ok(execution) => break execution,
@@ -2762,9 +2849,9 @@ mod tests {
     }
 
     #[test]
-    fn live_closure_expected_input_matches_the_real_notification_payload() {
+    fn live_closure_expected_inputs_match_single_and_batch_notification_payloads() {
         let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
-        let expected = live_closure_expected_native_input(
+        let expected = live_closure_expected_native_inputs(
             &json!({
                 "id": "message-1",
                 "from": "sender",
@@ -2779,9 +2866,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(expected.starts_with("COLLAB_NOTIFY message-1 ["));
-        assert!(expected.contains(challenge));
-        assert!(expected.contains("READ IS NOT DONE"));
+        assert_eq!(expected.exact.len(), 2);
+        assert!(expected.exact[0].starts_with("COLLAB_NOTIFY message-1 ["));
+        assert!(expected.exact[0].contains(challenge));
+        assert!(expected.exact[0].contains("READ IS NOT DONE"));
+        assert!(expected.exact[1].starts_with("COLLAB_NOTIFY message-1 [notification-batch]"));
+        assert!(expected.exact[1].contains("message_ids=message-1"));
+        assert!(expected.exact[1].contains("READ IS NOT DONE"));
         assert!(live_closure_item_matches_input(
             &json!({
                 "turnId": "turn-1",
@@ -2789,7 +2880,20 @@ mod tests {
                 "name": "send_message_to_thread",
                 "output": format!(
                     "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-1</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
-                    client::adapters::codex_app_server::escape_delegated_text(&expected)
+                    client::adapters::codex_app_server::escape_delegated_text(&expected.exact[0])
+                )
+            }),
+            &expected,
+            "message-1"
+        ));
+        assert!(live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-1",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-1</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+                    client::adapters::codex_app_server::escape_delegated_text(&expected.exact[1])
                 )
             }),
             &expected,
@@ -2800,7 +2904,7 @@ mod tests {
     #[test]
     fn live_closure_expected_input_rejects_raw_challenge_as_native_payload() {
         let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
-        let expected = live_closure_expected_native_input(
+        let expected = live_closure_expected_native_inputs(
             &json!({
                 "id": "message-1",
                 "from": "sender",
@@ -2825,6 +2929,68 @@ mod tests {
             }),
             &expected,
             "message-1"
+        ));
+    }
+
+    #[test]
+    fn live_closure_item_correlation_accepts_multi_message_batch_entry() {
+        let challenge = "appsdk-collab-live:closure-1:peer_to_peer";
+        let expected = live_closure_expected_native_inputs(
+            &json!({
+                "id": "message-target",
+                "from": "sender",
+                "to": "recipient",
+                "type": "notify",
+                "subject": challenge,
+                "body": challenge,
+                "state": "pending"
+            }),
+            "message-target",
+            challenge,
+        )
+        .unwrap();
+        let batch_input = "COLLAB_NOTIFY message-other [notification-batch] Batch wake: message_ids=message-other,message-target,message-later task_ids=none action_categories=other,appsdk-collab-live:closure-1:peer_to_peer,later. Read full durable details from collab inbox; execute the actions, do not ACK-only. older_messages=2; run collab inbox | P1 ACTION: do the in-scope action the message asks for. Details: collab msg message-other. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work.";
+
+        assert!(live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-other</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+                    client::adapters::codex_app_server::escape_delegated_text(batch_input)
+                )
+            }),
+            &expected,
+            "message-target"
+        ));
+        assert!(live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-target",
+                "type": "userMessage",
+                "clientId": "collab-notification-message-target",
+                "content": [{"type": "text", "text": batch_input}]
+            }),
+            &expected,
+            "message-target"
+        ));
+
+        let mismatched = batch_input.replace(
+            "other,appsdk-collab-live:closure-1:peer_to_peer,later",
+            "other,appsdk-collab-live:other,later",
+        );
+        assert!(!live_closure_item_matches_input(
+            &json!({
+                "turnId": "turn-target",
+                "type": "functionCallOutput",
+                "name": "send_message_to_thread",
+                "output": format!(
+                    "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>collab-notification-message-other</client_message_id>\n  <input>{}</input>\n</codex_delegation>",
+                    client::adapters::codex_app_server::escape_delegated_text(&mismatched)
+                )
+            }),
+            &expected,
+            "message-target"
         ));
     }
 
@@ -2869,9 +3035,13 @@ mod tests {
         })];
 
         let items = live_closure_turn_items(&turns).unwrap();
+        let expected = LiveClosureExpectedNativeInputs {
+            exact: vec![challenge.to_owned()],
+            batch_category: "closure".to_owned(),
+        };
         assert!(live_closure_item_matches_input(
             &items[0],
-            challenge,
+            &expected,
             "message-target"
         ));
     }
@@ -2888,9 +3058,13 @@ mod tests {
             )
         });
 
+        let expected = LiveClosureExpectedNativeInputs {
+            exact: vec![challenge.to_owned()],
+            batch_category: "closure".to_owned(),
+        };
         assert!(!live_closure_item_matches_input(
             &item,
-            challenge,
+            &expected,
             "message-target"
         ));
     }
@@ -2908,9 +3082,13 @@ mod tests {
             )
         });
 
+        let expected = LiveClosureExpectedNativeInputs {
+            exact: vec![challenge.to_owned()],
+            batch_category: "closure".to_owned(),
+        };
         assert!(live_closure_item_matches_input(
             &item,
-            challenge,
+            &expected,
             "message-target"
         ));
     }
@@ -2962,9 +3140,13 @@ mod tests {
                 "output": valid_output
             }),
         ] {
+            let expected = LiveClosureExpectedNativeInputs {
+                exact: vec![challenge.to_owned()],
+                batch_category: "closure".to_owned(),
+            };
             assert!(!live_closure_item_matches_input(
                 &item,
-                challenge,
+                &expected,
                 "message-target"
             ));
         }
@@ -2972,6 +3154,10 @@ mod tests {
         let stale_output = format!(
             "<codex_delegation>\n  <source_thread_id>source-thread</source_thread_id>\n  <client_message_id>message-old</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
         );
+        let expected = LiveClosureExpectedNativeInputs {
+            exact: vec![challenge.to_owned()],
+            batch_category: "closure".to_owned(),
+        };
         assert!(!live_closure_item_matches_input(
             &json!({
                 "turnId": "turn-target",
@@ -2979,7 +3165,7 @@ mod tests {
                 "name": "send_message_to_thread",
                 "output": stale_output,
             }),
-            challenge,
+            &expected,
             "message-target"
         ));
     }

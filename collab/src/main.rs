@@ -201,6 +201,9 @@ enum Cmd {
         /// act as another registered worker (testing / delegated runs)
         #[arg(long)]
         worker: Option<String>,
+        /// Replay one committed receive identity instead of consuming new mail
+        #[arg(long = "receive-id")]
+        receive_id: Option<String>,
     },
     /// List unread inbox
     Inbox {
@@ -1907,6 +1910,44 @@ fn command_envelope(scope: &Scope, ident: &Identity) -> anyhow::Result<proto::Co
     ))
 }
 
+/// One stable, caller-owned identity per `recv` invocation. It is generated
+/// before the request so a lost response can be replayed by the same caller
+/// instead of stranding an already committed batch.
+fn new_receive_id() -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("receive-{}-{nonce}", std::process::id())
+}
+
+/// The exact, copyable recovery instruction the default `recv` publishes
+/// before it consumes anything.
+fn receive_recovery_banner(receive_id: &str) -> String {
+    format!("recv receive_id={receive_id} recovery: collab recv --receive-id {receive_id}")
+}
+
+/// Publish the caller-owned receive identity and then dispatch the request.
+///
+/// Claiming `receive_id` only after a successful reply cannot recover a route
+/// whose response was lost, so the default CLI must make the replay identity
+/// visible before the daemon consumes the batch. A failed publication returns
+/// before dispatch: consuming without a recoverable identity would recreate
+/// the stranded batch the identity exists to prevent.
+fn recv_with_published_identity<D>(
+    publish: &mut dyn std::io::Write,
+    receive_id: &str,
+    dispatch: D,
+) -> anyhow::Result<serde_json::Value>
+where
+    D: FnOnce(&str) -> anyhow::Result<serde_json::Value>,
+{
+    writeln!(publish, "{}", receive_recovery_banner(receive_id))
+        .and_then(|()| publish.flush())
+        .map_err(|error| anyhow::anyhow!("RECEIVE_IDENTITY_PUBLISH_FAILED: {error}"))?;
+    dispatch(receive_id)
+}
+
 fn subagent_observe_query(command: &subagent::Action) -> Option<(Option<String>, Option<usize>)> {
     match command {
         subagent::Action::List => Some((None, None)),
@@ -2521,18 +2562,27 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&value);
             Ok(())
         }
-        Cmd::Recv { timeout, worker } => {
+        Cmd::Recv {
+            timeout,
+            worker,
+            receive_id,
+        } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope, worker)?;
-            let v: serde_json::Value = call_project(
-                &scope,
-                &ident,
-                &Req::Poll {
-                    worker_id: ident.worker_id.clone(),
-                    token: ident.token.clone(),
-                    timeout_ms: timeout.saturating_mul(1000),
-                },
-            )?;
+            let receive_id = receive_id.unwrap_or_else(new_receive_id);
+            // The caller must know the receive identity before consumption, not
+            // only after a successful reply: a lost socket response still
+            // leaves the exact replay command available on stderr.
+            let request = |receive_id: &str| Req::Poll {
+                worker_id: ident.worker_id.clone(),
+                token: ident.token.clone(),
+                timeout_ms: timeout.saturating_mul(1000),
+                receive_id: Some(receive_id.to_owned()),
+            };
+            let v =
+                recv_with_published_identity(&mut std::io::stderr(), &receive_id, |receive_id| {
+                    call_project(&scope, &ident, &request(receive_id))
+                })?;
             out(&v);
             Ok(())
         }
@@ -3612,6 +3662,108 @@ mod tests {
         assert_eq!(context.canonical_root, canonical.to_string_lossy());
         assert_eq!(context.project_scope.as_str(), canonical.to_string_lossy());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn default_recv_publishes_a_replayable_receive_identity_before_consuming() {
+        let first = new_receive_id();
+        let second = new_receive_id();
+        assert_ne!(
+            first, second,
+            "each default receive owns a distinct identity"
+        );
+        assert!(
+            crate::identity::validate_id_for_protocol(&first).is_ok(),
+            "the generated identity must satisfy protocol identifier rules"
+        );
+        let banner = receive_recovery_banner(&first);
+        assert!(banner.contains(&format!("receive_id={first}")));
+        assert!(
+            banner.contains(&format!("collab recv --receive-id {first}")),
+            "the default path must publish the exact replay command: {banner}"
+        );
+    }
+
+    #[test]
+    fn default_recv_aborts_before_dispatch_when_identity_publication_fails() {
+        struct FailingStderr;
+        impl std::io::Write for FailingStderr {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "stderr is not writable",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dispatched = std::cell::Cell::new(false);
+        let error =
+            recv_with_published_identity(&mut FailingStderr, "receive-publish-fail-1", |_| {
+                dispatched.set(true);
+                Ok(json!({"consumed": true}))
+            })
+            .unwrap_err();
+        assert!(
+            !dispatched.get(),
+            "an unpublished receive identity must abort before Poll dispatch"
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("RECEIVE_IDENTITY_PUBLISH_FAILED"),
+            "the publication failure must be the first reported error: {error}"
+        );
+    }
+
+    #[test]
+    fn default_recv_publishes_the_replay_identity_before_dispatch() {
+        struct RecordingStderr {
+            published: std::rc::Rc<std::cell::RefCell<String>>,
+            flushed: std::rc::Rc<std::cell::Cell<bool>>,
+        }
+        impl std::io::Write for RecordingStderr {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.published
+                    .borrow_mut()
+                    .push_str(&String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed.set(true);
+                Ok(())
+            }
+        }
+        let published = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let flushed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut stderr = RecordingStderr {
+            published: published.clone(),
+            flushed: flushed.clone(),
+        };
+        let observed = published.clone();
+        let observed_flushed = flushed.clone();
+        let error = recv_with_published_identity(
+            &mut stderr,
+            "receive-publish-order-1",
+            move |receive_id| {
+                let visible = observed.borrow().clone();
+                assert!(
+                    observed_flushed.get(),
+                    "the replay identity must be flushed before the request is dispatched"
+                );
+                assert!(
+                    visible.contains(&format!("receive_id={receive_id}")),
+                    "the replay identity must be visible before dispatch: {visible}"
+                );
+                Err(anyhow::anyhow!("ADAPTER_TIMEOUT: original transport error"))
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("ADAPTER_TIMEOUT"),
+            "the original dispatch error must be the first reported error: {error}"
+        );
     }
 
     #[test]

@@ -267,6 +267,20 @@ pub struct NotificationDeliveryFailure {
     pub failed_ms: i64,
 }
 
+/// Durable identity of one committed receive batch. The receive identity is
+/// caller-owned and persisted with the consumption, so a lost socket response
+/// can replay the exact batch without inventing a second mailbox. Only message
+/// identities are stored; retention still owns message bodies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReceiveReceipt {
+    pub receive_id: String,
+    pub worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_scope: Option<crate::scope::RouteScope>,
+    pub message_ids: Vec<String>,
+    pub received_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSnapshotReceipt {
     pub subagent_id: String,
@@ -582,6 +596,12 @@ pub enum Event {
         message_id: String,
         subscription_id: String,
     },
+    ReceiveCommitted {
+        receipt: ReceiveReceipt,
+        /// Consumption applied by the same event: a journal truncated after
+        /// this row replays a delivered batch, never an unread one.
+        ids: Vec<String>,
+    },
     Delivered {
         ids: Vec<String>,
     },
@@ -701,6 +721,7 @@ pub struct State {
     pub workers: HashMap<String, WorkerRec>,
     pub msgs: HashMap<String, Message>,
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
+    pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
@@ -1196,6 +1217,12 @@ impl State {
             } => {
                 self.wake_bindings
                     .insert(message_id.clone(), subscription_id.clone());
+            }
+            Event::ReceiveCommitted { receipt, ids } => {
+                self.receive_receipts
+                    .insert(receipt.receive_id.clone(), receipt.clone());
+                self.apply(&Event::Delivered { ids: ids.clone() });
+                self.apply(&Event::Acked { ids: ids.clone() });
             }
             Event::Delivered { ids } => {
                 for id in ids {

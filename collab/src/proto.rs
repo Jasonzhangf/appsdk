@@ -366,6 +366,11 @@ pub enum Req {
         token: String,
         #[serde(default = "default_poll_timeout")]
         timeout_ms: u64,
+        /// Caller-owned stable receive identity. Repeating the same identity
+        /// replays the exact committed batch instead of consuming new
+        /// messages, so a lost socket response cannot strand the batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receive_id: Option<String>,
     },
     Ack {
         worker_id: String,

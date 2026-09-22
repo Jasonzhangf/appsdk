@@ -9906,9 +9906,9 @@ fn poll_messages_with_context(
     worker_id: &str,
     token: Option<&str>,
     project_context: Option<&ProjectContext>,
+    receive_id: Option<&str>,
 ) -> Option<Resp> {
     let ids: Vec<String>;
-    let msgs: Vec<Message>;
     let mut st = server.state.lock().unwrap();
     match (token, project_context) {
         (Some(token), Some(project_context)) => {
@@ -9921,15 +9921,78 @@ fn poll_messages_with_context(
             "PROJECT_CONTEXT_REQUIRED: poll runtime admission requires token and project context",
         )),
     }
+    let route_scope = project_context.map(|context| RouteScope {
+        app_scope_id: context.app_scope_id.clone(),
+        project_scope_id: context.project_scope.clone(),
+    });
+    if let Some(receive_id) = receive_id {
+        if let Err(error) = crate::identity::validate_id_for_protocol(receive_id) {
+            return Some(Resp::err(format!("RECEIVE_IDENTITY_INVALID: {error}")));
+        }
+        if let Some(receipt) = st.receive_receipts.get(receive_id).cloned() {
+            if receipt.worker_id != worker_id {
+                return Some(Resp::err(
+                    "RECEIVE_IDENTITY_MISMATCH: receive identity belongs to another actor",
+                ));
+            }
+            if receipt.route_scope != route_scope {
+                return Some(Resp::err(
+                    "RECEIVE_ROUTE_MISMATCH: receive identity belongs to another project route",
+                ));
+            }
+            // The receipt stores identities, not a second copy of the body.
+            // Retention owns message lifetime, so a purged batch reports its
+            // expiry instead of resurrecting or retaining expired payload.
+            let Some(messages) = receipt
+                .message_ids
+                .iter()
+                .map(|id| st.msgs.get(id).cloned())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return Some(Resp::err_data(
+                    "RECEIVE_BATCH_EXPIRED: the committed receive batch is no longer retained",
+                    json!({
+                        "receive_id": receipt.receive_id,
+                        "expired": true,
+                        "count": 0,
+                    }),
+                ));
+            };
+            return Some(Resp::data(json!({
+                "messages": messages,
+                "count": receipt.message_ids.len(),
+                "receive_id": receipt.receive_id,
+                "replayed": true,
+                "fetched_at": iso(receipt.received_ms),
+            })));
+        }
+    }
     let unread = st.inbox_of(worker_id);
     if unread.is_empty() {
         return None;
     }
     ids = unread.iter().map(|m| m.id.clone()).collect();
-    msgs = unread.into_iter().cloned().collect();
     // recv is an explicit read operation: deliver and consume the same batch
-    // atomically so a successful read cannot leave a new ACK obligation.
-    let mut events = vec![Event::Delivered { ids: ids.clone() }, Event::Acked { ids }];
+    // atomically so a successful read cannot leave a new ACK obligation. The
+    // receive receipt commits in the same transaction, so a lost socket
+    // response replays the exact batch instead of stranding it.
+    let received_ms = now_ms();
+    let mut events = Vec::new();
+    if let Some(receive_id) = receive_id {
+        events.push(Event::ReceiveCommitted {
+            receipt: state::ReceiveReceipt {
+                receive_id: receive_id.to_owned(),
+                worker_id: worker_id.to_owned(),
+                route_scope,
+                message_ids: ids.clone(),
+                received_ms,
+            },
+            ids: ids.clone(),
+        });
+    } else {
+        events.push(Event::Delivered { ids: ids.clone() });
+        events.push(Event::Acked { ids: ids.clone() });
+    }
     if let Some(record) = st.keepalives.get(worker_id).cloned() {
         if record.unacked > 0 || record.last_notice_id.is_some() || record.suspected_offline {
             let mut updated = record;
@@ -9944,10 +10007,29 @@ fn poll_messages_with_context(
         }
     }
     server.commit_locked(&mut st, &events);
+    // Project from the committed reducer state so the first response and a
+    // receipt replay answer from the same owner. Retention still owns the
+    // body; the receipt keeps only the message identities.
+    let Some(msgs) = ids
+        .iter()
+        .map(|id| st.msgs.get(id).cloned())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Some(Resp::err_data(
+            "RECEIVE_BATCH_EXPIRED: the committed receive batch is no longer retained",
+            json!({
+                "receive_id": receive_id,
+                "expired": true,
+                "count": 0,
+            }),
+        ));
+    };
     Some(Resp::data(json!({
         "messages": msgs,
         "count": msgs.len(),
-        "fetched_at": iso(now_ms()),
+        "receive_id": receive_id,
+        "replayed": false,
+        "fetched_at": iso(received_ms),
     })))
 }
 
@@ -9956,6 +10038,7 @@ async fn poll_messages_async_with_context(
     worker_id: &str,
     token: Option<String>,
     project_context: Option<ProjectContext>,
+    receive_id: Option<String>,
 ) -> Option<Resp> {
     let worker_id = worker_id.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -9964,6 +10047,7 @@ async fn poll_messages_async_with_context(
             &worker_id,
             token.as_deref(),
             project_context.as_ref(),
+            receive_id.as_deref(),
         )
     })
     .await
@@ -9971,7 +10055,7 @@ async fn poll_messages_async_with_context(
 }
 
 async fn handle_poll_async(server: Arc<Server>, worker_id: String, timeout_ms: u64) -> Resp {
-    handle_poll_async_with_context(server, worker_id, None, timeout_ms, None).await
+    handle_poll_async_with_context(server, worker_id, None, timeout_ms, None, None).await
 }
 
 async fn handle_poll_async_with_context(
@@ -9980,6 +10064,7 @@ async fn handle_poll_async_with_context(
     token: Option<String>,
     timeout_ms: u64,
     project_context: Option<ProjectContext>,
+    receive_id: Option<String>,
 ) -> Resp {
     let timeout_ms = timeout_ms.min(MAX_POLL_MS);
     let mut notified = Box::pin(server.mailbox_notify.notified());
@@ -9992,6 +10077,7 @@ async fn handle_poll_async_with_context(
             &worker_id,
             token.clone(),
             project_context.clone(),
+            receive_id.clone(),
         )
         .await
         {
@@ -14349,6 +14435,7 @@ mod host_route_registry_tests {
                 worker_id: recipient_id.into(),
                 token: recipient_token.into(),
                 timeout_ms: 0,
+                receive_id: None,
             },
             tokio::sync::watch::channel(false).1,
         )
@@ -14632,6 +14719,7 @@ mod host_route_registry_tests {
                     worker_id: worker_id.into(),
                     token: token.into(),
                     timeout_ms: 0,
+                    receive_id: None,
                 },
                 tokio::sync::watch::channel(false).1,
             )
@@ -14926,6 +15014,7 @@ mod host_route_registry_tests {
                 worker_id: master_b.into(),
                 token: token_b.into(),
                 timeout_ms: 0,
+                receive_id: None,
             },
             tokio::sync::watch::channel(false).1,
         )
@@ -15144,6 +15233,7 @@ mod host_route_registry_tests {
                 worker_id: recipient_id.into(),
                 token: recipient_token.into(),
                 timeout_ms: 0,
+                receive_id: None,
             },
             tokio::sync::watch::channel(false).1,
         )
@@ -18447,6 +18537,7 @@ mod host_route_registry_tests {
                 worker_id: worker_id.into(),
                 token: token.into(),
                 timeout_ms: 1_000,
+                receive_id: None,
             },
         );
         let rebind = async move {
@@ -18535,11 +18626,13 @@ async fn dispatch_wire(
             worker_id,
             token,
             timeout_ms,
+            receive_id,
         } => {
             let poll_req = Req::Poll {
                 worker_id: worker_id.clone(),
                 token: token.clone(),
                 timeout_ms,
+                receive_id: receive_id.clone(),
             };
             if let Err(error) =
                 validate_request_context(&server, &poll_req, project_context.as_ref())
@@ -18565,6 +18658,7 @@ async fn dispatch_wire(
                         Some(token),
                         timeout_ms,
                         project_context,
+                        receive_id,
                     )
                     .await
                 }
@@ -18620,6 +18714,7 @@ async fn dispatch_wire_routed(
             worker_id,
             token,
             timeout_ms,
+            receive_id,
         } => {
             let Some(context) = project_context else {
                 return (
@@ -18633,6 +18728,7 @@ async fn dispatch_wire_routed(
                 worker_id: worker_id.clone(),
                 token: token.clone(),
                 timeout_ms,
+                receive_id: receive_id.clone(),
             };
             let server = match manager.select_runtime(&context) {
                 Ok(server) => server,
@@ -18660,6 +18756,7 @@ async fn dispatch_wire_routed(
                         Some(token),
                         timeout_ms,
                         Some(context),
+                        receive_id,
                     );
                     tokio::pin!(poll);
                     tokio::select! {

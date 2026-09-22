@@ -6472,7 +6472,10 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
     for (worker, observed_presence) in observations {
         let now = now_ms();
         let mut state = server.state.lock().unwrap();
-        if !state.workers.contains_key(&worker.id) || is_managed_subagent(&state, &worker.id) {
+        let Some(current_worker) = state.workers.get(&worker.id) else {
+            continue;
+        };
+        if current_worker != &worker || is_managed_subagent(&state, &worker.id) {
             continue;
         }
         let master_id = match live_master_id(server, &state) {

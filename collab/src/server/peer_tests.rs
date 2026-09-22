@@ -4,7 +4,7 @@ use crate::server::notification_contract::JournalError;
 use crate::server::state::{default_priority, is_goal_deadline, TaskRec};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 pub(crate) fn test_server() -> (Server, PathBuf) {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -8744,6 +8744,84 @@ fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
         "offline->online status edge must notify exactly once"
     );
     assert_eq!(state.keepalives["cold-worker"].notified_presence, "online");
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() {
+    let (mut server, root) = test_server();
+    register(&server, "master-worker", "thread-master");
+    register(&server, "edge-worker", "thread-stale");
+    let root_cwd = root.display().to_string();
+    let server_for_probe: Arc<StdMutex<Option<Arc<Server>>>> = Arc::new(StdMutex::new(None));
+    let server_for_probe_closure = server_for_probe.clone();
+    let reregistered = Arc::new(AtomicBool::new(false));
+    let reregistered_closure = reregistered.clone();
+    server.appserver_candidate_check = Arc::new(move |candidate| {
+        if candidate.thread_id == "thread-stale"
+            && !reregistered_closure.swap(true, Ordering::SeqCst)
+        {
+            if let Some(server) = server_for_probe_closure.lock().unwrap().as_ref() {
+                server.commit(&[Event::Registered {
+                    worker: WorkerRec {
+                        id: "edge-worker".into(),
+                        token: "token-edge-worker-new".into(),
+                        cwd: root_cwd.clone(),
+                        registered_ms: now_ms() + 1,
+                        transport: Some(test_appserver_transport("thread-new")),
+                    },
+                }]);
+            }
+            Err(crate::client::adapters::AdapterError::RouteUnavailable {
+                detail: "old registration route is no longer live".into(),
+            }
+            .to_string())
+        } else {
+            Ok(test_appserver_transport(&candidate.thread_id))
+        }
+    });
+    let server_arc = std::sync::Arc::new(server);
+    *server_for_probe.lock().unwrap() = Some(server_arc.clone());
+    let promote_resp = dispatch(
+        &server_arc,
+        Req::MasterPromote {
+            worker_id: "master-worker".into(),
+            token: "token-master-worker".into(),
+            approval: "approved".into(),
+        },
+    );
+    assert!(promote_resp.ok);
+    server_arc.commit(&[Event::KeepaliveUpdated {
+        worker_id: "edge-worker".into(),
+        record: crate::server::keepalive::Record {
+            notified_presence: "online".into(),
+            ..Default::default()
+        },
+    }]);
+
+    let status = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("edge-worker".into()),
+        },
+    );
+    assert!(status.ok, "{status:?}");
+    assert_eq!(status.data["workers"][0]["status"], "idle");
+    assert_eq!(
+        status.data["workers"][0]["transport"]["thread_id"],
+        "thread-new"
+    );
+    let state = server_arc.state.lock().unwrap();
+    assert_eq!(state.workers["edge-worker"].token, "token-edge-worker-new");
+    assert_eq!(state.keepalives["edge-worker"].notified_presence, "online");
+    assert!(state.msgs.values().all(|m| {
+        !(m.to == "master-worker" && m.subject == Some("worker-unresponsive: edge-worker".into()))
+    }));
+    assert!(!state
+        .master_wake
+        .unresponsive_workers
+        .contains(&"edge-worker".into()));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

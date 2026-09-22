@@ -3549,6 +3549,146 @@ fn worktree_binding_for_task(server: &Server, task: &TaskRec) -> Option<Worktree
     })
 }
 
+/// Normalize every whitespace-delimited token in a handoff body to its
+/// leading path substring.  Relative (`playground/...`), absolute, markdown
+/// link (`[x](/abs/...)`), and parenthesized forms all reduce to the same
+/// candidate here; tokens with no path separator are prose and are skipped.
+fn handoff_referenced_paths(body: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for token in body.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | ':'
+            )
+        });
+        // Keep a relative `playground/...` reference intact; for every other
+        // form (absolute, markdown link, parenthesized) the leading path
+        // starts at the first separator.
+        let candidate = if token.to_ascii_lowercase().starts_with("playground/") {
+            token
+        } else {
+            let Some(start) = token.find('/') else {
+                continue;
+            };
+            &token[start..]
+        };
+        let candidate = candidate.trim_end_matches(|c: char| {
+            matches!(
+                c,
+                '.' | ',' | ';' | ':' | ')' | ']' | '}' | '\'' | '"' | '`'
+            )
+        });
+        if candidate.len() <= 1 {
+            continue;
+        }
+        if !paths.iter().any(|existing| existing == candidate) {
+            paths.push(candidate.to_owned());
+        }
+    }
+    paths
+}
+
+/// Resolve a handoff reference to a project worktree, if it is one.  The
+/// reference must live under this project's playground or match a registered
+/// task worktree; an absolute path whose leaf is `worktree` is also accepted
+/// because that is the shape the original report used for a preflight
+/// implementation.  Anything else is an unrelated path and is not our
+/// business, so it never fails a send.
+fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -> Option<PathBuf> {
+    let playground = server.root.join("playground");
+    let raw = Path::new(candidate);
+    let absolute = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        server.root.join(raw)
+    };
+    let normalized = normalize_path_lexically(&absolute);
+    let playground_normalized = normalize_path_lexically(&playground);
+    if normalized.starts_with(&playground_normalized) {
+        return Some(normalized);
+    }
+    for task in state.tasks.values() {
+        let Some(registered) = task.worktree_path.as_deref() else {
+            continue;
+        };
+        let registered = normalize_path_lexically(Path::new(registered));
+        if normalized == registered {
+            return Some(normalized);
+        }
+    }
+    if raw.is_absolute()
+        && raw
+            .file_name()
+            .is_some_and(|leaf| leaf == std::ffi::OsStr::new("worktree"))
+    {
+        return Some(normalized);
+    }
+    None
+}
+
+/// Resolve a path with `.`/`..` collapsed so containment checks do not
+/// depend on the path already existing.
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn handoff_unresolved_recipient(to: &str) -> (String, serde_json::Value) {
+    (
+        format!("HANDOFF_TARGET_UNRESOLVED: recipient {to} not registered"),
+        json!({
+            "error_code": "HANDOFF_TARGET_UNRESOLVED",
+            "unresolved": {"kind": "recipient", "value": to},
+            "recipient": to,
+            "reason": "recipient_not_registered",
+            "recorded": false,
+        }),
+    )
+}
+
+/// Validate a handoff path reference before any durable record is written.
+/// Every worktree this send actually references must still exist; otherwise
+/// the caller gets a typed error naming the unresolved target instead of
+/// being told the handoff was recorded.
+fn resolve_handoff_target(
+    server: &Server,
+    state: &State,
+    to: &str,
+    body: &str,
+) -> Result<(), (String, serde_json::Value)> {
+    for candidate in handoff_referenced_paths(body) {
+        let Some(path) = handoff_worktree_reference(server, state, &candidate) else {
+            continue;
+        };
+        if !path.exists() {
+            return Err((
+                format!(
+                    "HANDOFF_TARGET_UNRESOLVED: worktree {} does not exist",
+                    path.display()
+                ),
+                json!({
+                    "error_code": "HANDOFF_TARGET_UNRESOLVED",
+                    "unresolved": {"kind": "worktree", "value": path.display().to_string()},
+                    "recipient": to,
+                    "reason": "worktree_path_missing",
+                    "recorded": false,
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn iso(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|d| d.to_rfc3339())
@@ -7900,6 +8040,14 @@ pub(crate) fn handle_send_with_task(
     if from.trim().is_empty() {
         return Resp::err("sender cannot be empty");
     }
+    // A recipient is a handoff target, so reporting it as unresolved must
+    // not depend on message dedup state.  Path references are still probed
+    // later, after dedup, so a previously recorded handoff is never blocked
+    // by a worktree that disappeared after delivery.
+    if !st.workers.contains_key(&to) {
+        let (error, data) = handoff_unresolved_recipient(&to);
+        return Resp::err_data(error, data);
+    }
     let Some(recipient) = st.workers.get(&to) else {
         return Resp::err(format!("recipient {} not registered", to));
     };
@@ -7981,6 +8129,9 @@ pub(crate) fn handle_send_with_task(
                 &notification,
             );
         }
+    }
+    if let Err((error, data)) = resolve_handoff_target(server, &st, &to, &msg.body) {
+        return Resp::err_data(error, data);
     }
     let mid = msg.id.clone();
     let task_id = assign_task.then(|| format!("task-{mid}"));

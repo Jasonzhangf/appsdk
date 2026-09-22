@@ -20166,6 +20166,13 @@ fn drain_goal_output_readers(
 const GOAL_COLLAB_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
+// A goal deadline is armed with an absolute at-ms that Collab validates when it
+// handles the request. That call can queue behind an active daemon batch for up
+// to the write budget, so an interval shorter than the budget can already be in
+// the past by the time the subscription is created. Rejecting it before any
+// local record mutation keeps `subscription_id` from being stranded.
+const GOAL_MIN_INTERVAL_MS: u64 = GOAL_COLLAB_WRITE_TIMEOUT.as_secs() * 1000;
+
 fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -20995,6 +21002,21 @@ where
             }
 
             let every_ms = parse_duration_to_ms(&interval_str).unwrap_or_else(|e| fail(e));
+            // A goal deadline is armed with an absolute at-ms that Collab
+            // validates after the subscribe request has queued behind the
+            // daemon's batch budget. An interval shorter than that budget can
+            // already be past by then, so reject it here, before the goal
+            // record is mutated, instead of arming a subscription that Collab
+            // will refuse and leaving subscription_id stranded at null.
+            if every_ms < GOAL_MIN_INTERVAL_MS {
+                fail(format!(
+                    "GOAL_INTERVAL_TOO_SHORT:{}: a goal deadline trigger is validated after the subscribe request can queue for up to {} seconds, so the interval must be at least {} seconds; rerun with --interval {}m",
+                    interval_str,
+                    GOAL_MIN_INTERVAL_MS / 1000,
+                    GOAL_MIN_INTERVAL_MS / 1000,
+                    GOAL_MIN_INTERVAL_MS / 60_000
+                ));
+            }
             let master_prompt = generate_long_horizon_master_prompt(&goal_path, &interval_str);
             let canonical_goal_path = goal_path
                 .canonicalize()
@@ -21192,8 +21214,7 @@ where
                 }
             }
 
-            let now_ms = goal_now_ms();
-            let trigger_ms = now_ms.saturating_add(every_ms.min(i64::MAX as u64) as i64);
+            let mut trigger_ms = goal_now_ms().saturating_add(every_ms.min(i64::MAX as u64) as i64);
             let mut record = serde_json::json!({
                 "schema_version": 1,
                 "goal_id": goal_id,
@@ -21250,6 +21271,12 @@ where
                 drop(_goal_lock);
                 goal_fail(format_json, &error, Some(&record));
             }
+            // Recompute the absolute trigger at the last possible moment before
+            // the subscribe call. The interval floor keeps Collab's validation
+            // inside the future for a slow subscribe path; this keeps the
+            // actual at-ms from carrying the record-write delay as well.
+            trigger_ms = goal_now_ms().saturating_add(every_ms.min(i64::MAX as u64) as i64);
+            record["trigger_ms"] = Value::Number(trigger_ms.into());
             let mut collab_command = Command::new("collab");
             collab_command
                 .args([

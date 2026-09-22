@@ -21093,6 +21093,153 @@ esac
     fs::remove_dir_all(root).unwrap();
 }
 
+// Short goal intervals used to arm an absolute at-ms that Collab could reject
+// as already past once the subscribe call queued behind the daemon batch
+// budget. The local record was written first, so the failure stranded
+// `subscription_id` at null. The interval is now rejected before any record
+// mutation, so no subscribe is attempted and no goal record is created.
+#[test]
+fn goal_subscribe_rejects_short_interval_before_mutating_the_record() {
+    let root = temp_root("goal-short-interval");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "notify subscribe")
+    printf '%s\n' "$*" >> notify-subscribe-calls
+    printf '%s\n' '{"subscription_id":"sub-short"}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    for interval in ["10s", "1s", "119s"] {
+        let rejected = Command::new(binary())
+            .args([
+                "goal",
+                "subscribe",
+                "--goal",
+                "long-task.md",
+                "--interval",
+                interval,
+                "--json",
+            ])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        assert_eq!(rejected.status.code(), Some(1), "interval {interval}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("GOAL_INTERVAL_TOO_SHORT"),
+            "interval {interval}: {}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            !root.join(".appsdk-control/long-task-goal.json").exists(),
+            "a rejected short interval must not mutate the local goal record"
+        );
+        assert!(
+            !root.join("notify-subscribe-calls").exists(),
+            "a rejected short interval must not reach Collab notify subscribe"
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+// The at-ms is recomputed immediately before the subscribe call, so the
+// interval is measured from just before the request instead of from before the
+// local record write. The fake Collab records the at-ms it received.
+#[test]
+fn goal_subscribe_computes_the_trigger_immediately_before_the_collab_call() {
+    let root = temp_root("goal-fresh-trigger");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "notify status") printf '%s\n' '{"subscriptions":[]}' ;;
+  "notify subscribe")
+    printf '%s\n' "$*" > notify-args
+    printf '%s\n' '{"subscription_id":"sub-fresh","status":"armed"}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let started = goal_now_ms_for_test();
+    let subscribed = Command::new(binary())
+        .args([
+            "goal",
+            "subscribe",
+            "--goal",
+            "long-task.md",
+            "--interval",
+            "2m",
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        subscribed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&subscribed.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&subscribed.stdout).unwrap();
+    assert_eq!(payload["active"], true);
+    assert_eq!(payload["observed"], "subscribed");
+    assert_eq!(payload["subscription_id"], "sub-fresh");
+
+    let notify_args = fs::read_to_string(root.join("notify-args")).unwrap();
+    let at_ms: i64 = notify_args
+        .split("--at-ms")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("notify subscribe must carry --at-ms")
+        .parse()
+        .unwrap();
+    assert!(
+        at_ms >= started.saturating_add(120_000),
+        "the at-ms must not be earlier than the start of the command plus the interval: at_ms={at_ms} started={started}"
+    );
+    assert_eq!(
+        payload["trigger_ms"].as_i64().unwrap(),
+        at_ms,
+        "the persisted record must carry the same trigger that was sent"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn goal_now_ms_for_test() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 #[test]
 fn goal_subscribe_failure_does_not_report_active() {
     let root = temp_root("goal-sub-fail");
@@ -21282,7 +21429,7 @@ esac
             "--goal",
             "long-task.md",
             "--interval",
-            "1s",
+            "2m",
             "--json",
         ])
         .current_dir(&root)
@@ -21324,7 +21471,7 @@ esac
             "--goal",
             "long-task.md",
             "--interval",
-            "10s",
+            "5m",
             "--json",
         ])
         .current_dir(&root)
@@ -21341,7 +21488,7 @@ esac
     assert_eq!(rearmed_json["active"], true);
     assert_eq!(rearmed_json["desired"], "subscribed");
     assert_eq!(rearmed_json["observed"], "subscribed");
-    assert_eq!(rearmed_json["interval"], "10s");
+    assert_eq!(rearmed_json["interval"], "5m");
     assert_eq!(rearmed_json["subscription_id"], "sub-rearmed");
     assert_eq!(
         rearmed_json["recovery_history"][0]["previous_record"]["desired"],

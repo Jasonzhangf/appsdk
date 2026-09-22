@@ -18,6 +18,11 @@ pub struct Record {
     /// tick; the master is told only when a state settles into something new.
     #[serde(default)]
     pub notified_state: String,
+    /// Last ordinary-peer transport presence observed by the status producer.
+    /// The first observation is a baseline; later online/offline edges notify
+    /// the live master exactly once per transition.
+    #[serde(default)]
+    pub notified_presence: String,
     /// When the current not-yet-reported observation first appeared.
     #[serde(default)]
     pub pending_since_ms: i64,

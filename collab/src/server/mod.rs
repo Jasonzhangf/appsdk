@@ -6439,6 +6439,125 @@ fn is_managed_subagent(state: &State, worker_id: &str) -> bool {
         .any(|record| record.peer == worker_id)
 }
 
+fn ordinary_peer_presence_label(presence: IdentityPresence) -> Option<&'static str> {
+    match presence {
+        IdentityPresence::Present => Some("online"),
+        IdentityPresence::Cold | IdentityPresence::Missing => Some("offline"),
+        IdentityPresence::Unknown => None,
+    }
+}
+
+fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&str>) {
+    let observations: Vec<(WorkerRec, &'static str)> = {
+        let state = server.state.lock().unwrap();
+        state
+            .workers
+            .values()
+            .filter(|worker| worker_filter.is_none_or(|id| id == worker.id))
+            .filter(|worker| {
+                worker
+                    .transport
+                    .as_ref()
+                    .is_some_and(|transport| transport.kind == TransportKind::AppServer)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    }
+    .into_iter()
+    .filter_map(|worker| {
+        ordinary_peer_presence_label(worker_presence(server, &worker)).map(|label| (worker, label))
+    })
+    .collect();
+
+    for (worker, observed_presence) in observations {
+        let now = now_ms();
+        let mut state = server.state.lock().unwrap();
+        if !state.workers.contains_key(&worker.id) || is_managed_subagent(&state, &worker.id) {
+            continue;
+        }
+        let master_id = match live_master_id(server, &state) {
+            Ok(Some(master_id)) => master_id,
+            _ => continue,
+        };
+        if master_id == worker.id {
+            continue;
+        }
+        let old = state
+            .keepalives
+            .get(&worker.id)
+            .cloned()
+            .unwrap_or_default();
+        if old.notified_presence == observed_presence {
+            continue;
+        }
+
+        let previous_presence = old.notified_presence.clone();
+        let mut record = old;
+        record.notified_presence = observed_presence.into();
+        let mut events = vec![Event::KeepaliveUpdated {
+            worker_id: worker.id.clone(),
+            record,
+        }];
+        if !previous_presence.is_empty() {
+            let offline = observed_presence == "offline";
+            events.push(Event::MasterWakeSignal {
+                signal: if offline {
+                    state::MasterWakeSignal::WorkerUnresponsive {
+                        worker_id: worker.id.clone(),
+                    }
+                } else {
+                    state::MasterWakeSignal::WorkerRecovered {
+                        worker_id: worker.id.clone(),
+                    }
+                },
+                at_ms: now,
+            });
+            if server.config.notifications.enabled {
+                if let Some(subscription) = state
+                    .matching_subscription(&master_id, "direct-message", None, now)
+                    .cloned()
+                {
+                    let message_id = gen_msg_id();
+                    events.push(Event::Sent {
+                        msg: Message {
+                            id: message_id.clone(),
+                            from: "collab-server".into(),
+                            to: master_id.clone(),
+                            mtype: "notify".into(),
+                            subject: Some(if offline {
+                                format!("worker-unresponsive: {}", worker.id)
+                            } else {
+                                format!("worker-recovered: {}", worker.id)
+                            }),
+                            body: if offline {
+                                format!(
+                                    "Worker {} changed from online to offline. Action required: run snapshot if owned work is blocked, inspect tasks, and reassign or close stale work with evidence.",
+                                    worker.id
+                                )
+                            } else {
+                                format!(
+                                    "Worker {} changed from offline to online. Action required: resume eligible assigned work or refresh scheduling evidence before dispatch.",
+                                    worker.id
+                                )
+                            },
+                            in_reply_to: None,
+                            created_ms: now,
+                            state: "pending".into(),
+                            wake_attempt_count: 0,
+                            last_wake_attempt_ms: 0,
+                        },
+                    });
+                    events.push(Event::WakeBound {
+                        message_id,
+                        subscription_id: subscription.id,
+                    });
+                }
+            }
+        }
+        server.commit_locked(&mut state, &events);
+    }
+}
+
 /// Admit a Start request to an already registered idle peer when the caller is
 /// the live master. This is shared by the daemon dispatch path and the direct
 /// subagent handler so neither entry point can bypass scheduler admission.
@@ -10673,6 +10792,7 @@ fn dispatch_with_route_context(
             Resp::err("declared roles are removed; use collab who/context for peer identity")
         }
         Req::Workers => {
+            record_ordinary_peer_presence_edges(server, None);
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
                 let role_briefs = st
@@ -10714,6 +10834,7 @@ fn dispatch_with_route_context(
             reason,
         } => handle_worker_close(server, worker_id, token, target_id, reason),
         Req::WorkerStatus { worker_id } => {
+            record_ordinary_peer_presence_edges(server, worker_id.as_deref());
             let (workers_rec, tasks_map, msgs_map, keepalives_map, role_briefs) = {
                 let st = server.state.lock().unwrap();
                 let role_briefs = st
@@ -10790,6 +10911,7 @@ fn dispatch_with_route_context(
             }))
         }
         Req::StatusAll => {
+            record_ordinary_peer_presence_edges(server, None);
             let (
                 workers_rec,
                 tasks,

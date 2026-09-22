@@ -3,7 +3,7 @@ use crate::identity::{runtime_from_registration_receipt, BindingId, RuntimeId, S
 use crate::server::notification_contract::JournalError;
 use crate::server::state::{default_priority, is_goal_deadline, TaskRec};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub(crate) fn test_server() -> (Server, PathBuf) {
@@ -8484,8 +8484,10 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
     let (mut server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "stuck-worker", "thread-stuck");
-    server.appserver_candidate_check = Arc::new(|candidate| {
-        if candidate.thread_id == "thread-stuck" {
+    let stuck_live = Arc::new(AtomicBool::new(true));
+    let stuck_live_for_probe = stuck_live.clone();
+    server.appserver_candidate_check = Arc::new(move |candidate| {
+        if candidate.thread_id == "thread-stuck" && !stuck_live_for_probe.load(Ordering::SeqCst) {
             Err(crate::client::adapters::AdapterError::RouteUnavailable {
                 detail: "stuck worker route is not live".into(),
             }
@@ -8505,6 +8507,23 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
     );
     assert!(promote_resp.ok);
 
+    let baseline = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("stuck-worker".into()),
+        },
+    );
+    assert!(baseline.ok, "{baseline:?}");
+    assert_eq!(baseline.data["workers"][0]["status"], "idle");
+    assert_eq!(
+        server_arc.state.lock().unwrap().keepalives["stuck-worker"].notified_presence,
+        "online"
+    );
+    assert!(server_arc.state.lock().unwrap().msgs.values().all(|m| {
+        !(m.to == "master-worker" && m.subject == Some("worker-unresponsive: stuck-worker".into()))
+    }));
+
+    stuck_live.store(false, Ordering::SeqCst);
     let status = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -8515,9 +8534,216 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
     assert_eq!(status.data["workers"][0]["status"], "lost");
 
     let state = server_arc.state.lock().unwrap();
-    assert!(state.msgs.values().all(|m| {
-        !(m.to == "master-worker" && m.subject == Some("worker-unresponsive: stuck-worker".into()))
-    }));
+    let offline_alerts: Vec<_> = state
+        .msgs
+        .values()
+        .filter(|m| {
+            m.to == "master-worker" && m.subject == Some("worker-unresponsive: stuck-worker".into())
+        })
+        .collect();
+    assert_eq!(offline_alerts.len(), 1);
+    assert!(offline_alerts[0].body.contains("run snapshot"));
+    assert_eq!(
+        state.keepalives["stuck-worker"].notified_presence,
+        "offline"
+    );
+    assert!(state
+        .master_wake
+        .unresponsive_workers
+        .contains(&"stuck-worker".into()));
+    drop(state);
+
+    for request in [
+        Req::WorkerStatus {
+            worker_id: Some("stuck-worker".into()),
+        },
+        Req::StatusAll,
+        Req::Workers,
+    ] {
+        let response = dispatch(&server_arc, request);
+        assert!(response.ok, "{response:?}");
+    }
+    let ack = dispatch(
+        &server_arc,
+        Req::Ack {
+            worker_id: "master-worker".into(),
+            token: "token-master-worker".into(),
+            ids: vec![],
+        },
+    );
+    assert!(ack.ok, "{ack:?}");
+    let unchanged = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("stuck-worker".into()),
+        },
+    );
+    assert!(unchanged.ok, "{unchanged:?}");
+    assert_eq!(
+        server_arc
+            .state
+            .lock()
+            .unwrap()
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker"
+                    && m.subject == Some("worker-unresponsive: stuck-worker".into())
+            })
+            .count(),
+        1,
+        "unchanged offline status, status-all, workers, and ack must not duplicate"
+    );
+
+    stuck_live.store(true, Ordering::SeqCst);
+    let recovered = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("stuck-worker".into()),
+        },
+    );
+    assert!(recovered.ok, "{recovered:?}");
+    assert_eq!(recovered.data["workers"][0]["status"], "idle");
+    {
+        let state = server_arc.state.lock().unwrap();
+        let recovered_alerts: Vec<_> = state
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker"
+                    && m.subject == Some("worker-recovered: stuck-worker".into())
+            })
+            .collect();
+        assert_eq!(recovered_alerts.len(), 1);
+        assert_eq!(state.keepalives["stuck-worker"].notified_presence, "online");
+        assert!(!state
+            .master_wake
+            .unresponsive_workers
+            .contains(&"stuck-worker".into()));
+    }
+    let duplicate_recovered = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("stuck-worker".into()),
+        },
+    );
+    assert!(duplicate_recovered.ok, "{duplicate_recovered:?}");
+    assert_eq!(
+        server_arc
+            .state
+            .lock()
+            .unwrap()
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker"
+                    && m.subject == Some("worker-recovered: stuck-worker".into())
+            })
+            .count(),
+        1,
+        "unchanged online status must not duplicate recovery"
+    );
+
+    stuck_live.store(false, Ordering::SeqCst);
+    let rearmed = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("stuck-worker".into()),
+        },
+    );
+    assert!(rearmed.ok, "{rearmed:?}");
+    assert_eq!(
+        server_arc
+            .state
+            .lock()
+            .unwrap()
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker"
+                    && m.subject == Some("worker-unresponsive: stuck-worker".into())
+            })
+            .count(),
+        2,
+        "opposite recovery transition must re-arm the next offline notification"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
+    let (mut server, root) = test_server();
+    register(&server, "master-worker", "thread-master");
+    register(&server, "cold-worker", "thread-cold");
+    let cold_live = Arc::new(AtomicBool::new(false));
+    let cold_live_for_probe = cold_live.clone();
+    server.appserver_candidate_check = Arc::new(move |candidate| {
+        if candidate.thread_id == "thread-cold" && !cold_live_for_probe.load(Ordering::SeqCst) {
+            Err(crate::client::adapters::AdapterError::RouteUnavailable {
+                detail: "cold worker route is not live".into(),
+            }
+            .to_string())
+        } else {
+            Ok(test_appserver_transport(&candidate.thread_id))
+        }
+    });
+    let server_arc = std::sync::Arc::new(server);
+    let promote_resp = dispatch(
+        &server_arc,
+        Req::MasterPromote {
+            worker_id: "master-worker".into(),
+            token: "token-master-worker".into(),
+            approval: "approved".into(),
+        },
+    );
+    assert!(promote_resp.ok);
+
+    let offline = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("cold-worker".into()),
+        },
+    );
+    assert!(offline.ok, "{offline:?}");
+    assert_eq!(offline.data["workers"][0]["status"], "lost");
+    {
+        let state = server_arc.state.lock().unwrap();
+        assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
+        assert!(state.msgs.values().all(|m| {
+            !(m.to == "master-worker"
+                && m.subject == Some("worker-unresponsive: cold-worker".into()))
+        }));
+    }
+
+    cold_live.store(true, Ordering::SeqCst);
+    let online = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("cold-worker".into()),
+        },
+    );
+    assert!(online.ok, "{online:?}");
+    assert_eq!(online.data["workers"][0]["status"], "idle");
+    let repeated = dispatch(
+        &server_arc,
+        Req::WorkerStatus {
+            worker_id: Some("cold-worker".into()),
+        },
+    );
+    assert!(repeated.ok, "{repeated:?}");
+    let state = server_arc.state.lock().unwrap();
+    assert_eq!(
+        state
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker" && m.subject == Some("worker-recovered: cold-worker".into())
+            })
+            .count(),
+        1,
+        "offline->online status edge must notify exactly once"
+    );
+    assert_eq!(state.keepalives["cold-worker"].notified_presence, "online");
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -8353,6 +8353,268 @@ fn init_waits_for_slow_collab_route_recovery_before_timeout() {
 }
 
 #[test]
+fn init_recovers_peer_identity_once_before_declaring_collab_unavailable() {
+    assert_init_recovers_peer_identity_error(
+        "init-collab-peer-identity-recover",
+        "collab: token mismatch: identity does not own this worker_id",
+        "runtime-peer-recovered",
+        "thread-peer-recovered",
+    );
+}
+
+#[test]
+fn init_recovers_persisted_peer_identity_with_missing_runtime() {
+    assert_init_recovers_peer_identity_error(
+        "init-collab-peer-persisted-identity-runtime-recover",
+        "collab: persisted Collab identity peer-recovered has no registered runtime",
+        "runtime-peer-persisted-recovered",
+        "thread-peer-persisted-recovered",
+    );
+}
+
+#[test]
+fn init_recovers_peer_identity_with_missing_runtime_binding() {
+    assert_init_recovers_peer_identity_error(
+        "init-collab-peer-runtime-binding-recover",
+        "collab: identity has no registered runtime binding",
+        "runtime-peer-binding-recovered",
+        "thread-peer-binding-recovered",
+    );
+}
+
+#[test]
+fn init_recovers_typed_runtime_binding_missing_runtime() {
+    assert_init_recovers_peer_identity_error(
+        "init-collab-peer-typed-runtime-missing-recover",
+        "RUNTIME_BINDING_REJECTED: persisted identity has no registered runtime",
+        "runtime-peer-typed-runtime-recovered",
+        "thread-peer-typed-runtime-recovered",
+    );
+}
+
+fn assert_init_recovers_peer_identity_error(
+    fixture_name: &str,
+    init_error: &str,
+    runtime_id: &str,
+    thread_id: &str,
+) {
+    let root = temp_root(fixture_name);
+    fs::create_dir_all(&root).unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let state = root.join("collab-state.txt");
+    let probe = root.join("collab-probe.txt");
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{}"
+state="{}"
+case "$*" in
+  "init")
+    if [ ! -f "$state" ]; then
+      printf '%s\n' '{}' >&2
+      exit 1
+    fi
+    printf '%s\n' '{{"ok":true,"runtime":{{"runtimeId":"{}","appserverId":"appserver-cli","namespace":"codex_tui","endpoint":"unix:///tmp/codex.sock","projectRoot":"{}","capabilities":["session_status","read_thread","send_message_to_thread","wait_reply"],"processId":4242}},"transport_selected":{{"kind":"appserver","endpoint":"unix:///tmp/codex.sock","namespace":"codex_tui","thread_id":"{}","capabilities":["session_status","read_thread","send_message_to_thread","wait_reply"],"self_check":"test"}}}}'
+    ;;
+  "worker recover")
+    printf '%s\n' recovered > "$state"
+    printf '%s\n' '{{"recovered":true,"worker_id":"peer-recovered","transport":{{"kind":"appserver","endpoint":"unix:///tmp/codex.sock","namespace":"codex_tui","thread_id":"thread-peer-recovered","capabilities":["send_message_to_thread"],"self_check":"test"}}}}'
+    ;;
+  *)
+    printf '%s\n' "unexpected collab command: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+            probe.display(),
+            state.display(),
+            init_error,
+            runtime_id,
+            root.canonicalize().unwrap().display(),
+            thread_id
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    init_git(&root);
+    let path = format!("{}:{}", fake_bin.display(), env::var("PATH").unwrap());
+
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("collab-channel"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_FAILED"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocations = fs::read_to_string(&probe).unwrap();
+    assert_eq!(invocations, "init\nworker recover\ninit\n");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_does_not_recover_peer_identity_from_non_canonical_root() {
+    let root = temp_root("init-collab-peer-recover-noncanonical");
+    fs::create_dir_all(&root).unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let probe = root.join("collab-probe.txt");
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  "init")
+    printf '%s\n' 'collab: token mismatch: identity does not own this worker_id' >&2
+    exit 1
+    ;;
+  "worker recover")
+    printf '%s\n' 'recover must not run from this root' >&2
+    exit 64
+    ;;
+  *)
+    printf '%s\n' "unexpected collab command: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+            probe.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &fake_bin)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("COLLAB_INIT_RECOVER_SKIPPED_NON_CANONICAL_ROOT"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("collab-channel"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocations = fs::read_to_string(&probe).unwrap();
+    assert_eq!(invocations, "init\n");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_does_not_recover_broad_runtime_binding_rejections() {
+    let root = temp_root("init-collab-runtime-binding-not-recoverable");
+    fs::create_dir_all(&root).unwrap();
+    confirm_preparation(&root, ".", "project_refactor");
+
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let probe = root.join("collab-probe.txt");
+    fs::write(
+        &fake_collab,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  "init")
+    printf '%s\n' 'RUNTIME_BINDING_REJECTED: candidate App Server thread is already bound to another worker' >&2
+    exit 1
+    ;;
+  "worker recover")
+    printf '%s\n' 'recover must not run for this error' >&2
+    exit 64
+    ;;
+  *)
+    printf '%s\n' "unexpected collab command: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+            probe.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+    init_git(&root);
+    let path = format!("{}:{}", fake_bin.display(), env::var("PATH").unwrap());
+
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("COLLAB_INIT_FAILED"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("RUNTIME_BINDING_REJECTED"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocations = fs::read_to_string(&probe).unwrap();
+    assert_eq!(invocations, "init\n");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_bounds_oversized_collab_timeout_override() {
     let root = temp_root("init-collab-oversized-timeout");
     fs::create_dir_all(&root).unwrap();

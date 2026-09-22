@@ -13801,10 +13801,86 @@ fn collab_init_timeout() -> Duration {
         .unwrap_or(COLLAB_INIT_TIMEOUT)
 }
 
-fn initialize_collab_peer(root: &Path) {
+fn run_collab_init(root: &Path) -> Result<Output, String> {
     let mut command = Command::new("collab");
     command.arg("init").current_dir(root);
-    let output = match run_goal_collab_command(command, collab_init_timeout()) {
+    run_goal_collab_command(command, collab_init_timeout())
+}
+
+fn collab_init_error_can_recover_identity(detail: &str) -> bool {
+    detail.lines().any(|line| {
+        let line = line.trim().strip_prefix("collab: ").unwrap_or(line.trim());
+        if matches!(
+            line,
+            "token mismatch: identity does not own this worker_id"
+                | "persisted Collab identity has no registered runtime"
+                | "identity has no registered runtime"
+                | "identity has no registered runtime binding"
+                | "RUNTIME_BINDING_REJECTED: persisted identity has no registered runtime"
+        ) {
+            return true;
+        }
+        line.strip_prefix("persisted Collab identity ")
+            .and_then(|value| value.strip_suffix(" has no registered runtime"))
+            .is_some_and(|worker_id| !worker_id.trim().is_empty())
+    })
+}
+
+fn collab_identity_recovery_root_error(root: &Path) -> Option<String> {
+    let canonical_root = match fs::canonicalize(root) {
+        Ok(root) => root,
+        Err(error) => {
+            return Some(format!("project_root_invalid:{}:{error}", root.display()));
+        }
+    };
+    if is_linked_git_worktree(&canonical_root) {
+        return Some(format!("linked_git_worktree:{}", canonical_root.display()));
+    }
+    let output = Command::new("git")
+        .args([
+            "-C",
+            canonical_root.to_str().unwrap_or("."),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return Some("vcs_adapter_unavailable".into());
+    };
+    if !output.status.success() {
+        return Some(format!(
+            "canonical_git_root_unavailable:{}",
+            canonical_root.display()
+        ));
+    }
+    let git_root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let canonical_git_root = match fs::canonicalize(&git_root) {
+        Ok(root) => root,
+        Err(error) => {
+            return Some(format!(
+                "canonical_git_root_invalid:{}:{error}",
+                git_root.display()
+            ));
+        }
+    };
+    if !canonical_root.starts_with(&canonical_git_root) {
+        return Some(format!(
+            "project_root_outside_git_root:{}:{}",
+            canonical_root.display(),
+            canonical_git_root.display()
+        ));
+    }
+    None
+}
+
+fn recover_collab_peer_identity(root: &Path) -> Result<Output, String> {
+    let mut command = Command::new("collab");
+    command.args(["worker", "recover"]).current_dir(root);
+    run_goal_collab_command(command, collab_init_timeout())
+}
+
+fn initialize_collab_peer(root: &Path) {
+    let output = match run_collab_init(root) {
         Ok(output) => output,
         Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT" => {
             eprintln!("COLLAB_INIT_TIMEOUT: collab init did not finish within the bounded registration window; run collab worker recover from the canonical project root or retry appsdk init . after the daemon is reachable; shared collaboration unavailable; independent work may continue");
@@ -13819,11 +13895,49 @@ fn initialize_collab_peer(root: &Path) {
             return;
         }
     };
-    if !output.status.success() {
+    let output = if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
-        eprintln!("COLLAB_INIT_FAILED:{}; shared collaboration unavailable; independent work may continue", detail.trim());
-        return;
-    }
+        if !collab_init_error_can_recover_identity(&detail) {
+            eprintln!("COLLAB_INIT_FAILED:{}; shared collaboration unavailable; independent work may continue", detail.trim());
+            return;
+        }
+        if let Some(reason) = collab_identity_recovery_root_error(root) {
+            eprintln!("COLLAB_INIT_RECOVER_SKIPPED_NON_CANONICAL_ROOT:{reason}; original={}; run collab worker recover from the canonical project main tree; shared collaboration unavailable; independent work may continue", detail.trim());
+            return;
+        }
+        let recovery = match recover_collab_peer_identity(root) {
+            Ok(recovery) => recovery,
+            Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT" => {
+                eprintln!("COLLAB_INIT_RECOVER_TIMEOUT: collab worker recover did not finish within the bounded registration window after collab init failed with {}; shared collaboration unavailable; independent work may continue", detail.trim());
+                return;
+            }
+            Err(error) if error == "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT" => {
+                eprintln!("COLLAB_INIT_RECOVER_OUTPUT_TIMEOUT: collab worker recover exited but output did not drain after collab init failed with {}; shared collaboration unavailable; independent work may continue", detail.trim());
+                return;
+            }
+            Err(error) => {
+                eprintln!("COLLAB_INIT_RECOVER_UNAVAILABLE:{error}; original={}; shared collaboration unavailable; independent work may continue", detail.trim());
+                return;
+            }
+        };
+        if !recovery.status.success() {
+            eprintln!("COLLAB_INIT_RECOVER_FAILED:{}; original={}; shared collaboration unavailable; independent work may continue", String::from_utf8_lossy(&recovery.stderr).trim(), detail.trim());
+            return;
+        }
+        match run_collab_init(root) {
+            Ok(retry) if retry.status.success() => retry,
+            Ok(retry) => {
+                eprintln!("COLLAB_INIT_FAILED_AFTER_RECOVER:{}; original={}; shared collaboration unavailable; independent work may continue", String::from_utf8_lossy(&retry.stderr).trim(), detail.trim());
+                return;
+            }
+            Err(error) => {
+                eprintln!("COLLAB_INIT_RETRY_UNAVAILABLE:{error}; original={}; shared collaboration unavailable; independent work may continue", detail.trim());
+                return;
+            }
+        }
+    } else {
+        output
+    };
     let result = String::from_utf8_lossy(&output.stdout);
     let result = result.trim();
     if result.is_empty() {

@@ -19838,6 +19838,15 @@ fn goal_mark_recovery_required(record: &mut Value, error: String) {
     record["revision"] = Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
 }
 
+fn goal_subscribe_failure_allows_no_subscription_recovery(error: &str) -> bool {
+    error.starts_with("COLLAB_SUBSCRIBE_FAILED:")
+        || error.starts_with("COLLAB_UNAVAILABLE:")
+        || matches!(
+            error,
+            "GOAL_COLLAB_COMMAND_TIMEOUT" | "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"
+        )
+}
+
 struct GoalLock {
     _file: fs::File,
     path: PathBuf,
@@ -20945,6 +20954,33 @@ where
             let mut terminal_previous = None;
             if let Some(existing) = existing.as_ref() {
                 if existing["desired"].as_str() == Some("cancel_pending") {
+                    if let Some(retained_id) = goal_record_subscription_id(existing) {
+                        match goal_subscription_status(root, &retained_id) {
+                            Ok((remote_status, remote_record)) => {
+                                if goal_subscription_is_terminal(&remote_status) {
+                                    terminal_previous = Some((remote_status, remote_record));
+                                } else {
+                                    let matched_subject =
+                                        remote_record["subject"].as_str().unwrap_or("unknown");
+                                    let error = format!(
+                                        "GOAL_CANCEL_PENDING_RECONCILIATION_REQUIRED: subscription {} remains {} under subject {}; rerun goal cancel before subscribing",
+                                        retained_id, remote_status, matched_subject
+                                    );
+                                    drop(_goal_lock);
+                                    goal_fail(format_json, &error, Some(existing));
+                                }
+                            }
+                            Err(error)
+                                if !error.starts_with("GOAL_STATUS_SUBSCRIPTION_NOT_FOUND:") =>
+                            {
+                                let error =
+                                    format!("GOAL_CANCEL_PENDING_RECONCILIATION_FAILED:{}", error);
+                                drop(_goal_lock);
+                                goal_fail(format_json, &error, Some(existing));
+                            }
+                            Err(_) => {}
+                        }
+                    }
                     match goal_subscription_by_subject_candidates(
                         root,
                         Some(existing),
@@ -21113,6 +21149,7 @@ where
             });
             if let Some(previous) = existing.as_ref().filter(|previous| {
                 previous["desired"].as_str() == Some("recovery_required")
+                    || previous["desired"].as_str() == Some("cancel_pending")
                     || terminal_previous.is_some()
             }) {
                 let mut previous = previous.clone();
@@ -21235,11 +21272,17 @@ where
                     .starts_with("GOAL_ONE_SHOT_SUBSCRIPTION_NOT_ARMED:")
                     .then_some(error.to_string())
             });
-            if !collab_subscribed
-                && record["subscription_id"].as_str().is_some()
-                && subscription_not_armed_error.is_some()
-            {
-                goal_mark_recovery_required(&mut record, subscription_not_armed_error.unwrap());
+            if !collab_subscribed {
+                if let Some(error) = subscription_not_armed_error {
+                    goal_mark_recovery_required(&mut record, error);
+                } else if let Some(error) = record["error"]
+                    .as_str()
+                    .filter(|_| record["subscription_id"].as_str().is_none())
+                    .filter(|error| goal_subscribe_failure_allows_no_subscription_recovery(error))
+                    .map(str::to_owned)
+                {
+                    goal_mark_recovery_required(&mut record, error);
+                }
             }
             record["revision"] = Value::Number(2.into());
             if let Err(error) = goal_record_write(root, &record) {
@@ -21584,7 +21627,7 @@ where
                         record["observed"] = Value::String("unknown".into());
                         record["active"] = Value::Bool(false);
                         record["error"] = Value::String(error.into());
-                        record["remote_state"] = Value::String("unknown".into());
+                        record["remote_state"] = Value::String("no_matching_armed_subject".into());
                         record["revision"] =
                             Value::Number((record["revision"].as_u64().unwrap_or(0) + 1).into());
                         if let Err(write_error) = goal_record_write(root, &record) {

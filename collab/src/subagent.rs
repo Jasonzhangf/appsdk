@@ -186,6 +186,10 @@ fn follow_up(record: &Record, reused: bool) -> serde_json::Value {
     value
 }
 
+fn can_reuse_existing(record: &Record) -> bool {
+    record.thread_id.is_some() && record.status != "failed"
+}
+
 pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
@@ -427,6 +431,51 @@ fn notify(
     }
     Ok(response.data)
 }
+
+fn child_appserver_candidate(
+    parent_transport: &crate::proto::SelectedTransport,
+    root: &std::path::Path,
+    thread_id: &crate::identity::NativeThreadId,
+) -> Result<crate::proto::AppServerCandidate> {
+    let child_status = crate::client::adapters::codex_app_server::read_thread_status(
+        parent_transport,
+        thread_id.as_str(),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let child_session_id = child_session_id_from_thread_status(&child_status)?;
+    child_appserver_candidate_from_session(parent_transport, root, &child_session_id, thread_id)
+}
+
+fn child_session_id_from_thread_status(thread_status: &serde_json::Value) -> Result<String> {
+    thread_status
+        .pointer("/thread/sessionId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .context("child App Server thread/read response is missing thread.sessionId")
+}
+
+fn child_appserver_candidate_from_session(
+    parent_transport: &crate::proto::SelectedTransport,
+    root: &std::path::Path,
+    child_session_id: &str,
+    thread_id: &crate::identity::NativeThreadId,
+) -> Result<crate::proto::AppServerCandidate> {
+    Ok(crate::proto::AppServerCandidate {
+        endpoint: parent_transport
+            .endpoint
+            .clone()
+            .context("parent App Server transport has no endpoint")?,
+        namespace: parent_transport
+            .namespace
+            .clone()
+            .context("parent App Server transport has no namespace")?,
+        session_id: child_session_id.to_owned(),
+        thread_id: thread_id.to_string(),
+        cwd: root.display().to_string(),
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 struct LaunchSpec {
     executable: String,
@@ -503,22 +552,21 @@ fn launch(
         profile.model.as_deref(),
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
-    record.thread_id = Some(thread_id.to_string());
-    let candidate = crate::proto::AppServerCandidate {
-        endpoint: parent_transport
-            .endpoint
-            .clone()
-            .context("parent App Server transport has no endpoint")?,
-        namespace: parent_transport
-            .namespace
-            .clone()
-            .context("parent App Server transport has no namespace")?,
-        session_id: parent_transport
-            .session_id
-            .clone()
-            .context("parent App Server transport has no session_id")?,
-        thread_id: thread_id.to_string(),
-        cwd: server.root.display().to_string(),
+    let candidate = match child_appserver_candidate(&parent_transport, &server.root, &thread_id) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            let archive_result = crate::client::adapters::codex_app_server::archive_thread(
+                &parent_transport,
+                thread_id.as_str(),
+            );
+            let archive_status = archive_result
+                .map(|_| "archived".to_owned())
+                .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
+            record.thread_id = None;
+            bail!(
+                "cannot build child App Server registration candidate: {error}; thread {archive_status}"
+            );
+        }
     };
     let scope = crate::scope::Scope {
         root: server.root.clone(),
@@ -535,6 +583,7 @@ fn launch(
         }),
     );
     if !registered.ok {
+        record.thread_id = None;
         let _ = crate::client::adapters::codex_app_server::archive_thread(
             &parent_transport,
             thread_id.as_str(),
@@ -552,6 +601,7 @@ fn launch(
     ) {
         Ok(registration) => registration,
         Err(error) => {
+            record.thread_id = None;
             let archive_result = crate::client::adapters::codex_app_server::archive_thread(
                 &parent_transport,
                 thread_id.as_str(),
@@ -578,6 +628,7 @@ fn launch(
     let role_brief = match crate::identity::role_brief_from_registration_receipt(&registered.data) {
         Ok(role_brief) => role_brief,
         Err(error) => {
+            record.thread_id = None;
             let archive_result = crate::client::adapters::codex_app_server::archive_thread(
                 &parent_transport,
                 thread_id.as_str(),
@@ -605,6 +656,7 @@ fn launch(
     if let Err(error) =
         crate::identity::persist_registration(&scope, &mut ident, runtime, transport.clone())
     {
+        record.thread_id = None;
         let archive_result = crate::client::adapters::codex_app_server::archive_thread(
             &parent_transport,
             thread_id.as_str(),
@@ -634,6 +686,7 @@ fn launch(
         &child_cwd,
         app_scope,
     ) {
+        record.thread_id = None;
         let archive_result = crate::client::adapters::codex_app_server::archive_thread(
             &parent_transport,
             thread_id.as_str(),
@@ -667,6 +720,7 @@ fn launch(
         &prompt,
         &format!("collab-subagent-start-{}", record.id),
     ) {
+        record.thread_id = None;
         let archive_result = crate::client::adapters::codex_app_server::archive_thread(
             &parent_transport,
             thread_id.as_str(),
@@ -700,6 +754,7 @@ fn launch(
         );
     }
     let _ = environment;
+    record.thread_id = Some(thread_id.to_string());
     record.status = "starting".into();
     record.ready_deadline_ms = now_ms() + settings.startup.ready_timeout_seconds as i64 * 1000;
     Ok(())
@@ -876,7 +931,7 @@ fn run(
                 if existing.parent != actor {
                     bail!("subagent belongs to another parent");
                 }
-                if existing.thread_id.is_some() {
+                if can_reuse_existing(existing) {
                     let existing = existing.clone();
                     return Ok(follow_up(&existing, true));
                 }
@@ -1399,5 +1454,66 @@ mod tests {
         assert!(prompt.contains("shared Collab MCP"));
         assert!(prompt.contains("collab CLI in this cwd is also valid"));
         assert!(!prompt.contains("NOT sandboxed shell"));
+    }
+
+    #[test]
+    fn child_appserver_candidate_binds_child_session_and_thread() {
+        let parent_transport = crate::proto::SelectedTransport {
+            kind: crate::proto::TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/collab-parent.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: None,
+            thread_id: Some("01a0c48b-parent-thread".into()),
+            capabilities: vec![],
+            self_check: "parent verified".into(),
+        };
+        let child_thread = crate::identity::NativeThreadId::new("01a0c7e7-child-thread").unwrap();
+        let root = std::path::Path::new("/tmp/collab-child-project");
+        let child_status = serde_json::json!({
+            "thread": {
+                "id": "01a0c7e7-child-thread",
+                "sessionId": "01a0c7e7-child-session"
+            }
+        });
+
+        let child_session_id = child_session_id_from_thread_status(&child_status).unwrap();
+        let candidate = child_appserver_candidate_from_session(
+            &parent_transport,
+            root,
+            &child_session_id,
+            &child_thread,
+        )
+        .unwrap();
+
+        assert_eq!(candidate.endpoint, "unix:///tmp/collab-parent.sock");
+        assert_eq!(candidate.namespace, "codex_tui");
+        assert_eq!(candidate.thread_id, "01a0c7e7-child-thread");
+        assert_eq!(candidate.session_id, "01a0c7e7-child-session");
+        assert_ne!(
+            candidate.session_id, "01a0c48b-parent-session",
+            "child registration must not self-check against the parent session"
+        );
+    }
+
+    #[test]
+    fn failed_subagent_record_with_thread_id_is_not_reused() {
+        let mut record = Record {
+            id: "child-1".into(),
+            parent: "parent-1".into(),
+            peer: "peer-1".into(),
+            status: "failed".into(),
+            thread_id: Some("archived-child-thread".into()),
+            profile: None,
+            created_ms: 0,
+            ready_deadline_ms: 0,
+            last_message: None,
+            error: Some("cannot register child identity".into()),
+            probe_failures: vec![],
+            runtime: Some("codex".into()),
+        };
+
+        assert!(!can_reuse_existing(&record));
+        record.status = "starting".into();
+        assert!(can_reuse_existing(&record));
     }
 }

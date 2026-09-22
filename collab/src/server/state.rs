@@ -567,6 +567,12 @@ pub enum Event {
         reason: String,
         updated_ms: i64,
     },
+    NotificationSkipped {
+        subscription_id: String,
+        reason: String,
+        due_ms: i64,
+        skipped_ms: i64,
+    },
     NotificationConsumed {
         subscription_id: String,
         message_id: String,
@@ -746,6 +752,16 @@ fn has_current_master_grant(state: &State, worker_id: &str, target: &str) -> boo
                     })
         })
     })
+}
+
+fn subscription_affects_master_wake(
+    state: &State,
+    subscription: &NotificationSubscription,
+) -> bool {
+    matches!(subscription.event.as_str(), "deadline" | "master-idle")
+        && (is_goal_deadline(subscription)
+            || state.master_worker_id.as_deref() == Some(subscription.worker_id.as_str())
+            || has_current_master_grant(state, &subscription.worker_id, &subscription.target))
 }
 
 impl State {
@@ -1042,6 +1058,22 @@ impl State {
                 error,
                 failed_ms,
             } => {
+                let failed_master_wake = self.msgs.get(message_id).is_some_and(|message| {
+                    message.from == "collab-server" && message.mtype == "notification"
+                }) && self
+                    .wake_bindings
+                    .get(message_id)
+                    .and_then(|subscription_id| {
+                        self.notification_subscriptions.get(subscription_id)
+                    })
+                    .is_some_and(|subscription| {
+                        subscription_affects_master_wake(self, subscription)
+                    });
+                if failed_master_wake {
+                    super::notification_state::mark_master_wake_delivery_failed(
+                        &mut self.master_wake,
+                    );
+                }
                 self.notification_delivery_failures.insert(
                     message_id.clone(),
                     NotificationDeliveryFailure {
@@ -1090,6 +1122,65 @@ impl State {
                     subscription.status = status.clone();
                     subscription.status_reason = Some(reason.clone());
                     subscription.updated_ms = *updated_ms;
+                }
+            }
+            Event::NotificationSkipped {
+                subscription_id,
+                reason,
+                due_ms,
+                skipped_ms,
+            } => {
+                let affects_master_wake = self
+                    .notification_subscriptions
+                    .get(subscription_id)
+                    .is_some_and(|subscription| {
+                        subscription_affects_master_wake(self, subscription)
+                    });
+                let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id)
+                else {
+                    return Ok(());
+                };
+                if affects_master_wake {
+                    super::notification_state::mark_master_wake_skipped_busy(&mut self.master_wake);
+                }
+                if is_goal_deadline(subscription) {
+                    let revision = u64::try_from(*due_ms).unwrap_or(0);
+                    super::notification_state::accumulate_master_wake(
+                        &mut self.master_wake,
+                        &MasterWakeSignal::GoalDue { revision },
+                        *skipped_ms,
+                    );
+                    super::notification_state::mark_master_wake_skipped_busy(&mut self.master_wake);
+                    subscription.status_reason = Some(reason.clone());
+                    subscription.updated_ms = *skipped_ms;
+                    return Ok(());
+                }
+                subscription.fired_count = subscription.fired_count.saturating_add(1);
+                subscription.status_reason = Some(reason.clone());
+                subscription.updated_ms = *skipped_ms;
+                let total = if subscription.interval_ms.is_some() {
+                    subscription.repeat_count
+                } else {
+                    subscription.trigger_times_ms.len().max(1) as u32
+                };
+                if subscription.fired_count >= total {
+                    subscription.status = "consumed".into();
+                } else if let Some(interval) = subscription.interval_ms {
+                    subscription.trigger_ms = Some(
+                        subscription
+                            .trigger_ms
+                            .map(|trigger| trigger.saturating_add(interval))
+                            .unwrap_or_else(|| {
+                                subscription
+                                    .created_ms
+                                    .saturating_add(interval.saturating_mul(
+                                        subscription.fired_count.saturating_add(1) as i64,
+                                    ))
+                            }),
+                    );
+                    subscription.status = "armed".into();
+                } else {
+                    subscription.status = "armed".into();
                 }
             }
             Event::NotificationConsumed {
@@ -1406,7 +1497,7 @@ impl State {
 
     pub fn snapshot_events(&self) -> Vec<Event> {
         let mut events = Vec::new();
-        if self.master_wake.generation > 0 {
+        if master_wake_snapshot_required(&self.master_wake) {
             events.push(Event::MasterWakeUpdated {
                 accumulator: self.master_wake.clone(),
             });
@@ -1736,6 +1827,13 @@ impl State {
     }
 }
 
+fn master_wake_snapshot_required(
+    accumulator: &super::notification_state::MasterWakeAccumulator,
+) -> bool {
+    accumulator.generation > 0
+        || (!accumulator.delivery_state.is_empty() && accumulator.delivery_state != "clean")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1797,6 +1895,273 @@ mod tests {
             replayed.notification_delivery_failures,
             state.notification_delivery_failures
         );
+    }
+
+    #[test]
+    fn skipped_busy_master_wake_delivery_state_replays_with_zero_generation() {
+        let mut state = State::default();
+        state.master_worker_id = Some("master".into());
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-master-deadline".into(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("periodic:master".into()),
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(10),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(60_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 60_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::NotificationSkipped {
+            subscription_id: "sub-master-deadline".into(),
+            reason: "deadline-master-busy-skipped".into(),
+            due_ms: 10,
+            skipped_ms: 12,
+        });
+        assert_eq!(state.master_wake.generation, 0);
+        assert_eq!(state.master_wake.delivery_state, "skipped-busy");
+
+        let replayed =
+            state
+                .snapshot_events()
+                .into_iter()
+                .fold(State::default(), |mut replayed, event| {
+                    replayed.apply(&event);
+                    replayed
+                });
+        assert_eq!(replayed.master_wake.generation, 0);
+        assert_eq!(
+            replayed.master_wake.delivery_state,
+            state.master_wake.delivery_state
+        );
+    }
+
+    #[test]
+    fn failed_master_wake_delivery_state_replays_with_zero_generation() {
+        let mut state = State::default();
+        state.master_worker_id = Some("master".into());
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-master-deadline".into(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("periodic:master".into()),
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(10),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(60_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 60_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: "master-deadline-message".into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("deadline:periodic:master".into()),
+                body: "DEADLINE_REACHED subject=periodic:master".into(),
+                in_reply_to: None,
+                created_ms: 11,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: "master-deadline-message".into(),
+            subscription_id: "sub-master-deadline".into(),
+        });
+        state.apply(&Event::NotificationDeliveryFailed {
+            message_id: "master-deadline-message".into(),
+            operation: "notification.emitted".into(),
+            error: "ADAPTER_ROUTE_UNAVAILABLE: failed".into(),
+            failed_ms: 12,
+        });
+        assert_eq!(state.master_wake.generation, 0);
+        assert_eq!(state.master_wake.delivery_state, "delivery_failed");
+
+        let replayed =
+            state
+                .snapshot_events()
+                .into_iter()
+                .fold(State::default(), |mut replayed, event| {
+                    replayed.apply(&event);
+                    replayed
+                });
+        assert_eq!(replayed.master_wake.generation, 0);
+        assert_eq!(
+            replayed.master_wake.delivery_state,
+            state.master_wake.delivery_state
+        );
+    }
+
+    #[test]
+    fn resource_release_failure_does_not_poison_master_wake_delivery_state() {
+        let mut state = State::default();
+        state.apply(&Event::MasterWakeSignal {
+            signal: MasterWakeSignal::GoalDue { revision: 7 },
+            at_ms: 10,
+        });
+        assert_eq!(state.master_wake.delivery_state, "pending");
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-release".into(),
+                worker_id: "worker".into(),
+                event: "resource-released".into(),
+                subject: Some("task-1".into()),
+                target: "thread-worker".into(),
+                method: "appserver".into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: 60_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: "release-message".into(),
+                from: "collab-server".into(),
+                to: "worker".into(),
+                mtype: "notification".into(),
+                subject: Some("released:task-1".into()),
+                body: "RESOURCE_RELEASED subject=task-1".into(),
+                in_reply_to: None,
+                created_ms: 11,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: "release-message".into(),
+            subscription_id: "sub-release".into(),
+        });
+        state.apply(&Event::NotificationDeliveryFailed {
+            message_id: "release-message".into(),
+            operation: "notification.emitted".into(),
+            error: "ADAPTER_UNKNOWN: native frame exceeds maximum size".into(),
+            failed_ms: 12,
+        });
+
+        assert_eq!(state.master_wake.delivery_state, "pending");
+        assert!(state
+            .notification_delivery_failures
+            .contains_key("release-message"));
+    }
+
+    #[test]
+    fn worker_deadline_failure_does_not_poison_master_wake_delivery_state() {
+        let mut state = State::default();
+        let initial_delivery_state = state.master_wake.delivery_state.clone();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-worker-deadline".into(),
+                worker_id: "worker".into(),
+                event: "deadline".into(),
+                subject: Some("worker-periodic".into()),
+                target: "thread-worker".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(10),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(60_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 60_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: "worker-deadline-message".into(),
+                from: "collab-server".into(),
+                to: "worker".into(),
+                mtype: "notification".into(),
+                subject: Some("deadline:worker-periodic".into()),
+                body: "DEADLINE_REACHED subject=worker-periodic".into(),
+                in_reply_to: None,
+                created_ms: 11,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: "worker-deadline-message".into(),
+            subscription_id: "sub-worker-deadline".into(),
+        });
+        state.apply(&Event::NotificationDeliveryFailed {
+            message_id: "worker-deadline-message".into(),
+            operation: "notification.emitted".into(),
+            error: "ADAPTER_UNKNOWN: native frame exceeds maximum size".into(),
+            failed_ms: 12,
+        });
+
+        assert_eq!(state.master_wake.delivery_state, initial_delivery_state);
+        assert_eq!(state.master_wake.generation, 0);
+    }
+
+    #[test]
+    fn worker_deadline_skip_does_not_poison_master_wake_delivery_state() {
+        let mut state = State::default();
+        let initial_delivery_state = state.master_wake.delivery_state.clone();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: "sub-worker-deadline".into(),
+                worker_id: "worker".into(),
+                event: "deadline".into(),
+                subject: Some("worker-periodic".into()),
+                target: "thread-worker".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(10),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(60_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 60_000,
+                status: "armed".into(),
+                created_ms: 1,
+                updated_ms: 1,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::NotificationSkipped {
+            subscription_id: "sub-worker-deadline".into(),
+            reason: "deadline-worker-busy-skipped".into(),
+            due_ms: 10,
+            skipped_ms: 12,
+        });
+
+        assert_eq!(state.master_wake.delivery_state, initial_delivery_state);
+        assert_eq!(state.master_wake.generation, 0);
+        let subscription = &state.notification_subscriptions["sub-worker-deadline"];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.fired_count, 1);
     }
 
     #[test]

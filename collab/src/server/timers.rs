@@ -15,7 +15,14 @@ pub fn tick(server: &Arc<Server>) {
 fn tick_at(server: &Arc<Server>, now: i64) {
     super::keepalive::tick_at(server, now);
     super::purge_expired_storage(server, now);
-    tick_with_idle_at(server, now, &|_| true);
+    if server.state.lock().unwrap().admission_frozen() {
+        return;
+    }
+    let due_recipients = due_deadline_recipients(server, now);
+    let readiness = deadline_recipient_readiness(server, &due_recipients);
+    tick_with_deadline_readiness_at(server, now, &|worker_id| {
+        readiness.get(worker_id).copied().flatten()
+    });
 }
 
 #[cfg(test)]
@@ -23,7 +30,21 @@ fn tick_with_idle(server: &Arc<Server>, _can_receive: &dyn Fn(&str) -> bool) {
     tick_at(server, now_ms());
 }
 
+#[cfg(test)]
 fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str) -> bool) {
+    tick_at(server, now);
+}
+
+#[cfg(test)]
+fn tick_with_deadline_readiness(server: &Arc<Server>, can_receive: &dyn Fn(&str) -> bool) {
+    tick_with_deadline_readiness_at(server, now_ms(), &|worker_id| Some(can_receive(worker_id)));
+}
+
+fn tick_with_deadline_readiness_at(
+    server: &Arc<Server>,
+    now: i64,
+    can_receive: &dyn Fn(&str) -> Option<bool>,
+) {
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
@@ -214,20 +235,7 @@ fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str)
         subscriptions
             .sort_by_key(|subscription| (subscription.created_ms, subscription.id.clone()));
         for subscription in subscriptions {
-            let next_trigger = subscription
-                .interval_ms
-                .map(|interval| {
-                    subscription
-                        .trigger_ms
-                        .unwrap_or(subscription.created_ms.saturating_add(interval))
-                })
-                .or_else(|| {
-                    subscription
-                        .trigger_times_ms
-                        .get(subscription.fired_count as usize)
-                        .copied()
-                })
-                .or(subscription.trigger_ms);
+            let next_trigger = next_subscription_trigger(subscription);
             let master_idle_gate_open = if subscription.event == "master-idle" {
                 match state.keepalives.get(&subscription.worker_id) {
                     None => false,
@@ -284,6 +292,29 @@ fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str)
             {
                 continue;
             }
+            if subscription.event == "deadline" {
+                match can_receive(&subscription.worker_id) {
+                    Some(true) => {}
+                    Some(false) => {
+                        due_events.push(Event::NotificationSkipped {
+                            subscription_id: subscription.id.clone(),
+                            reason: "deadline-master-busy-skipped".into(),
+                            due_ms: next_trigger.unwrap_or(now),
+                            skipped_ms: now,
+                        });
+                        continue;
+                    }
+                    None => {
+                        due_events.push(Event::NotificationSuppressed {
+                            subscription_id: subscription.id.clone(),
+                            status: "armed".into(),
+                            reason: "deadline-readiness-unavailable".into(),
+                            updated_ms: now,
+                        });
+                        continue;
+                    }
+                }
+            }
             if is_goal_deadline(subscription) {
                 let Some(key) = goal_deadline_key(subscription) else {
                     continue;
@@ -291,6 +322,13 @@ fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str)
                 if !goal_deadline_keys.insert(key) {
                     continue;
                 }
+                let revision = next_trigger
+                    .and_then(|trigger| u64::try_from(trigger).ok())
+                    .unwrap_or(0);
+                due_events.push(Event::MasterWakeSignal {
+                    signal: crate::server::state::MasterWakeSignal::GoalDue { revision },
+                    at_ms: now,
+                });
             }
             let message_id = super::gen_msg_id();
             if subscription.event == "master-idle" {
@@ -368,11 +406,96 @@ fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str)
     }
 }
 
+fn due_deadline_recipients(server: &Server, now: i64) -> HashSet<String> {
+    let state = server.state.lock().unwrap();
+    if !server.config.timers.enabled {
+        return HashSet::new();
+    }
+    state
+        .notification_subscriptions
+        .values()
+        .filter(|subscription| {
+            subscription.status == "armed"
+                && subscription.expires_ms > now
+                && subscription.event == "deadline"
+                && next_subscription_trigger(subscription).is_some_and(|trigger| trigger <= now)
+                && !state.wake_bindings.iter().any(|(message_id, bound)| {
+                    bound == &subscription.id
+                        && state
+                            .msgs
+                            .get(message_id)
+                            .is_some_and(|message| message.state == "pending")
+                })
+        })
+        .map(|subscription| subscription.worker_id.clone())
+        .collect()
+}
+
+fn next_subscription_trigger(
+    subscription: &crate::server::state::NotificationSubscription,
+) -> Option<i64> {
+    subscription
+        .interval_ms
+        .map(|interval| {
+            subscription
+                .trigger_ms
+                .unwrap_or(subscription.created_ms.saturating_add(interval))
+        })
+        .or_else(|| {
+            subscription
+                .trigger_times_ms
+                .get(subscription.fired_count as usize)
+                .copied()
+        })
+        .or(subscription.trigger_ms)
+}
+
+fn deadline_recipient_readiness(
+    server: &Server,
+    due_recipients: &HashSet<String>,
+) -> HashMap<String, Option<bool>> {
+    let workers = {
+        let state = server.state.lock().unwrap();
+        state
+            .workers
+            .values()
+            .filter(|worker| due_recipients.contains(&worker.id))
+            .filter_map(|worker| {
+                let transport = super::selected_transport_for_worker(worker)?;
+                let thread_id = transport.thread_id.clone()?;
+                Some((worker.id.clone(), transport, thread_id))
+            })
+            .collect::<Vec<_>>()
+    };
+    workers
+        .into_iter()
+        .map(|(worker_id, transport, thread_id)| {
+            let ready = (server.appserver_thread_status)(&transport, &thread_id)
+                .ok()
+                .and_then(|raw| raw.get("thread").cloned())
+                .and_then(|thread| {
+                    let thread_state = thread
+                        .get("status")
+                        .and_then(|status| status.get("type"))
+                        .and_then(serde_json::Value::as_str);
+                    thread
+                        .get("canAcceptDirectInput")
+                        .and_then(serde_json::Value::as_bool)
+                        .map(|can_accept| thread_state == Some("idle") && can_accept)
+                });
+            (worker_id, ready)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::keepalive::Record;
-    use crate::server::state::{Event, NotificationSubscription, State, TaskRec, WaitSpec};
+    use crate::server::state::{
+        Event, MigrationRecord, NotificationSubscription, State, TaskRec, WaitSpec,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn test_server() -> (Arc<Server>, std::path::PathBuf) {
@@ -514,6 +637,53 @@ mod tests {
         id
     }
 
+    fn periodic_deadline_subscription(server: &Server, worker_id: &str, subject: &str) -> String {
+        let now = now_ms();
+        let id = format!("sub-{worker_id}-periodic-deadline");
+        server.commit(&[Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: id.clone(),
+                worker_id: worker_id.into(),
+                event: "deadline".into(),
+                subject: Some(subject.into()),
+                target: format!("thread-{worker_id}"),
+                method: "appserver".into(),
+                trigger_ms: Some(now - 1),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(600_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: now + 86_400_000,
+                status: "armed".into(),
+                created_ms: now - 600_000,
+                updated_ms: now,
+                status_reason: None,
+            },
+        }]);
+        id
+    }
+
+    fn freeze_admission(server: &Server) {
+        let now = now_ms();
+        server.commit(&[Event::MigrationUpdated {
+            migration: MigrationRecord {
+                id: "migration".into(),
+                from_version: "v1".into(),
+                to_version: "v1".into(),
+                phase: "applied".into(),
+                admission_frozen: true,
+                snapshot_hash: None,
+                worker_count: 1,
+                task_count: 0,
+                message_count: 0,
+                operator: "test".into(),
+                issues: Vec::new(),
+                created_ms: now,
+                updated_ms: now,
+            },
+        }]);
+    }
+
     fn bind_message(server: &Server, worker_id: &str, subscription_id: &str) -> String {
         bind_message_with_id(
             server,
@@ -591,6 +761,151 @@ mod tests {
         working_task(&server, "owner");
         tick_with_idle(&server, &|_| true);
         assert!(server.state.lock().unwrap().msgs.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn admission_freeze_blocks_deadline_readiness_probe() {
+        let (mut server, root) = test_server();
+        let probes = Arc::new(AtomicUsize::new(0));
+        {
+            let probes = Arc::clone(&probes);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_thread_status = Arc::new(move |_, thread_id| {
+                probes.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": true
+                    }
+                }))
+            });
+        }
+        register_master(&server);
+        periodic_deadline_subscription(&server, "master", "goal:frozen");
+        freeze_admission(&server);
+        probes.store(0, Ordering::SeqCst);
+
+        tick_at(&server, now_ms());
+
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(server.state.lock().unwrap().msgs.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn deadline_readiness_probes_only_due_deadline_recipients() {
+        let (mut server, root) = test_server();
+        let probes = Arc::new(Mutex::new(Vec::new()));
+        {
+            let probes = Arc::clone(&probes);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_thread_status = Arc::new(move |_, thread_id| {
+                probes.lock().unwrap().push(thread_id.to_string());
+                Ok(serde_json::json!({
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": true
+                    }
+                }))
+            });
+        }
+        register_master(&server);
+        register(&server, "worker");
+        periodic_deadline_subscription(&server, "master", "periodic:due-master");
+        subscribe(
+            &server,
+            "worker",
+            "deadline",
+            Some("periodic:not-due-worker"),
+            Some(now_ms() + 600_000),
+        );
+        probes.lock().unwrap().clear();
+
+        let now = now_ms();
+        let due_recipients = due_deadline_recipients(&server, now);
+        assert_eq!(
+            due_recipients,
+            HashSet::from(["master".to_string()]),
+            "only the due deadline recipient should be eligible for readiness probing"
+        );
+        let readiness = deadline_recipient_readiness(&server, &due_recipients);
+
+        let probes = probes.lock().unwrap();
+        assert_eq!(readiness.get("master"), Some(&Some(true)));
+        assert_eq!(readiness.get("worker"), None);
+        assert_eq!(
+            probes.as_slice(),
+            &["thread-master".to_string()],
+            "readiness probing must stay bounded to due deadline recipients"
+        );
+        drop(probes);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn deadline_status_probe_error_preserves_one_shot_worker_deadline() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server)
+            .expect("unique test server")
+            .appserver_thread_status = Arc::new(|_, _| Err("status probe failed".into()));
+        register(&server, "worker");
+        let subscription_id = subscribe(
+            &server,
+            "worker",
+            "deadline",
+            Some("worker:one-shot"),
+            Some(now_ms() - 1),
+        );
+
+        tick_at(&server, now_ms());
+
+        let state = server.state.lock().unwrap();
+        assert!(state.msgs.is_empty());
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.fired_count, 0);
+        assert_eq!(
+            subscription.status_reason.as_deref(),
+            Some("deadline-readiness-unavailable")
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn deadline_missing_can_accept_preserves_periodic_worker_deadline() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server)
+            .expect("unique test server")
+            .appserver_thread_status = Arc::new(|_, thread_id| {
+            Ok(serde_json::json!({
+                "thread": {
+                    "id": thread_id,
+                    "status": {"type": "idle"}
+                }
+            }))
+        });
+        register(&server, "worker");
+        let subscription_id =
+            periodic_deadline_subscription(&server, "worker", "worker:periodic-missing-ready");
+
+        tick_at(&server, now_ms());
+
+        let state = server.state.lock().unwrap();
+        assert!(state.msgs.is_empty());
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.fired_count, 0);
+        assert_eq!(
+            subscription.status_reason.as_deref(),
+            Some("deadline-readiness-unavailable")
+        );
+        drop(state);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1471,6 +1786,176 @@ mod tests {
                 .count(),
             1
         );
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn periodic_deadline_skips_busy_master_and_records_due_state() {
+        let (server, root) = test_server();
+        register_master(&server);
+        let subscription_id =
+            periodic_deadline_subscription(&server, "master", "periodic:busy-master");
+
+        tick_with_deadline_readiness(&server, &|worker_id| worker_id != "master");
+
+        let state = server.state.lock().unwrap();
+        assert!(
+            state.msgs.is_empty(),
+            "busy master deadline timer must not create an AppServer wake"
+        );
+        let subscription = &state.notification_subscriptions[&subscription_id];
+        assert_eq!(subscription.status, "armed");
+        assert_eq!(subscription.fired_count, 1);
+        assert_eq!(
+            subscription.status_reason.as_deref(),
+            Some("deadline-master-busy-skipped")
+        );
+        assert!(!state.master_wake.goal_due);
+        assert_eq!(state.master_wake.delivery_state, "skipped-busy");
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn busy_goal_deadline_records_due_then_wakes_once_when_master_is_idle() {
+        let (server, root) = test_server();
+        register_master(&server);
+        let due_ms = now_ms() - 1234;
+        let subscription_id = "sub-goal-busy-master".to_string();
+        server.commit(&[Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.clone(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("goal:busy-master".into()),
+                target: "thread-master".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(due_ms),
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now_ms() + 86_400_000,
+                status: "armed".into(),
+                created_ms: due_ms - 1,
+                updated_ms: due_ms - 1,
+                status_reason: None,
+            },
+        }]);
+
+        tick_with_deadline_readiness(&server, &|worker_id| worker_id != "master");
+
+        let state = server.state.lock().unwrap();
+        assert!(state.msgs.is_empty());
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].status,
+            "armed"
+        );
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].fired_count,
+            0
+        );
+        assert!(state.master_wake.goal_due);
+        assert_eq!(
+            state.master_wake.active_goal_revision,
+            Some(u64::try_from(due_ms).unwrap())
+        );
+        assert_eq!(state.master_wake.delivery_state, "skipped-busy");
+        drop(state);
+
+        tick_with_deadline_readiness(&server, &|worker_id| worker_id == "master");
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs.len(), 1);
+        assert_eq!(
+            state
+                .msgs
+                .values()
+                .filter(|message| message.subject.as_deref() == Some("deadline:goal:busy-master"))
+                .count(),
+            1
+        );
+        assert!(state
+            .wake_bindings
+            .values()
+            .any(|bound| bound == &subscription_id));
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].fired_count, 0,
+            "queueing a pending automatic wake must not consume the one-shot before delivery"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn idle_periodic_deadline_sends_lightweight_wake_distinct_from_master_idle() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
+        register_master(&server);
+        let subscription_id = periodic_deadline_subscription(&server, "master", "goal:idle-master");
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        {
+            let delivered = Arc::clone(&delivered);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit| {
+                delivered.lock().unwrap().push((explicit, text.to_string()));
+                Ok(serde_json::json!({"accepted": true}))
+            });
+        }
+
+        tick_with_idle(&server, &|_| true);
+
+        let delivered = delivered.lock().unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert!(
+            !delivered[0].0,
+            "deadline timer must use automatic delivery"
+        );
+        assert!(
+            delivered[0].1.len() < 1024,
+            "deadline wake preview must stay bounded and lightweight"
+        );
+        assert!(delivered[0].1.contains("deadline:goal:idle-master"));
+        assert!(
+            !delivered[0].1.contains("MASTER_IDLE_WAKE"),
+            "deadline timer and idle notification paths must stay distinct"
+        );
+        drop(delivered);
+        let state = server.state.lock().unwrap();
+        assert!(state
+            .wake_bindings
+            .values()
+            .any(|bound| bound == &subscription_id));
+        assert!(state.master_wake.goal_due);
+        drop(state);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn deadline_delivery_failure_is_visible_without_successful_master_wake() {
+        let (mut server, root) = test_server();
+        Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
+        Arc::get_mut(&mut server)
+            .unwrap()
+            .appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+            Err("ADAPTER_UNKNOWN: native frame exceeds maximum size".into())
+        });
+        register_master(&server);
+        periodic_deadline_subscription(&server, "master", "goal:oversized-frame");
+
+        tick_with_idle(&server, &|_| true);
+
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs.len(), 1);
+        let message_id = state.msgs.keys().next().unwrap();
+        assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
+        assert!(state.notification_delivery_failures[message_id]
+            .error
+            .contains("native frame exceeds maximum size"));
+        assert_eq!(state.master_wake.delivery_state, "delivery_failed");
+        assert_ne!(state.master_wake.delivery_state, "notified_unconsumed");
         drop(state);
         std::fs::remove_dir_all(root).ok();
     }

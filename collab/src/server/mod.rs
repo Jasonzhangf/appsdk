@@ -169,8 +169,13 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<AppServerNotification
                 "explicit App Server notification requires the sender native thread id".to_string(),
             );
         }
-        crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
-            .map_err(|error| error.to_string())
+        if explicit {
+            crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
+                .map_err(|error| error.to_string())
+        } else {
+            crate::client::adapters::queue_wakeup(transport, body, message_id)
+                .map_err(|error| error.to_string())
+        }
     })
 }
 

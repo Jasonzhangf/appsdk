@@ -27,6 +27,7 @@ pub struct AppServerCapabilities {
     pub session_status: bool,
     pub send_message: bool,
     pub read_thread: bool,
+    pub queue_wakeup: bool,
     pub wait_reply: bool,
     pub ack: bool,
 }
@@ -38,6 +39,7 @@ impl AppServerCapabilities {
             session_status: true,
             send_message: true,
             read_thread: true,
+            queue_wakeup: true,
             wait_reply: true,
             ack: false,
         }
@@ -65,6 +67,9 @@ impl AppServerCapabilities {
         }
         if self.read_thread {
             values.push("read_thread");
+        }
+        if self.queue_wakeup {
+            values.push("queue_wakeup");
         }
         if self.wait_reply {
             values.push("wait_reply");
@@ -467,6 +472,21 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             operation: "thread/turns/list",
         });
     }
+    let queue_wakeup = method_exists(
+        &mut client,
+        "thread/queue/add",
+        json!({
+            "threadId": "",
+            "input": [],
+            "clientUserMessageId": "",
+        }),
+    )?;
+    if !queue_wakeup {
+        return Err(AdapterError::CapabilityUnavailable {
+            endpoint: EndpointKind::Tui,
+            operation: "thread/queue/add",
+        });
+    }
     Ok(SelectedTransport {
         kind: TransportKind::AppServer,
         endpoint: Some(format!("unix://{}", socket_path.display())),
@@ -477,10 +497,11 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
             "session_status".into(),
             "read_thread".into(),
             "send_message_to_thread".into(),
+            "queue_wakeup".into(),
             "wait_reply".into(),
         ],
         self_check:
-            "initialize, thread/read identity, turn/start, turn/steer, and thread/turns/list method probes passed"
+            "initialize, thread/read identity, turn/start, turn/steer, thread/turns/list, and thread/queue/add method probes passed"
                 .into(),
     })
 }
@@ -641,6 +662,16 @@ pub fn queue_wakeup(
     client_user_message_id: &str,
 ) -> Result<Value, AdapterError> {
     if transport.kind != TransportKind::AppServer {
+        return Err(AdapterError::CapabilityUnavailable {
+            endpoint: EndpointKind::Tui,
+            operation: "thread/queue/add",
+        });
+    }
+    if !transport
+        .capabilities
+        .iter()
+        .any(|capability| capability == "queue_wakeup")
+    {
         return Err(AdapterError::CapabilityUnavailable {
             endpoint: EndpointKind::Tui,
             operation: "thread/queue/add",
@@ -1495,6 +1526,11 @@ mod tests {
                 assert!(selected.self_check.contains("turn/start"));
                 assert!(selected.self_check.contains("turn/steer"));
                 assert!(selected.self_check.contains("thread/turns/list"));
+                assert!(selected.self_check.contains("thread/queue/add"));
+                assert!(selected
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "queue_wakeup"));
             }
             Err(AdapterError::RouteUnavailable { detail }) => {
                 assert!(detail.contains("persisted but not loaded"), "{detail}");
@@ -1514,9 +1550,9 @@ mod tests {
     }
 
     #[test]
-    fn candidate_does_not_require_appserver_queue_wakeup_method() {
+    fn candidate_requires_appserver_queue_wakeup_method() {
         let socket = std::env::temp_dir().join(format!(
-            "collab-queue-optional-{}-{}.sock",
+            "collab-queue-required-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1573,7 +1609,7 @@ mod tests {
                 stream
                     .write_all(&encode_frame(0x1, &serde_json::to_vec(&response).unwrap()))
                     .unwrap();
-                if method == "thread/turns/list" {
+                if method == "thread/queue/add" {
                     break;
                 }
             }
@@ -1587,12 +1623,14 @@ mod tests {
             thread_id: "thread-1".into(),
             cwd: env!("CARGO_MANIFEST_DIR").into(),
         };
-        let selected = verify_candidate(&candidate).unwrap();
-        assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
-        assert!(!selected
-            .capabilities
-            .iter()
-            .any(|capability| capability == "queue_wakeup"));
+        let error = verify_candidate(&candidate).unwrap_err();
+        assert!(matches!(
+            error,
+            AdapterError::CapabilityUnavailable {
+                operation: "thread/queue/add",
+                ..
+            }
+        ));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }
@@ -2919,7 +2957,7 @@ mod tests {
     }
 
     #[test]
-    fn default_notification_sink_starts_automatic_turn_without_sender_thread() {
+    fn default_notification_sink_queues_automatic_wake_without_sender_thread() {
         let socket = temp_socket("notify-automatic");
         let Some(listener) = bind_test_socket(&socket) else {
             return;
@@ -2928,38 +2966,22 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             handshake(&mut stream);
             initialize(&mut stream);
-            prepare_recipient_thread(&mut stream, "ok");
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
             let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["method"], "thread/queue/add");
             assert_eq!(request["params"]["threadId"], "thread-1");
             assert_eq!(
                 request["params"]["clientUserMessageId"],
                 "message-automatic"
             );
             assert_eq!(
-                request["params"]["toolOutput"]["output"],
-                "<codex_delegation>\n  <client_message_id>message-automatic</client_message_id>\n  <input>automatic body</input>\n</codex_delegation>"
+                request["params"]["input"],
+                json!([{"type": "text", "text": "automatic body"}])
             );
             respond(
                 &mut stream,
                 json!({
                     "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
-                    }
+                    "result": {"queued": true}
                 }),
             );
             stream.shutdown(Shutdown::Both).ok();
@@ -2973,9 +2995,30 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(receipt["turn"]["id"], "turn-started");
+        assert_eq!(receipt["queued"], true);
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn automatic_wake_rejects_transport_without_queue_capability() {
+        let socket = temp_socket("notify-no-queue-capability");
+        let mut transport = selected_transport(&socket);
+        transport
+            .capabilities
+            .retain(|capability| capability != "queue_wakeup");
+
+        let error = crate::server::default_appserver_notification_sink()(
+            &transport,
+            None,
+            "automatic body",
+            "message-automatic",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("CAPABILITY_UNAVAILABLE"));
+        assert!(error.contains("thread/queue/add"));
     }
 
     fn selected_transport(socket: &Path) -> SelectedTransport {
@@ -2985,7 +3028,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
-            capabilities: vec!["send_message_to_thread".into()],
+            capabilities: vec!["send_message_to_thread".into(), "queue_wakeup".into()],
             self_check: "test".into(),
         }
     }

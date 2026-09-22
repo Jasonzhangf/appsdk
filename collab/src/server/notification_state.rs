@@ -142,3 +142,11 @@ pub fn accumulate_master_wake(
 pub fn mark_master_wake_delivered(accumulator: &mut MasterWakeAccumulator) {
     accumulator.delivery_state = "notified_unconsumed".into();
 }
+
+pub fn mark_master_wake_delivery_failed(accumulator: &mut MasterWakeAccumulator) {
+    accumulator.delivery_state = "delivery_failed".into();
+}
+
+pub fn mark_master_wake_skipped_busy(accumulator: &mut MasterWakeAccumulator) {
+    accumulator.delivery_state = "skipped-busy".into();
+}

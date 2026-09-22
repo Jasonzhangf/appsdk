@@ -853,20 +853,22 @@ fn live_closure_function_call_output_fields(item: &serde_json::Value) -> Option<
     if lines.next()? != "<codex_delegation>" {
         return None;
     }
-    let source_thread_id = lines
-        .next()?
-        .strip_prefix("  <source_thread_id>")?
-        .strip_suffix("</source_thread_id>")?;
-    if source_thread_id.is_empty()
-        || source_thread_id.trim() != source_thread_id
-        || source_thread_id.contains('<')
-        || source_thread_id.contains('>')
-        || source_thread_id.contains('&')
+    let mut next_line = lines.next()?;
+    if let Some(source_thread_id) = next_line
+        .strip_prefix("  <source_thread_id>")
+        .and_then(|value| value.strip_suffix("</source_thread_id>"))
     {
-        return None;
+        if source_thread_id.is_empty()
+            || source_thread_id.trim() != source_thread_id
+            || source_thread_id.contains('<')
+            || source_thread_id.contains('>')
+            || source_thread_id.contains('&')
+        {
+            return None;
+        }
+        next_line = lines.next()?;
     }
-    let client_message_id = lines
-        .next()?
+    let client_message_id = next_line
         .strip_prefix("  <client_message_id>")?
         .strip_suffix("</client_message_id>")?;
     let client_message_id = client_message_id
@@ -3133,6 +3135,31 @@ mod tests {
         };
         assert!(live_closure_item_matches_input(
             &items[0],
+            &expected,
+            "message-target"
+        ));
+    }
+
+    #[test]
+    fn live_closure_item_correlation_accepts_daemon_function_output_without_source_thread() {
+        let challenge = "appsdk-collab-live:closure-1:daemon_to_peer";
+        let item = json!({
+            "turnId": "turn-target",
+            "type": "functionCallOutput",
+            "id": "fco_01a0c851-6d67-7872-abca-7266849ef9a8",
+            "name": "send_message_to_thread",
+            "namespace": "codex_tui",
+            "output": format!(
+                "<codex_delegation>\n  <client_message_id>collab-notification-message-target</client_message_id>\n  <input>{challenge}</input>\n</codex_delegation>"
+            )
+        });
+
+        let expected = LiveClosureExpectedNativeInputs {
+            exact: vec![challenge.to_owned()],
+            batch_category: "closure".to_owned(),
+        };
+        assert!(live_closure_item_matches_input(
+            &item,
             &expected,
             "message-target"
         ));

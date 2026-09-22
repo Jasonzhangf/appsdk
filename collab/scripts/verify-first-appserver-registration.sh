@@ -23,10 +23,19 @@ codex_home="$root/c"
 project="$root/p"
 state="$root/s"
 socket="$root/a.sock"
-thread_file="$root/t"
+thread_file="$root/thread-id"
+session_file="$root/session-id"
 appserver_pid=
 daemon_pid=
 thread_holder_pid=
+
+# This gate must prove first registration from an isolated host identity. Drop
+# any inherited production endpoint/session selection before an isolated
+# process starts; the real host session identity is read back from thread/start
+# and exported below.
+unset CODEX_SESSION_ID CODEX_THREAD_ID COLLAB_WORKER
+unset COLLAB_APPSERVER_SOCKET COLLAB_APPSERVER_NAMESPACE
+unset COLLAB_STATE_DIR COLLAB_ROOT COLLAB_HOST_STATE_DIR
 
 cleanup() {
   if [ -n "$thread_holder_pid" ] && kill -0 "$thread_holder_pid" 2>/dev/null; then
@@ -66,7 +75,7 @@ while [ ! -S "$socket" ]; do
   sleep 0.1
 done
 
-python3 - "$socket" "$project" "$thread_file" >"$root/thread-holder.out" 2>"$root/thread-holder.err" <<'PY' &
+python3 - "$socket" "$project" "$thread_file" "$session_file" >"$root/thread-holder.out" 2>"$root/thread-holder.err" <<'PY' &
 import base64
 import json
 import os
@@ -75,7 +84,7 @@ import struct
 import sys
 import time
 
-socket_path, project_root, thread_file = sys.argv[1:]
+socket_path, project_root, thread_file, thread_session_file = sys.argv[1:]
 stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 stream.settimeout(10)
 stream.connect(socket_path)
@@ -167,12 +176,22 @@ call(
     },
 )
 stream.sendall(frame({"method": "initialized", "params": {}}))
-thread_id = call(2, "thread/start", {"cwd": project_root})["thread"]["id"]
+started = call(2, "thread/start", {"cwd": project_root})["thread"]
+thread_id = started.get("id")
+session_id = started.get("sessionId")
+if not isinstance(thread_id, str) or not thread_id.strip():
+    raise SystemExit(f"thread/start response is missing thread.id: {started!r}")
+if not isinstance(session_id, str) or not session_id.strip():
+    raise SystemExit(
+        f"thread/start response is missing thread.sessionId: {started!r}"
+    )
 loaded = call(3, "thread/loaded/list", {})["data"]
 if thread_id not in loaded:
     raise SystemExit(f"thread {thread_id} is not loaded: {loaded!r}")
 with open(thread_file, "w", encoding="utf-8") as output:
     output.write(thread_id)
+with open(thread_session_file, "w", encoding="utf-8") as output:
+    output.write(session_id)
 time.sleep(120)
 PY
 thread_holder_pid=$!
@@ -186,7 +205,22 @@ while [ ! -s "$thread_file" ]; do
   fi
   sleep 0.1
 done
+attempt=0
+while [ ! -s "$session_file" ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -gt 100 ]; then
+    printf 'isolated App Server did not expose a host session identity\n' >&2
+    exit 1
+  fi
+  sleep 0.1
+done
 thread_id=$(cat "$thread_file")
+session_id=$(cat "$session_file")
+if [ -z "$thread_id" ] || [ -z "$session_id" ]; then
+  printf 'isolated identity is incomplete: thread=%s session=%s\n' \
+    "$thread_id" "$session_id" >&2
+  exit 1
+fi
 
 (
   cd "$project"
@@ -210,6 +244,7 @@ export COLLAB_STATE_DIR="$state"
 export COLLAB_APPSERVER_SOCKET="$socket"
 export COLLAB_APPSERVER_NAMESPACE=codex_app
 export CODEX_THREAD_ID="$thread_id"
+export CODEX_SESSION_ID="$session_id"
 
 cd "$project"
 "$collab_bin" init >"$root/init.json"
@@ -244,6 +279,7 @@ PY
 
 printf 'isolated_appserver_first_registration=PASS\n'
 printf 'thread_id=%s\n' "$thread_id"
+printf 'session_id=%s\n' "$session_id"
 if [ "${KEEP_GATE_ROOT:-0}" = "1" ]; then
   printf 'temp_root=%s\n' "$root"
 else

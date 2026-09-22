@@ -19,7 +19,8 @@ pub const APPSERVER_SOCKET_ENV: &str = "COLLAB_APPSERVER_SOCKET";
 pub const APPSERVER_NAMESPACE_ENV: &str = "COLLAB_APPSERVER_NAMESPACE";
 pub const APPSERVER_TIMEOUT_MS_ENV: &str = "COLLAB_APPSERVER_TIMEOUT_MS";
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_OUTGOING_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INCOMING_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerCapabilities {
@@ -1271,7 +1272,7 @@ impl Client {
             operation: "encode",
             detail: error.to_string(),
         })?;
-        if payload.len() > MAX_FRAME_BYTES {
+        if payload.len() > MAX_OUTGOING_FRAME_BYTES {
             return Err(AdapterError::Unknown {
                 operation: "encode",
                 detail: "native frame exceeds maximum size".into(),
@@ -1306,27 +1307,30 @@ impl Client {
             .map_err(|error| transport("websocket header", error))?;
         let opcode = header[0] & 0x0f;
         let masked = header[1] & 0x80 != 0;
-        let mut length = (header[1] & 0x7f) as usize;
+        let mut length = (header[1] & 0x7f) as u64;
         if length == 126 {
             let mut bytes = [0_u8; 2];
             self.stream
                 .read_exact(&mut bytes)
                 .map_err(|error| transport("websocket length", error))?;
-            length = u16::from_be_bytes(bytes) as usize;
+            length = u16::from_be_bytes(bytes) as u64;
         } else if length == 127 {
             let mut bytes = [0_u8; 8];
             self.stream
                 .read_exact(&mut bytes)
                 .map_err(|error| transport("websocket length", error))?;
-            let value = u64::from_be_bytes(bytes);
-            if value > MAX_FRAME_BYTES as u64 {
-                return Err(AdapterError::Unknown {
-                    operation: "websocket frame",
-                    detail: "native frame exceeds maximum size".into(),
-                });
-            }
-            length = value as usize;
+            length = u64::from_be_bytes(bytes);
         }
+        if length > MAX_INCOMING_FRAME_BYTES as u64 {
+            return Err(AdapterError::Unknown {
+                operation: "websocket frame",
+                detail: "native frame exceeds maximum size".into(),
+            });
+        }
+        let length = usize::try_from(length).map_err(|_| AdapterError::Unknown {
+            operation: "websocket frame",
+            detail: "native frame exceeds maximum size".into(),
+        })?;
         let mut mask = [0_u8; 4];
         if masked {
             self.stream
@@ -1494,6 +1498,75 @@ mod tests {
         let mut client = Client::connect(&socket, Duration::from_secs(2)).unwrap();
         let value = client.call("initialize", json!({})).unwrap();
         assert_eq!(value["ok"], true);
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn client_accepts_large_appserver_rpc_response() {
+        let socket = std::env::temp_dir().join(format!(
+            "caslr-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            let payload = read_client_frame(&mut stream);
+            let request: Value = serde_json::from_slice(&payload).unwrap();
+            let body = "x".repeat(MAX_OUTGOING_FRAME_BYTES + 1024);
+            let response = json!({"id": request["id"], "result": {"body": body}});
+            stream
+                .write_all(&encode_frame(0x1, &serde_json::to_vec(&response).unwrap()))
+                .unwrap();
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let mut client = Client::connect(&socket, Duration::from_secs(2)).unwrap();
+        let value = client.call("initialize", json!({})).unwrap();
+        assert_eq!(
+            value["body"].as_str().unwrap().len(),
+            MAX_OUTGOING_FRAME_BYTES + 1024
+        );
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn client_rejects_oversized_appserver_rpc_response() {
+        let socket = std::env::temp_dir().join(format!(
+            "cosar-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            let _payload = read_client_frame(&mut stream);
+            stream.write_all(&[0x81, 0x7f]).unwrap();
+            stream
+                .write_all(&((MAX_INCOMING_FRAME_BYTES as u64 + 1).to_be_bytes()))
+                .unwrap();
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let mut client = Client::connect(&socket, Duration::from_secs(2)).unwrap();
+        let error = client.call("initialize", json!({})).unwrap_err();
+        match error {
+            AdapterError::Unknown { operation, detail } => {
+                assert_eq!(operation, "websocket frame");
+                assert_eq!(detail, "native frame exceeds maximum size");
+            }
+            error => panic!("expected oversized websocket frame error, got {error:?}"),
+        }
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

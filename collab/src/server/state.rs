@@ -946,6 +946,9 @@ impl State {
         let Some(subscription) = self.notification_subscriptions.get_mut(subscription_id) else {
             return;
         };
+        if subscription.status == "cancelled" {
+            return;
+        }
         subscription.fired_count = subscription.fired_count.saturating_add(1);
         if is_goal_deadline(subscription) {
             subscription.status = "consumed".into();
@@ -3388,6 +3391,96 @@ mod tests {
             state.notification_subscriptions["sub-periodic"].fired_count,
             3
         );
+    }
+
+    #[test]
+    fn cancelled_periodic_subscription_does_not_rearm_on_consume_or_replay() {
+        let subscription_id = "sub-cancelled-periodic";
+        let message_id = "message-cancelled-periodic";
+        let mut state = State::default();
+        state.apply(&Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: subscription_id.into(),
+                worker_id: "master".into(),
+                event: "deadline".into(),
+                subject: Some("timer".into()),
+                target: "thread-7".into(),
+                method: "appserver".into(),
+                trigger_ms: Some(2_000),
+                trigger_times_ms: Vec::new(),
+                interval_ms: Some(1_000),
+                repeat_count: 3,
+                fired_count: 0,
+                expires_ms: 20_000,
+                status: "armed".into(),
+                created_ms: 1_000,
+                updated_ms: 1_000,
+                status_reason: None,
+            },
+        });
+        state.apply(&Event::Sent {
+            msg: Message {
+                id: message_id.into(),
+                from: "collab-server".into(),
+                to: "master".into(),
+                mtype: "notification".into(),
+                subject: Some("deadline:timer".into()),
+                body: "timer occurrence".into(),
+                in_reply_to: None,
+                created_ms: 2_000,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        });
+        state.apply(&Event::WakeBound {
+            message_id: message_id.into(),
+            subscription_id: subscription_id.into(),
+        });
+        state.apply(&Event::Delivered {
+            ids: vec![message_id.into()],
+        });
+        state.apply(&Event::NotificationStatus {
+            subscription_id: subscription_id.into(),
+            status: "cancelled".into(),
+            updated_ms: 2_500,
+        });
+
+        state.apply(&Event::NotificationConsumed {
+            subscription_id: subscription_id.into(),
+            message_id: message_id.into(),
+            consumed_ms: 2_600,
+        });
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].status,
+            "cancelled"
+        );
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].fired_count,
+            0
+        );
+
+        state.apply(&Event::Acked {
+            ids: vec![message_id.into()],
+        });
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].status,
+            "cancelled"
+        );
+        assert_eq!(
+            state.notification_subscriptions[subscription_id].fired_count,
+            0
+        );
+
+        let mut replayed = State::default();
+        for event in state.snapshot_events() {
+            replayed.apply(&event);
+        }
+        let replayed_subscription = &replayed.notification_subscriptions[subscription_id];
+        assert_eq!(replayed_subscription.status, "cancelled");
+        assert_eq!(replayed_subscription.fired_count, 0);
+        assert_eq!(replayed.msgs[message_id].state, "read");
     }
 
     #[test]

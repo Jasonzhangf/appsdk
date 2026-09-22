@@ -5521,6 +5521,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
             worker_id: "peer".into(),
             token: "token-peer".into(),
             timeout_ms: 1,
+            receive_id: None,
         },
         Req::Ack {
             worker_id: "peer".into(),
@@ -5713,6 +5714,7 @@ fn long_polls_do_not_starve_ping_on_the_blocking_pool() {
                 worker_id: "peer".into(),
                 token: "token-peer".into(),
                 timeout_ms: 10_000,
+                receive_id: None,
             })
             .unwrap();
             client.write_all(request.as_bytes()).await.unwrap();
@@ -5811,6 +5813,147 @@ async fn recv_consumes_messages_without_a_follow_up_ack() {
     assert_eq!(
         server.state.lock().unwrap().msgs["recv-message"].state,
         "read"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn seeded_receive_peer(server: &Server, root: &Path, id: &str, worker: &str) -> String {
+    let _ = root;
+    register(server, worker, "%peer");
+    server.commit(&[Event::Sent {
+        msg: Message {
+            id: id.into(),
+            from: "sender".into(),
+            to: worker.into(),
+            mtype: "notify".into(),
+            subject: Some("receive".into()),
+            body: format!("body-{id}"),
+            in_reply_to: None,
+            created_ms: now_ms(),
+            state: "pending".into(),
+            wake_attempt_count: 0,
+            last_wake_attempt_ms: 0,
+        },
+    }]);
+    root.display().to_string()
+}
+
+#[tokio::test]
+async fn receive_id_commits_the_batch_and_replays_it_after_a_lost_response() {
+    let (server, root) = test_server();
+    seeded_receive_peer(&server, &root, "receive-loss-message", "peer");
+    let server = Arc::new(server);
+
+    // First poll carries a caller-owned identity and commits the batch. The
+    // caller never sees this response: it simulates a lost socket reply.
+    let first = handle_poll_async_with_context(
+        server.clone(),
+        "peer".into(),
+        None,
+        0,
+        None,
+        Some("receive-loss-1".into()),
+    )
+    .await;
+    assert!(first.ok, "{first:?}");
+    assert_eq!(first.data["receive_id"], "receive-loss-1");
+    assert_eq!(first.data["replayed"], false);
+    assert_eq!(first.data["messages"][0]["id"], "receive-loss-message");
+    assert_eq!(
+        server.state.lock().unwrap().msgs["receive-loss-message"].state,
+        "read",
+        "the receive identity commits the consumption in the same transaction"
+    );
+
+    // The same identity must return the exact committed batch, not an empty
+    // inbox, so a lost response is recoverable by the same caller.
+    let replayed = handle_poll_async_with_context(
+        server.clone(),
+        "peer".into(),
+        None,
+        0,
+        None,
+        Some("receive-loss-1".into()),
+    )
+    .await;
+    assert!(replayed.ok, "{replayed:?}");
+    assert_eq!(replayed.data["replayed"], true);
+    assert_eq!(replayed.data["count"], 1);
+    assert_eq!(replayed.data["messages"][0]["id"], "receive-loss-message");
+    assert_eq!(
+        replayed.data["messages"][0]["body"],
+        "body-receive-loss-message"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn receive_id_replay_survives_a_truncated_journal_restart() {
+    let (server, root) = test_server();
+    seeded_receive_peer(&server, &root, "receive-restart-message", "peer");
+    let server = Arc::new(server);
+    let first = handle_poll_async_with_context(
+        server.clone(),
+        "peer".into(),
+        None,
+        0,
+        None,
+        Some("receive-restart-1".into()),
+    )
+    .await;
+    assert!(first.ok, "{first:?}");
+    assert_eq!(first.data["messages"][0]["id"], "receive-restart-message");
+    drop(server);
+
+    // A fresh reducer replayed from the committed journal must still answer
+    // the same identity with the same batch instead of an unread inbox.
+    let restored = replay(&root).expect("replay committed journal");
+    let receipt = restored
+        .receive_receipts
+        .get("receive-restart-1")
+        .expect("receive receipt must be durable");
+    assert_eq!(receipt.worker_id, "peer");
+    assert_eq!(
+        receipt.message_ids,
+        vec!["receive-restart-message".to_owned()]
+    );
+    assert!(restored.msgs["receive-restart-message"].state == "read");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn receive_id_rejects_another_actor_and_another_route() {
+    let (server, root) = test_server();
+    seeded_receive_peer(&server, &root, "receive-owner-message", "peer");
+    register(&server, "other", "%other");
+    let server = Arc::new(server);
+    let first = handle_poll_async_with_context(
+        server.clone(),
+        "peer".into(),
+        None,
+        0,
+        None,
+        Some("receive-owner-1".into()),
+    )
+    .await;
+    assert!(first.ok, "{first:?}");
+
+    let foreign = handle_poll_async_with_context(
+        server.clone(),
+        "other".into(),
+        None,
+        0,
+        None,
+        Some("receive-owner-1".into()),
+    )
+    .await;
+    assert!(!foreign.ok, "{foreign:?}");
+    assert!(
+        foreign
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("RECEIVE_IDENTITY_MISMATCH")),
+        "{foreign:?}"
     );
     std::fs::remove_dir_all(root).ok();
 }

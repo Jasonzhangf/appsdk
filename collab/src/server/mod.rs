@@ -9519,67 +9519,7 @@ fn handle_task_close(
     }
     server.commit_locked(&mut st, &close_events);
 
-    let waiting: Vec<TaskRec> = st
-        .tasks
-        .values()
-        .filter(|candidate| {
-            candidate.status == "waiting"
-                && candidate
-                    .wait
-                    .as_ref()
-                    .is_some_and(|wait| wait.waiting_for == closed.id)
-        })
-        .cloned()
-        .collect();
-    let mut subscribed_notifications = Vec::new();
-    for mut waiter_task in waiting {
-        waiter_task.status = "blocked".into();
-        waiter_task.wait = None;
-        waiter_task.next_step = Some(format!(
-            "RESOURCE_RELEASED={} recheck conflicts, then resume only after Server confirms free",
-            closed.id
-        ));
-        waiter_task.updated_ms = now_ms();
-        let waiter = waiter_task.owner.clone();
-        let subscription = st
-            .matching_subscription(&waiter, "resource-released", Some(&closed.id), now_ms())
-            .cloned();
-        let mut events = vec![
-            Event::TaskUpdated { task: waiter_task },
-            Event::MasterWakeSignal {
-                signal: state::MasterWakeSignal::TaskFreed {
-                    task_id: closed.id.clone(),
-                },
-                at_ms: now_ms(),
-            },
-        ];
-        if let Some(subscription) = subscription {
-            let message_id = gen_msg_id();
-            events.extend([
-                Event::Sent {
-                    msg: Message {
-                        id: message_id.clone(),
-                        from: "collab-server".into(),
-                        to: waiter,
-                        mtype: "notification".into(),
-                        subject: Some(format!("released:{}", closed.id)),
-                        body: format!("RESOURCE_RELEASED subject={}", closed.id),
-                        in_reply_to: None,
-                        created_ms: now_ms(),
-                        state: "pending".into(),
-                        wake_attempt_count: 0,
-                        last_wake_attempt_ms: 0,
-                    },
-                },
-                Event::WakeBound {
-                    message_id: message_id.clone(),
-                    subscription_id: subscription.id.clone(),
-                },
-            ]);
-            subscribed_notifications.push((message_id, subscription.id));
-        }
-        server.commit_locked(&mut st, &events);
-    }
+    let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
 
     let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
     drop(st);
@@ -9598,6 +9538,301 @@ fn handle_task_close(
         },
         "stale_workers": stale_workers,
         "notification": "subscribed resource waiters only",
+        "next_action": "lifecycle complete",
+    }))
+}
+
+/// Finish the release half of a cleanup completion whose verified receipt may
+/// already be durable. A finalize commits the verified receipt first and then
+/// releases waiters, so an interrupted run can leave a verified receipt with
+/// waiters still blocked. Every caller that observes a verified receipt resumes
+/// here, and the operation is idempotent: a released waiter no longer carries a
+/// wait on the closed task, so a retry releases nobody and sends no duplicate
+/// notification.
+fn resume_cleanup_release(server: &Server, st: &mut State, task_id: &str) -> Vec<(String, String)> {
+    release_dependents_of_closed_task(server, st, task_id)
+}
+
+/// A competing owner of the closed task's declared worktree/branch. A closed
+/// task is not a resource holder for scheduling, so another task may
+/// legitimately register the same worktree or branch after a forced close.
+/// Finalization must never remove a resource that a live task has since taken
+/// over, so it refuses while any non-closed task still references the declared
+/// path or branch.
+fn competing_resource_owner(state: &State, task: &TaskRec) -> Option<String> {
+    state
+        .tasks
+        .values()
+        .find(|candidate| {
+            candidate.id != task.id
+                && candidate.status != "closed"
+                && ((task.worktree_path.is_some() && candidate.worktree_path == task.worktree_path)
+                    || (task.branch.is_some() && candidate.branch == task.branch))
+        })
+        .map(|candidate| candidate.id.clone())
+}
+
+/// Waiters that blocked on one exactly identified task resource.
+fn waiting_dependents_of(state: &State, closed_id: &str) -> Vec<TaskRec> {
+    state
+        .tasks
+        .values()
+        .filter(|candidate| {
+            candidate.status == "waiting"
+                && candidate
+                    .wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.waiting_for == closed_id)
+        })
+        .cloned()
+        .collect()
+}
+
+/// A closed task frees its declared resource. Release exactly the waiters that
+/// blocked on it and wake only the subscriptions that named its subject. Replay
+/// and repeated completion stay idempotent because a released waiter no longer
+/// waits on this task.
+fn release_dependents_of_closed_task(
+    server: &Server,
+    st: &mut State,
+    closed_id: &str,
+) -> Vec<(String, String)> {
+    let waiting = waiting_dependents_of(st, closed_id);
+    let mut subscribed_notifications = Vec::new();
+    for mut waiter_task in waiting {
+        waiter_task.status = "blocked".into();
+        waiter_task.wait = None;
+        waiter_task.next_step = Some(format!(
+            "RESOURCE_RELEASED={closed_id} recheck conflicts, then resume only after Server confirms free"
+        ));
+        waiter_task.updated_ms = now_ms();
+        let waiter = waiter_task.owner.clone();
+        let subscription = st
+            .matching_subscription(&waiter, "resource-released", Some(closed_id), now_ms())
+            .cloned();
+        let mut events = vec![
+            Event::TaskUpdated { task: waiter_task },
+            Event::MasterWakeSignal {
+                signal: state::MasterWakeSignal::TaskFreed {
+                    task_id: closed_id.to_owned(),
+                },
+                at_ms: now_ms(),
+            },
+        ];
+        if let Some(subscription) = subscription {
+            let message_id = gen_msg_id();
+            events.extend([
+                Event::Sent {
+                    msg: Message {
+                        id: message_id.clone(),
+                        from: "collab-server".into(),
+                        to: waiter,
+                        mtype: "notification".into(),
+                        subject: Some(format!("released:{closed_id}")),
+                        body: format!("RESOURCE_RELEASED subject={closed_id}"),
+                        in_reply_to: None,
+                        created_ms: now_ms(),
+                        state: "pending".into(),
+                        wake_attempt_count: 0,
+                        last_wake_attempt_ms: 0,
+                    },
+                },
+                Event::WakeBound {
+                    message_id: message_id.clone(),
+                    subscription_id: subscription.id.clone(),
+                },
+            ]);
+            subscribed_notifications.push((message_id, subscription.id));
+        }
+        server.commit_locked(st, &events);
+    }
+    subscribed_notifications
+}
+
+/// Forced termination records an explicit manual close without claiming its
+/// worktree or branch was cleaned. This is the single completion path for that
+/// obligation: it applies the same resource contract as a normal close,
+/// replaces the pending receipt with verified evidence, and only then releases
+/// dependents and stops the owner's automatic lease.
+fn handle_task_finalize_cleanup(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    task_id: String,
+) -> Resp {
+    let mut st = server.state.lock().unwrap();
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
+    };
+    if worker.token != token {
+        return Resp::err("token mismatch: identity does not own this worker_id");
+    }
+    let Some(task) = st.tasks.get(&task_id).cloned() else {
+        return Resp::err(format!("task {} not found", task_id));
+    };
+    if task.status != "closed" {
+        return Resp::err(format!(
+            "task {} must be closed before cleanup finalization (current: {})",
+            task_id, task.status
+        ));
+    }
+    let live_master = match live_master_id(server, &st) {
+        Ok(master) => master,
+        Err(error) => return Resp::err(error),
+    };
+    // Only a definitively missing owner identity is treated as dead, matching
+    // the force-close authorization rule.
+    let owner_identity_live = st
+        .workers
+        .get(&task.owner)
+        .is_some_and(|owner| !matches!(worker_presence(server, owner), IdentityPresence::Missing));
+    let authorized = task.owner == worker_id
+        || live_master.as_deref() == Some(worker_id.as_str())
+        || (live_master.is_none() && !owner_identity_live);
+    if !authorized {
+        return Resp::err_data(
+            "cleanup finalization is not authorized for this caller",
+            json!({
+                "live_master": live_master,
+                "task_owner": task.owner,
+                "requester": worker_id,
+                "owner_identity_live": owner_identity_live,
+                "rule": "task owner, live master, or a peer closing an orphaned task may finalize cleanup",
+            }),
+        );
+    }
+    let existing = st
+        .cleanup_receipts
+        .get(&task.id)
+        .cloned()
+        .filter(|receipt| {
+            receipt.task_id == task.id
+                && receipt.worktree_path == task.worktree_path
+                && receipt.branch == task.branch
+        });
+    if existing
+        .as_ref()
+        .is_some_and(|receipt| receipt.verification == CleanupVerification::Verified)
+    {
+        let receipt_id = existing.map(|receipt| receipt.id);
+        let released = waiting_dependents_of(&st, &task.id)
+            .into_iter()
+            .map(|waiter| waiter.id)
+            .collect::<Vec<_>>();
+        let notifications = resume_cleanup_release(server, &mut st, &task.id);
+        // The lease stop is part of the same obligation, so a resumed attempt
+        // completes it too instead of reporting lifecycle complete over an
+        // armed lease.
+        if let Some(cancel) =
+            default_lease_cancel_on_last_close(&st, &task.owner, &task.id, now_ms())
+        {
+            server.commit_locked(&mut st, &[cancel]);
+        }
+        drop(st);
+        for (message_id, subscription_id) in notifications {
+            attempt_notification(server, &message_id, &subscription_id);
+        }
+        return Resp::data(json!({
+            "task": task.id,
+            "owner": task.owner,
+            "cleanup": {"result": "verified", "receipt_id": receipt_id},
+            "idempotent": true,
+            "released_dependents": released,
+            "next_action": "lifecycle complete",
+        }));
+    }
+    // A closed task is not a scheduling holder, so another task can take over
+    // the same worktree or branch after the force close. Removing it here would
+    // destroy a live owner's resource, so refuse before touching the
+    // filesystem or git and leave the obligation retryable.
+    if let Some(competing) = competing_resource_owner(&st, &task) {
+        return Resp::err_data(
+            format!(
+                "CLEANUP_FINALIZE_REFUSED: task {} declared worktree/branch {} which is owned by non-closed task {}",
+                task_id,
+                task.worktree_path.as_deref().unwrap_or("-"),
+                competing
+            ),
+            json!({
+                "task": task.id,
+                "competing_task": competing,
+                "cleanup": {
+                    "result": "unverified",
+                    "reason": existing.and_then(|receipt| receipt.manual_reason),
+                },
+                "finalized": false,
+                "rule": "finalization may remove only resources no non-closed task still references",
+            }),
+        );
+    }
+    // The same checks a normal close applies: a clean worktree inside
+    // ./playground and a branch already merged into main. Dirty, unmerged, or
+    // path-escaping resources are never removed to finish the lifecycle, so a
+    // refused finalize leaves the obligation visible and retryable.
+    if let Err(error) = close_task_resources(
+        &server.root,
+        task.worktree_path.as_deref(),
+        task.branch.as_deref(),
+    ) {
+        return Resp::err_data(
+            format!("CLEANUP_FINALIZE_REFUSED: {error}"),
+            json!({
+                "task": task.id,
+                "cleanup": {
+                    "result": "unverified",
+                    "reason": existing.and_then(|receipt| receipt.manual_reason),
+                },
+                "finalized": false,
+                "next_action": "resolve the reported resource problem, then rerun finalize-cleanup",
+            }),
+        );
+    }
+    let now = now_ms();
+    let receipt = CleanupReceipt {
+        id: format!("cleanup-final-{}-{}", task.id, now),
+        task_id: task.id.clone(),
+        worktree_path: task.worktree_path.clone(),
+        branch: task.branch.clone(),
+        verified_ms: now,
+        verification: CleanupVerification::Verified,
+        manual_reason: existing.and_then(|receipt| receipt.manual_reason),
+    };
+    server.commit_locked(
+        &mut st,
+        &[Event::CleanupVerified {
+            receipt: receipt.clone(),
+        }],
+    );
+    // Verification is durable now, so the owner's responsibility really is
+    // finished. Stop its automatic lease exactly as a normal close does, unless
+    // the owner still holds another unfinished task.
+    if let Some(cancel) = default_lease_cancel_on_last_close(&st, &task.owner, &task.id, now) {
+        server.commit_locked(&mut st, &[cancel]);
+    }
+    let released = waiting_dependents_of(&st, &task.id)
+        .into_iter()
+        .map(|waiter| waiter.id)
+        .collect::<Vec<_>>();
+    let notifications = resume_cleanup_release(server, &mut st, &task.id);
+    let stale_workers = stale_worker_views(&st, &|worker| worker_presence(server, worker));
+    drop(st);
+    for (message_id, subscription_id) in notifications {
+        attempt_notification(server, &message_id, &subscription_id);
+    }
+    Resp::data(json!({
+        "task": task.id,
+        "owner": task.owner,
+        "cleanup": {
+            "worktree": task.worktree_path,
+            "branch": task.branch,
+            "result": "verified",
+            "receipt_id": receipt.id,
+            "manual_reason": receipt.manual_reason,
+        },
+        "released_dependents": released,
+        "stale_workers": stale_workers,
+        "finalized": true,
+        "idempotent": false,
         "next_action": "lifecycle complete",
     }))
 }
@@ -10354,6 +10589,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::TaskReview { .. }
         | Req::TaskIntegrated { .. }
         | Req::TaskClose { .. }
+        | Req::TaskFinalizeCleanup { .. }
         | Req::TaskDispatch { .. }
         | Req::MigrationPlan { .. }
         | Req::MigrationApply { .. }
@@ -10458,6 +10694,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id, token, ..
         }
         | Req::TaskClose {
+            worker_id, token, ..
+        }
+        | Req::TaskFinalizeCleanup {
             worker_id, token, ..
         }
         | Req::TaskDispatch { worker_id, token }
@@ -11235,6 +11474,11 @@ fn dispatch_with_route_context(
             force,
             reason,
         } => handle_task_close(server, worker_id, token, task_id, force, reason),
+        Req::TaskFinalizeCleanup {
+            worker_id,
+            token,
+            task_id,
+        } => handle_task_finalize_cleanup(server, worker_id, token, task_id),
         Req::TaskDispatch { worker_id, token } => handle_task_dispatch(server, worker_id, token),
         Req::TaskStatus { task_id } => {
             let st = server.state.lock().unwrap();
@@ -11597,6 +11841,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
         | Req::TaskReview { worker_id, .. }
         | Req::TaskIntegrated { worker_id, .. }
         | Req::TaskClose { worker_id, .. }
+        | Req::TaskFinalizeCleanup { worker_id, .. }
         | Req::TaskDispatch { worker_id, .. }
         | Req::MigrationInspect { worker_id, .. }
         | Req::MigrationPlan { worker_id, .. }

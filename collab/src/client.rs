@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -103,6 +103,36 @@ pub fn resolve_route(
             native_thread_id: native_thread_id.to_owned(),
         },
     )?;
+    validate_route_resolution(route, session_id, native_thread_id)
+}
+
+pub fn resolve_route_with_stream(
+    stream: UnixStream,
+    session_id: &str,
+    native_thread_id: &str,
+) -> anyhow::Result<RouteResolution> {
+    let sock = stream
+        .peer_addr()
+        .ok()
+        .and_then(|addr| addr.as_pathname().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("<unknown>"));
+    let route: RouteResolution = call_with_stream(
+        &sock,
+        stream,
+        &Req::RouteResolve {
+            session_id: session_id.to_owned(),
+            native_thread_id: native_thread_id.to_owned(),
+        },
+        None,
+    )?;
+    validate_route_resolution(route, session_id, native_thread_id)
+}
+
+fn validate_route_resolution(
+    route: RouteResolution,
+    session_id: &str,
+    native_thread_id: &str,
+) -> anyhow::Result<RouteResolution> {
     route.validate()?;
     if route.session_id.as_str() != session_id {
         anyhow::bail!(
@@ -129,10 +159,19 @@ pub fn call_with_context<T: DeserializeOwned>(
     req: &Req,
     project_context: Option<ProjectContext>,
 ) -> anyhow::Result<T> {
+    let stream = connect(sock).map_err(|error| connection_error(sock, error))?;
+    call_with_stream(sock, stream, req, project_context)
+}
+
+pub fn call_with_stream<T: DeserializeOwned>(
+    sock: &Path,
+    mut stream: UnixStream,
+    req: &Req,
+    project_context: Option<ProjectContext>,
+) -> anyhow::Result<T> {
     if let Some(project_context) = project_context.as_ref() {
         project_context.validate()?;
     }
-    let mut stream = connect(sock).map_err(|error| connection_error(sock, error))?;
     let line = serde_json::to_string(&RequestEnvelope::new(req.clone(), project_context))?;
     stream.write_all(line.as_bytes()).with_context(|| {
         format!(

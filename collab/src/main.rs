@@ -4119,6 +4119,178 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// `collab init` on a unique persisted peer must send the *same* worker and
+    /// token to the daemon after the App Server address moved, and persist the
+    /// server-selected new binding under that identity.
+    #[test]
+    fn init_restores_the_persisted_identity_and_persists_the_new_binding() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("init-scope-rebind");
+        // The daemon socket lives in the state root, so keep that path short
+        // enough for `sockaddr_un`.
+        let state_root = std::env::temp_dir().join(format!(
+            "cs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        let route = json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": identity::CLI_APP_SERVER_ID,
+            "project_scope": root.canonicalize().unwrap(),
+            "canonical_root": root.canonicalize().unwrap(),
+            "storage_root": root.canonicalize().unwrap(),
+            "registered_ms": 1
+        });
+        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+        let old_runtime = RuntimeIdentity {
+            agent_id: identity::AgentId::new("agent-peer").unwrap(),
+            runtime_id: identity::RuntimeId::new("runtime-agent-peer").unwrap(),
+            appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+            endpoint_generation: 1,
+            binding_id: identity::BindingId::new("binding-agent-peer").unwrap(),
+            session_id: Some(identity::SessionId::new("session-old").unwrap()),
+            native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
+        };
+        let transport = SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("session-old".into()),
+            thread_id: Some("thread-old".into()),
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        };
+        let persisted = Identity {
+            worker_id: "agent-peer".into(),
+            token: "token-agent-peer".into(),
+            project_scope: Some(
+                Scope { root: root.clone() }
+                    .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                    .unwrap()
+                    .project_scope_id,
+            ),
+            runtime: Some(old_runtime),
+            transport: Some(transport.clone()),
+        };
+        let identity_path = state_root
+            .join("identities")
+            .join("agent-peer")
+            .join("identity.json");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &identity_path,
+            serde_json::to_string_pretty(&persisted).unwrap(),
+        )
+        .unwrap();
+
+        // The route authority has to be listening before identity loading asks
+        // it whether the persisted address is dead.
+        let socket = state_root.join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let responder = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+
+            // 1. Identity loading asks the route authority whether the persisted
+            //    old address is still alive. It answers: provably dead.
+            let (mut route_stream, _) = listener.accept().unwrap();
+            let mut route_line = String::new();
+            std::io::BufReader::new(&route_stream)
+                .read_line(&mut route_line)
+                .unwrap();
+            let route_request: serde_json::Value = serde_json::from_str(&route_line).unwrap();
+            assert_eq!(route_request["op"], "RouteResolve");
+            assert_eq!(route_request["session_id"], "session-old");
+            assert_eq!(route_request["native_thread_id"], "thread-old");
+            route_stream
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({
+                            "ok": false,
+                            "error": "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread"
+                        })
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+
+            // 2. Registration must now arrive as the restored identity.
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            // The restored identity must register as itself, with its own token
+            // and its own derived binding id.
+            assert_eq!(request["worker_id"], "agent-peer");
+            assert_eq!(request["token"], "token-agent-peer");
+            let response = json!({
+                "ok": true,
+                "worker_id": "agent-peer",
+                "identity_kind": "peer",
+                "transport_selected": {
+                    "kind": "appserver",
+                    "endpoint": "unix:///tmp/codex.sock",
+                    "namespace": "codex_tui",
+                    "session_id": "session-new",
+                    "thread_id": "thread-new",
+                    "capabilities": ["send_message_to_thread"],
+                    "self_check": "test appserver"
+                },
+                "typed": true,
+                "command_id": "command-register",
+                "operation_id": "operation-register",
+                "sequence": 2,
+                "revision": 2,
+                "replayed": false,
+                "command": {
+                    "binding": {
+                        "project_scope": root_string,
+                        "app_scope_id": identity::CLI_APP_SERVER_ID,
+                        "agent_id": "agent-peer",
+                        "runtime_id": "runtime-agent-peer",
+                        "binding_id": "binding-agent-peer",
+                        "endpoint_generation": 2,
+                        "session_id": "session-new",
+                        "native_thread_id": "thread-new"
+                    }
+                }
+            });
+            std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+        });
+
+        set_current_session_thread("thread-new", "session-new");
+        let mut ident = identity::load_or_create_for_init(&Scope { root: root.clone() }).unwrap();
+        assert_eq!(ident.worker_id, "agent-peer");
+        assert_eq!(ident.token, "token-agent-peer");
+        ensure_registration(&Scope { root: root.clone() }, &mut ident).unwrap();
+        responder.join().unwrap();
+        clear_current_session_thread();
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+
+        // The same identity now owns the new address on disk.
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&identity_path).unwrap()).unwrap();
+        assert_eq!(stored["worker_id"], "agent-peer");
+        assert_eq!(stored["runtime"]["native_thread_id"], "thread-new");
+        assert_eq!(stored["runtime"]["session_id"], "session-new");
+        assert_eq!(stored["runtime"]["endpoint_generation"], 2);
+        assert_eq!(stored["transport"]["thread_id"], "thread-new");
+        assert_eq!(stored["transport"]["session_id"], "session-new");
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn ensure_registration_uses_provisional_runtime_for_scope_mismatch() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();

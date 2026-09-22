@@ -657,7 +657,7 @@ pub fn load_or_create(
     _endpoint_override: Option<String>,
 ) -> anyhow::Result<Identity> {
     let _ = _endpoint_override;
-    load_or_create_resolved(scope, worker_id)
+    load_or_create_resolved(scope, worker_id, false)
 }
 
 /// Load the identity selected by the current worker/thread without creating or
@@ -724,17 +724,169 @@ pub fn load_or_create_for_init(scope: &Scope) -> anyhow::Result<Identity> {
 }
 
 fn load_or_create_for_init_at(host_paths: &HostPaths, scope: &Scope) -> anyhow::Result<Identity> {
-    load_or_create_resolved_at(host_paths, scope, None)
+    load_or_create_resolved_at(host_paths, scope, None, true)
 }
 
-fn load_or_create_resolved(scope: &Scope, worker_id: Option<String>) -> anyhow::Result<Identity> {
-    load_or_create_resolved_at(&HostPaths::resolve()?, scope, worker_id)
+fn load_or_create_resolved(
+    scope: &Scope,
+    worker_id: Option<String>,
+    allow_scope_rebind: bool,
+) -> anyhow::Result<Identity> {
+    load_or_create_resolved_at(&HostPaths::resolve()?, scope, worker_id, allow_scope_rebind)
+}
+
+/// What the daemon route authority said about one persisted App Server address.
+///
+/// `Unknown` is load-bearing: an unreachable daemon, a transport failure, or
+/// any answer that is not a definite "this address has no route" must never be
+/// read as death, because "the old binding looks quiet" is exactly the state a
+/// hijacker could assert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteLiveness {
+    /// The authority answered with the exact not-found contract.
+    Dead,
+    /// The authority resolved a live route for this address.
+    Live,
+    /// No usable answer: unreachable daemon, timeout, or an error that reports
+    /// a route which exists but is not currently usable.
+    Unknown,
+}
+
+fn probe_address(sock: &Path, session_id: &str, native_thread_id: &str) -> RouteLiveness {
+    let stream = match crate::client::connect(sock) {
+        Ok(stream) => stream,
+        Err(error) => return probe_error_class(sock, &error.into()),
+    };
+    if let Err(error) = stream.set_read_timeout(Some(std::time::Duration::from_millis(500))) {
+        return probe_error_class(sock, &error.into());
+    }
+    match crate::client::resolve_route_with_stream(stream, session_id, native_thread_id) {
+        Ok(_) => RouteLiveness::Live,
+        // Only the exact not-found contract proves the address is gone.
+        // `ROUTE_RESOLVE_INVALID` also covers a route that exists while its
+        // runtime is unavailable, or whose identity does not validate, so it is
+        // explicitly *not* proof of death.
+        Err(error) => probe_error_class(sock, &error),
+    }
+}
+
+fn probe_error_class(_sock: &Path, error: &anyhow::Error) -> RouteLiveness {
+    let message = error.to_string();
+    if message.starts_with("ROUTE_RESOLVE_NOT_FOUND") {
+        RouteLiveness::Dead
+    } else {
+        RouteLiveness::Unknown
+    }
+}
+
+/// Why `collab init` may not mint a brand-new identity for this project.
+enum ScopeRebindOutcome {
+    /// One durable record whose address is provably dead: restore it.
+    Adopted(Identity),
+    /// No durable record to protect: first registration for this project.
+    NoCandidate,
+    /// A durable record exists but its state cannot be established. Minting
+    /// here would silently orphan it, so the caller must fail closed.
+    Unproven(String),
+}
+
+/// Restore the persisted identity of a project whose App Server address moved.
+///
+/// An App Server restart that changes both halves of the `(session, thread)`
+/// dual key leaves the strict lookup empty, and `load_or_create` would then
+/// mint a brand-new `codex-<thread>` identity while the old record is orphaned.
+///
+/// Scope membership alone is *not* authorization: another peer's identity can
+/// be the only durable record in a project, and adopting it would hand over
+/// that peer's worker id and token while its own binding is still live. A
+/// candidate is therefore only adopted when its persisted App Server address is
+/// provably dead, and only from the explicit `collab init` / worker recovery
+/// paths. Everything else stays fail-closed and falls through to a normal first
+/// registration under the caller's own thread-scoped identity.
+fn identity_for_scope_rebind_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+) -> anyhow::Result<ScopeRebindOutcome> {
+    let project_scope = scope
+        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+        .project_scope_id;
+    let identities_root = host_paths.state_root().join("identities");
+    if !identities_root.is_dir() {
+        return Ok(ScopeRebindOutcome::NoCandidate);
+    }
+    let mut matches = BTreeMap::new();
+    let mut persisted = 0usize;
+    let mut unproven = Vec::new();
+    for entry in std::fs::read_dir(identities_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(identity) = read_identity(&entry.path().join("identity.json"))? else {
+            continue;
+        };
+        let Some(runtime) = identity.runtime.as_ref() else {
+            continue;
+        };
+        // The rebind candidate is only the same agent inside this project's
+        // scope. A record bound to another project is never stolen.
+        if identity.project_scope.as_ref() != Some(&project_scope) {
+            continue;
+        }
+        persisted += 1;
+        // Only a candidate whose old dual key is provably dead may be restored.
+        // A legacy record without a session cannot prove death and is left to
+        // the explicit-identity path.
+        let (Some(session_id), Some(native_thread_id)) = (
+            runtime.session_id.as_ref(),
+            runtime.native_thread_id.as_ref(),
+        ) else {
+            unproven.push(identity.worker_id.clone());
+            continue;
+        };
+        match probe_address(
+            &host_paths.socket_path(),
+            session_id.as_str(),
+            native_thread_id.as_str(),
+        ) {
+            RouteLiveness::Dead => {}
+            RouteLiveness::Live => continue,
+            RouteLiveness::Unknown => {
+                unproven.push(identity.worker_id.clone());
+                continue;
+            }
+        }
+        matches.insert(identity.worker_id.clone(), identity);
+    }
+    match matches.len() {
+        0 if persisted == 0 => Ok(ScopeRebindOutcome::NoCandidate),
+        // Every candidate answered "still live", so this is a genuine first
+        // registration for the caller; the live peers keep their identities.
+        0 if unproven.is_empty() => Ok(ScopeRebindOutcome::NoCandidate),
+        // At least one candidate could not be classified. Minting here would
+        // silently orphan it, so fail closed even if another candidate is live.
+        0 => Ok(ScopeRebindOutcome::Unproven(format!(
+            "the persisted Collab identity for this project scope cannot be confirmed dead ({})",
+            unproven.join(", ")
+        ))),
+        1 => Ok(ScopeRebindOutcome::Adopted(
+            matches
+                .into_iter()
+                .next()
+                .map(|(_, identity)| identity)
+                .expect("exactly one match"),
+        )),
+        count => anyhow::bail!(
+            "multiple provably dead persisted Collab identities for this project scope: {count}; recovery: identify the intended peer from `collab status --all`, then explicitly rebind that one identity with the current host session/thread pair; do not guess among the matches, delete identities, or edit identity state by hand"
+        ),
+    }
 }
 
 fn load_or_create_resolved_at(
     host_paths: &HostPaths,
-    _scope: &Scope,
+    scope: &Scope,
     worker_id: Option<String>,
+    allow_scope_rebind: bool,
 ) -> anyhow::Result<Identity> {
     let thread_id = std::env::var("CODEX_THREAD_ID")
         .ok()
@@ -772,6 +924,24 @@ fn load_or_create_resolved_at(
                 "multiple persisted Collab identities are bound to App Server thread {thread_id}: {count}; recovery: identify the intended peer from `collab status --all`, then explicitly rebind that one identity with the current host session/thread pair; do not guess among the matches, delete identities, or edit identity state by hand"
             ),
         }
+        // The strict dual key found nothing. On the explicit initialization
+        // paths a durable record whose old address is provably dead is the
+        // identity being restored: an App Server restart can rotate both halves
+        // of the key, and that must not mint a replacement identity for an
+        // agent that already has one. A live old binding is never adopted, and
+        // a record whose state cannot be established fails closed rather than
+        // silently orphaning it.
+        if allow_scope_rebind {
+            match identity_for_scope_rebind_at(host_paths, scope)? {
+                ScopeRebindOutcome::Adopted(identity) => return Ok(identity),
+                ScopeRebindOutcome::NoCandidate => {}
+                ScopeRebindOutcome::Unproven(detail) => {
+                    anyhow::bail!(
+                        "IDENTITY_REBIND_UNPROVEN: {detail}; recovery: confirm the daemon route authority is reachable and that the persisted peer is not live, then re-run with the explicit identity (`COLLAB_WORKER=<worker-id>`) to rebind it deterministically; do not mint a new identity for a project that already has one, delete identities, or edit identity state by hand"
+                    )
+                }
+            }
+        }
     }
     if let Some(ident) = read_identity(&identity_path_at(host_paths, &worker_id)?)? {
         return Ok(ident);
@@ -790,11 +960,21 @@ fn load_or_create_resolved_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     static ENV_LOCK: &std::sync::Mutex<()> = &crate::scope::TEST_ENV_LOCK;
 
     fn test_scope(root: PathBuf) -> Scope {
         Scope { root }
+    }
+
+    fn canonical_test_scope(scope: &Scope) -> String {
+        scope
+            .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id
+            .as_str()
+            .to_owned()
     }
 
     fn test_root(prefix: &str) -> PathBuf {
@@ -817,7 +997,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let identity =
-            load_or_create_resolved_at(&host_paths, &scope, Some("thread-worker".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("thread-worker".into()), false)
+                .unwrap();
         let path = identity_path_at(&host_paths, &identity.worker_id).unwrap();
         assert!(path.starts_with(state_root.join("identities")));
         assert!(!root
@@ -836,7 +1017,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let mut identity =
-            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into()), false)
+                .unwrap();
         persist_registration_at(
             &host_paths,
             &scope,
@@ -860,7 +1042,7 @@ mod tests {
         std::env::set_var("CODEX_THREAD_ID", "thread-1");
         std::env::set_var("CODEX_SESSION_ID", "session-1");
         std::env::remove_var("COLLAB_WORKER");
-        let resolved = load_or_create_resolved_at(&host_paths, &scope, None).unwrap();
+        let resolved = load_or_create_resolved_at(&host_paths, &scope, None, false).unwrap();
         match previous_thread {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
             None => std::env::remove_var("CODEX_THREAD_ID"),
@@ -890,7 +1072,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let mut identity =
-            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into()), false)
+                .unwrap();
         let mut runtime = runtime_identity(4, "binding-managed");
         runtime.session_id = Some(SessionId::new("session-old").unwrap());
         runtime.native_thread_id = Some(NativeThreadId::new("thread-shared").unwrap());
@@ -1010,7 +1193,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let mut identity =
-            load_or_create_resolved_at(&host_paths, &scope, Some("dual-worker".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("dual-worker".into()), false)
+                .unwrap();
         let mut runtime = runtime_identity(4, "binding-dual");
         runtime.session_id = Some(SessionId::new("session-bound").unwrap());
         runtime.native_thread_id = Some(NativeThreadId::new("thread-bound").unwrap());
@@ -1065,7 +1249,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let mut identity =
-            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("managed-worker".into()), false)
+                .unwrap();
         persist_registration_at(
             &host_paths,
             &scope,
@@ -1091,7 +1276,8 @@ mod tests {
         std::env::remove_var("COLLAB_WORKER");
 
         let existing_error = load_existing_at(&host_paths, &scope, None).unwrap_err();
-        let create_error = load_or_create_resolved_at(&host_paths, &scope, None).unwrap_err();
+        let create_error =
+            load_or_create_resolved_at(&host_paths, &scope, None, false).unwrap_err();
 
         match previous_thread {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
@@ -1126,7 +1312,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let mut authoritative =
-            load_or_create_resolved_at(&host_paths, &scope, Some("authoritative".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("authoritative".into()), false)
+                .unwrap();
         let mut runtime = runtime_identity(7, "binding-authoritative");
         runtime.native_thread_id = Some(NativeThreadId::new("thread-current").unwrap());
         persist_registration_at(
@@ -1415,7 +1602,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let identity =
-            load_or_create_resolved_at(&host_paths, &scope, Some("thread-worker".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("thread-worker".into()), false)
+                .unwrap();
         assert_eq!(identity.worker_id, "thread-worker");
         assert_eq!(identity.runtime, None);
         assert_eq!(identity.transport, None);
@@ -1433,7 +1621,8 @@ mod tests {
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let mut ident =
-            load_or_create_resolved_at(&host_paths, &scope, Some("codex-thread-1".into())).unwrap();
+            load_or_create_resolved_at(&host_paths, &scope, Some("codex-thread-1".into()), false)
+                .unwrap();
         persist_registration_at(
             &host_paths,
             &scope,
@@ -1468,6 +1657,335 @@ mod tests {
             Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
             None => std::env::remove_var("CODEX_THREAD_ID"),
         }
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Adversarial probe 1: another peer is the only durable identity in the
+    /// project and its App Server address is still live. A different thread in
+    /// the same project must NOT be able to walk away with its id and token.
+    #[test]
+    fn init_never_adopts_a_peer_whose_old_binding_is_still_live() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = short_test_root();
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let root_str = canonical_test_scope(&scope);
+        let other = persist_peer_at(
+            &host_paths,
+            &scope,
+            "other-peer",
+            "session-other",
+            "thread-other",
+            1,
+        );
+
+        let authority =
+            spawn_route_authority(&state_root, RouteAuthorityAnswer::Live, root_str.clone());
+        let adopted = with_current_address("thread-intruder", "session-intruder", || {
+            load_or_create_resolved_at(&host_paths, &scope, None, true)
+        });
+        authority.join().unwrap();
+
+        let adopted = adopted.unwrap();
+        assert_ne!(adopted.worker_id, other.worker_id);
+        assert_ne!(adopted.token, other.token);
+        assert_eq!(adopted.worker_id, "codex-thread-intruder");
+        assert!(adopted.runtime.is_none());
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Adversarial probe 2 shape: the persisted peer's own address is provably
+    /// dead, so `collab init` restores that identity with its original token.
+    #[test]
+    fn init_restores_the_same_identity_when_its_old_binding_is_provably_dead() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = short_test_root();
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let root_str = canonical_test_scope(&scope);
+        let original = persist_peer_at(
+            &host_paths,
+            &scope,
+            "agent-peer",
+            "session-old",
+            "thread-old",
+            1,
+        );
+        let original_token = original.token.clone();
+
+        let authority =
+            spawn_route_authority(&state_root, RouteAuthorityAnswer::Dead, root_str.clone());
+        let restored = with_current_address("thread-new", "session-new", || {
+            load_or_create_resolved_at(&host_paths, &scope, None, true)
+        });
+        authority.join().unwrap();
+
+        let restored = restored.unwrap();
+        assert_eq!(restored.worker_id, "agent-peer");
+        assert_eq!(restored.token, original_token);
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Explicit identity selection is the deterministic recovery path: it needs
+    /// no liveness proof because the caller named the identity.
+    #[test]
+    fn explicit_worker_selection_rebinds_without_a_liveness_probe() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = short_test_root();
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let original = persist_peer_at(
+            &host_paths,
+            &scope,
+            "agent-peer",
+            "session-old",
+            "thread-old",
+            1,
+        );
+        let original_token = original.token.clone();
+
+        // No route authority is listening: explicit selection must not need one.
+        let selected = with_current_address("thread-new", "session-new", || {
+            load_or_create_resolved_at(&host_paths, &scope, Some("agent-peer".into()), true)
+        });
+
+        let selected = selected.unwrap();
+        assert_eq!(selected.worker_id, "agent-peer");
+        assert_eq!(selected.token, original_token);
+
+        // The recovery skill names the identity through the environment, not
+        // through an argument: that path must behave identically.
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("COLLAB_WORKER", "agent-peer");
+        let selected_env = load_or_create_resolved_at(&host_paths, &scope, None, true);
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+        let selected_env = selected_env.unwrap();
+        assert_eq!(selected_env.worker_id, "agent-peer");
+        assert_eq!(selected_env.token, original_token);
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Even with a dead address the selection must stay unique: two provably
+    /// dead peers in one project are still an ambiguity, not a free pick.
+    #[test]
+    fn init_still_fails_closed_when_several_dead_identities_match() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = short_test_root();
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        persist_peer_at(&host_paths, &scope, "agent-a", "session-a", "thread-a", 1);
+        persist_peer_at(&host_paths, &scope, "agent-b", "session-b", "thread-b", 1);
+
+        let socket = state_root.join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let authority = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .unwrap();
+                let response = json!({
+                    "ok": false,
+                    "error": "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread"
+                });
+                std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+            }
+        });
+        let restored = with_current_address("thread-new", "session-new", || {
+            load_or_create_resolved_at(&host_paths, &scope, None, true)
+        });
+        authority.join().unwrap();
+
+        let error = restored.unwrap_err().to_string();
+        assert!(
+            error.contains("multiple provably dead persisted Collab identities"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// R2 P1-a: `ROUTE_RESOLVE_INVALID` means "route exists but the runtime is
+    /// unusable" (exactly what a daemon restart replays), never proof of death.
+    /// A fake authority answering that must not hand over the peer's identity.
+    #[test]
+    fn unavailable_runtime_is_not_proof_of_death_and_is_never_adopted() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = short_test_root();
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let root_str = canonical_test_scope(&scope);
+        let victim = persist_peer_at(
+            &host_paths,
+            &scope,
+            "victim-peer",
+            "session-victim",
+            "thread-victim",
+            1,
+        );
+
+        let authority = spawn_route_authority(
+            &state_root,
+            RouteAuthorityAnswer::UnavailableRuntime,
+            root_str.clone(),
+        );
+        let outcome = with_current_address("thread-intruder", "session-intruder", || {
+            load_or_create_resolved_at(&host_paths, &scope, None, true)
+        });
+        authority.join().unwrap();
+
+        // Fail closed: no adoption, and no silent mint that orphans the peer.
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.starts_with("IDENTITY_REBIND_UNPROVEN"), "{error}");
+        assert!(!error.contains(&victim.token), "{error}");
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                state_root
+                    .join("identities")
+                    .join("victim-peer")
+                    .join("identity.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["token"], victim.token.as_str());
+        assert!(
+            !state_root
+                .join("identities")
+                .join("codex-thread-intruder")
+                .exists(),
+            "a new identity must not be minted while a persisted peer is unproven"
+        );
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// R2 P1-b: an unreachable/slow route authority is not an answer. When the
+    /// project already has a persisted identity, init must fail closed with a
+    /// recovery path instead of quietly minting a replacement.
+    #[test]
+    fn unreachable_route_authority_never_mints_over_a_persisted_identity() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = short_test_root();
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let victim = persist_peer_at(
+            &host_paths,
+            &scope,
+            "victim-peer",
+            "session-victim",
+            "thread-victim",
+            1,
+        );
+
+        // A listening socket that accepts and then stays silent for longer
+        // than the probe's read timeout. This exercises the timeout path
+        // specifically: if the 500ms read timeout were removed, the load call
+        // would block until the authority drops and the assertions below would
+        // fail. `dropped` proves the authority was still silent when the
+        // timeout fired, so the result cannot be an EOF classification.
+        let socket = state_root.join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_thread = dropped.clone();
+        let authority = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            drop(stream);
+            dropped_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = with_current_address("thread-intruder", "session-intruder", || {
+            load_or_create_resolved_at(&host_paths, &scope, None, true)
+        });
+        let elapsed = started.elapsed();
+
+        assert!(
+            !dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "authority dropped before the probe returned, so the result may be EOF, not a timeout"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(500),
+            "probe returned in {elapsed:?}; the 500ms read timeout did not fire"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1400),
+            "probe blocked past the read timeout: {elapsed:?}"
+        );
+
+        authority.join().unwrap();
+
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.starts_with("IDENTITY_REBIND_UNPROVEN"), "{error}");
+        assert!(error.contains("COLLAB_WORKER"), "{error}");
+        assert_eq!(victim.worker_id, "victim-peer");
+        assert!(
+            !state_root
+                .join("identities")
+                .join("codex-thread-intruder")
+                .exists(),
+            "an unproven authority must not mint a new identity"
+        );
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Ordinary commands keep the strict contract: a moved address is not
+    /// adopted outside the explicit init/recovery paths.
+    #[test]
+    fn ordinary_commands_do_not_adopt_a_moved_app_server_address() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("ci-ordinary-no-scope-rebind");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let state_root = root.join("global");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let original = persist_peer_at(
+            &host_paths,
+            &scope,
+            "agent-peer",
+            "session-old",
+            "thread-old",
+            1,
+        );
+
+        let resolved = with_current_address("thread-new", "session-new", || {
+            load_or_create_resolved_at(&host_paths, &scope, None, false)
+        })
+        .unwrap();
+
+        assert_eq!(resolved.worker_id, "codex-thread-new");
+        assert_ne!(resolved.token, original.token);
         std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
@@ -1613,5 +2131,129 @@ mod tests {
         assert!(AgentId::new("").is_err());
         assert!(RuntimeId::new("runtime\n1").is_err());
         assert!(DispatchId::new("d".repeat(MAX_ID_LENGTH + 1)).is_err());
+    }
+
+    /// A short temp project root: the fake route-authority socket lives under the
+    /// state root, so the combined path must stay under `sockaddr_un`'s limit.
+    fn short_test_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Keep the whole `<root>/global/server.sock` path short: unix socket paths
+        // are limited to ~104 bytes and the macOS temp dir already uses ~48.
+        std::env::temp_dir().join(format!(
+            "cs{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// A fake daemon that answers one `RouteResolve` with either a dead-address
+    /// error or a live route. Scope membership alone must never be enough for
+    /// adoption, so every rebind test states what the route authority says.
+    fn spawn_route_authority(
+        state_root: &std::path::Path,
+        answer: RouteAuthorityAnswer,
+        project_scope: String,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, Write};
+
+        let socket = state_root.join("server.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], "RouteResolve");
+            let response = match answer {
+                RouteAuthorityAnswer::Dead => json!({
+                    "ok": false,
+                    "error": "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread"
+                }),
+                RouteAuthorityAnswer::Live => json!({
+                    "ok": true,
+                    "app_scope_id": CLI_APP_SERVER_ID,
+                    "project_scope": project_scope,
+                    "canonical_root": project_scope,
+                    "storage_root": project_scope,
+                    "agent_id": "other-peer",
+                    "binding_id": "binding-other-peer",
+                    "endpoint_generation": 1,
+                    "session_id": request["session_id"].clone(),
+                    "native_thread_id": request["native_thread_id"].clone()
+                }),
+                // A route that exists while its runtime is unavailable. This is
+                // not death: a daemon restart replays routes with `runtime:
+                // None`, so treating it as death would hand a live peer's
+                // identity to whoever asks next.
+                RouteAuthorityAnswer::UnavailableRuntime => json!({
+                    "ok": false,
+                    "error": "ROUTE_RESOLVE_INVALID: current route state for App Server thread references an unavailable runtime"
+                }),
+            };
+            std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+        })
+    }
+    #[derive(Debug, Clone, Copy)]
+    enum RouteAuthorityAnswer {
+        Dead,
+        Live,
+        UnavailableRuntime,
+    }
+    /// Build one persisted identity whose dual key is the given address.
+    fn persist_peer_at(
+        host_paths: &HostPaths,
+        scope: &Scope,
+        worker: &str,
+        session: &str,
+        thread: &str,
+        generation: u64,
+    ) -> Identity {
+        let mut identity =
+            load_or_create_resolved_at(host_paths, scope, Some(worker.into()), false).unwrap();
+        let mut runtime = runtime_identity(generation, &format!("binding-{worker}"));
+        runtime.session_id = Some(SessionId::new(session).unwrap());
+        runtime.native_thread_id = Some(NativeThreadId::new(thread).unwrap());
+        persist_registration_at(
+            host_paths,
+            scope,
+            &mut identity,
+            runtime,
+            SelectedTransport {
+                kind: TransportKind::AppServer,
+                endpoint: Some("unix:///tmp/codex.sock".into()),
+                namespace: Some("codex_tui".into()),
+                session_id: Some(session.into()),
+                thread_id: Some(thread.into()),
+                capabilities: vec!["send_message".into()],
+                self_check: "server verified".into(),
+            },
+        )
+        .unwrap();
+        identity
+    }
+    fn with_current_address<T>(thread: &str, session: &str, body: impl FnOnce() -> T) -> T {
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("CODEX_THREAD_ID", thread);
+        std::env::set_var("CODEX_SESSION_ID", session);
+        std::env::remove_var("COLLAB_WORKER");
+        let result = body();
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+        result
     }
 }

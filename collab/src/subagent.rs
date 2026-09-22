@@ -1310,13 +1310,32 @@ fn run(
                 .get(&record.id)
                 .filter(|receipt| record.thread_id.as_deref() == Some(receipt.thread_id.as_str()))
                 .cloned();
-            let Some(snapshot) = snapshot else {
-                bail!(
-                    "subagent {} requires a successful snapshot of its bound App Server thread before close",
-                    record.id
-                );
+            // A definitive Missing thread can never produce the pre-close
+            // snapshot, so retirement is allowed once it holds no unresolved
+            // responsibility. Cold and Unknown keep the snapshot gate: a cold
+            // thread is still addressable and an inconclusive probe is not
+            // evidence of death.
+            let mut retired_without_snapshot = false;
+            let snapshot_captured_ms = match snapshot {
+                Some(snapshot) => Some(snapshot.captured_ms),
+                None => {
+                    let presence = state
+                        .workers
+                        .get(&record.peer)
+                        .map(|worker| crate::server::worker_presence(server, worker))
+                        .unwrap_or(crate::server::presence::IdentityPresence::Missing);
+                    if presence != crate::server::presence::IdentityPresence::Missing
+                        || !subagent_responsibilities_resolved(&state, &record)
+                    {
+                        bail!(
+                            "subagent {} requires a successful snapshot of its bound App Server thread before close",
+                            record.id
+                        );
+                    }
+                    retired_without_snapshot = true;
+                    None
+                }
             };
-            let snapshot_captured_ms = snapshot.captured_ms;
             record.status = "closing".into();
             server
                 .commit_locked_checked(
@@ -1327,7 +1346,9 @@ fn run(
                 )
                 .map_err(|error| anyhow::anyhow!("subagent close journal failure: {error}"))?;
             drop(state);
-            if let Some(thread_id) = record.thread_id.as_deref() {
+            if let (false, Some(thread_id)) =
+                (retired_without_snapshot, record.thread_id.as_deref())
+            {
                 let transport = {
                     let state = server.state.lock().unwrap();
                     state
@@ -1355,6 +1376,21 @@ fn run(
         _ => unreachable!(),
     }
     Ok(json!({"subagent": record}))
+}
+
+/// A missing thread may retire only after its responsibility set is empty:
+/// no active owned task and no unread notification still addressed to it.
+fn subagent_responsibilities_resolved(
+    state: &crate::server::state::State,
+    record: &Record,
+) -> bool {
+    let has_active_task = state.tasks.values().any(|task| {
+        task.owner == record.peer && crate::server::state::task_resource_active(&task.status)
+    });
+    let has_unread_notification = state.msgs.values().any(|message| {
+        message.to == record.peer && matches!(message.state.as_str(), "pending" | "delivered")
+    });
+    !has_active_task && !has_unread_notification
 }
 
 #[cfg(test)]

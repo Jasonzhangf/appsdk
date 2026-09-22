@@ -101,8 +101,27 @@ affected project.
 
 ### 1. Recovery
 
-Use recovery only after a daemon restart, transport replacement, identity
-mismatch, or an explicitly reported delivery failure:
+Start with the one-step bootstrap. For an AppSDK project, a missing or
+unresolvable thread route after a daemon/App Server restart is normally fixed
+by running `appsdk init .` once from the canonical root; do not open a forensic
+chain (PID/mtime hunts, nested-worktree probing, route/journal inspection)
+unless that single bootstrap fails. Run `collab down`/`up` only when the
+running daemon predates the installed binary.
+
+```sh
+collab master status        # canonical root, before anything else
+appsdk init .               # only if the current thread has no route
+collab context
+collab route resolve --native-thread-id "$CODEX_THREAD_ID"
+```
+
+`appsdk init .` owns identity, host route, and App Server thread/session
+binding together. These bindings must persist and be restored
+deterministically across daemon and App Server restart; requiring a manual
+second init or `collab worker recover` after every restart is a product
+defect, not an operator step.
+
+Use the wider recovery path below only when that bootstrap fails:
 
 ```sh
 collab status --all
@@ -532,6 +551,14 @@ chain. Start a managed subagent with `appsdk subagent start --id <id>`
 own worktree and file scope. Subagents must obey master and parent;
 independent peers may decline an invite to protect their current task.
 Wait for evidence summaries, then integrate. Chat tone is not completion.
+
+Delivery and review are not lifecycle endpoints. After a delivered candidate,
+the live master drives review, integration, cleanup, task close, and then the
+next ready assignment. Do not leave a peer idle merely because its last task
+returned `delivered`, `merged`, or a review verdict. Reuse the same live peer
+or a fresh managed subagent for the next non-overlapping P0/P1 assignment
+whenever capacity exists. Closing or force-closing a stale task is a scheduling
+decision that must preserve evidence, not a reason to stop dispatching.
 
 A worker or subagent executes only the approved assignment, owns that
 task's full lifecycle, and returns evidence. It has no global schedule.

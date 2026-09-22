@@ -753,16 +753,29 @@ enum RouteLiveness {
 }
 
 fn probe_address(sock: &Path, session_id: &str, native_thread_id: &str) -> RouteLiveness {
-    match crate::client::resolve_route(sock, session_id, native_thread_id) {
+    let stream = match crate::client::connect(sock) {
+        Ok(stream) => stream,
+        Err(error) => return probe_error_class(sock, &error.into()),
+    };
+    if let Err(error) = stream.set_read_timeout(Some(std::time::Duration::from_millis(500))) {
+        return probe_error_class(sock, &error.into());
+    }
+    match crate::client::resolve_route_with_stream(stream, session_id, native_thread_id) {
         Ok(_) => RouteLiveness::Live,
         // Only the exact not-found contract proves the address is gone.
         // `ROUTE_RESOLVE_INVALID` also covers a route that exists while its
         // runtime is unavailable, or whose identity does not validate, so it is
         // explicitly *not* proof of death.
-        Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND") => {
-            RouteLiveness::Dead
-        }
-        Err(_) => RouteLiveness::Unknown,
+        Err(error) => probe_error_class(sock, &error),
+    }
+}
+
+fn probe_error_class(_sock: &Path, error: &anyhow::Error) -> RouteLiveness {
+    let message = error.to_string();
+    if message.starts_with("ROUTE_RESOLVE_NOT_FOUND") {
+        RouteLiveness::Dead
+    } else {
+        RouteLiveness::Unknown
     }
 }
 
@@ -847,6 +860,11 @@ fn identity_for_scope_rebind_at(
     }
     match matches.len() {
         0 if persisted == 0 => Ok(ScopeRebindOutcome::NoCandidate),
+        // Every candidate answered "still live", so this is a genuine first
+        // registration for the caller; the live peers keep their identities.
+        0 if unproven.is_empty() => Ok(ScopeRebindOutcome::NoCandidate),
+        // At least one candidate could not be classified. Minting here would
+        // silently orphan it, so fail closed even if another candidate is live.
         0 => Ok(ScopeRebindOutcome::Unproven(format!(
             "the persisted Collab identity for this project scope cannot be confirmed dead ({})",
             unproven.join(", ")
@@ -948,6 +966,15 @@ mod tests {
 
     fn test_scope(root: PathBuf) -> Scope {
         Scope { root }
+    }
+
+    fn canonical_test_scope(scope: &Scope) -> String {
+        scope
+            .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id
+            .as_str()
+            .to_owned()
     }
 
     fn test_root(prefix: &str) -> PathBuf {
@@ -1646,6 +1673,7 @@ mod tests {
         std::fs::create_dir_all(&state_root).unwrap();
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let root_str = canonical_test_scope(&scope);
         let other = persist_peer_at(
             &host_paths,
             &scope,
@@ -1655,7 +1683,8 @@ mod tests {
             1,
         );
 
-        let authority = spawn_route_authority(&state_root, RouteAuthorityAnswer::Live);
+        let authority =
+            spawn_route_authority(&state_root, RouteAuthorityAnswer::Live, root_str.clone());
         let adopted = with_current_address("thread-intruder", "session-intruder", || {
             load_or_create_resolved_at(&host_paths, &scope, None, true)
         });
@@ -1681,6 +1710,7 @@ mod tests {
         std::fs::create_dir_all(&state_root).unwrap();
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let root_str = canonical_test_scope(&scope);
         let original = persist_peer_at(
             &host_paths,
             &scope,
@@ -1691,7 +1721,8 @@ mod tests {
         );
         let original_token = original.token.clone();
 
-        let authority = spawn_route_authority(&state_root, RouteAuthorityAnswer::Dead);
+        let authority =
+            spawn_route_authority(&state_root, RouteAuthorityAnswer::Dead, root_str.clone());
         let restored = with_current_address("thread-new", "session-new", || {
             load_or_create_resolved_at(&host_paths, &scope, None, true)
         });
@@ -1808,6 +1839,7 @@ mod tests {
         std::fs::create_dir_all(&state_root).unwrap();
         let scope = test_scope(root.clone());
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let root_str = canonical_test_scope(&scope);
         let victim = persist_peer_at(
             &host_paths,
             &scope,
@@ -1817,8 +1849,11 @@ mod tests {
             1,
         );
 
-        let authority =
-            spawn_route_authority(&state_root, RouteAuthorityAnswer::UnavailableRuntime);
+        let authority = spawn_route_authority(
+            &state_root,
+            RouteAuthorityAnswer::UnavailableRuntime,
+            root_str.clone(),
+        );
         let outcome = with_current_address("thread-intruder", "session-intruder", || {
             load_or_create_resolved_at(&host_paths, &scope, None, true)
         });
@@ -1871,13 +1906,18 @@ mod tests {
             1,
         );
 
-        // A listening socket that never answers, so the client times out. No
-        // daemon is ever started and no identity may be minted.
+        // A listening socket that never answers and closes immediately, so
+        // the probe gets EOF rather than a classification. No daemon is ever
+        // started and no identity may be minted.
         let socket = state_root.join("server.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let closer = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
         let outcome = with_current_address("thread-intruder", "session-intruder", || {
             load_or_create_resolved_at(&host_paths, &scope, None, true)
         });
+        closer.join().unwrap();
 
         let error = outcome.unwrap_err().to_string();
         assert!(error.starts_with("IDENTITY_REBIND_UNPROVEN"), "{error}");
@@ -2088,6 +2128,7 @@ mod tests {
     fn spawn_route_authority(
         state_root: &std::path::Path,
         answer: RouteAuthorityAnswer,
+        project_scope: String,
     ) -> std::thread::JoinHandle<()> {
         use std::io::{BufRead, Write};
 
@@ -2109,9 +2150,9 @@ mod tests {
                 RouteAuthorityAnswer::Live => json!({
                     "ok": true,
                     "app_scope_id": CLI_APP_SERVER_ID,
-                    "project_scope": request["project_scope"].clone(),
-                    "canonical_root": "/tmp",
-                    "storage_root": "/tmp",
+                    "project_scope": project_scope,
+                    "canonical_root": project_scope,
+                    "storage_root": project_scope,
                     "agent_id": "other-peer",
                     "binding_id": "binding-other-peer",
                     "endpoint_generation": 1,

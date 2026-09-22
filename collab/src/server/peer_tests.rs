@@ -898,6 +898,47 @@ fn current_head(root: &Path) -> String {
     rev_parse(root, "HEAD")
 }
 
+/// Drive one task to the accepted state that `task integrated` requires.
+fn accept_task(server: &Server, owner: &str, id: &str) {
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                server,
+                owner.into(),
+                format!("token-{owner}"),
+                id.into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            server,
+            owner.into(),
+            format!("token-{owner}"),
+            id.into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate".into()),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_review(
+            server,
+            owner.into(),
+            format!("token-{owner}"),
+            id.into(),
+            true,
+            false,
+            "review passed".into(),
+        )
+        .ok
+    );
+    assert_eq!(server.state.lock().unwrap().tasks[id].status, "accepted");
+}
+
 fn rev_parse(root: &Path, rev: &str) -> String {
     String::from_utf8(
         Command::new("git")
@@ -8746,6 +8787,216 @@ fn merged_task_without_lifecycle_edges_cannot_close() {
         server.state.lock().unwrap().tasks["accepted-task"].status,
         "merged"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_integrated_accepts_the_main_tip() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    accept_task(&server, "owner", "task");
+    initialize_main(&root);
+    let head = current_head(&root);
+
+    let integrated = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        head.clone(),
+        "main tip integration".into(),
+    );
+    assert!(integrated.ok, "{integrated:?}");
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.tasks["task"].status, "merged");
+    assert_eq!(
+        state.task_lifecycle["task"].integration_commit.as_deref(),
+        Some(head.as_str())
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_integrated_accepts_a_real_merge_commit_and_the_merged_candidate() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    accept_task(&server, "owner", "task");
+    initialize_main(&root);
+
+    git_ok(&root, &["checkout", "-q", "-b", "candidate"]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "candidate"]);
+    let candidate = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "main"]);
+    git_ok(
+        &root,
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "candidate",
+            "-m",
+            "merge candidate",
+        ],
+    );
+    let merge_commit = current_head(&root);
+    assert_ne!(candidate, merge_commit);
+    // Main keeps moving after the merge, so neither the merge commit nor the
+    // candidate is the current main tip when integration is recorded.
+    git_ok(
+        &root,
+        &["commit", "--allow-empty", "-q", "-m", "main moves on"],
+    );
+    let main_tip = current_head(&root);
+    assert_eq!(rev_parse(&root, "refs/heads/main"), main_tip);
+    assert_ne!(main_tip, merge_commit);
+
+    let via_merge = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        merge_commit.clone(),
+        "merge commit integration".into(),
+    );
+    assert!(via_merge.ok, "{via_merge:?}");
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["task"]
+            .integration_commit
+            .as_deref(),
+        Some(merge_commit.as_str())
+    );
+
+    // The same accepted task can be re-recorded with the candidate SHA that
+    // the merge brought in, because it is reachable from refs/heads/main.
+    {
+        let mut state = server.state.lock().unwrap();
+        let mut task = state.tasks.remove("task").unwrap();
+        task.status = "accepted".into();
+        state.tasks.insert(task.id.clone(), task);
+    }
+    let via_candidate = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        candidate.clone(),
+        "candidate SHA integration".into(),
+    );
+    assert!(via_candidate.ok, "{via_candidate:?}");
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["task"]
+            .integration_commit
+            .as_deref(),
+        Some(candidate.as_str())
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_integrated_rejects_a_commit_not_reachable_from_main_with_an_actionable_error() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    accept_task(&server, "owner", "task");
+    initialize_main(&root);
+    let main_head = current_head(&root);
+
+    git_ok(&root, &["checkout", "-q", "--orphan", "orphan"]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "orphan"]);
+    let orphan = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "main"]);
+
+    let rejected = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        orphan.clone(),
+        "orphan integration".into(),
+    );
+    assert!(!rejected.ok, "{rejected:?}");
+    assert_eq!(
+        rejected.error.as_deref(),
+        Some("TASK_INTEGRATION_COMMIT_MISMATCH")
+    );
+    assert_eq!(rejected.data["provided"], orphan);
+    assert_eq!(rejected.data["main_head"], main_head);
+    assert!(
+        rejected.data["expected"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reachable from refs/heads/main"),
+        "expected value must name the reachability contract: {rejected:?}"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().tasks["task"].status,
+        "accepted"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn task_integrated_is_correct_when_root_is_not_checked_out_on_main() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    accept_task(&server, "owner", "task");
+    initialize_main(&root);
+    let main_head = current_head(&root);
+
+    git_ok(&root, &["checkout", "-q", "-b", "topic"]);
+    git_ok(&root, &["commit", "--allow-empty", "-q", "-m", "topic"]);
+    let topic_head = current_head(&root);
+    assert_ne!(topic_head, main_head);
+    assert_eq!(rev_parse(&root, "refs/heads/main"), main_head);
+
+    // The recorded commit is a real ancestor of main, so reachability must be
+    // judged from refs/heads/main rather than from the current checkout.
+    let integrated = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        topic_head.clone(),
+        "integration judged from refs/heads/main".into(),
+    );
+    assert!(
+        !integrated.ok,
+        "a topic-only commit must not be accepted: {integrated:?}"
+    );
+    assert_eq!(
+        integrated.error.as_deref(),
+        Some("TASK_INTEGRATION_COMMIT_MISMATCH")
+    );
+    assert!(integrated.data["expected"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("reachable from refs/heads/main"));
+    assert_eq!(
+        server.state.lock().unwrap().tasks["task"].status,
+        "accepted"
+    );
+
+    let merged = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        main_head.clone(),
+        "main ancestor accepted while checked out on topic".into(),
+    );
+    assert!(merged.ok, "{merged:?}");
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["task"]
+            .integration_commit
+            .as_deref(),
+        Some(main_head.as_str())
+    );
+    // The checkout must not be moved by the integration record.
+    assert_eq!(current_head(&root), topic_head);
     std::fs::remove_dir_all(root).ok();
 }
 

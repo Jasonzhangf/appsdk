@@ -1807,7 +1807,7 @@ mod tests {
                     }
                 }),
             );
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let probe = next_request(&mut stream);
                 respond(
                     &mut stream,
@@ -1944,6 +1944,12 @@ mod tests {
             respond(
                 &mut stream,
                 json!({"id": turns["id"], "result": {"data": []}}),
+            );
+            let queue = next_request(&mut stream);
+            assert_eq!(queue["method"], "thread/queue/add");
+            respond(
+                &mut stream,
+                json!({"id": queue["id"], "result": {"queued": true}}),
             );
             stream.shutdown(Shutdown::Both).ok();
         });

@@ -11451,6 +11451,194 @@ fn migrated_project_verifies_without_local_sdk_witness_or_binary_digest_match() 
 }
 
 #[test]
+fn pinned_sdk_witness_is_executable_and_resolvable_in_a_fresh_worktree() {
+    let main = temp_root("sdk-witness-main");
+    let worktree = temp_root("sdk-witness-linked");
+    let registry = temp_root("sdk-witness-registry");
+    let main_text = main.to_str().unwrap();
+    let worktree_text = worktree.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    assert!(run(&["new", main_text]).status.success());
+    init_git(&main);
+    // pin-lock is the only writer of the ignored witness and is the historical
+    // source of the `binary_ref: project-sdk` lock a consumer gate inspects.
+    let pinned = run(&[
+        "pin-lock",
+        main_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ]);
+    assert!(
+        pinned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let witness = main.join(".appsdk/sdk.bin");
+    let mode = fs::metadata(&witness).unwrap().permissions().mode();
+    assert!(
+        mode & 0o111 != 0,
+        "pin-lock witness must stay executable for consumer gates, mode={mode:o}"
+    );
+    assert!(fs::read_to_string(main.join(".gitignore"))
+        .unwrap()
+        .contains(".appsdk/sdk.bin"));
+    // The pinned lock is tracked project truth; only the ignored witness is
+    // per-checkout, so commit the lock before branching a worktree from it.
+    assert!(Command::new("git")
+        .args(["-C", main_text, "add", ".appsdk/sdk.lock", ".gitignore"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", main_text, "commit", "-m", "pin"])
+        .status()
+        .unwrap()
+        .success());
+
+    let added = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_text,
+            "HEAD",
+        ])
+        .status()
+        .unwrap();
+    assert!(added.success());
+    // A fresh worktree inherits the tracked lock but never the ignored witness.
+    assert!(!worktree.join(".appsdk/sdk.bin").exists());
+
+    let resolved = Command::new(binary())
+        .args(["sdk-witness", worktree_text])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        resolved.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resolved.stdout),
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let restored = worktree.join(".appsdk/sdk.bin");
+    assert_eq!(fs::read(&restored).unwrap(), fs::read(&witness).unwrap());
+    let restored_mode = fs::metadata(&restored).unwrap().permissions().mode();
+    assert!(
+        restored_mode & 0o111 != 0,
+        "resolved witness must be executable, mode={restored_mode:o}"
+    );
+    let lock: Value =
+        serde_json::from_str(&fs::read_to_string(worktree.join(".appsdk/sdk.lock")).unwrap())
+            .unwrap();
+    assert_eq!(lock["binary_ref"], Value::String("project-sdk".into()));
+    assert_eq!(
+        file_digest(&restored),
+        lock["digest"].as_str().unwrap(),
+        "witness must stay byte-identical to the locked digest"
+    );
+
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "remove",
+            "--force",
+            worktree_text,
+        ])
+        .status();
+    fs::remove_dir_all(main).unwrap();
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn pinned_sdk_witness_resolution_fails_closed_on_a_mismatched_binary() {
+    let main = temp_root("sdk-witness-mismatch-main");
+    let worktree = temp_root("sdk-witness-mismatch-linked");
+    let registry = temp_root("sdk-witness-mismatch-registry");
+    let main_text = main.to_str().unwrap();
+    let worktree_text = worktree.to_str().unwrap();
+    let registry_text = registry.to_str().unwrap();
+
+    assert!(run(&["new", main_text]).status.success());
+    init_git(&main);
+    assert!(run(&[
+        "pin-lock",
+        main_text,
+        "--binary",
+        binary().to_str().unwrap(),
+    ])
+    .status
+    .success());
+    assert!(Command::new("git")
+        .args(["-C", main_text, "add", ".appsdk/sdk.lock"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["-C", main_text, "commit", "-m", "pin"])
+        .status()
+        .unwrap()
+        .success());
+    let added = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_text,
+            "HEAD",
+        ])
+        .status()
+        .unwrap();
+    assert!(added.success());
+
+    let wrong = worktree.join("wrong-appsdk");
+    fs::write(&wrong, "not the pinned AppSDK binary\n").unwrap();
+    let rejected = Command::new(binary())
+        .args([
+            "sdk-witness",
+            worktree_text,
+            "--binary",
+            wrong.to_str().unwrap(),
+        ])
+        .env("APPSDK_HOME", registry_text)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("SDK_WITNESS_BINARY_MISMATCH"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        !worktree.join(".appsdk/sdk.bin").exists(),
+        "a mismatched binary must not materialize an unverifiable witness"
+    );
+
+    fs::remove_file(&wrong).unwrap();
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            main_text,
+            "worktree",
+            "remove",
+            "--force",
+            worktree_text,
+        ])
+        .status();
+    fs::remove_dir_all(main).unwrap();
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn verify_admission_requires_generated_artifact_requirement() {
     let root = temp_root("verify-admission");
     let root_text = root.to_str().unwrap();

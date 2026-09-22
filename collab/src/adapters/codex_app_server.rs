@@ -1864,12 +1864,6 @@ mod tests {
                 &mut stream,
                 json!({"id": turns["id"], "result": {"data": []}}),
             );
-            let queue = next_request(&mut stream);
-            assert_eq!(queue["method"], "thread/queue/add");
-            respond(
-                &mut stream,
-                json!({"id": queue["id"], "result": {"queued": true}}),
-            );
             stream.shutdown(Shutdown::Both).ok();
         });
 
@@ -1883,6 +1877,11 @@ mod tests {
         let selected = verify_candidate(&candidate).unwrap();
         assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
         assert!(selected.self_check.contains("thread/read"));
+        assert!(!selected.self_check.contains("thread/queue/add"));
+        assert!(!selected
+            .capabilities
+            .iter()
+            .any(|capability| capability == "queue_wakeup"));
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

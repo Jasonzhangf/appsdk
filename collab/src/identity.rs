@@ -1906,18 +1906,43 @@ mod tests {
             1,
         );
 
-        // A listening socket that never answers and closes immediately, so
-        // the probe gets EOF rather than a classification. No daemon is ever
-        // started and no identity may be minted.
+        // A listening socket that accepts and then stays silent for longer
+        // than the probe's read timeout. This exercises the timeout path
+        // specifically: if the 500ms read timeout were removed, the load call
+        // would block until the authority drops and the assertions below would
+        // fail. `dropped` proves the authority was still silent when the
+        // timeout fired, so the result cannot be an EOF classification.
         let socket = state_root.join("server.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let closer = std::thread::spawn(move || {
-            let _ = listener.accept();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_thread = dropped.clone();
+        let authority = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            drop(stream);
+            dropped_thread.store(true, std::sync::atomic::Ordering::SeqCst);
         });
+
+        let started = std::time::Instant::now();
         let outcome = with_current_address("thread-intruder", "session-intruder", || {
             load_or_create_resolved_at(&host_paths, &scope, None, true)
         });
-        closer.join().unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            !dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "authority dropped before the probe returned, so the result may be EOF, not a timeout"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(500),
+            "probe returned in {elapsed:?}; the 500ms read timeout did not fire"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1400),
+            "probe blocked past the read timeout: {elapsed:?}"
+        );
+
+        authority.join().unwrap();
 
         let error = outcome.unwrap_err().to_string();
         assert!(error.starts_with("IDENTITY_REBIND_UNPROVEN"), "{error}");

@@ -3175,8 +3175,14 @@ fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() 
     assert_eq!(replayed.msgs[&msg_id].state, "pending");
 
     // An explicit recv after the close still returns the unread payload.
-    let recv = poll_messages_with_context(&server, "owner", None, None)
-        .expect("the preserved unread payload must still be delivered");
+    let recv = poll_messages_with_context(
+        &server,
+        "owner",
+        None,
+        None,
+        Some("recv-last-close-unread-preserved"),
+    )
+    .expect("the preserved unread payload must still be delivered");
     assert!(recv.ok, "{:?}", recv.error);
     assert_eq!(recv.data["count"], 1);
     assert_eq!(recv.data["messages"][0]["id"], msg_id.as_str());

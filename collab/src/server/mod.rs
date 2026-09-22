@@ -9718,6 +9718,7 @@ fn worker_status_summary_with_maps(
             "kind": transport.kind.as_str(),
             "endpoint": transport.endpoint,
             "namespace": transport.namespace,
+            "session_id": transport.session_id,
             "thread_id": transport.thread_id,
             "self_check": transport.self_check,
         })),
@@ -13521,6 +13522,20 @@ mod host_route_registry_tests {
         let (_, workers) = manager.dispatch_sync(Some(recipient_context.clone()), Req::Workers);
         assert!(workers.ok, "{workers:?}");
         assert_eq!(workers.data["count"], 2);
+        let recipient_worker = workers.data["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["id"] == recipient_id)
+            .expect("recipient worker");
+        assert_eq!(
+            recipient_worker["transport"]["session_id"], "session-thread-route-aware-recipient",
+            "live-closure worker-id target binding needs the target App Server session"
+        );
+        assert_eq!(
+            recipient_worker["transport"]["thread_id"],
+            "thread-route-aware-recipient"
+        );
 
         let (_, task_registration) = manager.dispatch_sync(
             Some(sender_context.clone()),

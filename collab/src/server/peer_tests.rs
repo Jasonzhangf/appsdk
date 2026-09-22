@@ -6,6 +6,201 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+#[test]
+fn handoff_to_unregistered_recipient_fails_typed_before_recording() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "operator".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        "candidate awaits routing".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok);
+    let error = response.error.unwrap_or_default();
+    assert!(
+        error.contains("HANDOFF_TARGET_UNRESOLVED") && error.contains("operator"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(response.data["error_code"], "HANDOFF_TARGET_UNRESOLVED");
+    assert_eq!(response.data["unresolved"]["kind"], "recipient");
+    assert_eq!(response.data["unresolved"]["value"], "operator");
+    assert_eq!(response.data["reason"], "recipient_not_registered");
+    assert_eq!(response.data["recorded"], false);
+    assert!(
+        server.state.lock().unwrap().msgs.is_empty(),
+        "an unresolved handoff target must not create a durable message"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_missing_worktree_path_fails_typed_before_recording() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let missing = root.join("playground/does-not-exist").display().to_string();
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        format!("preflight implementation lives at {missing}"),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok);
+    let error = response.error.unwrap_or_default();
+    assert!(
+        error.contains("HANDOFF_TARGET_UNRESOLVED") && error.contains("does-not-exist"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(response.data["unresolved"]["kind"], "worktree");
+    assert_eq!(response.data["reason"], "worktree_path_missing");
+    assert_eq!(response.data["recorded"], false);
+    assert!(server.state.lock().unwrap().msgs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_registered_recipient_and_existing_path_succeeds() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let worktree = root.join("playground/handoff-live");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        format!("preflight implementation lives at {}", worktree.display()),
+        None,
+        "immediate".into(),
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    assert!(response.data["msg_id"].is_string());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_relative_missing_worktree_fails_typed() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        "preflight implementation lives at playground/gone-relative".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok, "{response:?}");
+    let error = response.error.unwrap_or_default();
+    assert!(
+        error.contains("HANDOFF_TARGET_UNRESOLVED") && error.contains("gone-relative"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(response.data["reason"], "worktree_path_missing");
+    assert_eq!(response.data["recorded"], false);
+    assert!(server.state.lock().unwrap().msgs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_absolute_missing_worktree_outside_playground_fails_typed() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let missing = "/tmp/m1-tailscale-replay-20260908T121151Z/worktree";
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        format!("preflight implementation at ({missing}) is gone"),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok, "{response:?}");
+    let error = response.error.unwrap_or_default();
+    assert!(
+        error.contains("HANDOFF_TARGET_UNRESOLVED") && error.contains("m1-tailscale-replay"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(response.data["reason"], "worktree_path_missing");
+    assert!(server.state.lock().unwrap().msgs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_unrelated_playground_path_still_delivers() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("unrelated path mention".into()),
+        "see /Volumes/extension/code/other-project/playground/other-worktree for reference".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_dedup_resend_survives_a_path_that_disappeared_after_delivery() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let worktree = root.join("playground/handoff-dedup");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let body = format!("preflight implementation lives at {}", worktree.display());
+    let first = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        body.clone(),
+        None,
+        "immediate".into(),
+    );
+    assert!(first.ok, "{first:?}");
+    let msg_id = first.data["msg_id"].as_str().unwrap().to_owned();
+    std::fs::remove_dir_all(&worktree).unwrap();
+    let resend = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("preflight candidate handoff".into()),
+        body,
+        None,
+        "immediate".into(),
+    );
+    assert_eq!(resend.data["deduplicated"], true);
+    assert_eq!(resend.data["msg_id"], msg_id.as_str());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 pub(crate) fn test_server() -> (Server, PathBuf) {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);

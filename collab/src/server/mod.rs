@@ -6357,6 +6357,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "responsibilities": [
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "Split work into independent scopes; assign tasks and resources; keep useful worker capacity loaded.",
+                "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
                 "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
                 "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
                 "Continue under the standing goal without waiting for user input; hold wakes only for a true external approval or dependency gate."
@@ -6373,7 +6374,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
             "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show` and keep eligible workers loaded.",
+            "next_action": "Run `appsdk longhorizon show` and keep eligible workers loaded; delivered or reviewed work triggers the next review/integration/cleanup/dispatch step, not an endpoint.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }

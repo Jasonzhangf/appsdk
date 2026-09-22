@@ -4294,19 +4294,17 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "peer", "task", "feature").ok);
-    for status in ["verifying", "reviewed"] {
-        assert!(
-            handle_task_update(
-                &server,
-                "peer".into(),
-                "token-peer".into(),
-                "task".into(),
-                Some(status.into()),
-                Some(format!("continue {status}")),
-            )
-            .ok
-        );
-    }
+    assert!(
+        handle_task_update(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "task".into(),
+            Some("verifying".into()),
+            Some("continue verifying".into()),
+        )
+        .ok
+    );
     let delivered = handle_task_deliver(
         &server,
         "peer".into(),
@@ -6953,19 +6951,76 @@ fn removed_role_and_dispatch_commands_fail_fast() {
 }
 
 #[test]
-fn lifecycle_cannot_bypass_review_or_delivery() {
+fn lifecycle_cannot_bypass_delivery_or_review() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
     assert!(create_task(&server, "peer", "task", "feature").ok);
-    let early_delivery = handle_task_deliver(
+    assert!(create_task(&server, "peer", "blocked-task", "blocked-feature").ok);
+    assert!(create_task(&server, "peer", "working-task", "working-feature").ok);
+    let early_review = handle_task_review(
         &server,
         "peer".into(),
         "token-peer".into(),
         "task".into(),
-        Some("not reviewed".into()),
+        true,
+        false,
+        "not delivered".into(),
+    );
+    assert!(!early_review.ok);
+    assert_eq!(
+        early_review.error.as_deref(),
+        Some("task task must be delivered before review (current: working)")
+    );
+    let missing_evidence_delivery = handle_task_deliver(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "working-task".into(),
+        None,
         Some("/tmp/worktree".into()),
     );
-    assert!(!early_delivery.ok);
+    assert_eq!(
+        missing_evidence_delivery.error.as_deref(),
+        Some("task deliver requires non-empty --evidence")
+    );
+    let working_delivery = handle_task_deliver(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "working-task".into(),
+        Some("working task candidate verified".into()),
+        Some("/tmp/worktree".into()),
+    );
+    assert!(working_delivery.ok, "{working_delivery:?}");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["working-task"].status,
+        "delivered"
+    );
+    assert!(
+        handle_task_update(
+            &server,
+            "peer".into(),
+            "token-peer".into(),
+            "blocked-task".into(),
+            Some("blocked".into()),
+            None,
+        )
+        .ok
+    );
+    let blocked_delivery = handle_task_deliver(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "blocked-task".into(),
+        Some("blocked task candidate verified".into()),
+        Some("/tmp/worktree".into()),
+    );
+    assert_eq!(
+        blocked_delivery.error.as_deref(),
+        Some(
+            "task blocked-task must be owned and working, verifying, reviewed, or rework before delivery (current: blocked)"
+        )
+    );
     assert!(
         handle_task_update(
             &server,
@@ -6973,17 +7028,6 @@ fn lifecycle_cannot_bypass_review_or_delivery() {
             "token-peer".into(),
             "task".into(),
             Some("verifying".into()),
-            None,
-        )
-        .ok
-    );
-    assert!(
-        handle_task_update(
-            &server,
-            "peer".into(),
-            "token-peer".into(),
-            "task".into(),
-            Some("reviewed".into()),
             None,
         )
         .ok
@@ -7002,7 +7046,30 @@ fn lifecycle_cannot_bypass_review_or_delivery() {
     );
     assert_eq!(
         server.state.lock().unwrap().tasks["task"].status,
-        "reviewed"
+        "verifying"
+    );
+    let delivered = handle_task_deliver(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "task".into(),
+        Some("candidate verified".into()),
+        Some("/tmp/worktree".into()),
+    );
+    assert!(delivered.ok, "{delivered:?}");
+    let accepted = handle_task_review(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(accepted.ok, "{accepted:?}");
+    assert_eq!(
+        server.state.lock().unwrap().tasks["task"].status,
+        "accepted"
     );
     std::fs::remove_dir_all(root).ok();
 }

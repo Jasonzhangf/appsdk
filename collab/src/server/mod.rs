@@ -497,6 +497,10 @@ fn task_transition_allowed(current: &str, next: &str) -> bool {
         )
 }
 
+fn task_delivery_allowed(status: &str) -> bool {
+    matches!(status, "working" | "verifying" | "reviewed" | "rework")
+}
+
 pub struct Server {
     pub config: crate::config::Config,
     pub root: PathBuf,
@@ -8785,9 +8789,9 @@ fn handle_task_deliver(
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
-    if task.owner != worker_id || task.status != "reviewed" {
+    if task.owner != worker_id || !task_delivery_allowed(&task.status) {
         return Resp::err(format!(
-            "task {} must be reviewed by its owner before delivery (current: {})",
+            "task {} must be owned and working, verifying, reviewed, or rework before delivery (current: {})",
             task_id, task.status
         ));
     }

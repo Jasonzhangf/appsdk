@@ -538,6 +538,11 @@ pub fn immediate_notify(
         {
             false
         }
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            false
+        }
         // `thread/resume` is not universal across App Server builds; a method
         // that does not exist leaves the existing status-based path intact.
         Err(AdapterError::CapabilityUnavailable { .. }) => false,
@@ -616,6 +621,10 @@ pub fn immediate_notify(
 fn is_thread_not_loaded_error(operation: &str, detail: &str, thread_id: &str) -> bool {
     operation == "rpc"
         && (detail == "thread not loaded" || detail == format!("thread not loaded: {thread_id}"))
+}
+
+fn is_thread_rollout_missing_error(operation: &str, detail: &str, thread_id: &str) -> bool {
+    operation == "rpc" && detail == format!("no rollout found for thread id {thread_id}")
 }
 
 /// The App Server holds one writer per thread.  A second client is refused
@@ -2641,6 +2650,58 @@ mod tests {
     }
 
     #[test]
+    fn immediate_notify_materializes_missing_rollout_through_turn_start() {
+        let socket = temp_socket("notify-missing-rollout-start");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "missingRollout");
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            assert_eq!(start["params"]["threadId"], "thread-1");
+            assert_eq!(start["params"]["clientUserMessageId"], "message-rollout");
+            respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {"id": "turn-materialized", "status": "inProgress", "items": []}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let receipt = immediate_notify(
+            &selected_transport(&socket),
+            Some("sender-thread"),
+            "notify body",
+            "message-rollout",
+        )
+        .unwrap();
+        assert_eq!(receipt["turn"]["id"], "turn-materialized");
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
     fn immediate_notify_refuses_when_resumed_thread_still_reports_not_loaded() {
         let socket = temp_socket("notify-read-not-loaded-start");
         let Some(listener) = bind_test_socket(&socket) else {
@@ -3163,6 +3224,16 @@ mod tests {
                 json!({
                     "id": request["id"],
                     "error": {"code": -32600, "message": "thread not found"}
+                }),
+            ),
+            "missingRollout" => respond(
+                stream,
+                json!({
+                    "id": request["id"],
+                    "error": {
+                        "code": -32602,
+                        "message": format!("no rollout found for thread id {}", request["params"]["threadId"].as_str().unwrap())
+                    }
                 }),
             ),
             other => panic!("unsupported recipient thread outcome {other}"),

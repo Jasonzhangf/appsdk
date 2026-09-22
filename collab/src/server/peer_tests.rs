@@ -9341,6 +9341,14 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
         context.data["next_actions"],
         serde_json::json!(["run `appsdk longhorizon show` and keep eligible workers loaded"])
     );
+    assert!(context.data["role_brief"]["responsibilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.")));
+    assert_eq!(
+        context.data["role_brief"]["next_action"],
+        "Run `appsdk longhorizon show` and keep eligible workers loaded; delivered or reviewed work triggers the next review/integration/cleanup/dispatch step, not an endpoint."
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

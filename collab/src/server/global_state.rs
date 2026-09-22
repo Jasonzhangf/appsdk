@@ -651,6 +651,13 @@ pub struct MigrationCommitEvidence {
     pub source_project_id: String,
     pub target_epoch: u64,
     pub source_snapshot_digest: String,
+    /// Digest of the immutable archive that carries the source stream.  The
+    /// receipt owns the authoritative value; this copy is only a projection
+    /// input, so a record-only edit cannot satisfy the fence.  `default` keeps
+    /// pre-fence journal records deserializable so the gate can refuse them
+    /// instead of aborting journal replay.
+    #[serde(default)]
+    pub archive_digest: String,
     pub operation_id: OperationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<BindingId>,
@@ -675,6 +682,7 @@ impl MigrationCommitEvidence {
             source_project_id: source_project_id.into(),
             target_epoch,
             source_snapshot_digest: source_snapshot_digest.into(),
+            archive_digest: String::new(),
             operation_id,
             binding_id,
             fencing_token,
@@ -682,6 +690,13 @@ impl MigrationCommitEvidence {
         };
         evidence.validate()?;
         Ok(evidence)
+    }
+
+    /// Set the projected archive digest.  The value is only a projection of the
+    /// receipt-side truth; the migration gate compares it against the receipt.
+    pub fn with_archive_digest(mut self, archive_digest: impl Into<String>) -> Self {
+        self.archive_digest = archive_digest.into();
+        self
     }
 
     pub fn validate(&self) -> Result<(), StateError> {
@@ -725,6 +740,11 @@ pub struct MigrationWriterReceipt {
     pub source_epoch: Option<u64>,
     pub target_epoch: u64,
     pub source_snapshot_digest: String,
+    /// Authoritative digest of the immutable migration archive.  The receipt
+    /// owns this value; commit evidence only projects it.  `default` keeps
+    /// receipts written before this field existed deserializable.
+    #[serde(default)]
+    pub archive_digest: String,
     pub writer_id: AgentId,
     pub operation_id: OperationId,
     pub fencing_token: u64,
@@ -752,6 +772,7 @@ impl MigrationWriterReceipt {
             source_epoch,
             target_epoch,
             source_snapshot_digest: source_snapshot_digest.into(),
+            archive_digest: String::new(),
             writer_id,
             operation_id,
             fencing_token,
@@ -760,6 +781,12 @@ impl MigrationWriterReceipt {
         };
         receipt.validate()?;
         Ok(receipt)
+    }
+
+    /// Bind the authoritative archive digest this writer committed.
+    pub fn with_archive_digest(mut self, archive_digest: impl Into<String>) -> Self {
+        self.archive_digest = archive_digest.into();
+        self
     }
 
     pub fn validate(&self) -> Result<(), StateError> {
@@ -1401,6 +1428,7 @@ impl GlobalState {
             &writer.migration_id,
             &writer.source_project_id,
             &writer.source_snapshot_digest,
+            &writer.archive_digest,
             writer.target_epoch,
             &writer.operation_id,
             None,
@@ -1415,6 +1443,7 @@ impl GlobalState {
                 &receipt.migration_id,
                 &receipt.source_project_id,
                 &receipt.source_snapshot_digest,
+                &writer.archive_digest,
                 receipt.target_epoch,
                 &receipt.operation_id,
                 Some(&receipt.binding_id),
@@ -1429,6 +1458,7 @@ impl GlobalState {
                 &receipt.migration_id,
                 &receipt.source_project_id,
                 &receipt.source_snapshot_digest,
+                &writer.archive_digest,
                 receipt.target_epoch,
                 &receipt.operation_id,
                 Some(&receipt.binding_id),
@@ -1501,6 +1531,7 @@ impl GlobalState {
         migration_id: &str,
         source_project_id: &str,
         source_snapshot_digest: &str,
+        receipt_archive_digest: &str,
         target_epoch: u64,
         operation_id: &OperationId,
         binding_id: Option<&BindingId>,
@@ -1513,6 +1544,23 @@ impl GlobalState {
                 operation_id
             )));
         };
+
+        // The receipt owns the archive truth; evidence only projects it.  A
+        // record-only edit therefore cannot satisfy this binding, and a
+        // pre-fence receipt (empty digest, deserialized via `default`) is
+        // refused explicitly instead of silently accepted.
+        if receipt_archive_digest.trim().is_empty() {
+            return Err(StateError::Invariant(format!(
+                "{kind} receipt {} carries no authoritative archive digest",
+                operation_id
+            )));
+        }
+        if evidence.archive_digest != receipt_archive_digest {
+            return Err(StateError::Invariant(format!(
+                "{kind} receipt {} evidence archive digest {} does not match the receipt archive digest {}",
+                operation_id, evidence.archive_digest, receipt_archive_digest
+            )));
+        }
 
         if evidence.migration_id != migration_id {
             return Err(StateError::Invariant(format!(
@@ -3844,6 +3892,7 @@ mod tests {
             1,
             1,
         )
+        .map(|receipt| receipt.with_archive_digest("sha256:archive"))
         .expect("migration writer receipt")
     }
 
@@ -3862,6 +3911,7 @@ mod tests {
             7,
             committed_revision,
         )
+        .map(|evidence| evidence.with_archive_digest("sha256:archive"))
         .expect("migration commit evidence")
     }
 
@@ -4210,6 +4260,97 @@ mod tests {
         assert!(matches!(
             receipts.validate(),
             Err(StateError::Invariant(reason)) if reason.contains("different source epoch")
+        ));
+    }
+
+    /// The receipt, not the record, owns the archive digest.  A record-only
+    /// edit (the exact attack the reviewer reproduced) must be refused.
+    #[test]
+    fn migration_commit_fence_rejects_a_record_only_archive_digest_edit() {
+        let mut state = GlobalState::new(2).unwrap();
+        state.set_counters(9, 9);
+        state.migration_commit_evidence.insert(
+            "writer-op-1".into(),
+            migration_commit("writer-op-1", None, 1)
+                .with_archive_digest("sha256:attacker-supplied"),
+        );
+        let receipts = MigrationReceiptSet {
+            writer: Some(migration_writer(2)),
+            ..MigrationReceiptSet::default()
+        };
+
+        assert!(matches!(
+            state.validate_migration_receipts(&receipts),
+            Err(StateError::Invariant(reason))
+                if reason.contains("evidence archive digest sha256:attacker-supplied does not match the receipt archive digest sha256:archive")
+        ));
+    }
+
+    /// A pre-fence record deserialized through `#[serde(default)]` has an empty
+    /// archive digest and must be refused by the gate, not accepted.
+    #[test]
+    fn migration_commit_fence_rejects_an_unfenced_legacy_record_at_the_gate() {
+        let mut state = GlobalState::new(2).unwrap();
+        state.set_counters(9, 9);
+        state.migration_commit_evidence.insert(
+            "writer-op-1".into(),
+            MigrationCommitEvidence::new(
+                "migration-1",
+                "project-1",
+                2,
+                "sha256:source",
+                OperationId::new("writer-op-1").expect("operation id"),
+                None,
+                7,
+                1,
+            )
+            .expect("legacy unfenced evidence deserializes"),
+        );
+        let receipts = MigrationReceiptSet {
+            writer: Some(migration_writer(2)),
+            ..MigrationReceiptSet::default()
+        };
+
+        assert!(matches!(
+            state.validate_migration_receipts(&receipts),
+            Err(StateError::Invariant(reason))
+                if reason.contains("evidence archive digest  does not match the receipt archive digest sha256:archive")
+        ));
+    }
+
+    /// A receipt that carries no authoritative digest must be refused before
+    /// any evidence comparison, so the fence fails closed on both sides.
+    #[test]
+    fn migration_commit_fence_rejects_a_receipt_without_an_archive_digest() {
+        let mut state = GlobalState::new(2).unwrap();
+        state.set_counters(9, 9);
+        state.migration_commit_evidence.insert(
+            "writer-op-1".into(),
+            migration_commit("writer-op-1", None, 1),
+        );
+        let receipts = MigrationReceiptSet {
+            writer: Some(
+                MigrationWriterReceipt::new(
+                    "migration-1",
+                    "project-1",
+                    None,
+                    2,
+                    "sha256:source",
+                    AgentId::new("writer-1").unwrap(),
+                    OperationId::new("writer-op-1").unwrap(),
+                    7,
+                    1,
+                    1,
+                )
+                .expect("legacy receipt deserializes"),
+            ),
+            ..MigrationReceiptSet::default()
+        };
+
+        assert!(matches!(
+            state.validate_migration_receipts(&receipts),
+            Err(StateError::Invariant(reason))
+                if reason.contains("carries no authoritative archive digest")
         ));
     }
 }

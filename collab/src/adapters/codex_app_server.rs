@@ -1726,13 +1726,30 @@ mod tests {
                     }
                 }),
             );
-            for _ in 0..5 {
-                let probe = next_request(&mut stream);
-                respond(
-                    &mut stream,
-                    json!({"id": probe["id"], "result": {"data": []}}),
-                );
-            }
+            let items = next_request(&mut stream);
+            assert_eq!(items["method"], "thread/items/list");
+            respond(
+                &mut stream,
+                json!({"id": items["id"], "result": {"data": []}}),
+            );
+            let turn_start = next_request(&mut stream);
+            assert_eq!(turn_start["method"], "turn/start");
+            respond(
+                &mut stream,
+                json!({"id": turn_start["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            );
+            let steer = next_request(&mut stream);
+            assert_eq!(steer["method"], "turn/steer");
+            respond(
+                &mut stream,
+                json!({"id": steer["id"], "error": {"code": -32600, "message": "invalid params"}}),
+            );
+            let turns = next_request(&mut stream);
+            assert_eq!(turns["method"], "thread/turns/list");
+            respond(
+                &mut stream,
+                json!({"id": turns["id"], "result": {"data": []}}),
+            );
             stream.shutdown(Shutdown::Both).ok();
         });
 

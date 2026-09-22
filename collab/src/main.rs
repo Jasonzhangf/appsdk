@@ -366,6 +366,15 @@ enum TaskCmd {
         #[arg(long)]
         next: Option<String>,
     },
+    /// Complete the cleanup obligation left by a forced close.
+    ///
+    /// Verifies and removes the task's declared worktree/branch under the same
+    /// contract as a normal close, refuses while another non-closed task
+    /// references the same worktree or branch, replaces the unverified receipt
+    /// with verified evidence, stops the owner's automatic lease once its last
+    /// responsibility is verified, and releases dependent waiters exactly once.
+    /// A retry resumes the remaining release instead of double-releasing.
+    FinalizeCleanup { id: String },
     /// Close a merged task and clean up its declared worktree/branch.
     /// With --force the live master may close any task. With no live master,
     /// the owner may close its task, or a registered peer may close an
@@ -2780,6 +2789,11 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     task_id: id,
                     force,
                     reason,
+                },
+                TaskCmd::FinalizeCleanup { id } => Req::TaskFinalizeCleanup {
+                    worker_id: worker_id.clone(),
+                    token: token.clone(),
+                    task_id: id,
                 },
                 TaskCmd::Dispatch => Req::TaskDispatch {
                     worker_id: worker_id.clone(),

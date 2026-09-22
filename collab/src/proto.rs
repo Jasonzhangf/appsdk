@@ -471,6 +471,11 @@ pub enum Req {
         force: bool,
         reason: Option<String>,
     },
+    TaskFinalizeCleanup {
+        worker_id: String,
+        token: String,
+        task_id: String,
+    },
     TaskDispatch {
         worker_id: String,
         token: String,

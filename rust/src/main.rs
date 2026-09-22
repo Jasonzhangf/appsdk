@@ -20547,6 +20547,35 @@ fn goal_subscription_is_terminal(status: &str) -> bool {
     matches!(status, "consumed" | "expired" | "cancelled")
 }
 
+// Collab leaves a skipped goal deadline `armed` with its one-shot trigger in
+// the past, so the retained remote record alone cannot prove the subscription
+// is still ahead. Every `deadline-*` status reason is written on the due path
+// (busy-skipped or readiness-unavailable), which makes it due evidence too.
+fn goal_deadline_trigger_is_due(remote_record: &Value, now_ms: i64) -> bool {
+    if remote_record["status"].as_str() != Some("armed") {
+        return false;
+    }
+    if remote_record["status_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.starts_with("deadline-"))
+    {
+        return true;
+    }
+    let fired_count = remote_record["fired_count"].as_u64().unwrap_or(0);
+    let next_trigger = remote_record["trigger_times_ms"]
+        .as_array()
+        .and_then(|times| {
+            usize::try_from(fired_count)
+                .ok()
+                .and_then(|index| times.get(index))
+        })
+        .and_then(Value::as_i64)
+        .or_else(|| remote_record["trigger_ms"].as_i64());
+    // A goal deadline always carries its trigger, so a record without one is
+    // not evidence that the retained deadline is already due.
+    next_trigger.is_some_and(|trigger| trigger <= now_ms)
+}
+
 fn goal_fail(format_json: bool, error: &str, record: Option<&Value>) -> ! {
     eprintln!("{}", error);
     if format_json {
@@ -21100,6 +21129,7 @@ where
                         }
                     }
                 }
+                let mut due_deadline_rearm: Option<String> = None;
                 if matches!(
                     existing["desired"].as_str(),
                     Some("subscribed" | "recovery_required")
@@ -21116,7 +21146,21 @@ where
                             remote_record,
                             matched_subject,
                         ))) => {
-                            if existing["goal_id"].as_str() == Some(goal_id.as_str()) {
+                            if existing["goal_id"].as_str() != Some(goal_id.as_str()) {
+                                drop(_goal_lock);
+                                goal_fail(
+                                    format_json,
+                                    "GOAL_ALREADY_SUBSCRIBED: cancel the existing goal before subscribing another",
+                                    Some(existing),
+                                );
+                            }
+                            if goal_deadline_trigger_is_due(&remote_record, goal_now_ms()) {
+                                // Retaining an already-due one-shot deadline
+                                // would report `subscribed` while the patrol
+                                // loop stays stopped. Cancel it and fall
+                                // through to arm a fresh future trigger.
+                                due_deadline_rearm = Some(subscription_id);
+                            } else {
                                 let mut response = existing.clone();
                                 let retained_subject =
                                     existing["subject"].as_str().map(str::to_owned);
@@ -21161,12 +21205,6 @@ where
                                 }
                                 return;
                             }
-                            drop(_goal_lock);
-                            goal_fail(
-                                format_json,
-                                "GOAL_ALREADY_SUBSCRIBED: cancel the existing goal before subscribing another",
-                                Some(existing),
-                            );
                         }
                         Ok(None) if recovering => {}
                         Ok(None) => {
@@ -21210,6 +21248,25 @@ where
                             drop(_goal_lock);
                             goal_fail(format_json, &error, Some(&recovery));
                         }
+                    }
+                }
+                if let Some(subscription_id) = due_deadline_rearm {
+                    if let Err(error) = goal_cancel_subscription(root, &subscription_id) {
+                        let mut recovery = (*existing).clone();
+                        goal_mark_recovery_required(
+                            &mut recovery,
+                            format!("GOAL_DUE_DEADLINE_REARM_CANCEL_FAILED:{}", error),
+                        );
+                        if let Err(write_error) = goal_record_write(root, &recovery) {
+                            drop(_goal_lock);
+                            goal_fail(format_json, &write_error, Some(&recovery));
+                        }
+                        drop(_goal_lock);
+                        goal_fail(
+                            format_json,
+                            recovery["error"].as_str().unwrap(),
+                            Some(&recovery),
+                        );
                     }
                 }
             }

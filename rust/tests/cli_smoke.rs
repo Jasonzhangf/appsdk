@@ -21240,6 +21240,152 @@ fn goal_now_ms_for_test() -> i64 {
         .as_millis() as i64
 }
 
+// A goal deadline that Collab skipped while the master was busy stays `armed`
+// with its one-shot trigger in the past, so `goal subscribe` must not report
+// that already-due deadline as the retained, idempotent subscription: the
+// patrol loop would silently stop while the local record still reads
+// `subscribed`. The fake Collab answers `notify status` from the same record
+// the daemon exposes, and drops cancelled subscriptions out of that view like
+// the daemon reducer does.
+#[test]
+fn goal_subscribe_rearms_a_due_one_shot_deadline_instead_of_retaining_it() {
+    let root = temp_root("goal-due-retain");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("long-task.md"), "# Sample Long-Horizon Goal\n").unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+past="${GOAL_FAKE_PAST_MS:?}"
+future="${GOAL_FAKE_FUTURE_MS:?}"
+subscription() {
+  printf '{"id":"sub-retained","status":"armed","event":"deadline","subject":"goal:long-task.md","trigger_times_ms":[%s],"fired_count":0,"status_reason":"%s","expires_ms":9999999999999}' "$1" "$2"
+}
+case "$1 $2" in
+  "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+  "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
+  "context "*|"context") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "notify status")
+    if [ -f cancelled.marker ]; then
+      printf '%s\n' '{"subscriptions":[]}'
+    elif [ "${GOAL_FAKE_DUE:-}" = "1" ]; then
+      printf '{"subscriptions":[%s]}\n' "$(subscription "$past" deadline-master-busy-skipped)"
+    else
+      printf '{"subscriptions":[%s]}\n' "$(subscription "$future" "")"
+    fi
+    ;;
+  "notify unsubscribe")
+    printf '%s\n' "$*" >> unsubscribe-calls
+    : > cancelled.marker
+    printf '%s\n' '{"subscription_id":"sub-retained","status":"cancelled"}'
+    ;;
+  "notify subscribe")
+    printf '%s\n' "$*" >> subscribe-calls
+    count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
+    printf '%s' "$count" > subscribe-count
+    at=""
+    previous=""
+    for argument in "$@"; do
+      if [ "$previous" = "--at-ms" ]; then
+        at="$argument"
+      fi
+      previous="$argument"
+    done
+    printf '{"subscription_id":"sub-arm-%s","status":"armed","event":"deadline","subject":"goal:long-task.md","trigger_times_ms":[%s],"fired_count":0}\n' "$count" "$at"
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let subscribed = |due: bool| {
+        Command::new(binary())
+            .args([
+                "goal",
+                "subscribe",
+                "--goal",
+                "long-task.md",
+                "--interval",
+                "5m",
+                "--json",
+            ])
+            .current_dir(&root)
+            .env("PATH", &fake_bin)
+            .env(
+                "GOAL_FAKE_PAST_MS",
+                (goal_now_ms_for_test() - 600_000).to_string(),
+            )
+            .env(
+                "GOAL_FAKE_FUTURE_MS",
+                (goal_now_ms_for_test() + 600_000).to_string(),
+            )
+            .env("GOAL_FAKE_DUE", if due { "1" } else { "0" })
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap()
+    };
+
+    let first = subscribed(false);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_payload: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_payload["subscription_id"], "sub-arm-1");
+
+    // Condition 2: a one-shot deadline that is still in the future keeps the
+    // existing idempotent retain behavior and does not reach Collab again.
+    let retained = subscribed(false);
+    assert!(
+        retained.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retained.stderr)
+    );
+    let retained_payload: Value = serde_json::from_slice(&retained.stdout).unwrap();
+    assert_eq!(retained_payload["subscription_id"], "sub-retained");
+    assert_eq!(retained_payload["idempotent"], true);
+    let subscribe_calls = fs::read_to_string(root.join("subscribe-calls")).unwrap();
+    assert_eq!(subscribe_calls.lines().count(), 1);
+    assert!(!root.join("unsubscribe-calls").exists());
+
+    // Condition 1: once the retained one-shot deadline is due, the subscribe
+    // must cancel it and arm a fresh future trigger instead of returning it.
+    let started = goal_now_ms_for_test();
+    let rearmed = subscribed(true);
+    assert!(
+        rearmed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rearmed.stderr)
+    );
+    let rearmed_payload: Value = serde_json::from_slice(&rearmed.stdout).unwrap();
+    assert_eq!(rearmed_payload["subscription_id"], "sub-arm-2");
+    assert_ne!(rearmed_payload["idempotent"], true);
+    assert_eq!(
+        rearmed_payload["collab_subscription"]["subscription_id"],
+        "sub-arm-2"
+    );
+    let rearmed_trigger = rearmed_payload["collab_subscription"]["trigger_times_ms"][0]
+        .as_i64()
+        .expect("the re-armed subscription must carry a trigger");
+    assert!(
+        rearmed_trigger > started,
+        "the re-armed trigger must be in the future: trigger={rearmed_trigger} started={started}"
+    );
+    assert!(
+        fs::read_to_string(root.join("unsubscribe-calls"))
+            .unwrap()
+            .contains("sub-retained"),
+        "the due retained subscription must be cancelled before re-arming"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn goal_subscribe_failure_does_not_report_active() {
     let root = temp_root("goal-sub-fail");

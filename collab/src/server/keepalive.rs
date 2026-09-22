@@ -54,6 +54,15 @@ pub(crate) fn actionable(status: &str) -> bool {
     )
 }
 
+/// A task that has not reached a terminal lifecycle state still owns its
+/// worktree, branch, and delivery obligation, so its owner cannot be retired.
+/// This is deliberately wider than `actionable`: a blocked, waiting, or
+/// already-delivered task raises no keepalive nudge, but it is still unfinished
+/// responsibility that must be resolved before worker close.
+pub(crate) fn unfinished(status: &str) -> bool {
+    !matches!(status, "closed" | "cancelled")
+}
+
 fn observed_label(agent: AgentState) -> &'static str {
     match agent {
         AgentState::Waiting => "idle",

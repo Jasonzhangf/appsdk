@@ -3633,6 +3633,35 @@ fn registered_peer_default_events(state: &State, now: i64) -> Vec<Event> {
         .collect()
 }
 
+/// The closing owner's last unfinished task cancels its default direct-message
+/// lease so a retired peer stops receiving automatic wakes. Cancellation is
+/// control-plane only: it must not supersede already-delivered mailbox
+/// messages, because an explicit `recv` still owes the unread payload. A
+/// later explicit `notify subscribe --event direct-message` rearms delivery.
+fn default_lease_cancel_on_last_close(
+    state: &State,
+    owner: &str,
+    closed_task_id: &str,
+    now: i64,
+) -> Option<Event> {
+    let other_unfinished = state.tasks.values().any(|task| {
+        task.id != closed_task_id && task.owner == owner && keepalive::unfinished(&task.status)
+    });
+    if other_unfinished {
+        return None;
+    }
+    let subscription_id = default_direct_message_id(owner);
+    let subscription = state.notification_subscriptions.get(&subscription_id)?;
+    if subscription.status != "armed" {
+        return None;
+    }
+    Some(Event::NotificationStatus {
+        subscription_id,
+        status: "cancelled".into(),
+        updated_ms: now,
+    })
+}
+
 fn restore_registered_peer_default_leases(server: &Server) {
     let events = {
         let state = server.state.lock().unwrap();
@@ -7500,7 +7529,7 @@ fn handle_worker_close(
     let owned: Vec<String> = state
         .tasks
         .values()
-        .filter(|task| task.owner == target_id && keepalive::actionable(&task.status))
+        .filter(|task| task.owner == target_id && keepalive::unfinished(&task.status))
         .map(|task| task.id.clone())
         .collect();
     if !owned.is_empty() {
@@ -9302,6 +9331,11 @@ fn handle_task_close(
                 });
             }
         }
+    }
+    if let Some(cancel) =
+        default_lease_cancel_on_last_close(&st, &closed.owner, &closed.id, closed.updated_ms)
+    {
+        close_events.push(cancel);
     }
     server.commit_locked(&mut st, &close_events);
 

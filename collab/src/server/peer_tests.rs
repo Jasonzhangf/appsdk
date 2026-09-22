@@ -2786,6 +2786,230 @@ fn worker_close_is_master_only_audited_and_refuses_to_strand_tasks() {
 }
 
 #[test]
+fn worker_close_refuses_every_unfinished_task_status() {
+    let (server, root) = test_server();
+    register(&server, "master", "%master");
+    register(&server, "peer-b", "%peer-b");
+    assert!(
+        super::handle_master_promote(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "user approved master".into(),
+        )
+        .ok
+    );
+    server.commit(&[Event::WorkerSnapshotCaptured {
+        worker_id: "peer-b".into(),
+        thread_id: "thread-peer-b".into(),
+        captured_ms: now_ms(),
+    }]);
+
+    // A task that raised no keepalive nudge still owns a worktree, branch, and
+    // delivery obligation, so worker retirement must refuse it.
+    for status in ["blocked", "waiting", "delivered", "accepted", "merged"] {
+        server.commit(&[Event::TaskCreated {
+            task: TaskRec {
+                id: format!("task-{status}"),
+                owner: "peer-b".into(),
+                created_by: "master".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p2".into(),
+                status: status.into(),
+                next_step: None,
+                wait: None,
+                created_ms: now_ms(),
+                updated_ms: now_ms(),
+            },
+        }]);
+        let refused = super::handle_worker_close(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "peer-b".into(),
+            format!("retire while {status}"),
+        );
+        assert!(
+            !refused.ok,
+            "worker close must refuse an unfinished {status} task: {:?}",
+            refused.data
+        );
+        assert!(
+            refused
+                .error
+                .unwrap_or_default()
+                .contains(&format!("task-{status}")),
+            "the refusal must name the blocking task for {status}"
+        );
+        server.commit(&[Event::TaskUpdated {
+            task: TaskRec {
+                id: format!("task-{status}"),
+                owner: "peer-b".into(),
+                created_by: "master".into(),
+                feature_id: None,
+                worktree_path: None,
+                branch: None,
+                base_commit: None,
+                priority: "p2".into(),
+                status: "closed".into(),
+                next_step: None,
+                wait: None,
+                created_ms: now_ms(),
+                updated_ms: now_ms(),
+            },
+        }]);
+    }
+
+    let closed = super::handle_worker_close(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "peer-b".into(),
+        "no unfinished task remains".into(),
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() {
+    let (server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "owner", "%owner");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    let sent = handle_send(
+        &server,
+        "sender".into(),
+        "owner".into(),
+        "notify".into(),
+        Some("unread while busy".into()),
+        "payload that must survive the close".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(sent.ok, "{}", sent.error.clone().unwrap_or_default());
+    let msg_id = sent.data["msg_id"].as_str().unwrap().to_string();
+
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                Some(format!("continue {status}")),
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate verified".into()),
+            Some("/tmp/lifecycle-r1-worktree".into()),
+        )
+        .ok
+    );
+    assert!(
+        handle_task_review(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            true,
+            false,
+            "review pass".into(),
+        )
+        .ok
+    );
+    initialize_main(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            current_head(&root),
+            "main verified".into(),
+        )
+        .ok
+    );
+
+    let closed = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    assert_eq!(
+        closed.data["notification"],
+        "subscribed resource waiters only"
+    );
+
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.notification_subscriptions["sub-default-direct-message-owner"].status,
+            "cancelled",
+            "the last task close must end the default direct-message lease"
+        );
+        assert_eq!(
+            state.msgs[&msg_id].state, "pending",
+            "automatic lease cancellation must not supersede unread mailbox bytes"
+        );
+        assert!(state.inbox_of("owner").iter().any(|m| m.id == msg_id));
+    }
+
+    // Durable replay must keep both facts: lease cancelled, payload still owed.
+    let replayed = super::replay(&root).unwrap();
+    assert_eq!(
+        replayed.notification_subscriptions["sub-default-direct-message-owner"].status,
+        "cancelled"
+    );
+    assert_eq!(replayed.msgs[&msg_id].state, "pending");
+
+    // An explicit recv after the close still returns the unread payload.
+    let recv = poll_messages_with_context(&server, "owner", None, None)
+        .expect("the preserved unread payload must still be delivered");
+    assert!(recv.ok, "{:?}", recv.error);
+    assert_eq!(recv.data["count"], 1);
+    assert_eq!(recv.data["messages"][0]["id"], msg_id.as_str());
+    assert_eq!(
+        recv.data["messages"][0]["body"],
+        "payload that must survive the close"
+    );
+
+    // Explicit rearm after the automatic cancellation still works.
+    let rearmed = handle_notification_subscribe(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "direct-message".into(),
+        None,
+        None,
+        Vec::new(),
+        None,
+        1,
+        3_600,
+    );
+    assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
+    assert_eq!(rearmed.data["subscription"]["status"], "armed");
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
     let (server, root) = test_server();
     register(&server, "master", "%master");

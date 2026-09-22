@@ -9268,6 +9268,66 @@ fn resolve_authoritative_main_head(root: &Path) -> Result<String, Resp> {
     }
 }
 
+/// Integration records accept the main tip, a real merge commit, or the
+/// merged candidate SHA itself. The authoritative question is reachability
+/// from `refs/heads/main`, not string equality with its current tip, because
+/// the daemon root may be checked out on a different branch while the main
+/// worktree advances elsewhere.
+fn commit_is_integrated_in_main(root: &Path, commit: &str) -> Result<bool, Resp> {
+    let verified = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
+        .output();
+    let verified = match verified {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return Err(Resp::err_data(
+                "TASK_INTEGRATION_COMMIT_UNRESOLVED",
+                json!({
+                    "provided": commit,
+                    "detail": String::from_utf8_lossy(&output.stderr).trim(),
+                    "expected": "a commit reachable from refs/heads/main",
+                }),
+            ))
+        }
+        Err(error) => {
+            return Err(Resp::err_data(
+                "TASK_INTEGRATION_COMMIT_UNRESOLVED",
+                json!({
+                    "provided": commit,
+                    "detail": error.to_string(),
+                    "expected": "a commit reachable from refs/heads/main",
+                }),
+            ))
+        }
+    };
+    let resolved = String::from_utf8_lossy(&verified.stdout).trim().to_string();
+    let reachable = Command::new("git")
+        .current_dir(root)
+        .args(["merge-base", "--is-ancestor", &resolved, "refs/heads/main"])
+        .output();
+    match reachable {
+        Ok(output) if output.status.success() => Ok(true),
+        Ok(output) if output.status.code() == Some(1) => Ok(false),
+        Ok(output) => Err(Resp::err_data(
+            "TASK_INTEGRATION_MAIN_UNRESOLVED",
+            json!({
+                "provided": commit,
+                "ref": "refs/heads/main",
+                "detail": String::from_utf8_lossy(&output.stderr).trim(),
+            }),
+        )),
+        Err(error) => Err(Resp::err_data(
+            "TASK_INTEGRATION_MAIN_UNRESOLVED",
+            json!({
+                "provided": commit,
+                "ref": "refs/heads/main",
+                "detail": error.to_string(),
+            }),
+        )),
+    }
+}
+
 fn handle_task_review(
     server: &Server,
     worker_id: String,
@@ -9368,10 +9428,20 @@ fn handle_task_integrated(
         Ok(head) => head,
         Err(error) => return error,
     };
-    if commit != head {
+    let integrated = match commit_is_integrated_in_main(&server.root, commit) {
+        Ok(integrated) => integrated,
+        Err(error) => return error,
+    };
+    if !integrated {
         return Resp::err_data(
             "TASK_INTEGRATION_COMMIT_MISMATCH",
-            json!({"provided": commit, "main_head": head}),
+            json!({
+                "provided": commit,
+                "main_head": head,
+                "expected": format!(
+                    "commit already reachable from refs/heads/main (main tip {head})"
+                ),
+            }),
         );
     }
     let now = now_ms();

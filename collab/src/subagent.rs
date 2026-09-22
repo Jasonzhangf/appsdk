@@ -476,6 +476,80 @@ fn child_appserver_candidate_from_session(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildNotificationFailureAction {
+    PreserveRouteBinding,
+    RetireRouteBinding,
+}
+
+fn child_notification_failure_action(
+    error: &crate::client::adapters::AdapterError,
+) -> ChildNotificationFailureAction {
+    match error {
+        crate::client::adapters::AdapterError::Unknown {
+            operation: "rpc",
+            detail,
+        } if detail.contains("no rollout found for thread id") => {
+            ChildNotificationFailureAction::PreserveRouteBinding
+        }
+        _ => ChildNotificationFailureAction::RetireRouteBinding,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn child_notification_failure_result(
+    route_owner: &Server,
+    server: &Server,
+    record: &mut Record,
+    parent_transport: &crate::proto::SelectedTransport,
+    thread_id: &crate::identity::NativeThreadId,
+    worker_id: &str,
+    child_cwd: &str,
+    app_scope: Option<&AppServerId>,
+    error: crate::client::adapters::AdapterError,
+) -> Result<()> {
+    if child_notification_failure_action(&error)
+        == ChildNotificationFailureAction::PreserveRouteBinding
+    {
+        record.thread_id = Some(thread_id.to_string());
+        bail!(
+            "child notification failed: {error}; thread archive skipped: missing App Server rollout; route preserved; binding preserved"
+        );
+    }
+    record.thread_id = None;
+    let archive_result = crate::client::adapters::codex_app_server::archive_thread(
+        parent_transport,
+        thread_id.as_str(),
+    );
+    let route_cleanup = crate::server::retire_current_thread_route_after_launch_failure(
+        route_owner,
+        server,
+        worker_id,
+        child_cwd,
+        app_scope,
+    );
+    let binding_cleanup = crate::server::retire_runtime_binding_after_route_failure(
+        server,
+        worker_id,
+        child_cwd,
+        app_scope,
+        &record.parent,
+        "child notification failed",
+    );
+    let archive_status = archive_result
+        .map(|_| "archived".to_owned())
+        .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
+    let route_status = route_cleanup
+        .map(|_| "route retired".to_owned())
+        .unwrap_or_else(|cleanup_error| format!("route cleanup failed: {cleanup_error}"));
+    let binding_status = binding_cleanup
+        .map(|_| "binding retired".to_owned())
+        .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
+    bail!(
+        "child notification failed: {error}; thread {archive_status}; {route_status}; {binding_status}"
+    );
+}
+
 #[derive(Serialize, Deserialize)]
 struct LaunchSpec {
     executable: String,
@@ -720,37 +794,16 @@ fn launch(
         &prompt,
         &format!("collab-subagent-start-{}", record.id),
     ) {
-        record.thread_id = None;
-        let archive_result = crate::client::adapters::codex_app_server::archive_thread(
-            &parent_transport,
-            thread_id.as_str(),
-        );
-        let route_cleanup = crate::server::retire_current_thread_route_after_launch_failure(
+        return child_notification_failure_result(
             route_owner,
             server,
+            record,
+            &parent_transport,
+            &thread_id,
             &ident.worker_id,
             &child_cwd,
             app_scope,
-        );
-        let binding_cleanup = crate::server::retire_runtime_binding_after_route_failure(
-            server,
-            &ident.worker_id,
-            &child_cwd,
-            app_scope,
-            &record.parent,
-            "child notification failed",
-        );
-        let archive_status = archive_result
-            .map(|_| "archived".to_owned())
-            .unwrap_or_else(|archive_error| format!("archive failed: {archive_error}"));
-        let route_status = route_cleanup
-            .map(|_| "route retired".to_owned())
-            .unwrap_or_else(|cleanup_error| format!("route cleanup failed: {cleanup_error}"));
-        let binding_status = binding_cleanup
-            .map(|_| "binding retired".to_owned())
-            .unwrap_or_else(|cleanup_error| format!("binding cleanup failed: {cleanup_error}"));
-        bail!(
-            "child notification failed: {error}; thread {archive_status}; {route_status}; {binding_status}"
+            error,
         );
     }
     let _ = environment;
@@ -1493,6 +1546,215 @@ mod tests {
             candidate.session_id, "01a0c48b-parent-session",
             "child registration must not self-check against the parent session"
         );
+    }
+
+    #[test]
+    fn missing_rollout_notification_failure_preserves_route_binding() {
+        let missing_rollout = crate::client::adapters::AdapterError::Unknown {
+            operation: "rpc",
+            detail: "no rollout found for thread id 01a0c80e-child-thread".into(),
+        };
+        assert_eq!(
+            child_notification_failure_action(&missing_rollout),
+            ChildNotificationFailureAction::PreserveRouteBinding
+        );
+
+        let other_rpc_failure = crate::client::adapters::AdapterError::Unknown {
+            operation: "rpc",
+            detail: "thread not found: 01a0c80e-child-thread".into(),
+        };
+        assert_eq!(
+            child_notification_failure_action(&other_rpc_failure),
+            ChildNotificationFailureAction::RetireRouteBinding
+        );
+
+        let writer_conflict = crate::client::adapters::AdapterError::ThreadWriterConflict {
+            detail: "thread owned by another writer".into(),
+        };
+        assert_eq!(
+            child_notification_failure_action(&writer_conflict),
+            ChildNotificationFailureAction::RetireRouteBinding
+        );
+    }
+
+    fn register_child_route(
+        server: &Server,
+        root: &std::path::Path,
+        child_id: &str,
+        thread_id: &str,
+    ) -> (
+        AppServerId,
+        crate::identity::SessionId,
+        crate::identity::NativeThreadId,
+        crate::scope::RouteScope,
+        crate::identity::BindingId,
+    ) {
+        let app_scope = AppServerId::new("tui-default").unwrap();
+        let response = crate::server::handle_register_with_app_scope_unfinalized(
+            server,
+            child_id.into(),
+            format!("token-{child_id}"),
+            root.display().to_string(),
+            Some(app_scope.clone()),
+            Some(crate::proto::TransportCandidates {
+                appserver: Some(crate::server::peer_tests::test_appserver_candidate(
+                    thread_id,
+                )),
+            }),
+        );
+        assert!(response.ok, "{response:?}");
+        crate::server::commit_current_thread_route_for_runtime(
+            server,
+            server,
+            child_id,
+            &root.display().to_string(),
+            Some(&app_scope),
+        )
+        .unwrap();
+        let session_id = crate::identity::SessionId::new(format!("session-{thread_id}")).unwrap();
+        let native_thread_id = crate::identity::NativeThreadId::new(thread_id).unwrap();
+        let route_scope = crate::scope::RouteScope {
+            app_scope_id: app_scope.clone(),
+            project_scope_id: crate::server::GlobalState::canonical_project_scope(root).unwrap(),
+        };
+        let binding_id = crate::identity::BindingId::new(format!("binding-{child_id}")).unwrap();
+        (
+            app_scope,
+            session_id,
+            native_thread_id,
+            route_scope,
+            binding_id,
+        )
+    }
+
+    #[test]
+    fn missing_rollout_notification_failure_keeps_durable_child_route_binding() {
+        let (server, root) = crate::server::peer_tests::test_server();
+        let child_id = "child-missing-rollout";
+        let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
+            register_child_route(&server, &root, child_id, "thread-child-missing-rollout");
+        let parent_transport = crate::server::peer_tests::test_appserver_transport("thread-parent");
+        let mut record = Record {
+            id: "subagent-missing-rollout".into(),
+            parent: "parent-1".into(),
+            peer: child_id.into(),
+            status: "starting".into(),
+            thread_id: None,
+            profile: None,
+            created_ms: 0,
+            ready_deadline_ms: 0,
+            last_message: None,
+            error: None,
+            probe_failures: vec![],
+            runtime: Some("codex".into()),
+        };
+
+        let error = crate::client::adapters::AdapterError::Unknown {
+            operation: "rpc",
+            detail: format!(
+                "no rollout found for thread id {}",
+                native_thread_id.as_str()
+            ),
+        };
+        let result = child_notification_failure_result(
+            &server,
+            &server,
+            &mut record,
+            &parent_transport,
+            &native_thread_id,
+            child_id,
+            &root.display().to_string(),
+            Some(&app_scope),
+            error,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            result.contains("route preserved; binding preserved"),
+            "{result}"
+        );
+        assert_eq!(record.thread_id.as_deref(), Some(native_thread_id.as_str()));
+        let state = server.state.lock().unwrap();
+        let binding = state
+            .global
+            .lookup_binding_for(&route_scope, &binding_id)
+            .unwrap();
+        assert_eq!(
+            binding.native_thread_id.as_ref(),
+            Some(&native_thread_id),
+            "missing rollout must keep the runtime binding thread-backed"
+        );
+        assert_eq!(
+            state
+                .global
+                .lookup_current_thread_route(&session_id, &native_thread_id),
+            Some(binding),
+            "missing rollout must not retire the published child route"
+        );
+        assert!(state.workers.contains_key(child_id));
+    }
+
+    #[test]
+    fn other_notification_failure_retires_durable_child_route_binding() {
+        let (server, root) = crate::server::peer_tests::test_server();
+        let child_id = "child-notification-rpc-failure";
+        let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
+            register_child_route(&server, &root, child_id, "thread-child-rpc-failure");
+        let parent_transport = crate::server::peer_tests::test_appserver_transport("thread-parent");
+        let mut record = Record {
+            id: "subagent-rpc-failure".into(),
+            parent: "parent-1".into(),
+            peer: child_id.into(),
+            status: "starting".into(),
+            thread_id: Some(native_thread_id.to_string()),
+            profile: None,
+            created_ms: 0,
+            ready_deadline_ms: 0,
+            last_message: None,
+            error: None,
+            probe_failures: vec![],
+            runtime: Some("codex".into()),
+        };
+
+        let error = crate::client::adapters::AdapterError::Unknown {
+            operation: "rpc",
+            detail: "thread not found".into(),
+        };
+        let result = child_notification_failure_result(
+            &server,
+            &server,
+            &mut record,
+            &parent_transport,
+            &native_thread_id,
+            child_id,
+            &root.display().to_string(),
+            Some(&app_scope),
+            error,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(result.contains("route retired"), "{result}");
+        assert!(result.contains("binding retired"), "{result}");
+        assert_eq!(record.thread_id, None);
+        let state = server.state.lock().unwrap();
+        let binding = state
+            .global
+            .lookup_binding_for(&route_scope, &binding_id)
+            .unwrap();
+        assert_eq!(
+            binding.native_thread_id, None,
+            "generic notification failures must retire the runtime binding"
+        );
+        assert!(
+            state
+                .global
+                .lookup_current_thread_route(&session_id, &native_thread_id)
+                .is_none(),
+            "generic notification failures must retire the published child route"
+        );
+        assert!(!state.workers.contains_key(child_id));
     }
 
     #[test]

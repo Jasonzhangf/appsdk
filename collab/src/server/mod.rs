@@ -169,13 +169,8 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<AppServerNotification
                 "explicit App Server notification requires the sender native thread id".to_string(),
             );
         }
-        if explicit {
-            crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
-                .map_err(|error| error.to_string())
-        } else {
-            crate::client::adapters::queue_wakeup(transport, body, message_id)
-                .map_err(|error| error.to_string())
-        }
+        crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
+            .map_err(|error| error.to_string())
     })
 }
 
@@ -11774,8 +11769,8 @@ mod host_route_registry_tests {
                     from: "sender".into(),
                     to: "worker-1".into(),
                     mtype: "notify".into(),
-                    subject: Some("queue-only".into()),
-                    body: "must remain pending after queue acceptance".into(),
+                    subject: Some("turn-accepted".into()),
+                    body: "must remain pending after turn acceptance".into(),
                     in_reply_to: None,
                     created_ms: now_ms(),
                     state: "pending".into(),

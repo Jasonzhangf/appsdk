@@ -34,8 +34,8 @@ Before review, prove the affected subset and every changed invariant:
 - failed wake and daemon restart never replay an attempted batch;
 - one ID/subject/original-body delivery preserves a reusable direct-message
   lease and records one accepted delivery event; explicit `sendmessage` proves
-  native `turn/start` accepted the bounded preview, while daemon wakeup and
-  long-horizon notifications use `thread/queue/add`;
+  native `turn/start` or `turn/steer` accepted the bounded preview, and daemon
+  wakeup plus long-horizon notifications use the same immediate path;
 - successful resource/deadline/async-result delivery consumes exactly one
   matching one-shot subscription;
 - release clears obsolete wait state and does not wake an unsubscribed Agent;

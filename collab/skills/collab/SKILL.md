@@ -124,7 +124,7 @@ Treat each claim separately:
 ```text
 durable=true -> mailbox journal accepted
 notification=accepted -> selected transport accepted the preview
-transport evidence -> App Server queued it
+transport evidence -> App Server accepted the native turn submission
 recv response -> peer consumed the message
 task close receipt -> lifecycle ended
 ```
@@ -191,7 +191,7 @@ After a fix, verify the same user path again and classify the first divergence:
 
 - `send` durable but no transport acceptance: inspect the selected transport,
   subscription, ownership, Agent state, and daemon log.
-- App Server queue acceptance appears but no worker result: inspect the
+- App Server turn acceptance appears but no worker result: inspect the
   native thread and worker state; do not call that a reply.
 - `recv` returns messages: the read is consumed atomically; no follow-up ACK is
   required. `msg`, `inbox`, and `context` remain read-only.
@@ -267,13 +267,12 @@ With a matching live subscription, the first pending message opens a fixed
 batched delivery globally or per project; `appsdk config` shows effective
 policy. All eligible unsent messages for that recipient are combined
 into the selected transport's bounded delivery (up to 3 previews per knock,
-with overflow retained in the inbox). App Server explicit notifications use
-`turn/start`, which starts a new turn or steers the recipient's current turn.
-`thread/queue/add` is reserved for daemon-generated wakeup/long-horizon
-notifications that require a safe waiting/idle agent; actively working agents
-defer those wakeups without burning attempts so in-flight tasks are not
-polluted. Explicit `collab sendmessage` is immediate and follows the
-explicit-message adapter gate, including while the recipient is working.
+with overflow retained in the inbox). App Server notifications use the
+immediate path: `turn/steer` for exactly one in-progress turn, otherwise
+`turn/start`. This is a bounded interrupt; turn acceptance is not execution,
+read, reply, task progress, or lifecycle evidence. Explicit `collab
+sendmessage` is immediate and follows the explicit-message adapter gate,
+including while the recipient is working.
 If delivered-but-unconsumed notifications reach the throttle threshold (default
 3), further push knocks pause until `collab recv` consumes them, preventing
 terminal pollution and storms. Each batch has one attempt; the default window

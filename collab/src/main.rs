@@ -935,10 +935,15 @@ fn live_closure_expected_native_inputs(
     message_id: &str,
     challenge: &str,
 ) -> anyhow::Result<LiveClosureExpectedNativeInputs> {
+    let receipt_type = receipt
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let supported_type = matches!(receipt_type, "notify" | "notification");
     if receipt.get("id").and_then(serde_json::Value::as_str) != Some(message_id)
         || receipt.get("body").and_then(serde_json::Value::as_str) != Some(challenge)
         || receipt.get("subject").and_then(serde_json::Value::as_str) != Some(challenge)
-        || receipt.get("type").and_then(serde_json::Value::as_str) != Some("notify")
+        || !supported_type
     {
         anyhow::bail!("COLLAB_LIVE_CLOSURE_MESSAGE_BINDING_MISMATCH");
     }
@@ -956,7 +961,7 @@ fn live_closure_expected_native_inputs(
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_MESSAGE_RECIPIENT_MISSING"))?
             .to_owned(),
-        mtype: "notify".into(),
+        mtype: receipt_type.to_owned(),
         subject: Some(challenge.to_owned()),
         body: challenge.to_owned(),
         in_reply_to: None,
@@ -1327,6 +1332,10 @@ fn live_closure_observe(
     Ok(())
 }
 
+fn live_closure_daemon_producer_path(path: &str) -> bool {
+    path.starts_with("daemon_") || path == "restart_replay"
+}
+
 fn live_closure_probe(
     scope: &Scope,
     closure_id: String,
@@ -1372,6 +1381,30 @@ fn live_closure_probe(
     )?;
     let workers: serde_json::Value = call_project(scope, &ident, &Req::Workers)?;
     let master: serde_json::Value = call_project(scope, &ident, &Req::MasterStatus)?;
+    let daemon_producer = live_closure_daemon_producer_path(&path);
+    let endpoint_generation = ident
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.endpoint_generation)
+        .unwrap_or_default();
+    let first_failure = |code: &str, detail: &str| {
+        out(&json!({
+            "status": "failed",
+            "closure_claim": false,
+            "entrypoint": "collab live-closure probe",
+            "path": path,
+            "first_failure": {"code": code, "detail": detail},
+            "identity": ident.worker_id.clone(),
+            "endpoint_generation": endpoint_generation,
+        }));
+    };
+    if daemon_producer && to_project.is_some() {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_TARGET_PROJECT_UNSUPPORTED",
+            "daemon-produced live-closure probes are resident-daemon contracts for the current project; cross-project daemon production requires a separate target-side contract",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_PROJECT_UNSUPPORTED");
+    }
     let target_scope = if path == "master_to_master" {
         let target = to_project
             .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_PROBE_MISSING:to_project"))?
@@ -1409,22 +1442,6 @@ fn live_closure_probe(
         )?
     } else {
         master.clone()
-    };
-    let endpoint_generation = ident
-        .runtime
-        .as_ref()
-        .map(|runtime| runtime.endpoint_generation)
-        .unwrap_or_default();
-    let first_failure = |code: &str, detail: &str| {
-        out(&json!({
-            "status": "failed",
-            "closure_claim": false,
-            "entrypoint": "collab live-closure probe",
-            "path": path,
-            "first_failure": {"code": code, "detail": detail},
-            "identity": ident.worker_id.clone(),
-            "endpoint_generation": endpoint_generation,
-        }));
     };
     if context
         .get("registered")
@@ -1473,27 +1490,22 @@ fn live_closure_probe(
         .pointer("/master/worker_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let sender_role = if ident.worker_id == master_id {
+    let sender_role = if daemon_producer {
+        "daemon"
+    } else if ident.worker_id == master_id {
         "master"
     } else {
         "peer"
     };
     let expected_sender_role = path.split("_to_").next().unwrap_or_default();
-    if path.starts_with("daemon_") || path == "restart_replay" {
-        first_failure(
-            "COLLAB_LIVE_CLOSURE_DAEMON_PRODUCER_UNSUPPORTED",
-            "the resident daemon has no authenticated exact-challenge producer; no daemon identity is forged",
-        );
-        anyhow::bail!("COLLAB_LIVE_CLOSURE_DAEMON_PRODUCER_UNSUPPORTED");
-    }
-    if sender_role != expected_sender_role {
+    if !daemon_producer && sender_role != expected_sender_role {
         first_failure(
             "COLLAB_LIVE_CLOSURE_SENDER_ROLE_MISMATCH",
             "the probe only sends as the current authenticated worker",
         );
         anyhow::bail!("COLLAB_LIVE_CLOSURE_SENDER_ROLE_MISMATCH");
     }
-    if ident.worker_id == to {
+    if !daemon_producer && ident.worker_id == to {
         first_failure(
             "COLLAB_LIVE_CLOSURE_TARGET_SELF",
             "a closure path requires a distinct target worker",
@@ -1507,6 +1519,16 @@ fn live_closure_probe(
         );
         anyhow::bail!("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH");
     }
+    if matches!(path.as_str(), "daemon_to_peer" | "restart_replay")
+        && !master_id.is_empty()
+        && to == master_id
+    {
+        first_failure(
+            "COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH",
+            "the selected daemon-produced path requires a non-master peer target",
+        );
+        anyhow::bail!("COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH");
+    }
     if path == "master_to_master" && to != target_master_id {
         first_failure(
             "COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH",
@@ -1517,7 +1539,6 @@ fn live_closure_probe(
     let challenge = format!(
         "appsdk-collab-live:{closure_id}:{path}:{source_commit}:{artifact_hash}:{environment_id}:{endpoint_generation}"
     );
-    let command = command_envelope(scope, &ident)?;
     let timeout = live_closure_timeout()?;
     let response: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
         let assigned_by = master
@@ -1550,7 +1571,22 @@ fn live_closure_probe(
             },
             Some(cli_project_context(&target_scope.root)?),
         )?
+    } else if daemon_producer {
+        call_project(
+            scope,
+            &ident,
+            &Req::LiveClosureDaemonSend {
+                worker_id: ident.worker_id.clone(),
+                token: ident.token.clone(),
+                to: to.clone(),
+                path: path.clone(),
+                subject: challenge.clone(),
+                body: challenge.clone(),
+                restart_replay_pending: path == "restart_replay",
+            },
+        )?
     } else {
+        let command = command_envelope(scope, &ident)?;
         call_project(
             scope,
             &ident,
@@ -1679,14 +1715,29 @@ fn live_closure_probe(
             "transport": target.get("transport").cloned().unwrap_or_else(|| json!({})),
         })
     });
+    let restart_replay_pending = response
+        .get("restart_replay_pending")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let closure_claim = !restart_replay_pending;
+    let status = if restart_replay_pending {
+        "restart_replay_pending_observed"
+    } else {
+        "closure_observed"
+    };
     out(&json!({
-        "status": "closure_observed",
-        "closure_claim": true,
+        "status": status,
+        "closure_claim": closure_claim,
         "entrypoint": "collab live-closure probe",
         "path": path,
         "challenge": challenge,
         "message_id": message_id,
-        "sender_worker_id": ident.worker_id,
+        "sender_worker_id": if daemon_producer {
+            "collab-server".to_owned()
+        } else {
+            ident.worker_id.clone()
+        },
+        "requester_worker_id": ident.worker_id,
         "sender_role": sender_role,
         "target_worker_id": to,
         "target_project_scope": target_scope
@@ -1696,11 +1747,19 @@ fn live_closure_probe(
         "message_project_scope": target_scope
             .as_ref()
             .map(|scope| scope.root.display().to_string()),
-        "message_sender": if target_scope.is_some() {
+        "message_sender": if daemon_producer {
+            "collab-server".to_owned()
+        } else if target_scope.is_some() {
             format!("{}@{}", ident.worker_id, scope.root.display())
         } else {
             ident.worker_id.clone()
         },
+        "daemon_sender": daemon_producer,
+        "restart_replay_pending": restart_replay_pending,
+        "restart_replay_contract": restart_replay_pending.then(|| json!({
+            "status": "pending_daemon_restart",
+            "reason": "the challenge was produced by the resident daemon and observed by the target, but no daemon restart/replay occurred in this probe"
+        })),
         "endpoint_generation": endpoint_generation,
         "target_execution": target_execution,
         "receipt": receipt,
@@ -2899,6 +2958,39 @@ mod tests {
             &expected,
             "message-1"
         ));
+    }
+
+    #[test]
+    fn live_closure_expected_inputs_accept_daemon_notification_message_type() {
+        let challenge = "appsdk-collab-live:closure-1:daemon_to_peer";
+        let expected = live_closure_expected_native_inputs(
+            &json!({
+                "id": "message-daemon",
+                "from": "collab-server",
+                "to": "recipient",
+                "type": "notification",
+                "subject": challenge,
+                "body": challenge,
+                "state": "pending"
+            }),
+            "message-daemon",
+            challenge,
+        )
+        .unwrap();
+
+        assert_eq!(expected.exact.len(), 2);
+        assert!(expected.exact[0].starts_with("COLLAB_NOTIFY message-daemon ["));
+        assert!(expected.exact[0].contains(challenge));
+        assert!(expected.exact[1].contains("message_ids=message-daemon"));
+    }
+
+    #[test]
+    fn live_closure_daemon_producer_paths_are_current_project_contracts() {
+        assert!(live_closure_daemon_producer_path("daemon_to_peer"));
+        assert!(live_closure_daemon_producer_path("daemon_to_master"));
+        assert!(live_closure_daemon_producer_path("restart_replay"));
+        assert!(!live_closure_daemon_producer_path("master_to_master"));
+        assert!(!live_closure_daemon_producer_path("peer_to_peer"));
     }
 
     #[test]

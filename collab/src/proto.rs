@@ -328,6 +328,15 @@ pub enum Req {
         body: String,
         in_reply_to: Option<String>,
     },
+    LiveClosureDaemonSend {
+        worker_id: String,
+        token: String,
+        to: String,
+        path: String,
+        subject: String,
+        body: String,
+        restart_replay_pending: bool,
+    },
     NotificationMethods,
     NotificationSubscribe {
         worker_id: String,

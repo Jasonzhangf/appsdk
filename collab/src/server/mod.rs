@@ -145,6 +145,8 @@ const MAX_WORKTREE_PATH_BYTES: usize = 80;
 /// A new daemon must fence this writer before it replays the project journal;
 /// otherwise an old binary could append concurrently under the new socket.
 const LEGACY_HOST_DAEMON_LOCK_PATH: &str = "/tmp/collab-host.lock";
+const DAEMON_LIVE_CLOSURE_MODE: &str = "daemon-live-closure";
+const RESTART_REPLAY_PENDING_MODE: &str = "restart-replay-pending";
 
 type AppServerCandidateCheck =
     dyn Fn(&crate::proto::AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync;
@@ -3759,13 +3761,12 @@ fn attempt_appserver_notification_with_retry(
             (message.to == recipient
                 && state.scheduler_message_deliverable(&message.id)
                 && message_explicit == explicit
-                && state
-                    .delivery_modes
-                    .get(&message.id)
-                    .filter(|mode| mode.as_str() == "explicit-notification")
-                    .map(|_| 0)
-                    .unwrap_or_else(|| server.config.notifications.delay_ms(&sub.event))
-                    == delay
+                && notification_delivery_delay_ms(
+                    &state,
+                    &message.id,
+                    &sub.event,
+                    &server.config.notifications,
+                ) == delay
                 && message.state == "pending"
                 && (allow_retry || message.wake_attempt_count < MAX_WAKE_ATTEMPTS)
                 && sub.worker_id == recipient
@@ -3803,7 +3804,12 @@ fn attempt_appserver_notification_with_retry(
             let message_explicit = is_explicit_notification(&state, message);
             (message.to == recipient
                 && message_explicit == explicit
-                && (message_explicit || server.config.notifications.delay_ms(&sub.event) == delay)
+                && notification_delivery_delay_ms(
+                    &state,
+                    &message.id,
+                    &sub.event,
+                    &server.config.notifications,
+                ) == delay
                 && sub.worker_id == recipient
                 && subscription_matches_transport(sub, transport))
             .then_some(message.last_wake_attempt_ms)
@@ -3921,12 +3927,12 @@ fn attempt_notification_detailed_with_at(
                 "subscription does not belong to the recipient".into(),
             );
         }
-        let delay = state
-            .delivery_modes
-            .get(message_id)
-            .filter(|mode| mode.as_str() == "explicit-notification")
-            .map(|_| 0)
-            .unwrap_or_else(|| server.config.notifications.delay_ms(&subscription.event));
+        let delay = notification_delivery_delay_ms(
+            &state,
+            message_id,
+            &subscription.event,
+            &server.config.notifications,
+        );
         let worker_transport = state
             .workers
             .get(&recipient)
@@ -4005,6 +4011,18 @@ fn attempt_notification_detailed_with_at(
         );
     }
     attempt
+}
+
+fn notification_delivery_delay_ms(
+    state: &State,
+    message_id: &str,
+    event: &str,
+    config: &crate::config::Notifications,
+) -> i64 {
+    match state.delivery_modes.get(message_id).map(String::as_str) {
+        Some("explicit-notification" | DAEMON_LIVE_CLOSURE_MODE | RESTART_REPLAY_PENDING_MODE) => 0,
+        _ => config.delay_ms(event),
+    }
 }
 
 fn attempt_notification(server: &Server, message_id: &str, subscription_id: &str) -> bool {
@@ -4093,12 +4111,12 @@ fn attempt_scheduler_notification(
             if subscription.worker_id != recipient {
                 return None;
             }
-            let delay = state
-                .delivery_modes
-                .get(message_id)
-                .filter(|mode| mode.as_str() == "explicit-notification")
-                .map(|_| 0)
-                .unwrap_or_else(|| server.config.notifications.delay_ms(&subscription.event));
+            let delay = notification_delivery_delay_ms(
+                &state,
+                message_id,
+                &subscription.event,
+                &server.config.notifications,
+            );
             let transport = state
                 .workers
                 .get(&recipient)
@@ -4729,12 +4747,12 @@ pub(crate) fn attempt_notification_with_default(
         if subscription.worker_id != recipient {
             return false;
         }
-        let delay = state
-            .delivery_modes
-            .get(message_id)
-            .filter(|mode| mode.as_str() == "explicit-notification")
-            .map(|_| 0)
-            .unwrap_or_else(|| server.config.notifications.delay_ms(&subscription.event));
+        let delay = notification_delivery_delay_ms(
+            &state,
+            message_id,
+            &subscription.event,
+            &server.config.notifications,
+        );
         let Some(transport) = state
             .workers
             .get(&recipient)
@@ -8029,6 +8047,115 @@ pub(crate) fn handle_send_with_task(
     )
 }
 
+fn handle_live_closure_daemon_send(
+    server: &Server,
+    worker_id: String,
+    token: String,
+    to: String,
+    path: String,
+    subject: String,
+    body: String,
+    restart_replay_pending: bool,
+) -> Resp {
+    if !matches!(
+        path.as_str(),
+        "daemon_to_peer" | "daemon_to_master" | "restart_replay"
+    ) {
+        return Resp::err(format!("COLLAB_LIVE_CLOSURE_PROBE_INVALID_PATH:{path}"));
+    }
+    if restart_replay_pending && path != "restart_replay" {
+        return Resp::err("COLLAB_LIVE_CLOSURE_RESTART_REPLAY_PENDING_REQUIRES_RESTART_PATH");
+    }
+    if subject.trim().is_empty() || body.trim().is_empty() || subject != body {
+        return Resp::err("COLLAB_LIVE_CLOSURE_CHALLENGE_MISMATCH");
+    }
+
+    let restart_replay_pending = path == "restart_replay";
+    let mut st = server.state.lock().unwrap();
+    if let Err(error) = verify(&st, &worker_id, &token) {
+        return error;
+    }
+    let live_master = match live_master_id(server, &st) {
+        Ok(master) => master,
+        Err(error) => return Resp::err(error),
+    };
+    if path == "daemon_to_master" && live_master.as_deref() != Some(to.as_str()) {
+        return Resp::err("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH");
+    }
+    if matches!(path.as_str(), "daemon_to_peer" | "restart_replay")
+        && live_master.as_deref() == Some(to.as_str())
+    {
+        return Resp::err("COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH");
+    }
+    let Some(recipient) = st.workers.get(&to) else {
+        return Resp::err(format!("recipient {} not registered", to));
+    };
+    if worker_presence(server, recipient) != IdentityPresence::Present {
+        return Resp::err("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE");
+    }
+    let msg = Message {
+        id: gen_msg_id(),
+        from: "collab-server".into(),
+        to: to.clone(),
+        mtype: "notification".into(),
+        subject: Some(subject),
+        body,
+        in_reply_to: None,
+        created_ms: now_ms(),
+        state: "pending".into(),
+        wake_attempt_count: 0,
+        last_wake_attempt_ms: 0,
+    };
+    let mid = msg.id.clone();
+    let subscription = st
+        .matching_subscription(&to, "direct-message", None, now_ms())
+        .cloned();
+    let delivery_mode = if restart_replay_pending {
+        RESTART_REPLAY_PENDING_MODE
+    } else {
+        DAEMON_LIVE_CLOSURE_MODE
+    };
+    let mut events = vec![
+        Event::Sent { msg },
+        Event::DeliveryMode {
+            msg_id: mid.clone(),
+            mode: delivery_mode.into(),
+            source_thread_id: None,
+        },
+    ];
+    if let Some(subscription) = &subscription {
+        events.push(Event::WakeBound {
+            message_id: mid.clone(),
+            subscription_id: subscription.id.clone(),
+        });
+    }
+    if let Err(error) = server.commit_locked_checked(&mut st, &events) {
+        return Resp::err(format!("SEND_DURABILITY_FAILED: {error}"));
+    }
+    drop(st);
+
+    let notification = subscription
+        .as_ref()
+        .map(|subscription| {
+            attempt_notification_detailed_with_at(server, &mid, &subscription.id, now_ms())
+        })
+        .unwrap_or_else(|| {
+            NotificationAttempt::NotAttempted("no notification subscription".into())
+        });
+    notification_send_response(
+        json!({
+            "msg_id": mid,
+            "daemon_sender": true,
+            "from": "collab-server",
+            "path": path,
+            "delivery_mode": delivery_mode,
+            "restart_replay_pending": restart_replay_pending,
+        }),
+        subscription.is_some(),
+        &notification,
+    )
+}
+
 fn handle_cross_project_send(
     server: &Server,
     from: String,
@@ -9908,6 +10035,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         ),
         Req::Send { .. }
         | Req::CrossProjectSend { .. }
+        | Req::LiveClosureDaemonSend { .. }
         | Req::NotificationSubscribe { .. }
         | Req::NotificationUnsubscribe { .. }
         | Req::Poll { .. }
@@ -9982,6 +10110,9 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             worker_id: Some(worker_id),
             token: Some(token),
             ..
+        }
+        | Req::LiveClosureDaemonSend {
+            worker_id, token, ..
         }
         | Req::NotificationSubscribe {
             worker_id, token, ..
@@ -10503,6 +10634,24 @@ fn dispatch_with_route_context(
                 app_scope,
             )
         }
+        Req::LiveClosureDaemonSend {
+            worker_id,
+            token,
+            to,
+            path,
+            subject,
+            body,
+            restart_replay_pending,
+        } => handle_live_closure_daemon_send(
+            server,
+            worker_id,
+            token,
+            to,
+            path,
+            subject,
+            body,
+            restart_replay_pending,
+        ),
         Req::CrossProjectSend { .. } => Resp::err(
             "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: cross-project wire requests require independently verified source and target route owners",
         ),
@@ -11126,6 +11275,7 @@ fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, Strin
     match req {
         Req::Subagent { worker_id, .. }
         | Req::Register { worker_id, .. }
+        | Req::LiveClosureDaemonSend { worker_id, .. }
         | Req::NotificationSubscribe { worker_id, .. }
         | Req::NotificationStatus { worker_id, .. }
         | Req::NotificationUnsubscribe { worker_id, .. }
@@ -11989,6 +12139,220 @@ mod host_route_registry_tests {
             .inbox_of("worker-1")
             .iter()
             .any(|m| m.id == message_id));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_closure_daemon_send_uses_daemon_identity_without_explicit_source_thread() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let notification_calls = Arc::new(Mutex::new(Vec::new()));
+        let notification_calls_for_sink = notification_calls.clone();
+        with_appserver_notification_sink(
+            &mut server,
+            move |_, source_thread_id, text, message_id, explicit| {
+                notification_calls_for_sink.lock().unwrap().push((
+                    source_thread_id.map(str::to_owned),
+                    text.to_owned(),
+                    message_id.to_owned(),
+                    explicit,
+                ));
+                Ok(json!({"accepted": true}))
+            },
+        );
+        let app_scope = AppServerId::new("daemon-live-app").unwrap();
+        for (worker_id, token, thread_id) in [
+            ("requester", "token-requester", "thread-requester"),
+            ("target", "token-target", "thread-target"),
+        ] {
+            let registered = handle_register_with_app_scope(
+                &server,
+                worker_id.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(app_scope.clone()),
+                Some(test_candidates(thread_id).unwrap()),
+            );
+            assert!(registered.ok, "{registered:?}");
+        }
+        let subscribed = handle_notification_subscribe(
+            &server,
+            "target".into(),
+            "token-target".into(),
+            "direct-message".into(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            1,
+            60,
+        );
+        assert!(subscribed.ok, "{subscribed:?}");
+
+        let response = handle_live_closure_daemon_send(
+            &server,
+            "requester".into(),
+            "token-requester".into(),
+            "target".into(),
+            "daemon_to_peer".into(),
+            "challenge-daemon".into(),
+            "challenge-daemon".into(),
+            false,
+        );
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data["daemon_sender"], true);
+        assert_eq!(response.data["from"], "collab-server");
+        assert_eq!(response.data["path"], "daemon_to_peer");
+        assert_eq!(response.data["delivery_mode"], DAEMON_LIVE_CLOSURE_MODE);
+        assert_eq!(response.data["restart_replay_pending"], false);
+        let message_id = response.data["msg_id"].as_str().unwrap();
+
+        let calls = notification_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+        assert!(calls[0].1.contains("challenge-daemon"));
+        assert_eq!(calls[0].2, format!("collab-notification-{message_id}"));
+        assert!(!calls[0].3, "daemon live-closure is not explicit");
+        drop(calls);
+
+        let state = server.state.lock().unwrap();
+        let msg = &state.msgs[message_id];
+        assert_eq!(msg.from, "collab-server");
+        assert_eq!(msg.to, "target");
+        assert_eq!(msg.mtype, "notification");
+        assert_eq!(msg.subject.as_deref(), Some("challenge-daemon"));
+        assert_eq!(msg.body, "challenge-daemon");
+        assert_eq!(state.delivery_modes[message_id], DAEMON_LIVE_CLOSURE_MODE);
+        assert!(!state.delivery_source_threads.contains_key(message_id));
+        assert_eq!(msg.wake_attempt_count, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_closure_daemon_to_master_rejects_non_master_target() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        let app_scope = AppServerId::new("daemon-master-app").unwrap();
+        for (worker_id, token, thread_id) in [
+            ("requester", "token-requester", "thread-requester"),
+            ("master", "token-master", "thread-master"),
+            ("peer", "token-peer", "thread-peer"),
+        ] {
+            let registered = handle_register_with_app_scope(
+                &server,
+                worker_id.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(app_scope.clone()),
+                Some(test_candidates(thread_id).unwrap()),
+            );
+            assert!(registered.ok, "{registered:?}");
+        }
+        let promoted = handle_master_promote(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "test approval".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+
+        let rejected = handle_live_closure_daemon_send(
+            &server,
+            "requester".into(),
+            "token-requester".into(),
+            "peer".into(),
+            "daemon_to_master".into(),
+            "challenge-master".into(),
+            "challenge-master".into(),
+            false,
+        );
+        assert!(!rejected.ok, "{rejected:?}");
+        assert_eq!(
+            rejected.error.as_deref(),
+            Some("COLLAB_LIVE_CLOSURE_MASTER_ROUTE_MISMATCH")
+        );
+        assert!(server.state.lock().unwrap().msgs.is_empty());
+
+        for path in ["daemon_to_peer", "restart_replay"] {
+            let rejected = handle_live_closure_daemon_send(
+                &server,
+                "requester".into(),
+                "token-requester".into(),
+                "master".into(),
+                path.into(),
+                format!("challenge-{path}"),
+                format!("challenge-{path}"),
+                path == "restart_replay",
+            );
+            assert!(!rejected.ok, "{path}: {rejected:?}");
+            assert_eq!(
+                rejected.error.as_deref(),
+                Some("COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH")
+            );
+            assert!(server.state.lock().unwrap().msgs.is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_closure_restart_replay_records_pending_contract_mode() {
+        let (mut server, root, _) = test_server();
+        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        with_appserver_notification_sink(&mut server, |_, source_thread_id, _, _, explicit| {
+            assert!(source_thread_id.is_none());
+            assert!(!explicit);
+            Ok(json!({"accepted": true}))
+        });
+        let app_scope = AppServerId::new("restart-replay-app").unwrap();
+        for (worker_id, token, thread_id) in [
+            ("requester", "token-requester", "thread-requester"),
+            ("target", "token-target", "thread-target"),
+        ] {
+            let registered = handle_register_with_app_scope(
+                &server,
+                worker_id.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(app_scope.clone()),
+                Some(test_candidates(thread_id).unwrap()),
+            );
+            assert!(registered.ok, "{registered:?}");
+        }
+        let subscribed = handle_notification_subscribe(
+            &server,
+            "target".into(),
+            "token-target".into(),
+            "direct-message".into(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            1,
+            60,
+        );
+        assert!(subscribed.ok, "{subscribed:?}");
+
+        let response = handle_live_closure_daemon_send(
+            &server,
+            "requester".into(),
+            "token-requester".into(),
+            "target".into(),
+            "restart_replay".into(),
+            "challenge-restart".into(),
+            "challenge-restart".into(),
+            true,
+        );
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data["restart_replay_pending"], true);
+        assert_eq!(response.data["delivery_mode"], RESTART_REPLAY_PENDING_MODE);
+        let message_id = response.data["msg_id"].as_str().unwrap();
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.delivery_modes[message_id],
+            RESTART_REPLAY_PENDING_MODE
+        );
+        assert_eq!(state.msgs[message_id].from, "collab-server");
+        assert_eq!(state.msgs[message_id].mtype, "notification");
         std::fs::remove_dir_all(root).unwrap();
     }
 

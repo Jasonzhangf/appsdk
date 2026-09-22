@@ -13,6 +13,15 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 fn tools() -> Value {
     json!([
         tool("collab_msg", "Read a durable notification by ID.", json!({"id":{"type":"string"}}), &["id"]),
+        tool(
+            "collab_recv",
+            "Consume the durable inbox batch. receive_id is the caller-owned receive identity; repeat the same value to replay a committed receive after a lost response.",
+            json!({
+                "timeout":{"type":"integer","minimum":0},
+                "receive_id":{"type":"string"}
+            }),
+            &["receive_id"]
+        ),
         tool("collab_subagent", "Parent manages children; child uses ready/working and sends results via collab_sendmessage. status includes mailbox, keepalive and notification history. snapshot is explicit screen-tail read only, not a health probe. Observers without an App Server push channel must check status/mailbox themselves. rearm requires an explicit operator request after exhaustion. start accepts optional runtime=codex to override ~/.appsdk/config.toml. dispatch assigns a real task through the live master scheduler and is idempotent by request_id.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close"]},"id":{"type":"string"},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
         tool(
             "collab_init",
@@ -172,9 +181,30 @@ fn collab_bin() -> std::path::PathBuf {
 }
 
 fn call(name: &str, args: &Value) -> Result<String, String> {
+    let argv = build_argv(name, args)?;
+    let mut command = Command::new(collab_bin());
+    command.args(argv);
+    let output = command.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(if stderr.is_empty() { stdout } else { stderr });
+    }
+    Ok(stdout)
+}
+
+fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut argv = Vec::<String>::new();
     match name {
         "collab_msg" => argv.extend(["msg".into(), required(args, "id")?]),
+        "collab_recv" => {
+            argv.push("recv".into());
+            optional_integer_flag(&mut argv, args, "timeout", "--timeout")?;
+            argv.extend([
+                "--receive-id".into(),
+                required_receive_id(args, "receive_id")?,
+            ]);
+        }
         "collab_subagent" => {
             let action = required(args, "action")?;
             if ![
@@ -354,15 +384,7 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
         }
         _ => return Err(format!("unknown tool {name}")),
     }
-    let mut command = Command::new(collab_bin());
-    command.args(argv);
-    let output = command.output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        return Err(if stderr.is_empty() { stdout } else { stderr });
-    }
-    Ok(stdout)
+    Ok(argv)
 }
 
 fn required(args: &Value, key: &str) -> Result<String, String> {
@@ -370,6 +392,18 @@ fn required(args: &Value, key: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("missing required argument {key}"))
+}
+
+fn required_receive_id(args: &Value, key: &str) -> Result<String, String> {
+    let value = args
+        .get(key)
+        .ok_or_else(|| format!("missing required argument {key}"))?
+        .as_str()
+        .ok_or_else(|| format!("{key} must be a string"))?;
+    if value.trim().is_empty() {
+        return Err(format!("{key} must not be empty"));
+    }
+    Ok(value.to_owned())
 }
 
 fn optional_flag(
@@ -592,6 +626,62 @@ mod tests {
             .find(|tool| tool["name"] == "collab_task_accept")
             .unwrap();
         assert_eq!(accept["inputSchema"]["required"], json!(["id"]));
+    }
+
+    #[test]
+    fn recv_schema_requires_caller_supplied_receive_id() {
+        let definitions = tools();
+        let recv = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "collab_recv")
+            .expect("collab_recv tool");
+        let properties = recv["inputSchema"]["properties"].as_object().unwrap();
+        assert!(
+            properties.contains_key("receive_id"),
+            "MCP recv must expose the durable receive identity for replay"
+        );
+        assert_eq!(
+            recv["inputSchema"]["required"],
+            json!(["receive_id"]),
+            "MCP recv must require a caller-owned receive identity"
+        );
+    }
+
+    #[test]
+    fn recv_rejects_absent_or_invalid_receive_id_before_spawn() {
+        for args in [
+            json!({}),
+            json!({"timeout": 30}),
+            json!({"receive_id": null}),
+            json!({"receive_id": 42}),
+            json!({"receive_id": ""}),
+            json!({"receive_id": "   "}),
+        ] {
+            let error = build_argv("collab_recv", &args)
+                .expect_err(&format!("collab_recv must reject {args} before spawn"));
+            assert!(
+                error.contains("receive_id"),
+                "unexpected error for {args}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn recv_forwards_caller_receive_id_unchanged() {
+        let argv = build_argv(
+            "collab_recv",
+            &json!({"timeout": 30, "receive_id": "recv-0922-abc"}),
+        )
+        .expect("valid receive_id must build argv");
+        assert_eq!(
+            argv,
+            vec!["recv", "--timeout", "30", "--receive-id", "recv-0922-abc"]
+        );
+        let repeated = build_argv("collab_recv", &json!({"receive_id": "recv-0922-abc"}))
+            .expect("repeat call must build argv");
+        assert_eq!(repeated, vec!["recv", "--receive-id", "recv-0922-abc"]);
     }
 
     #[test]

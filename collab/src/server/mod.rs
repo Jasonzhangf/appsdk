@@ -5796,7 +5796,7 @@ fn handle_register_with_app_scope_inner(
                 worker_id
             ));
         }
-        let reuse_existing = same_runtime_key;
+        let reuse_existing = same_runtime_key && !recover_existing;
         drop(st);
         let mut resp = register_typed(
             server,

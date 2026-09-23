@@ -6429,6 +6429,94 @@ fn conflict_is_durable_and_wait_targets_resource_holder() {
 }
 
 #[test]
+fn self_registration_cannot_duplicate_the_owners_active_task() {
+    let (server, root) = test_server();
+    register(&server, "peer", "%peer");
+    assert!(create_task(&server, "peer", "authoritative", "shared-feature").ok);
+
+    let duplicate = create_task(&server, "peer", "duplicate", "shared-feature");
+    assert!(!duplicate.ok, "{duplicate:?}");
+    let error = duplicate.error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("TASK_OWNER_ALREADY_HOLDS_RESOURCE:"),
+        "error={error}"
+    );
+    assert!(error.contains("authoritative"), "error={error}");
+    assert_ne!(error, "TASK_RESOURCE_CONFLICT");
+    let state = server.state.lock().unwrap();
+    assert!(!state.tasks.contains_key("duplicate"));
+    assert_eq!(state.tasks["authoritative"].status, "working");
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn scheduler_assignment_cannot_self_conflict_with_a_duplicate_registration() {
+    let (server, root) = test_server();
+    register(&server, "peer", "%peer");
+    let now = now_ms();
+    server.commit(&[
+        Event::TaskCreated {
+            task: TaskRec {
+                id: "task-scheduler-authoritative".into(),
+                owner: "peer".into(),
+                created_by: "master".into(),
+                feature_id: Some("shared-feature".into()),
+                worktree_path: Some("playground/shared".into()),
+                branch: Some("fix/shared".into()),
+                base_commit: None,
+                priority: default_priority(),
+                status: "assigned".into(),
+                next_step: None,
+                wait: None,
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+        Event::SchedulerAdmission {
+            admission: crate::server::state::SchedulerAdmissionRecord {
+                request_id: "request-authoritative".into(),
+                decision: "use-registered-peer".into(),
+                worker_id: "master".into(),
+                managed_subagent_id: None,
+                message_id: "scheduler-request-authoritative".into(),
+                task_id: "task-scheduler-authoritative".into(),
+                status: "succeeded".into(),
+                error: None,
+                created_ms: now,
+                updated_ms: now,
+            },
+        },
+    ]);
+
+    let duplicate = create_task(&server, "peer", "duplicate", "shared-feature");
+    assert!(!duplicate.ok, "{duplicate:?}");
+    let error = duplicate.error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("TASK_OWNER_ALREADY_HOLDS_RESOURCE:"),
+        "error={error}"
+    );
+    assert!(
+        error.contains("task-scheduler-authoritative"),
+        "error={error}"
+    );
+    assert_ne!(error, "TASK_RESOURCE_CONFLICT");
+    let state = server.state.lock().unwrap();
+    assert!(!state.tasks.contains_key("duplicate"));
+    assert_eq!(
+        state.tasks["task-scheduler-authoritative"].status,
+        "assigned"
+    );
+    assert!(
+        state.tasks.values().all(|task| task.next_step.as_deref()
+            != Some("RESOURCE_CONFLICT=task-scheduler-authoritative")),
+        "no task may block against its own scheduler assignment"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn holder_close_persists_release_only_for_waiter() {
     let (server, root) = test_server();
     register(&server, "holder", "%holder");

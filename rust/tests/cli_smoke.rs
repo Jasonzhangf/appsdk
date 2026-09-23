@@ -9355,6 +9355,223 @@ fn verify_rejects_contracts_that_drop_canonical_semantics() {
 }
 
 #[test]
+fn verify_rejects_nested_and_noncanonical_contract_weakening() {
+    let root = temp_root("declared-contract-nested-and-zone-minimums");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let sdk_resources_path = root.join(".appsdk/sdk-resources.json");
+    let sdk_resources_before = fs::read(&sdk_resources_path).unwrap();
+
+    let worktree_path = root.join("contracts/records/worktree-record.schema.json");
+    let worktree_projection_path =
+        root.join(".appsdk/contracts/records/worktree-record.schema.json");
+    let worktree_before = fs::read(&worktree_path).unwrap();
+    let mut weakened_worktree: Value = serde_json::from_slice(&worktree_before).unwrap();
+    weakened_worktree["allOf"][0]["then"]
+        .as_object_mut()
+        .unwrap()
+        .remove("required");
+    fs::write(
+        &worktree_path,
+        serde_json::to_string_pretty(&weakened_worktree).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        &worktree_projection_path,
+        serde_json::to_string_pretty(&weakened_worktree).unwrap() + "\n",
+    )
+    .unwrap();
+    set_sdk_resource_digest(
+        &root,
+        "contracts/records/worktree-record.schema.json",
+        &worktree_projection_path,
+    );
+    let missing_allof = run(&["verify", "--admission", root_text]);
+    assert!(
+        !missing_allof.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&missing_allof.stdout),
+        String::from_utf8_lossy(&missing_allof.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_allof.stderr)
+            .contains("DECLARED_RECORD_CONTRACT_MISMATCH"),
+        "stderr={}",
+        String::from_utf8_lossy(&missing_allof.stderr)
+    );
+    restore_sdk_contract(
+        &worktree_path,
+        &worktree_projection_path,
+        &sdk_resources_path,
+        &worktree_before,
+        &sdk_resources_before,
+    );
+
+    let promotion_path = root.join("contracts/records/promotion-record.schema.json");
+    let promotion_projection_path =
+        root.join(".appsdk/contracts/records/promotion-record.schema.json");
+    let promotion_before = fs::read(&promotion_path).unwrap();
+    let mut legacy_promotion: Value = serde_json::from_slice(&promotion_before).unwrap();
+    legacy_promotion["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|value| value.as_str() != Some("bug_closure_verified"));
+    legacy_promotion["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bug_closure_verified");
+    fs::write(
+        &promotion_path,
+        serde_json::to_string_pretty(&legacy_promotion).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        &promotion_projection_path,
+        serde_json::to_string_pretty(&legacy_promotion).unwrap() + "\n",
+    )
+    .unwrap();
+    set_sdk_resource_digest(
+        &root,
+        "contracts/records/promotion-record.schema.json",
+        &promotion_projection_path,
+    );
+    let accepted_legacy_promotion = run(&["verify", "--admission", root_text]);
+    assert!(
+        accepted_legacy_promotion.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&accepted_legacy_promotion.stdout),
+        String::from_utf8_lossy(&accepted_legacy_promotion.stderr)
+    );
+    restore_sdk_contract(
+        &promotion_path,
+        &promotion_projection_path,
+        &sdk_resources_path,
+        &promotion_before,
+        &sdk_resources_before,
+    );
+
+    let zone_path = root.join("contracts/transitions/zone-transition.manifest.json");
+    let zone_projection_path =
+        root.join(".appsdk/contracts/transitions/zone-transition.manifest.json");
+    let zone_before = fs::read(&zone_path).unwrap();
+    let mut conflicting_zone: Value = serde_json::from_slice(&zone_before).unwrap();
+    conflicting_zone["transitions"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|transition| {
+            transition["from"].as_str() != Some("playground")
+                || transition["to"].as_str() != Some("playground")
+        });
+    let mut conflicting_transition = conflicting_zone["transitions"][0].clone();
+    conflicting_transition["from"] = Value::String("playground".into());
+    conflicting_transition["to"] = Value::String("playground".into());
+    conflicting_transition["allowed"] = Value::Bool(false);
+    conflicting_zone["transitions"]
+        .as_array_mut()
+        .unwrap()
+        .push(conflicting_transition);
+    fs::write(
+        &zone_path,
+        serde_json::to_string_pretty(&conflicting_zone).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        &zone_projection_path,
+        serde_json::to_string_pretty(&conflicting_zone).unwrap() + "\n",
+    )
+    .unwrap();
+    set_sdk_resource_digest(
+        &root,
+        "contracts/transitions/zone-transition.manifest.json",
+        &zone_projection_path,
+    );
+    let conflicting = run(&["verify", "--admission", root_text]);
+    assert!(
+        !conflicting.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&conflicting.stdout),
+        String::from_utf8_lossy(&conflicting.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&conflicting.stderr).contains("INVALID_DECLARED_ZONE_CONTRACT"),
+        "stderr={}",
+        String::from_utf8_lossy(&conflicting.stderr)
+    );
+    restore_sdk_contract(
+        &zone_path,
+        &zone_projection_path,
+        &sdk_resources_path,
+        &zone_before,
+        &sdk_resources_before,
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_parallel_zone_contract_dropping_live_closure() {
+    let root = temp_root("declared-zone-parallel-live-closure");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let project_before = fs::read(&project_path).unwrap();
+    let mut project: Value = serde_json::from_slice(&project_before).unwrap();
+    project["development_scenarios"]["enabled"] =
+        Value::Array(vec![Value::String("multi_worker_collaboration".into())]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let zone_path = root.join("contracts/transitions/zone-transition.manifest.json");
+    let zone_projection_path =
+        root.join(".appsdk/contracts/transitions/zone-transition.manifest.json");
+    let zone_before = fs::read(&zone_path).unwrap();
+    let mut v4_zone: Value = serde_json::from_slice(&zone_before).unwrap();
+    for transition in v4_zone["transitions"].as_array_mut().unwrap() {
+        if transition["from"].as_str() == Some("playground")
+            && transition["to"].as_str() == Some("active")
+        {
+            transition["record_required"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|record| record.as_str() != Some("CollabLiveClosureRecordWhenParallel"));
+        }
+    }
+    fs::write(
+        &zone_path,
+        serde_json::to_string_pretty(&v4_zone).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(
+        &zone_projection_path,
+        serde_json::to_string_pretty(&v4_zone).unwrap() + "\n",
+    )
+    .unwrap();
+    set_sdk_resource_digest(
+        &root,
+        "contracts/transitions/zone-transition.manifest.json",
+        &zone_projection_path,
+    );
+
+    let rejected = run(&["verify", "--admission", root_text]);
+    assert!(
+        !rejected.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("INVALID_DECLARED_ZONE_CONTRACT"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn install_bundle_resources_projects_declared_record_contract_sources() {
     let root = temp_root("project-record-contract-projection");
     let root_text = root.to_str().unwrap();
@@ -11713,6 +11930,31 @@ fn digest(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn set_sdk_resource_digest(root: &Path, source: &str, projection: &Path) {
+    let record_path = root.join(".appsdk/sdk-resources.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    let entry = record["resources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["source"] == source)
+        .unwrap();
+    entry["digest"] = Value::String(file_digest(projection));
+    fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+}
+
+fn restore_sdk_contract(
+    source_path: &Path,
+    projection_path: &Path,
+    sdk_resources_path: &Path,
+    source_before: &[u8],
+    sdk_resources_before: &[u8],
+) {
+    fs::write(source_path, source_before).unwrap();
+    fs::write(projection_path, source_before).unwrap();
+    fs::write(sdk_resources_path, sdk_resources_before).unwrap();
 }
 
 fn git_test_value(root: &Path, args: &[&str]) -> String {

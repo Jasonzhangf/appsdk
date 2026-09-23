@@ -1474,6 +1474,33 @@ fn assert_schema_property_compatible(canonical: &Value, declared: &Value, path: 
     if !canonical.is_object() || !declared.is_object() {
         fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{}", path));
     }
+    for key in ["if", "then", "not"] {
+        let Some(expected) = canonical.get(key) else {
+            continue;
+        };
+        let actual = declared
+            .get(key)
+            .unwrap_or_else(|| fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/{key}")));
+        assert_schema_property_compatible(expected, actual, &format!("{path}/{key}"));
+    }
+    if let Some(expected_all_of) = canonical.get("allOf") {
+        let Some(expected_rules) = expected_all_of.as_array() else {
+            fail(format!("INVALID_CANONICAL_RECORD_CONTRACT:{}", path));
+        };
+        let Some(actual_rules) = declared.get("allOf").and_then(Value::as_array) else {
+            fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/allOf"));
+        };
+        for (index, expected_rule) in expected_rules.iter().enumerate() {
+            let Some(actual_rule) = actual_rules.get(index) else {
+                fail(format!("DECLARED_RECORD_CONTRACT_MISMATCH:{path}/allOf"));
+            };
+            assert_schema_property_compatible(
+                expected_rule,
+                actual_rule,
+                &format!("{path}/allOf/{index}"),
+            );
+        }
+    }
     for key in [
         "type",
         "const",
@@ -1575,6 +1602,27 @@ fn assert_schema_property_compatible(canonical: &Value, declared: &Value, path: 
 
 fn assert_record_schema_minimum(relative: &str, declared: &Value) {
     let canonical = canonical_record_contract(relative);
+    let mut canonical_root = serde_json::Map::new();
+    let mut declared_root = serde_json::Map::new();
+    for key in ["if", "then", "not", "allOf"] {
+        let Some(expected) = canonical.get(key) else {
+            continue;
+        };
+        let actual = declared.get(key).unwrap_or_else(|| {
+            fail(format!(
+                "DECLARED_RECORD_CONTRACT_MISMATCH:{relative}/{key}"
+            ))
+        });
+        canonical_root.insert(key.into(), expected.clone());
+        declared_root.insert(key.into(), actual.clone());
+    }
+    if !canonical_root.is_empty() {
+        assert_schema_property_compatible(
+            &Value::Object(canonical_root),
+            &Value::Object(declared_root),
+            relative,
+        );
+    }
     let canonical_required = schema_required_names(&canonical, relative);
     let declared_required = schema_required_names(declared, relative);
     let declared_properties = declared
@@ -1670,10 +1718,44 @@ fn assert_declared_contracts(root: &Path, project: &Value) {
         .get("transitions")
         .and_then(Value::as_array)
         .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
-    if declared_transitions.len() < canonical_transitions.len()
-        || canonical_transitions
+    let declared_transition_keys = declared_transitions
+        .iter()
+        .map(|transition| {
+            transition
+                .get("from")
+                .and_then(Value::as_str)
+                .zip(transition.get("to").and_then(Value::as_str))
+                .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"))
+        })
+        .collect::<Vec<_>>();
+    let mut unique_transition_keys = BTreeSet::new();
+    if declared_transition_keys
+        .iter()
+        .any(|key| !unique_transition_keys.insert(key))
+    {
+        fail("INVALID_DECLARED_ZONE_CONTRACT");
+    }
+    let canonical_transition_keys = canonical_transitions
+        .iter()
+        .map(|transition| {
+            transition
+                .get("from")
+                .and_then(Value::as_str)
+                .zip(transition.get("to").and_then(Value::as_str))
+                .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"))
+        })
+        .collect::<Vec<_>>();
+    let mut unique_canonical_keys = BTreeSet::new();
+    if canonical_transition_keys
+        .iter()
+        .any(|key| !unique_canonical_keys.insert(key))
+    {
+        fail("INVALID_CANONICAL_ZONE_CONTRACT");
+    }
+    if declared_transition_keys.len() != canonical_transition_keys.len()
+        || canonical_transition_keys
             .iter()
-            .any(|expected| !declared_transitions.iter().any(|actual| actual == expected))
+            .any(|key| !declared_transition_keys.contains(key))
     {
         fail("INVALID_DECLARED_ZONE_CONTRACT");
     }
@@ -1720,6 +1802,26 @@ fn assert_declared_contracts(root: &Path, project: &Value) {
             {
                 fail("INVALID_DECLARED_ZONE_CONTRACT");
             }
+        }
+    }
+    for expected in canonical_transitions {
+        let key = expected
+            .get("from")
+            .and_then(Value::as_str)
+            .zip(expected.get("to").and_then(Value::as_str))
+            .unwrap_or_else(|| fail("INVALID_CANONICAL_ZONE_CONTRACT"));
+        let actual = declared_transitions
+            .iter()
+            .find(|transition| {
+                transition
+                    .get("from")
+                    .and_then(Value::as_str)
+                    .zip(transition.get("to").and_then(Value::as_str))
+                    .is_some_and(|actual_key| actual_key == key)
+            })
+            .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
+        if actual != expected {
+            fail("INVALID_DECLARED_ZONE_CONTRACT");
         }
     }
     if let Some(expected_forbidden) = canonical_zone.get("forbidden_runtime_edges") {

@@ -20457,7 +20457,8 @@ esac
 
     // Charter, fleet rules and notification rules all travel with the wake.
     assert!(text.contains("不要空转，不要假装完成"));
-    assert!(text.contains("最多 5 个"));
+    assert!(text.contains("`[subagent].max_concurrent`（默认 8）"));
+    assert!(text.contains("普通 peer 不计入该额度"));
     assert!(text.contains("绝不能以 ACK、已读或一段总结结束一轮"));
     assert!(text.contains("collab worker close"));
     assert!(text.contains("appsdk subworker status"));
@@ -20480,7 +20481,18 @@ esac
     assert_eq!(payload["goal"]["registered"], true);
     assert_eq!(payload["goal"]["interval"], "10m");
     assert!(payload["charter"].as_str().unwrap().contains("调度"));
-    assert!(payload["fleet_rules"].as_str().unwrap().contains("5 个"));
+    assert!(payload["charter"]
+        .as_str()
+        .unwrap()
+        .contains("先饱和每一个 live+present 的空闲普通 peer"));
+    assert!(payload["charter"]
+        .as_str()
+        .unwrap()
+        .contains("长等待仍并发派单"));
+    assert!(payload["fleet_rules"]
+        .as_str()
+        .unwrap()
+        .contains("`[subagent].max_concurrent`（默认 8）"));
     assert!(payload["notification_rules"]
         .as_str()
         .unwrap()

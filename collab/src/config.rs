@@ -126,6 +126,7 @@ pub struct Subagent {
     pub profile_priority: Vec<String>,
     pub persistent: bool,
     pub close_on_task_complete: bool,
+    pub max_concurrent: u32,
     pub profiles: BTreeMap<String, Profile>,
     pub health: Health,
     pub startup: Startup,
@@ -138,6 +139,7 @@ impl Default for Subagent {
             profile_priority: vec!["gcm".into(), "oauth".into()],
             persistent: true,
             close_on_task_complete: false,
+            max_concurrent: 8,
             profiles: BTreeMap::from([
                 (
                     "gcm".into(),
@@ -432,6 +434,9 @@ impl Config {
         if !s.persistent || s.close_on_task_complete {
             bail!("subagents currently require persistent=true and close_on_task_complete=false");
         }
+        if !(1..=64).contains(&s.max_concurrent) {
+            bail!("subagent.max_concurrent must be 1..64");
+        }
         if s.health.attempts_per_profile != 1
             || !(1..=180).contains(&s.health.timeout_seconds)
             || s.health.expected_response.trim().is_empty()
@@ -512,6 +517,7 @@ mod tests {
         let c = parse("", Path::new("/project")).unwrap();
         assert_eq!(c.retention.ttl_days, 7);
         assert_eq!(c.subagent.runtime, "codex");
+        assert_eq!(c.subagent.max_concurrent, 8);
         assert_eq!(c.subagent.health.timeout_seconds, 90);
         assert_eq!(c.notifications.delay_ms("direct-message"), 120000);
         assert_eq!(c.notifications.delay_ms("deadline"), 0);
@@ -531,6 +537,8 @@ mod tests {
             "[notifications]\nmode='typo'",
             "[timers]\ntick_interval_ms=0",
             "[subagent]\nruntime='claude'",
+            "[subagent]\nmax_concurrent=0",
+            "[subagent]\nmax_concurrent=65",
             "[retention]\nttl_days=0",
         ] {
             assert!(parse(s, Path::new("/project")).is_err());

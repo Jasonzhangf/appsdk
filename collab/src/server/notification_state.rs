@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MasterWakeSignal {
@@ -20,6 +21,9 @@ pub struct MasterWakeAccumulator {
     pub goal_due: bool,
     #[serde(default)]
     pub idle_workers: Vec<String>,
+    /// Idle-capacity additions accumulated since the last master-idle batch.
+    #[serde(default)]
+    pub newly_idle_workers: Vec<String>,
     #[serde(default)]
     pub unresponsive_workers: Vec<String>,
     #[serde(default)]
@@ -78,17 +82,31 @@ pub fn accumulate_master_wake(
             }
             changed
         }
-        MasterWakeSignal::WorkerIdle { worker_id } | MasterWakeSignal::MasterIdle { worker_id } => {
+        MasterWakeSignal::WorkerIdle { worker_id } => {
             let added = add_unique(&mut accumulator.idle_workers, worker_id.clone());
+            let newly_added = add_unique(&mut accumulator.newly_idle_workers, worker_id.clone());
             let recovered = accumulator
                 .unresponsive_workers
                 .iter()
                 .position(|id| id == worker_id)
                 .map(|index| accumulator.unresponsive_workers.remove(index))
                 .is_some();
-            added || recovered
+            added || newly_added || recovered
+        }
+        MasterWakeSignal::MasterIdle { worker_id } => {
+            // The master is the consumer, not idle worker capacity. Its idle
+            // edge flushes the accumulated batch instead of joining it.
+            accumulator
+                .unresponsive_workers
+                .iter()
+                .position(|id| id == worker_id)
+                .map(|index| accumulator.unresponsive_workers.remove(index))
+                .is_some()
+                || (accumulator.generation == 0 && accumulator.last_updated_ms == 0)
         }
         MasterWakeSignal::WorkerUnresponsive { worker_id } => {
+            accumulator.idle_workers.retain(|id| id != worker_id);
+            accumulator.newly_idle_workers.retain(|id| id != worker_id);
             add_unique(&mut accumulator.unresponsive_workers, worker_id.clone())
         }
         MasterWakeSignal::WorkerRecovered { worker_id }
@@ -100,6 +118,7 @@ pub fn accumulate_master_wake(
             if let Some(index) = idle_removed {
                 accumulator.idle_workers.remove(index);
             }
+            accumulator.newly_idle_workers.retain(|id| id != worker_id);
             let unresponsive_removed = accumulator
                 .unresponsive_workers
                 .iter()
@@ -115,18 +134,27 @@ pub fn accumulate_master_wake(
         MasterWakeSignal::TaskFreed { task_id } => {
             add_unique(&mut accumulator.completed_or_freed_tasks, task_id.clone())
         }
-        MasterWakeSignal::SubagentStatus { subagent_id } => add_unique(
-            &mut accumulator.idle_workers,
-            format!("subagent:{subagent_id}"),
-        ),
+        MasterWakeSignal::SubagentStatus { subagent_id } => {
+            let id = format!("subagent:{subagent_id}");
+            let added = add_unique(&mut accumulator.idle_workers, id.clone());
+            let newly_added = add_unique(&mut accumulator.newly_idle_workers, id);
+            added || newly_added
+        }
         MasterWakeSignal::SubagentWorking { subagent_id } => {
             let id = format!("subagent:{subagent_id}");
-            accumulator
+            let idle_removed = accumulator
                 .idle_workers
                 .iter()
                 .position(|existing| existing == &id)
                 .map(|index| accumulator.idle_workers.remove(index))
-                .is_some()
+                .is_some();
+            let newly_removed = accumulator
+                .newly_idle_workers
+                .iter()
+                .position(|existing| existing == &id)
+                .map(|index| accumulator.newly_idle_workers.remove(index))
+                .is_some();
+            idle_removed || newly_removed
         }
     };
     if changed {
@@ -149,4 +177,38 @@ pub fn mark_master_wake_delivery_failed(accumulator: &mut MasterWakeAccumulator)
 
 pub fn mark_master_wake_skipped_busy(accumulator: &mut MasterWakeAccumulator) {
     accumulator.delivery_state = "skipped-busy".into();
+}
+
+pub fn mark_idle_batch_delivered(accumulator: &mut MasterWakeAccumulator) {
+    accumulator.newly_idle_workers.clear();
+}
+
+pub fn retain_live_idle_workers(
+    accumulator: &mut MasterWakeAccumulator,
+    live_workers: &BTreeSet<String>,
+    live_subagents: &BTreeSet<String>,
+) -> bool {
+    let before_idle = accumulator.idle_workers.clone();
+    let before_newly = accumulator.newly_idle_workers.clone();
+    accumulator.idle_workers.retain(|id| {
+        if let Some(subagent_id) = id.strip_prefix("subagent:") {
+            live_subagents.contains(subagent_id)
+        } else {
+            live_workers.contains(id)
+        }
+    });
+    accumulator.newly_idle_workers.retain(|id| {
+        if let Some(subagent_id) = id.strip_prefix("subagent:") {
+            live_subagents.contains(subagent_id)
+        } else {
+            live_workers.contains(id)
+        }
+    });
+    let changed =
+        accumulator.idle_workers != before_idle || accumulator.newly_idle_workers != before_newly;
+    if changed {
+        accumulator.generation = accumulator.generation.saturating_add(1);
+        accumulator.delivery_state = "pending".into();
+    }
+    changed
 }

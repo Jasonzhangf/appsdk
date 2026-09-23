@@ -98,6 +98,10 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
         }
         state.workers.values().cloned().collect()
     };
+    let master_id = {
+        let state = server.state.lock().unwrap();
+        super::live_master_id(server, &state).ok().flatten()
+    };
     for worker in workers {
         // App Server transport exposes thread liveness, not the agent's
         // execution state. Managed children report that state through their
@@ -160,10 +164,7 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
             .values()
             .find(|child| child.peer == worker.id)
             .cloned();
-        let master_id = match super::live_master_id(server, &state) {
-            Ok(master_id) => master_id,
-            Err(_) => continue,
-        };
+        let master_id = master_id.clone();
         let is_live_master = master_id.as_deref() == Some(worker.id.as_str());
         if agent == AgentState::Working && record.pending_since_ms == 0 {
             record.pending_since_ms = now;
@@ -189,33 +190,54 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                 "actionable-tasks-idle"
             };
             let observed_str = observed_label(agent);
-            let observed_changed = record.observed != observed_str;
+            let prior_observed = record.observed.clone();
+            let observed_changed = prior_observed != observed_str;
+            let idle_report_settled = if !is_idle || managed.is_none() {
+                true
+            } else if prior_observed != "working" {
+                true
+            } else {
+                now.saturating_sub(record.pending_since_ms) >= SUBAGENT_STATE_SETTLE_MS
+            };
+            let idle_record_ready = is_idle && idle_report_settled;
+            let idle_signal_due = idle_record_ready
+                && record.idle_episode_notices == 0
+                && !record.idle_episode_stopped
+                && (record.working_seen || task_revision_changed);
+            let working_signal_due = !is_idle && prior_observed == "idle" && record.working_seen;
             if observed_changed {
                 record.observed = observed_str.into();
                 record.idle_since_ms = now;
                 if agent == AgentState::Working {
                     record.activity_ms = now;
+                    if !is_live_master {
+                        record.idle_episode_notices = 0;
+                        record.idle_episode_reason.clear();
+                        record.idle_episode_stopped = false;
+                        record.working_seen = true;
+                    }
                 }
             }
             record.unacked = 0;
             record.last_notice_id = None;
             let mut events = Vec::new();
-            if observed_changed {
-                let signal = if is_idle {
-                    if is_live_master {
-                        super::state::MasterWakeSignal::MasterIdle {
-                            worker_id: worker.id.clone(),
-                        }
-                    } else if let Some(child) = &managed {
-                        super::state::MasterWakeSignal::SubagentStatus {
-                            subagent_id: child.id.clone(),
-                        }
-                    } else {
-                        super::state::MasterWakeSignal::WorkerIdle {
-                            worker_id: worker.id.clone(),
-                        }
+            if idle_signal_due {
+                let signal = if is_live_master {
+                    super::state::MasterWakeSignal::MasterIdle {
+                        worker_id: worker.id.clone(),
                     }
                 } else if let Some(child) = &managed {
+                    super::state::MasterWakeSignal::SubagentStatus {
+                        subagent_id: child.id.clone(),
+                    }
+                } else {
+                    super::state::MasterWakeSignal::WorkerIdle {
+                        worker_id: worker.id.clone(),
+                    }
+                };
+                events.push(Event::MasterWakeSignal { signal, at_ms: now });
+            } else if working_signal_due {
+                let signal = if let Some(child) = &managed {
                     super::state::MasterWakeSignal::SubagentWorking {
                         subagent_id: child.id.clone(),
                     }
@@ -234,7 +256,9 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
                     events.push(Event::SubagentUpdated { subagent: child });
                 }
             }
-            if !is_idle && record.pending_since_ms == 0 {
+            if is_idle && managed.is_some() && prior_observed != "working" && !record.working_seen {
+                record.pending_since_ms = now;
+            } else if !is_idle && record.pending_since_ms == 0 {
                 record.pending_since_ms = now;
             } else if record.pending_since_ms == 0 {
                 record.pending_since_ms = now;
@@ -242,95 +266,6 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
             let new_idle_reason = is_idle && record.idle_episode_reason != idle_reason;
             if new_idle_reason {
                 record.idle_episode_reason = idle_reason.into();
-            }
-            let idle_notification_due = if is_live_master {
-                is_idle
-                    && tasks.is_empty()
-                    && !record.idle_episode_stopped
-                    && record.idle_episode_notices < 3
-                    && ((record.working_seen && record.idle_episode_notices == 0)
-                        || (record.idle_episode_notices > 0
-                            && now.saturating_sub(record.last_notice_ms)
-                                >= super::mailbox::AUTOMATIC_BATCH_WINDOW_MS))
-            } else {
-                is_idle
-                    && record.working_seen
-                    && record.idle_episode_notices == 0
-                    && (managed.is_none() || !tasks.is_empty() || task_revision_changed)
-                    && (managed.is_none()
-                        || now.saturating_sub(record.pending_since_ms) >= SUBAGENT_STATE_SETTLE_MS)
-            };
-            if idle_notification_due && server.config.notifications.enabled {
-                if let Some(master_id) = master_id {
-                    // An armed subscription can still name the master's old
-                    // endpoint. Validate its current delivery target before the
-                    // idle transition is consumed by Sent/WakeBound.
-                    let subscription =
-                        state.matching_subscription(&master_id, "direct-message", None, now);
-                    if master_id == worker.id {
-                        if let Some(sub) = subscription {
-                            let alert_id = super::gen_msg_id();
-                            events.push(Event::Sent {
-                                msg: Message {
-                                    id: alert_id.clone(),
-                                    from: "collab-server".into(),
-                                    to: worker.id.clone(),
-                                    mtype: "notify".into(),
-                                    subject: Some(format!("master-idle: {}", worker.id)),
-                                    body: format!(
-                                        "Master {} is now idle with no actionable task. Scheduling continues: inspect the task graph, worker/subagent load, liveness, saturation, and blockers; dispatch authorized work or resolve and reassign blockers. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
-                                        worker.id, sub.id
-                                    ),
-                                    in_reply_to: None,
-                                    created_ms: now,
-                                    state: "pending".into(),
-                                    wake_attempt_count: 0,
-                                    last_wake_attempt_ms: 0,
-                retry_attempted: false,
-                                },
-                            });
-                            events.push(Event::WakeBound {
-                                message_id: alert_id,
-                                subscription_id: sub.id.clone(),
-                            });
-                            record.last_notice_ms = now;
-                            record.idle_episode_notices =
-                                record.idle_episode_notices.saturating_add(1);
-                        }
-                    } else if let Some(sub) = subscription {
-                        let alert_id = super::gen_msg_id();
-                        events.push(Event::Sent {
-                            msg: Message {
-                                id: alert_id.clone(),
-                                from: "collab-server".into(),
-                                to: master_id.clone(),
-                                mtype: if managed.is_some() { "subagent-status" } else { "notify" }.into(),
-                                subject: Some(if managed.is_some() { "subagent-status".into() } else { format!("worker-idle: {}", worker.id) }),
-                                body: if let Some(child) = &managed {
-                                    format!("subagent={} state=idle tasks={}", child.id, tasks.join(","))
-                                } else if tasks.is_empty() {
-                                    format!("Worker {} is now idle with no active task. Action required: check task graph for unblocked downstream tasks, or pull from appsdk bug list --status open (P0/P1). If all work is complete, propose next steps to user and pause.", worker.id)
-                                } else {
-                                    format!("Worker {} is now idle. Actionable tasks: {}. Action required: inspect these tasks and the task graph for unblocked downstream work, or pull from appsdk bug list --status open (P0/P1). If all work is complete, propose next steps to user and pause.", worker.id, tasks.join(","))
-                                },
-                                in_reply_to: None,
-                                created_ms: now,
-                                state: "pending".into(),
-                                wake_attempt_count: 0,
-                                last_wake_attempt_ms: 0,
-                retry_attempted: false,
-                            },
-                        });
-                        record.idle_episode_notices = record.idle_episode_notices.saturating_add(1);
-                        record.last_notice_ms = now;
-                        record.notified_state = "idle".into();
-                        record.working_seen = false;
-                        events.push(Event::WakeBound {
-                            message_id: alert_id,
-                            subscription_id: sub.id.clone(),
-                        });
-                    }
-                }
             }
             if record != old {
                 events.insert(
@@ -346,6 +281,106 @@ pub(crate) fn tick_at(server: &Server, now: i64) {
             }
         }
     }
+    flush_idle_batches_if_ready(server, now);
+}
+
+fn flush_idle_batches_if_ready(server: &Server, now: i64) {
+    if !server.config.notifications.enabled {
+        return;
+    }
+    let mut state = server.state.lock().unwrap();
+    if state.admission_frozen() {
+        return;
+    }
+    let Some(master_id) = super::live_master_id(server, &state).ok().flatten() else {
+        return;
+    };
+    let master_record = state.keepalives.get(&master_id).cloned();
+    if master_record
+        .as_ref()
+        .is_some_and(|record| record.observed == "working")
+    {
+        return;
+    }
+    if state.master_wake.newly_idle_workers.is_empty() {
+        return;
+    }
+    let Some(subscription) = state
+        .matching_subscription(&master_id, "direct-message", None, now)
+        .cloned()
+    else {
+        return;
+    };
+    let newly_idle = state.master_wake.newly_idle_workers.clone();
+    let live_idle = state.master_wake.idle_workers.clone();
+    let blocked = state.master_wake.blocked_or_timed_out_tasks.clone();
+    let subject = if newly_idle.len() == 1 && newly_idle[0].starts_with("subagent:") {
+        "subagent-status".to_string()
+    } else if newly_idle.len() == 1 {
+        "worker-idle".to_string()
+    } else {
+        "master-wake-batch".to_string()
+    };
+    let body = format!(
+        "newly_idle={} live_idle={} blocked={} goal_due={}. Scheduling continues: saturate live present peers first, then schedule managed subagents within the configured cap. Never stay idle while eligible capacity remains. Inspect the task graph, every live peer and managed subagent, liveness, saturation, and blockers; dispatch the next ready non-overlapping P0/P1 task to each idle eligible worker, or resolve and reassign blockers. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
+        newly_idle.join(","),
+        live_idle.join(","),
+        blocked.join(","),
+        state.master_wake.goal_due,
+        subscription.id
+    );
+    let alert_id = super::gen_msg_id();
+    let mut events = vec![
+        Event::Sent {
+            msg: Message {
+                id: alert_id.clone(),
+                from: "collab-server".into(),
+                to: master_id.clone(),
+                mtype: if subject == "subagent-status" {
+                    "subagent-status".into()
+                } else {
+                    "notify".into()
+                },
+                subject: Some(subject.clone()),
+                body,
+                in_reply_to: None,
+                created_ms: now,
+                state: "pending".into(),
+                wake_attempt_count: 0,
+                last_wake_attempt_ms: 0,
+                retry_attempted: false,
+            },
+        },
+        Event::WakeBound {
+            message_id: alert_id,
+            subscription_id: subscription.id,
+        },
+    ];
+    for idle in &newly_idle {
+        let worker_id = idle.strip_prefix("subagent:").map_or(idle.as_str(), |id| {
+            state
+                .subagents
+                .get(id)
+                .map(|record| record.peer.as_str())
+                .unwrap_or(id)
+        });
+        let mut record = state.keepalives.get(worker_id).cloned().unwrap_or_default();
+        record.idle_episode_notices = record.idle_episode_notices.max(1);
+        record.last_notice_ms = now;
+        record.notified_state = "idle".into();
+        record.working_seen = false;
+        record.pending_since_ms = now;
+        record.observed = "idle".into();
+        events.push(Event::KeepaliveUpdated {
+            worker_id: worker_id.into(),
+            record,
+        });
+    }
+    crate::server::notification_state::mark_idle_batch_delivered(&mut state.master_wake);
+    events.push(Event::MasterWakeUpdated {
+        accumulator: state.master_wake.clone(),
+    });
+    server.commit_locked(&mut state, &events);
 }
 
 #[cfg(test)]
@@ -517,6 +552,147 @@ mod tests {
                 .count(),
             0
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_idle_signal_records_once_and_does_not_rearm() {
+        let mut state = State::default();
+        let signal = super::super::state::MasterWakeSignal::WorkerIdle {
+            worker_id: "peer".into(),
+        };
+        state.apply(&Event::MasterWakeSignal {
+            signal: signal.clone(),
+            at_ms: 10,
+        });
+        state.apply(&Event::MasterWakeSignal { signal, at_ms: 20 });
+        assert_eq!(state.master_wake.generation, 1);
+        assert_eq!(state.master_wake.idle_workers, vec!["peer"]);
+        assert_eq!(state.master_wake.newly_idle_workers, vec!["peer"]);
+    }
+
+    #[test]
+    fn closed_subagent_and_removed_peer_leave_both_idle_lists() {
+        let mut state = State::default();
+        state.apply(&Event::MasterWakeSignal {
+            signal: super::super::state::MasterWakeSignal::WorkerIdle {
+                worker_id: "lost-peer".into(),
+            },
+            at_ms: 10,
+        });
+        state.apply(&Event::MasterWakeSignal {
+            signal: super::super::state::MasterWakeSignal::SubagentStatus {
+                subagent_id: "closed-child".into(),
+            },
+            at_ms: 11,
+        });
+        assert_eq!(
+            state.master_wake.idle_workers,
+            vec!["lost-peer", "subagent:closed-child"]
+        );
+
+        state.apply(&Event::LegacyWorkerRemoved {
+            worker_id: "lost-peer".into(),
+        });
+        state.apply(&Event::SubagentUpdated {
+            subagent: crate::subagent::Record {
+                id: "closed-child".into(),
+                parent: "master".into(),
+                peer: "closed-peer".into(),
+                status: "closed".into(),
+                thread_id: Some("thread-closed-peer".into()),
+                profile: None,
+                created_ms: 1,
+                ready_deadline_ms: 2,
+                last_message: None,
+                error: None,
+                probe_failures: Vec::new(),
+                runtime: Some("codex".into()),
+            },
+        });
+
+        assert!(state.master_wake.idle_workers.is_empty());
+        assert!(state.master_wake.newly_idle_workers.is_empty());
+    }
+
+    #[test]
+    fn master_busy_defers_managed_idle_until_one_batch() {
+        let (server, root) = test_server();
+        register(&server, "master", "thread-master");
+        register(&server, "child", "thread-child");
+        assert!(
+            super::super::handle_master_promote(
+                &server,
+                "master".into(),
+                "token-master".into(),
+                "user approved master".into(),
+            )
+            .ok
+        );
+        let now = super::super::state::now_ms();
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: managed("managed", "master", "child", "working", now),
+            },
+            Event::KeepaliveUpdated {
+                worker_id: "master".into(),
+                record: Record {
+                    observed: "working".into(),
+                    idle_since_ms: now - 1,
+                    working_seen: true,
+                    ..Default::default()
+                },
+            },
+            Event::TaskCreated {
+                task: task("task-child", "child", "working", now),
+            },
+        ]);
+        tick_at(&server, now + 1_000);
+
+        {
+            let mut state = server.state.lock().unwrap();
+            let mut child = state.subagents["managed"].clone();
+            child.status = "idle".into();
+            state.subagents.insert(child.id.clone(), child);
+        }
+        tick_at(&server, now + 61_002);
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                state
+                    .msgs
+                    .values()
+                    .all(|message| message.mtype != "subagent-status"),
+                "master busy must not receive per-event subagent idle notices"
+            );
+            assert!(state
+                .master_wake
+                .idle_workers
+                .contains(&"subagent:managed".into()));
+        }
+
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "idle".into(),
+                idle_since_ms: now + 61_003,
+                working_seen: true,
+                ..Default::default()
+            },
+        }]);
+        tick_at(&server, now + 61_004);
+
+        let state = server.state.lock().unwrap();
+        let batch: Vec<_> = state
+            .msgs
+            .values()
+            .filter(|message| message.to == "master")
+            .collect();
+        assert_eq!(batch.len(), 1, "idle-time consumption must be one batch");
+        let body = &batch[0].body;
+        assert!(body.contains("newly_idle=subagent:managed"), "{body}");
+        assert!(body.contains("live_idle=subagent:managed"), "{body}");
+        drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 

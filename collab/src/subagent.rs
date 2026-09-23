@@ -92,6 +92,32 @@ pub struct Record {
     #[serde(default)]
     pub runtime: Option<String>,
 }
+
+/// How a managed child was finalized. Archiving is the preferred outcome, but
+/// a session root on another volume cannot be archived in place; that case is
+/// reported as a named terminal cleanup instead of an unbounded error.
+const CLOSE_OUTCOME_ARCHIVED: &str = "closed_archived";
+const CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE: &str = "closed_archive_unavailable";
+const CLOSE_OUTCOME_ARCHIVE_FAILED: &str = "closed_archive_failed";
+
+fn archive_unavailable_error(error: &str) -> bool {
+    error.contains("Cross-device link (os error 18)")
+        || error.contains("ADAPTER_CAPABILITY_UNAVAILABLE")
+}
+
+fn close_archive_error(outcome: &str, error: &str) -> String {
+    format!("CLOSE_OUTCOME={outcome}: {error}")
+}
+
+fn recorded_close_outcome(record: &Record) -> &'static str {
+    match record.error.as_deref() {
+        Some(error) if error.contains(CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE) => {
+            CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE
+        }
+        Some(error) if error.contains(CLOSE_OUTCOME_ARCHIVE_FAILED) => CLOSE_OUTCOME_ARCHIVE_FAILED,
+        _ => CLOSE_OUTCOME_ARCHIVED,
+    }
+}
 pub(crate) fn observe(
     server: &Server,
     id: Option<&str>,
@@ -1300,7 +1326,9 @@ fn run(
         }
         Action::Close { .. } => {
             if record.status == "closed" {
-                return Ok(json!({"subagent": record, "reused": true}));
+                let mut value = close_result(&record, None, recorded_close_outcome(&record))?;
+                value["reused"] = json!(true);
+                return Ok(value);
             }
             if record.status == "probing" && record.error.is_none() {
                 bail!("startup probe is in progress; check status, or close after its bounded completion");
@@ -1337,6 +1365,7 @@ fn run(
                 }
             };
             record.status = "closing".into();
+            record.error = None;
             server
                 .commit_locked_checked(
                     &mut state,
@@ -1349,16 +1378,77 @@ fn run(
             if let (false, Some(thread_id)) =
                 (retired_without_snapshot, record.thread_id.as_deref())
             {
-                let transport = {
+                let (transport, peer_cwd) = {
                     let state = server.state.lock().unwrap();
-                    state
+                    let peer_cwd = state
+                        .workers
+                        .get(&record.peer)
+                        .map(|worker| worker.cwd.clone())
+                        .unwrap_or_else(|| server.root.display().to_string());
+                    let transport = state
                         .workers
                         .get(&record.peer)
                         .and_then(|worker| worker.transport.clone())
-                }
-                .context("subagent has no registered App Server transport")?;
-                (server.appserver_thread_archive)(&transport, thread_id)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                        .context("subagent has no registered App Server transport")?;
+                    (transport, peer_cwd)
+                };
+                let close_outcome = match (server.appserver_thread_archive)(&transport, thread_id) {
+                    Ok(_) => CLOSE_OUTCOME_ARCHIVED,
+                    Err(error) => {
+                        let archive_error = error.to_string();
+                        let close_outcome = if archive_unavailable_error(&archive_error) {
+                            CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE
+                        } else {
+                            CLOSE_OUTCOME_ARCHIVE_FAILED
+                        };
+                        record.thread_id = None;
+                        record.error = Some(close_archive_error(close_outcome, &archive_error));
+                        if let Err(cleanup_error) =
+                            crate::server::retire_current_thread_route_after_launch_failure(
+                                route_owner,
+                                server,
+                                &record.peer,
+                                &peer_cwd,
+                                app_scope.as_ref(),
+                            )
+                        {
+                            record.error = Some(close_archive_error(
+                                close_outcome,
+                                &format!("{archive_error}; route cleanup failed: {cleanup_error}"),
+                            ));
+                        }
+                        if let Err(cleanup_error) =
+                            crate::server::retire_runtime_binding_after_route_failure(
+                                server,
+                                &record.peer,
+                                &peer_cwd,
+                                app_scope.as_ref(),
+                                &record.parent,
+                                "subagent close archive unavailable",
+                            )
+                        {
+                            record.error = Some(close_archive_error(
+                                close_outcome,
+                                &format!(
+                                    "{}; binding cleanup failed: {cleanup_error}",
+                                    record.error.clone().unwrap_or_default()
+                                ),
+                            ));
+                        }
+                        close_outcome
+                    }
+                };
+                record.status = "closed".into();
+                server
+                    .commit_checked(&[Event::SubagentUpdated {
+                        subagent: record.clone(),
+                    }])
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "subagent close outcome unknown: archive stage completed but journal commit failed: {error}"
+                        )
+                    })?;
+                return close_result(&record, snapshot_captured_ms, close_outcome);
             }
             record.status = "closed".into();
             server
@@ -1368,10 +1458,7 @@ fn run(
                 .map_err(|error| {
                     anyhow::anyhow!("subagent close outcome unknown: external close completed but journal commit failed: {error}")
                 })?;
-            return Ok(json!({
-                "subagent": record,
-                "snapshot_captured_ms": snapshot_captured_ms
-            }));
+            return close_result(&record, snapshot_captured_ms, CLOSE_OUTCOME_ARCHIVED);
         }
         _ => unreachable!(),
     }
@@ -1391,6 +1478,18 @@ fn subagent_responsibilities_resolved(
         message.to == record.peer && matches!(message.state.as_str(), "pending" | "delivered")
     });
     !has_active_task && !has_unread_notification
+}
+
+fn close_result(
+    record: &Record,
+    snapshot_captured_ms: Option<i64>,
+    close_outcome: &str,
+) -> Result<serde_json::Value> {
+    Ok(json!({
+        "subagent": record,
+        "snapshot_captured_ms": snapshot_captured_ms,
+        "close_outcome": close_outcome,
+    }))
 }
 
 #[cfg(test)]
@@ -1661,6 +1760,172 @@ mod tests {
             route_scope,
             binding_id,
         )
+    }
+
+    #[test]
+    fn close_reports_named_terminal_outcome_when_archive_is_impossible() {
+        let (mut server, root) = crate::server::peer_tests::test_server();
+        let registered = crate::server::handle_register_with_app_scope_unfinalized(
+            &server,
+            "parent".into(),
+            "token-parent".into(),
+            root.display().to_string(),
+            Some(AppServerId::new("tui-default").unwrap()),
+            Some(crate::proto::TransportCandidates {
+                appserver: Some(crate::server::peer_tests::test_appserver_candidate(
+                    "thread-parent",
+                )),
+            }),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let child_id = "child-archive-unavailable";
+        let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
+            register_child_route(&server, &root, child_id, "thread-child-archive-unavailable");
+        server.commit(&[Event::SubagentUpdated {
+            subagent: Record {
+                id: "subagent-archive-unavailable".into(),
+                parent: "parent".into(),
+                peer: child_id.into(),
+                status: "idle".into(),
+                thread_id: Some(native_thread_id.to_string()),
+                profile: None,
+                created_ms: 0,
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: vec![],
+                runtime: Some("codex".into()),
+            },
+        }]);
+        server.commit(&[Event::SubagentSnapshotCaptured {
+            subagent_id: "subagent-archive-unavailable".into(),
+            thread_id: native_thread_id.to_string(),
+            captured_ms: now_ms(),
+        }]);
+        server.appserver_thread_archive = std::sync::Arc::new(|_, _| {
+            Err("ADAPTER_UNKNOWN: rpc unknown: failed to archive session: thread-store internal error: failed to archive thread: Cross-device link (os error 18)".into())
+        });
+        let server = std::sync::Arc::new(server);
+
+        let response = crate::subagent::handle_with_env_for_app_scope(
+            &server,
+            &server,
+            "parent",
+            "token-parent",
+            Action::Close {
+                id: "subagent-archive-unavailable".into(),
+            },
+            app_scope.clone(),
+            std::collections::BTreeMap::new(),
+        );
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.data["close_outcome"], "closed_archive_unavailable",
+            "{response:?}"
+        );
+        assert!(response.data["subagent"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Cross-device link (os error 18)")));
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.subagents["subagent-archive-unavailable"].status,
+            "closed"
+        );
+        assert!(state
+            .global
+            .lookup_current_thread_route(&session_id, &native_thread_id)
+            .is_none());
+        assert_eq!(
+            state
+                .global
+                .lookup_binding_for(&route_scope, &binding_id)
+                .and_then(|binding| binding.native_thread_id.clone()),
+            None
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn close_reports_archive_failed_when_archiving_returns_an_unclassified_error() {
+        let (mut server, root) = crate::server::peer_tests::test_server();
+        let registered = crate::server::handle_register_with_app_scope_unfinalized(
+            &server,
+            "parent".into(),
+            "token-parent".into(),
+            root.display().to_string(),
+            Some(AppServerId::new("tui-default").unwrap()),
+            Some(crate::proto::TransportCandidates {
+                appserver: Some(crate::server::peer_tests::test_appserver_candidate(
+                    "thread-parent",
+                )),
+            }),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let child_id = "child-archive-failed";
+        let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
+            register_child_route(&server, &root, child_id, "thread-child-archive-failed");
+        server.commit(&[Event::SubagentUpdated {
+            subagent: Record {
+                id: "subagent-archive-failed".into(),
+                parent: "parent".into(),
+                peer: child_id.into(),
+                status: "idle".into(),
+                thread_id: Some(native_thread_id.to_string()),
+                profile: None,
+                created_ms: 0,
+                ready_deadline_ms: 0,
+                last_message: None,
+                error: None,
+                probe_failures: vec![],
+                runtime: Some("codex".into()),
+            },
+        }]);
+        server.commit(&[Event::SubagentSnapshotCaptured {
+            subagent_id: "subagent-archive-failed".into(),
+            thread_id: native_thread_id.to_string(),
+            captured_ms: now_ms(),
+        }]);
+        server.appserver_thread_archive =
+            std::sync::Arc::new(|_, _| Err("ADAPTER_TIMEOUT: archive timed out".into()));
+        let server = std::sync::Arc::new(server);
+
+        let response = crate::subagent::handle_with_env_for_app_scope(
+            &server,
+            &server,
+            "parent",
+            "token-parent",
+            Action::Close {
+                id: "subagent-archive-failed".into(),
+            },
+            app_scope,
+            std::collections::BTreeMap::new(),
+        );
+
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.data["close_outcome"], "closed_archive_failed",
+            "{response:?}"
+        );
+        assert!(response.data["subagent"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("archive timed out")));
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.subagents["subagent-archive-failed"].status, "closed");
+        assert!(state
+            .global
+            .lookup_current_thread_route(&session_id, &native_thread_id)
+            .is_none());
+        assert_eq!(
+            state
+                .global
+                .lookup_binding_for(&route_scope, &binding_id)
+                .and_then(|binding| binding.native_thread_id.clone()),
+            None
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

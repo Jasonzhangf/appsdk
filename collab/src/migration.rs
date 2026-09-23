@@ -3923,6 +3923,25 @@ mod tests {
 
     #[test]
     fn verified_admission_requires_archive_and_explicit_source_identity() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/migration-v1-history-manifest.schema.json"
+        ))
+        .expect("declared manifest schema parses");
+        assert!(schema["properties"]["admission_evidence"].is_object());
+        assert!(schema["allOf"]
+            .as_array()
+            .is_some_and(
+                |clauses| clauses.iter().any(|clause| clause["if"]["properties"]
+                    ["project_admission"]["const"]
+                    == "verified"
+                    && clause["then"]["required"]
+                        == serde_json::json!([
+                            "archive_ref",
+                            "archive_digest",
+                            "admission_evidence"
+                        ]))
+            ));
+
         let report = inspect_jsonl(direct_line("one", 1).as_bytes());
         let identity = ManifestIdentity {
             source_repo: Some("/repo".to_owned()),
@@ -3947,6 +3966,15 @@ mod tests {
         assert_eq!(manifest.project_admission, ProjectAdmission::Verified);
         assert_eq!(manifest.archive_ref.as_deref(), Some("archive/migration-1"));
         assert_eq!(manifest.archive_digest.as_deref(), Some("sha256:archive"));
+        let serialized = serde_json::to_value(&manifest).expect("verified manifest serializes");
+        assert_eq!(
+            serialized["admission_evidence"]["archive_ref"].as_str(),
+            Some("archive/migration-1")
+        );
+        assert_eq!(
+            serialized["admission_evidence"]["writer_frozen"].as_bool(),
+            Some(true)
+        );
     }
 
     #[test]

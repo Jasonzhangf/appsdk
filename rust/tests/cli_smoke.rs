@@ -9837,6 +9837,69 @@ fn verify_requires_the_project_pinned_sdk_binary_version() {
 }
 
 #[test]
+fn verify_requires_lock_version_to_match_project_version() {
+    let root = temp_root("sdk-lock-project-version-pin");
+    fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap();
+    confirm_preparation(&root, ".", "new_project");
+    assert!(run(&["init", root_text]).status.success());
+
+    let project_file = root.join(".appsdk/project.json");
+    let project_before = fs::read(&project_file).unwrap();
+    let project: Value = serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    let lock_file = root.join(".appsdk/sdk.lock");
+    let lock_before = fs::read(&lock_file).unwrap();
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
+    lock["version"] = Value::String("0.1.5".into());
+    assert_ne!(
+        lock["version"], project["sdk"]["version"],
+        "fixture must separate lock and project versions"
+    );
+    lock["contract_schema"] = project["schema_version"].clone();
+    fs::write(
+        &lock_file,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let result = run(&["verify", root_text]);
+    assert!(
+        !result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("INVALID_SDK_LOCK"),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let mut project: Value = serde_json::from_slice(&project_before).unwrap();
+    project["sdk"]["version"] = Value::String("0.1.5".into());
+    fs::write(
+        &project_file,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::write(&lock_file, &lock_before).unwrap();
+    let project_mismatch = run(&["verify", root_text]);
+    assert!(
+        !project_mismatch.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&project_mismatch.stdout),
+        String::from_utf8_lossy(&project_mismatch.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&project_mismatch.stderr)
+            .contains("PROJECT_SDK_VERSION_PIN_MISMATCH:0.1.5:required_binary=appsdk-0.1.5"),
+        "stderr={}",
+        String::from_utf8_lossy(&project_mismatch.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn collaboration_is_optional_and_does_not_require_a_merge_queue() {
     let root = temp_root("scenario-pair");
     let root_text = root.to_str().unwrap();

@@ -520,8 +520,26 @@ enum MigrateCmd {
     Verify,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_OUTPUT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 fn out<T: serde::Serialize>(v: &T) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap());
+    let rendered = serde_json::to_string_pretty(v).unwrap();
+    #[cfg(test)]
+    if TEST_OUTPUT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            *slot = Some(rendered.clone());
+            true
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
+    println!("{rendered}");
 }
 
 /// Register an identity with the server (idempotent for the same token).
@@ -1790,22 +1808,6 @@ fn cli_project_context(root: &std::path::Path) -> anyhow::Result<ProjectContext>
     )
 }
 
-/// Restore a persisted dead-address identity for context without minting a new
-/// peer when this thread genuinely has no registration. A successful restore
-/// re-registers the new App Server address through the normal owner path.
-fn context_identity_after_route_miss(
-    worker: Option<String>,
-) -> anyhow::Result<Option<(Scope, Identity)>> {
-    let scope = Scope {
-        root: std::env::current_dir()?,
-    };
-    let Some(mut identity) = identity::load_existing_with_scope_rebind(&scope, worker)? else {
-        return Ok(None);
-    };
-    ensure_registration(&scope, &mut identity)?;
-    Ok(Some((scope, identity)))
-}
-
 fn unregistered_context(
     scope: Option<&Scope>,
     identity: Option<&Identity>,
@@ -2641,24 +2643,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let route = match scope::route_for_native_thread(&host_paths, &session_id, &thread_id) {
                 Ok(route) => route,
                 Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
-                    let route_error = error.to_string();
-                    if let Some((scope, ident)) = context_identity_after_route_miss(worker)? {
-                        if ident.transport.is_none() {
-                            out(&unregistered_context(Some(&scope), Some(&ident), None)?);
-                            return Ok(());
-                        }
-                        let v: serde_json::Value = call_project(
-                            &scope,
-                            &ident,
-                            &Req::Context {
-                                worker_id: ident.worker_id.clone(),
-                                token: ident.token.clone(),
-                            },
-                        )?;
-                        out(&v);
-                    } else {
-                        out(&unregistered_context(None, None, Some(&route_error))?);
-                    }
+                    out(&unregistered_context(None, None, Some(&error.to_string()))?);
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -4631,12 +4616,12 @@ mod tests {
     }
 
     /// Context is the route-resolution entry point hit after an App Server
-    /// restart. A miss there must restore the dead-address identity rather than
-    /// ending at the old manual-recovery guidance.
+    /// restart. A miss there must stay read-only: it may report unregistered,
+    /// but it must not read the cwd identity or rebind/mint a peer.
     #[test]
-    fn context_route_miss_restores_the_dead_address_identity() {
+    fn context_route_miss_is_read_only_and_does_not_rebind_identity() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let root = test_root("context-route-miss-rebind");
+        let root = test_root("context-route-miss-read-only");
         let state_root = std::env::temp_dir().join(format!(
             "cs-{}-{}",
             std::process::id(),
@@ -4701,7 +4686,6 @@ mod tests {
 
         let socket = state_root.join("server.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
         let responder = std::thread::spawn(move || {
             use std::io::{BufRead, Write};
 
@@ -4726,84 +4710,44 @@ mod tests {
                     .as_bytes(),
                 )
                 .unwrap();
-
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut line = String::new();
-            std::io::BufReader::new(&stream)
-                .read_line(&mut line)
-                .unwrap();
-            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["worker_id"], "agent-peer");
-            assert_eq!(request["token"], "token-agent-peer");
-            let response = json!({
-                "ok": true,
-                "worker_id": "agent-peer",
-                "identity_kind": "peer",
-                "transport_selected": {
-                    "kind": "appserver",
-                    "endpoint": "unix:///tmp/codex.sock",
-                    "namespace": "codex_tui",
-                    "session_id": "session-new",
-                    "thread_id": "thread-new",
-                    "capabilities": ["send_message_to_thread"],
-                    "self_check": "test appserver"
-                },
-                "typed": true,
-                "command_id": "command-register",
-                "operation_id": "operation-register",
-                "sequence": 2,
-                "revision": 2,
-                "replayed": false,
-                "command": {
-                    "binding": {
-                        "project_scope": root_string,
-                        "app_scope_id": identity::CLI_APP_SERVER_ID,
-                        "agent_id": "agent-peer",
-                        "runtime_id": "runtime-agent-peer",
-                        "binding_id": "binding-agent-peer",
-                        "endpoint_generation": 2,
-                        "session_id": "session-new",
-                        "native_thread_id": "thread-new"
-                    }
-                }
-            });
-            std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
         });
 
-        set_current_session_thread("thread-new", "session-new");
+        set_current_session_thread("thread-old", "session-old");
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let (scope, ident) = context_identity_after_route_miss(None).unwrap().unwrap();
+        TEST_OUTPUT.with(|slot| *slot.borrow_mut() = Some(String::new()));
+        let result = run(Cmd::Context { worker: None });
+        let captured = TEST_OUTPUT.with(|slot| slot.borrow_mut().take().unwrap());
         std::env::set_current_dir(previous).unwrap();
         responder.join().unwrap();
         clear_current_session_thread();
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
 
-        assert_eq!(scope.root, root.canonicalize().unwrap());
-        assert_eq!(ident.worker_id, "agent-peer");
-        assert_eq!(ident.token, "token-agent-peer");
-        let runtime = ident.runtime.as_ref().unwrap();
+        result.unwrap();
+        let context: serde_json::Value = serde_json::from_str(&captured).unwrap();
+        assert_eq!(context["registered"], false);
+        assert_eq!(context["recovery"]["kind"], "route_recovery_required");
         assert_eq!(
-            runtime
-                .native_thread_id
-                .as_ref()
-                .map(identity::NativeThreadId::as_str),
-            Some("thread-new")
+            std::fs::read_to_string(&identity_path).unwrap(),
+            serde_json::to_string_pretty(&persisted).unwrap(),
+            "context must not rewrite persisted identity state"
         );
+        let mut identities = std::fs::read_dir(state_root.join("identities"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        identities.sort();
         assert_eq!(
-            runtime.session_id.as_ref().map(identity::SessionId::as_str),
-            Some("session-new")
+            identities,
+            vec!["agent-peer".to_string()],
+            "context must not create any identity"
         );
-        assert_eq!(runtime.endpoint_generation, 2);
-        let stored: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&identity_path).unwrap()).unwrap();
-        assert_eq!(stored["runtime"]["native_thread_id"], "thread-new");
         assert!(
             !state_root
                 .join("identities")
                 .join("codex-thread-new")
                 .exists(),
-            "context route recovery must not mint a replacement identity"
+            "context must not mint a replacement identity"
         );
         std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();

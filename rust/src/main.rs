@@ -1602,6 +1602,27 @@ fn assert_schema_property_compatible(canonical: &Value, declared: &Value, path: 
 
 fn assert_record_schema_minimum(relative: &str, declared: &Value) {
     let canonical = canonical_record_contract(relative);
+    let mut canonical_root = serde_json::Map::new();
+    let mut declared_root = serde_json::Map::new();
+    for key in ["if", "then", "not", "allOf"] {
+        let Some(expected) = canonical.get(key) else {
+            continue;
+        };
+        let actual = declared.get(key).unwrap_or_else(|| {
+            fail(format!(
+                "DECLARED_RECORD_CONTRACT_MISMATCH:{relative}/{key}"
+            ))
+        });
+        canonical_root.insert(key.into(), expected.clone());
+        declared_root.insert(key.into(), actual.clone());
+    }
+    if !canonical_root.is_empty() {
+        assert_schema_property_compatible(
+            &Value::Object(canonical_root),
+            &Value::Object(declared_root),
+            relative,
+        );
+    }
     let canonical_required = schema_required_names(&canonical, relative);
     let declared_required = schema_required_names(declared, relative);
     let declared_properties = declared

@@ -3579,9 +3579,10 @@ fn worktree_binding_for_task(server: &Server, task: &TaskRec) -> Option<Worktree
 }
 
 /// Normalize every whitespace-delimited token in a handoff body to its
-/// leading path substring.  Relative (`playground/...`), absolute, markdown
-/// link (`[x](/abs/...)`), and parenthesized forms all reduce to the same
-/// candidate here; tokens with no path separator are prose and are skipped.
+/// leading path substring.  Relative (`playground/...`, `./...`, `../...`),
+/// absolute, markdown link (`[x](/abs/...)`), and parenthesized forms all
+/// reduce to the same candidate here; tokens with no path separator are prose
+/// and are skipped.
 fn handoff_referenced_paths(body: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for token in body.split_whitespace() {
@@ -3591,10 +3592,19 @@ fn handoff_referenced_paths(body: &str) -> Vec<String> {
                 '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | ':'
             )
         });
-        // Keep a relative `playground/...` reference intact; for every other
-        // form (absolute, markdown link, parenthesized) the leading path
-        // starts at the first separator.
-        let candidate = if token.to_ascii_lowercase().starts_with("playground/") {
+        // A markdown link carries its path after `](`; the label itself is
+        // prose, so only the target is inspected.
+        let token = match token.find("](") {
+            Some(index) => &token[index + 2..],
+            None => token,
+        };
+        // Keep relative references intact, including spellings that do not
+        // start with `playground/`.  Resolving them against the project root
+        // is what binds them to project-owned worktree identity; collapsing
+        // them to their first separator would silently relocate `./x` to `/x`.
+        let candidate = if token.starts_with("./") || token.starts_with("../") {
+            token
+        } else if token.to_ascii_lowercase().starts_with("playground/") {
             token
         } else {
             let Some(start) = token.find('/') else {
@@ -3618,12 +3628,12 @@ fn handoff_referenced_paths(body: &str) -> Vec<String> {
     paths
 }
 
-/// Resolve a handoff reference to a project worktree, if it is one.  The
-/// reference must live under this project's playground or match a registered
-/// task worktree; an absolute path whose leaf is `worktree` is also accepted
-/// because that is the shape the original report used for a preflight
-/// implementation.  Anything else is an unrelated path and is not our
-/// business, so it never fails a send.
+/// Resolve a handoff reference to a project worktree, if it is one.  Ownership
+/// is bound to project identity only: the reference must live under this
+/// project's playground or match a registered task worktree exactly.  A path
+/// leaf is never evidence of ownership, so an unrelated absolute path or a
+/// prose URL that merely ends in a worktree-like segment is not our business
+/// and never fails a send.
 fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -> Option<PathBuf> {
     let playground = server.root.join("playground");
     let raw = Path::new(candidate);
@@ -3641,17 +3651,18 @@ fn handoff_worktree_reference(server: &Server, state: &State, candidate: &str) -
         let Some(registered) = task.worktree_path.as_deref() else {
             continue;
         };
-        let registered = normalize_path_lexically(Path::new(registered));
+        // A registered worktree path is project-scoped, so a relative spelling
+        // resolves against the owning project root before equality is tested.
+        let registered = Path::new(registered);
+        let registered = if registered.is_absolute() {
+            registered.to_path_buf()
+        } else {
+            server.root.join(registered)
+        };
+        let registered = normalize_path_lexically(&registered);
         if normalized == registered {
             return Some(normalized);
         }
-    }
-    if raw.is_absolute()
-        && raw
-            .file_name()
-            .is_some_and(|leaf| leaf == std::ffi::OsStr::new("worktree"))
-    {
-        return Some(normalized);
     }
     None
 }

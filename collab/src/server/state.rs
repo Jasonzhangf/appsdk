@@ -1015,6 +1015,13 @@ impl State {
             }
             Event::SubagentUpdated { subagent } => {
                 self.subagents.insert(subagent.id.clone(), subagent.clone());
+                if subagent.status == "closed" {
+                    let id = format!("subagent:{}", subagent.id);
+                    self.master_wake.idle_workers.retain(|worker| worker != &id);
+                    self.master_wake
+                        .newly_idle_workers
+                        .retain(|worker| worker != &id);
+                }
             }
             Event::SubagentSnapshotCaptured {
                 subagent_id,
@@ -1051,6 +1058,10 @@ impl State {
             }
             Event::LegacyWorkerRemoved { worker_id } => {
                 self.workers.remove(worker_id);
+                self.master_wake.idle_workers.retain(|id| id != worker_id);
+                self.master_wake
+                    .newly_idle_workers
+                    .retain(|id| id != worker_id);
             }
             Event::WorkerClosed {
                 worker_id,
@@ -1071,6 +1082,10 @@ impl State {
                 );
                 self.workers.remove(worker_id);
                 self.keepalives.remove(worker_id);
+                self.master_wake.idle_workers.retain(|id| id != worker_id);
+                self.master_wake
+                    .newly_idle_workers
+                    .retain(|id| id != worker_id);
             }
             Event::LegacyMasterTransferred { .. } => {}
             Event::Sent { msg } => {

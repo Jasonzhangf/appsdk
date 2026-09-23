@@ -9339,15 +9339,19 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert!(context.data["recorded_unusable"].is_null());
     assert_eq!(
         context.data["next_actions"],
-        serde_json::json!(["run `appsdk longhorizon show` and keep eligible workers loaded"])
+        serde_json::json!(["run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"])
     );
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.")));
+    assert!(context.data["role_brief"]["responsibilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.")));
     assert_eq!(
         context.data["role_brief"]["next_action"],
-        "Run `appsdk longhorizon show` and keep eligible workers loaded; delivered or reviewed work triggers the next review/integration/cleanup/dispatch step, not an endpoint."
+        "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint."
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -10186,13 +10190,14 @@ fn worker_freed_transitions_notify_live_master() {
         "expected managed subagent-status alert sent to master"
     );
     let alert = idle_alert.unwrap();
-    assert!(alert.body.contains("subagent=managed-worker state=idle"));
+    assert!(alert.body.contains("newly_idle=subagent:managed-worker"));
+    assert!(alert.body.contains("live_idle=subagent:managed-worker"));
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn master_working_to_idle_notifies_itself_once_with_scheduling_contract() {
+fn master_working_to_idle_leaves_reminder_to_the_master_idle_timer() {
     let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     let server_arc = std::sync::Arc::new(server);
@@ -10227,90 +10232,14 @@ fn master_working_to_idle_notifies_itself_once_with_scheduling_contract() {
     crate::server::keepalive::tick_at(&server_arc, now + 1);
 
     let state = server_arc.state.lock().unwrap();
-    let idle_alerts: Vec<_> = state
-        .msgs
-        .values()
-        .filter(|m| {
-            m.to == "master-worker" && m.subject == Some("master-idle: master-worker".into())
-        })
-        .collect();
-    assert_eq!(idle_alerts.len(), 1, "one scheduling wake per transition");
-    let alert = idle_alerts[0];
-    assert!(alert.body.contains("task graph"));
-    assert!(alert.body.contains("saturation"));
-    assert!(alert.body.contains("Scheduling continues"));
-    assert!(alert.body.contains(
-        "no actionable task, dependency, resolvable blocker, or authorized open bug remains"
-    ));
-    assert!(alert
-        .body
-        .contains("collab notify unsubscribe sub-default-direct-message-master-worker"));
-    assert!(alert.body.contains("record the receipt"));
-    let subscription_id = state
-        .wake_bindings
-        .get(&alert.id)
-        .expect("master wake must bind once");
-    let subscription = state
-        .notification_subscriptions
-        .get(subscription_id)
-        .unwrap();
-    assert_eq!(subscription.worker_id, "master-worker");
-    assert_eq!(subscription.event, "direct-message");
-    assert_eq!(subscription.status, "armed");
-    drop(state);
-
-    crate::server::keepalive::tick_at(&server_arc, now + 2);
-    let state = server_arc.state.lock().unwrap();
     assert_eq!(
         state
             .msgs
             .values()
-            .filter(|m| {
-                m.to == "master-worker" && m.subject == Some("master-idle: master-worker".into())
-            })
+            .filter(|m| m.to == "master-worker")
             .count(),
-        1,
-        "duplicate idle observation must not wake again"
-    );
-    drop(state);
-
-    let mut new_reason = crate::server::keepalive::Record::default();
-    new_reason.observed = "idle".into();
-    new_reason.idle_episode_reason = "different-reason".into();
-    new_reason.idle_episode_notices = 1;
-    server_arc.commit(&[Event::KeepaliveUpdated {
-        worker_id: "master-worker".into(),
-        record: new_reason,
-    }]);
-    crate::server::keepalive::tick_at(&server_arc, now + 120_001);
-    let state = server_arc.state.lock().unwrap();
-    assert_eq!(
-        state
-            .msgs
-            .values()
-            .filter(|m| {
-                m.to == "master-worker" && m.subject == Some("master-idle: master-worker".into())
-            })
-            .count(),
-        2,
-        "same episode reminder is windowed and new reason does not reset budget"
-    );
-    drop(state);
-
-    for tick in [now + 240_002, now + 360_003] {
-        crate::server::keepalive::tick_at(&server_arc, tick);
-    }
-    let state = server_arc.state.lock().unwrap();
-    assert_eq!(
-        state
-            .msgs
-            .values()
-            .filter(|m| {
-                m.to == "master-worker" && m.subject == Some("master-idle: master-worker".into())
-            })
-            .count(),
-        3,
-        "idle episode suppresses after three reminders"
+        0,
+        "keepalive must not self-wake a master idle transition; the master-idle timer owns that contract"
     );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();

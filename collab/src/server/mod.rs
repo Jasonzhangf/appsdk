@@ -6357,6 +6357,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             "responsibilities": [
                 "Run `appsdk longhorizon show` to reconstruct goal, tasks, workers, blockers, and bugs.",
                 "Split work into independent scopes; assign tasks and resources; keep useful worker capacity loaded.",
+                "Before ending each scheduling turn, saturate every live present peer first, then schedule managed subagents within the configured cap; never stay idle while eligible capacity remains.",
                 "Delivery, merge, or a review verdict is not a lifecycle endpoint; drive review/integration/cleanup/close and assign the next ready P0/P1 task.",
                 "Own worker blockers: investigate, unblock, reassign, or close. Do not wait for someone else.",
                 "Drive test, verification, commit, merge, worktree cleanup, and task closure.",
@@ -6374,7 +6375,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
             },
             "blocked_boundary": "Investigate and unblock first; only pause for a true external approval or dependency gate.",
             "completion_action": "Drive the project to verified merge, cleanup, task closure, and final acceptance.",
-            "next_action": "Run `appsdk longhorizon show` and keep eligible workers loaded; delivered or reviewed work triggers the next review/integration/cleanup/dispatch step, not an endpoint.",
+            "next_action": "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.",
             "notification_rule": "A notification is an interrupt, not completion. Do its P0/P1/P2 action, then resume scheduling; never stop on ACK/read/summary."
         });
     }
@@ -6804,6 +6805,17 @@ fn ordinary_peer_presence_label(presence: IdentityPresence) -> Option<&'static s
     }
 }
 
+pub(crate) fn live_managed_subagent_count(server: &Server, parent: &str) -> usize {
+    let state = server.state.lock().unwrap();
+    state
+        .subagents
+        .values()
+        .filter(|record| record.parent == parent && record.status != "closed")
+        .filter_map(|record| state.workers.get(&record.peer))
+        .filter(|worker| matches!(worker_presence(server, worker), IdentityPresence::Present))
+        .count()
+}
+
 fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&str>) {
     let master = match live_master_worker_snapshot(server) {
         Ok(Some(master)) => master,
@@ -6988,13 +7000,20 @@ pub(crate) fn scheduler_admit_subagent_start(
         {
             ("reuse-idle-managed-subagent", peer_id, Some(id), reason)
         } else {
-            let admission = json!({
-                "decision": "create-managed-subagent",
-                "managed_subagent_id": serde_json::Value::Null,
-                "reason": "no eligible live registered peer or idle managed subagent capacity",
-            });
-            record_scheduler_admission(server, admission)?;
-            return Ok(None);
+            let live_managed = live_managed_subagent_count(server, worker_id);
+            let cap = server.config.subagent.max_concurrent as usize;
+            if live_managed < cap {
+                let admission = json!({
+                    "decision": "create-managed-subagent",
+                    "managed_subagent_id": serde_json::Value::Null,
+                    "reason": "no eligible live registered peer or idle managed subagent capacity",
+                });
+                record_scheduler_admission(server, admission)?;
+                return Ok(None);
+            }
+            return Err(Resp::err(
+                "no eligible live registered peer or idle managed subagent capacity",
+            ));
         };
     let managed_subagent = managed_subagent_id
         .as_ref()
@@ -7491,6 +7510,14 @@ pub(crate) fn handle_scheduler_dispatch(
             if let Some(response) = scheduler_dispatch_deduplicated(server, &worker_id, &request_id)
             {
                 return response;
+            }
+            let live_managed = live_managed_subagent_count(server, &worker_id);
+            let cap = server.config.subagent.max_concurrent as usize;
+            if live_managed < cap {
+                return Resp::data(json!({
+                    "decision": "create-managed-subagent",
+                    "reason": "no eligible live registered peer or idle managed subagent capacity",
+                }));
             }
             return Resp::err(
                 "scheduler dispatch has no eligible live peer or idle managed subagent capacity",
@@ -7989,7 +8016,60 @@ fn master_assignment_view(
     })
 }
 
+fn prune_master_wake_idle_capacity(server: &Server) {
+    let (live_idle_workers, live_idle_subagents) = {
+        let state = server.state.lock().unwrap();
+        let live_idle_subagents = state
+            .subagents
+            .values()
+            .filter(|record| record.status == "idle")
+            .filter(|record| {
+                state.workers.get(&record.peer).is_some_and(|worker| {
+                    worker_presence(server, worker) == IdentityPresence::Present
+                })
+            })
+            .filter(|record| {
+                !state
+                    .tasks
+                    .values()
+                    .any(|task| task.owner == record.peer && keepalive::actionable(&task.status))
+            })
+            .map(|record| record.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let live_idle_workers = state
+            .workers
+            .values()
+            .filter(|worker| worker_presence(server, worker) == IdentityPresence::Present)
+            .filter(|worker| {
+                state
+                    .keepalives
+                    .get(&worker.id)
+                    .is_some_and(|record| record.observed == "idle")
+            })
+            .filter(|worker| {
+                !state
+                    .tasks
+                    .values()
+                    .any(|task| task.owner == worker.id && keepalive::actionable(&task.status))
+            })
+            .map(|worker| worker.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        (live_idle_workers, live_idle_subagents)
+    };
+    let mut state = server.state.lock().unwrap();
+    let changed = notification_state::retain_live_idle_workers(
+        &mut state.master_wake,
+        &live_idle_workers,
+        &live_idle_subagents,
+    );
+    if changed {
+        let accumulator = state.master_wake.clone();
+        server.commit_locked(&mut state, &[Event::MasterWakeUpdated { accumulator }]);
+    }
+}
+
 fn handle_master_status(server: &Server) -> Resp {
+    prune_master_wake_idle_capacity(server);
     let state = server.state.lock().unwrap();
     let route_scope = server_route_scope(server, &state).ok().flatten();
     let live = match live_master_id(server, &state) {
@@ -10322,8 +10402,10 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         .collect();
     if next_actions.is_empty() {
         if master["worker_id"].as_str() == Some(worker_id.as_str()) {
-            next_actions
-                .push("run `appsdk longhorizon show` and keep eligible workers loaded".into());
+            next_actions.push(
+                "run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"
+                    .into(),
+            );
         } else {
             next_actions
                 .push("no assigned task action; remain available for an explicit dispatch".into());
@@ -20789,7 +20871,8 @@ pub(crate) mod peer_tests;
 #[cfg(test)]
 mod scheduler_admission_tests {
     use super::*;
-    use crate::server::peer_tests::{register, test_server};
+    use crate::server::peer_tests::{register, test_appserver_transport, test_server};
+    use crate::server::state::MasterWakeSignal;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicU64;
@@ -21193,6 +21276,245 @@ mod scheduler_admission_tests {
             std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl")).unwrap();
         assert!(audit.contains("create-managed-subagent"));
         assert!(audit.contains("no eligible live registered peer"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_subagent_admission_honors_configured_cap() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        promote_master(&server);
+        server.config.subagent.max_concurrent = 2;
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "child-a".into(),
+                    parent: "master".into(),
+                    peer: "managed-a".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-managed-a".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: now_ms() + 10_000,
+                    last_message: None,
+                    error: None,
+                    probe_failures: vec![],
+                    runtime: Some("codex".into()),
+                },
+            },
+            Event::Registered {
+                worker: WorkerRec {
+                    id: "managed-a".into(),
+                    token: "token-managed-a".into(),
+                    cwd: root.display().to_string(),
+                    registered_ms: now_ms(),
+                    transport: Some(test_appserver_transport("thread-managed-a")),
+                },
+            },
+        ]);
+
+        let below_cap =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
+                .unwrap()
+                .expect("idle child below cap must be reused");
+        assert_eq!(
+            below_cap.data["admission"]["decision"],
+            "reuse-idle-managed-subagent"
+        );
+
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "child-a".into(),
+                    parent: "master".into(),
+                    peer: "managed-a".into(),
+                    status: "working".into(),
+                    thread_id: Some("thread-managed-a".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: now_ms() + 10_000,
+                    last_message: None,
+                    error: None,
+                    probe_failures: vec![],
+                    runtime: Some("codex".into()),
+                },
+            },
+            Event::Registered {
+                worker: WorkerRec {
+                    id: "managed-a".into(),
+                    token: "token-managed-a".into(),
+                    cwd: root.display().to_string(),
+                    registered_ms: now_ms(),
+                    transport: Some(test_appserver_transport("thread-managed-a")),
+                },
+            },
+        ]);
+
+        let busy_child =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
+                .unwrap();
+        assert!(
+            busy_child.is_none(),
+            "busy child must not be reused, and below-cap creation stays on the start path: {busy_child:?}"
+        );
+
+        server.config.subagent.max_concurrent = 1;
+        let at_cap =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
+                .unwrap_err();
+        assert!(at_cap
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no eligible live registered peer or idle managed subagent capacity"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_subagent_cap_counts_children_not_ordinary_peers() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "ordinary-peer", "%ordinary-peer");
+        promote_master(&server);
+        server.config.subagent.max_concurrent = 2;
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "child-a".into(),
+                    parent: "master".into(),
+                    peer: "managed-a".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-managed-a".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: now_ms() + 10_000,
+                    last_message: None,
+                    error: None,
+                    probe_failures: vec![],
+                    runtime: Some("codex".into()),
+                },
+            },
+            Event::Registered {
+                worker: WorkerRec {
+                    id: "managed-a".into(),
+                    token: "token-managed-a".into(),
+                    cwd: root.display().to_string(),
+                    registered_ms: now_ms(),
+                    transport: Some(test_appserver_transport("thread-managed-a")),
+                },
+            },
+        ]);
+        assert_eq!(live_managed_subagent_count(&server, "master"), 1);
+        let decision =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
+                .unwrap();
+        assert_eq!(
+            decision
+                .as_ref()
+                .and_then(|response| response.data["admission"]["decision"].as_str()),
+            Some("use-registered-peer"),
+            "ordinary peer must be saturated before managed capacity: {decision:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn master_status_hides_closed_and_lost_idle_capacity() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "closed-peer", "%closed-peer");
+        register(&server, "lost-peer", "%lost-peer");
+        promote_master(&server);
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "closed-child".into(),
+                    parent: "master".into(),
+                    peer: "closed-peer".into(),
+                    status: "idle".into(),
+                    thread_id: Some("thread-closed-peer".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: now_ms() + 10_000,
+                    last_message: None,
+                    error: None,
+                    probe_failures: vec![],
+                    runtime: Some("codex".into()),
+                },
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::SubagentStatus {
+                    subagent_id: "closed-child".into(),
+                },
+                at_ms: now_ms(),
+            },
+            Event::MasterWakeSignal {
+                signal: MasterWakeSignal::WorkerIdle {
+                    worker_id: "lost-peer".into(),
+                },
+                at_ms: now_ms(),
+            },
+        ]);
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .master_wake
+            .idle_workers
+            .contains(&"subagent:closed-child".into()));
+        server.commit(&[
+            Event::SubagentUpdated {
+                subagent: crate::subagent::Record {
+                    id: "closed-child".into(),
+                    parent: "master".into(),
+                    peer: "closed-peer".into(),
+                    status: "closed".into(),
+                    thread_id: Some("thread-closed-peer".into()),
+                    profile: None,
+                    created_ms: now_ms(),
+                    ready_deadline_ms: now_ms() + 10_000,
+                    last_message: None,
+                    error: None,
+                    probe_failures: vec![],
+                    runtime: Some("codex".into()),
+                },
+            },
+            Event::WorkerClosed {
+                worker_id: "closed-peer".into(),
+                closed_by: "master".into(),
+                reason: "done".into(),
+                snapshot_captured_ms: Some(now_ms()),
+                at_ms: now_ms(),
+            },
+        ]);
+        server.appserver_candidate_check = Arc::new(|candidate| {
+            if candidate.thread_id == "thread-lost-peer" {
+                Err(crate::client::adapters::AdapterError::RouteUnavailable {
+                    detail: "lost peer route".into(),
+                }
+                .to_string())
+            } else {
+                Ok(test_appserver_transport(&candidate.thread_id))
+            }
+        });
+
+        let status = handle_master_status(&server);
+        assert!(status.ok, "{status:?}");
+        let idle_workers = status.data["master"]["master_wake"]["idle_workers"]
+            .as_array()
+            .unwrap();
+        assert!(
+            !idle_workers
+                .iter()
+                .any(|id| id.as_str() == Some("subagent:closed-child")),
+            "closed child must not remain idle capacity"
+        );
+        assert!(
+            !idle_workers
+                .iter()
+                .any(|id| id.as_str() == Some("lost-peer")),
+            "lost peer must not remain idle capacity"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

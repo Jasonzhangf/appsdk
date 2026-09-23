@@ -497,7 +497,14 @@ Master operates under two prime directives:
    arbitration; master must actively close the lifecycle rather than patch
    output symptoms.
 2. **Worker Capacity Saturation**: Master must keep the entire worker fleet
-   fully saturated without idle time or serial bottlenecks.
+   fully saturated without idle time or serial bottlenecks. Saturate every
+   live present ordinary peer first, then schedule managed subagents within
+   the configured `subagent.max_concurrent` cap. Peers do not consume that
+   cap. Before ending each scheduling turn, inspect every live peer and
+   managed subagent: if any eligible worker is idle and an authorized P0/P1
+   task is ready, dispatch the next non-overlapping assignment immediately.
+   Delivery, merge, review, task close, and cleanup are lifecycle steps, never
+   reasons to leave capacity idle.
 
 **Sovereignty and Backlog Priority**:
 - **No autonomous technical debt refactoring**: When assigned tasks complete
@@ -515,13 +522,19 @@ Master operates under two prime directives:
 **Worker->Master idle fact and master long-horizon wake**:
 When a worker transitions from `working` to `idle`, it emits one idempotent
 worker-idle fact to the live master. The master has long-horizon wake; the
-worker does not. On an idle fact, master may:
+worker does not. On an idle fact, master must:
 1. Check the active task graph for unblocked downstream tasks and dispatch;
 2. If the main graph is clear, pull the highest-priority open issue from the
    bug backlog (`appsdk bug list --status open`), with P0 first; P0 blocks the
    affected project;
 3. If all tasks and bugs are closed, report completion and propose next
    steps to the user.
+
+Do not stop after consuming a report or closing a task while another live,
+eligible peer has no assignment. Saturate live peers first, then use managed
+subagents only within the configured cap. Dispatch the next ready
+non-overlapping P0/P1 task before the scheduling turn ends. A fleet with idle
+capacity is not a completed scheduling cycle.
 
 Master idle reminders are level-triggered. Within the same master idle episode,
 each reminder attempt consumes the shared episode-local budget, up to three

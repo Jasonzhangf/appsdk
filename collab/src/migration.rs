@@ -727,6 +727,653 @@ pub struct MigrationApplyReceipt {
     pub writer_operation_id: String,
 }
 
+/// Durable lifecycle states for the typed migration manifest.
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationMappingStatus {
+    Planned,
+    Running,
+    Verified,
+    NeedsOperator,
+    ResetRequired,
+    Aborted,
+}
+
+impl MigrationMappingStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Running => "running",
+            Self::Verified => "verified",
+            Self::NeedsOperator => "needs_operator",
+            Self::ResetRequired => "reset_required",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+/// Durable lifecycle states for one mapped source record.
+#[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestRecordStatus {
+    Planned,
+    Mapped,
+    NeedsReconciliation,
+    Blocked,
+    Rejected,
+    Unknown,
+}
+
+impl ManifestRecordStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Mapped => "mapped",
+            Self::NeedsReconciliation => "needs_reconciliation",
+            Self::Blocked => "blocked",
+            Self::Rejected => "rejected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Identity supplied by the migration owner. The manifest builder never
+/// fabricates source or target truth from these values.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ManifestIdentity {
+    pub migration_id: String,
+    pub source_project_id: String,
+    pub canonical_project_cwd: String,
+    pub owner_authority: String,
+    pub source_schema_version: String,
+    pub target_schema_version: String,
+    pub source_repo: Option<String>,
+    pub source_branch: Option<String>,
+    pub source_head: Option<String>,
+    pub source_tree: Option<String>,
+    pub source_epoch: Option<u64>,
+    pub target_epoch: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationAdmissionEvidence {
+    pub writer_frozen: bool,
+    pub live_scope_verified: bool,
+    pub current_source_verified: bool,
+    pub source_identity_verified: bool,
+    pub archive_ref: String,
+    pub archive_digest: String,
+}
+
+impl MigrationAdmissionEvidence {
+    fn validate(&self) -> Result<(), MigrationContractError> {
+        if !self.writer_frozen
+            || !self.live_scope_verified
+            || !self.current_source_verified
+            || !self.source_identity_verified
+        {
+            return Err(MigrationContractError::missing(
+                "manifest.project_admission_evidence",
+            ));
+        }
+        validate_contract_reference("manifest.archive_ref", &self.archive_ref)?;
+        validate_contract_identifier("manifest.archive_digest", &self.archive_digest)
+    }
+}
+
+impl ManifestIdentity {
+    pub fn new(
+        migration_id: impl Into<String>,
+        source_project_id: impl Into<String>,
+        canonical_project_cwd: impl Into<String>,
+    ) -> Result<Self, MigrationContractError> {
+        let identity = Self {
+            migration_id: migration_id.into(),
+            source_project_id: source_project_id.into(),
+            canonical_project_cwd: canonical_project_cwd.into(),
+            owner_authority: "inspection:typed-manifest".to_owned(),
+            source_schema_version: "collab-journal/v1".to_owned(),
+            target_schema_version: "collab-global/v1".to_owned(),
+            source_repo: None,
+            source_branch: None,
+            source_head: None,
+            source_tree: None,
+            source_epoch: None,
+            target_epoch: 2,
+            created_at: "inspection".to_owned(),
+            updated_at: "inspection".to_owned(),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    fn validate(&self) -> Result<(), MigrationContractError> {
+        validate_contract_identifier("migration_id", &self.migration_id)?;
+        validate_contract_identifier("source_project_id", &self.source_project_id)?;
+        validate_contract_reference("canonical_project_cwd", &self.canonical_project_cwd)?;
+        validate_contract_identifier("owner_authority", &self.owner_authority)?;
+        validate_contract_identifier("source_schema_version", &self.source_schema_version)?;
+        validate_contract_identifier("target_schema_version", &self.target_schema_version)?;
+        validate_contract_identifier("created_at", &self.created_at)?;
+        validate_contract_identifier("updated_at", &self.updated_at)?;
+        if let Some(source_epoch) = self.source_epoch {
+            if source_epoch == 0 {
+                return Err(MigrationContractError::invalid(
+                    "source_epoch",
+                    "must be non-zero when present",
+                ));
+            }
+        }
+        if self.target_epoch == 0 {
+            return Err(MigrationContractError::invalid(
+                "target_epoch",
+                "must be non-zero",
+            ));
+        }
+        if self.source_epoch == Some(self.target_epoch) {
+            return Err(MigrationContractError::invalid(
+                "source_epoch",
+                "must differ from target_epoch",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One schema-shaped mapping row for a source record. Raw source bytes remain
+/// outside the manifest; the row carries only identity, digest, decision and
+/// target binding evidence.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationManifestRecord {
+    pub source_record_id: String,
+    pub source_record_type: String,
+    pub source_record_digest: String,
+    pub source_disposition: SourceDisposition,
+    pub target_epoch: String,
+    pub target_sequence: Option<u64>,
+    pub target_entity_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub runtime_id: Option<String>,
+    pub binding_id: Option<String>,
+    pub endpoint_generation: Option<u64>,
+    pub appsdk_record_ref: Option<String>,
+    pub appsdk_record_digest: Option<String>,
+    pub owner_authority: String,
+    pub blocker_code: Option<String>,
+    pub mapping_class: MappingClass,
+    pub mapping_status: ManifestRecordStatus,
+    pub raw_archive_ref: Option<String>,
+    pub exact_error: Option<String>,
+    pub first_failed_boundary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl MigrationManifestRecord {
+    fn from_inspection(
+        record: &RecordInspection,
+        identity: &ManifestIdentity,
+    ) -> Result<Self, MigrationContractError> {
+        let source_record_id = record
+            .record_id
+            .clone()
+            .unwrap_or_else(|| format!("line-{}-unidentified", record.line_number));
+        let source_record_type = record
+            .event
+            .clone()
+            .unwrap_or_else(|| "unclassified".to_owned());
+        let blocker_code = record
+            .exact_error
+            .as_deref()
+            .map(|error| error.split(':').next().unwrap_or(error).to_owned());
+        let mapping_status = match record.source_disposition {
+            SourceDisposition::DirectReplay => ManifestRecordStatus::Planned,
+            SourceDisposition::AdaptReconcile => ManifestRecordStatus::NeedsReconciliation,
+            SourceDisposition::ArchiveOnly => ManifestRecordStatus::Blocked,
+            SourceDisposition::RebuildRequired => ManifestRecordStatus::Blocked,
+        };
+        let row = Self {
+            source_record_id,
+            source_record_type,
+            source_record_digest: record.digest.clone(),
+            source_disposition: record.source_disposition,
+            target_epoch: identity.target_epoch.to_string(),
+            target_sequence: None,
+            target_entity_id: None,
+            agent_id: None,
+            runtime_id: None,
+            binding_id: None,
+            endpoint_generation: None,
+            appsdk_record_ref: None,
+            appsdk_record_digest: None,
+            owner_authority: identity.owner_authority.clone(),
+            blocker_code,
+            mapping_class: record.classification,
+            mapping_status,
+            raw_archive_ref: None,
+            exact_error: record.exact_error.clone(),
+            first_failed_boundary: record.first_failed_boundary.clone(),
+            created_at: identity.created_at.clone(),
+            updated_at: identity.updated_at.clone(),
+        };
+        row.validate()?;
+        Ok(row)
+    }
+
+    pub fn validate(&self) -> Result<(), MigrationContractError> {
+        validate_contract_identifier("manifest.record.source_record_id", &self.source_record_id)?;
+        validate_contract_identifier(
+            "manifest.record.source_record_type",
+            &self.source_record_type,
+        )?;
+        validate_contract_identifier(
+            "manifest.record.source_record_digest",
+            &self.source_record_digest,
+        )?;
+        validate_contract_identifier("manifest.record.target_epoch", &self.target_epoch)?;
+        validate_contract_identifier("manifest.record.owner_authority", &self.owner_authority)?;
+        validate_contract_identifier("manifest.record.created_at", &self.created_at)?;
+        validate_contract_identifier("manifest.record.updated_at", &self.updated_at)?;
+        if self.mapping_status == ManifestRecordStatus::Mapped {
+            if self.mapping_class == MappingClass::Unknown {
+                return Err(MigrationContractError::invalid(
+                    "manifest.record.mapping_status",
+                    "unknown records cannot be mapped",
+                ));
+            }
+            if self.target_sequence.is_none() || self.target_entity_id.is_none() {
+                return Err(MigrationContractError::missing(
+                    "manifest.record.target_sequence_or_entity",
+                ));
+            }
+        }
+        if self.mapping_class == MappingClass::Unknown {
+            if self.mapping_status == ManifestRecordStatus::Mapped {
+                return Err(MigrationContractError::invalid(
+                    "manifest.record.mapping_status",
+                    "unknown records cannot be mapped",
+                ));
+            }
+            if self.blocker_code.is_none()
+                || self.exact_error.is_none()
+                || self.first_failed_boundary.is_none()
+            {
+                return Err(MigrationContractError::missing(
+                    "manifest.record.unknown_evidence",
+                ));
+            }
+        }
+        if self.mapping_class == MappingClass::Reset {
+            if self.mapping_status == ManifestRecordStatus::Mapped {
+                return Err(MigrationContractError::invalid(
+                    "manifest.record.mapping_status",
+                    "reset records cannot be mapped",
+                ));
+            }
+            if self.blocker_code.is_none()
+                || self.exact_error.is_none()
+                || self.first_failed_boundary.is_none()
+            {
+                return Err(MigrationContractError::missing(
+                    "manifest.record.reset_evidence",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Typed manifest derived from one inspection report. This is the in-memory
+/// schema owner for a future journaled manifest fact; deriving it performs no
+/// archive, epoch, projection or daemon write.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationManifest {
+    pub migration_id: String,
+    pub source_project_id: String,
+    pub canonical_project_cwd: String,
+    pub source_schema_version: String,
+    pub target_schema_version: String,
+    pub source_snapshot_digest: String,
+    pub source_epoch: Option<String>,
+    pub target_epoch: String,
+    pub project_admission: ProjectAdmission,
+    pub owner_authority: String,
+    pub blocker_code: Option<String>,
+    pub first_failed_boundary: Option<String>,
+    pub mapping_status: MigrationMappingStatus,
+    pub archive_ref: Option<String>,
+    pub archive_digest: Option<String>,
+    pub admission_evidence: Option<MigrationAdmissionEvidence>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub source_repo: Option<String>,
+    pub source_branch: Option<String>,
+    pub source_head: Option<String>,
+    pub source_tree: Option<String>,
+    pub records: Vec<MigrationManifestRecord>,
+}
+
+impl MigrationManifest {
+    pub fn from_report(
+        report: &InspectionReport,
+        identity: ManifestIdentity,
+    ) -> Result<Self, MigrationContractError> {
+        Self::from_report_with_admission(report, identity, None)
+    }
+
+    pub fn from_report_with_admission(
+        report: &InspectionReport,
+        identity: ManifestIdentity,
+        admission_evidence: Option<MigrationAdmissionEvidence>,
+    ) -> Result<Self, MigrationContractError> {
+        identity.validate()?;
+        let mut records = Vec::with_capacity(report.records.len());
+        for record in &report.records {
+            records.push(MigrationManifestRecord::from_inspection(record, &identity)?);
+        }
+        let (blocker_code, first_failed_boundary) = if let Some(issue) = report.issues.first() {
+            (
+                Some(
+                    issue
+                        .exact_error
+                        .split(':')
+                        .next()
+                        .unwrap_or(&issue.exact_error)
+                        .to_owned(),
+                ),
+                Some(issue.first_failed_boundary.clone()),
+            )
+        } else if let Some(record) = records.iter().find(|record| {
+            matches!(
+                record.mapping_class,
+                MappingClass::Reset | MappingClass::Unknown
+            ) && record.exact_error.is_some()
+                && record.first_failed_boundary.is_some()
+        }) {
+            (
+                record.blocker_code.clone(),
+                record.first_failed_boundary.clone(),
+            )
+        } else if let Some(record) = records
+            .iter()
+            .find(|record| record.exact_error.is_some() && record.first_failed_boundary.is_some())
+        {
+            (
+                record.blocker_code.clone(),
+                record.first_failed_boundary.clone(),
+            )
+        } else if admission_evidence.is_none() {
+            (
+                Some("PROJECT_ADMISSION_EVIDENCE_ABSENT".to_owned()),
+                Some("project_admission".to_owned()),
+            )
+        } else {
+            (None, None)
+        };
+        let project_admission = if admission_evidence.is_some()
+            && report.issues.is_empty()
+            && report
+                .records
+                .iter()
+                .all(|record| record.classification == MappingClass::Direct)
+        {
+            ProjectAdmission::Verified
+        } else if report
+            .records
+            .iter()
+            .any(|record| record.classification == MappingClass::Reset)
+        {
+            ProjectAdmission::ResetRequired
+        } else {
+            ProjectAdmission::NeedsOperator
+        };
+        let manifest = Self {
+            migration_id: identity.migration_id,
+            source_project_id: identity.source_project_id,
+            canonical_project_cwd: identity.canonical_project_cwd,
+            source_schema_version: identity.source_schema_version,
+            target_schema_version: identity.target_schema_version,
+            source_snapshot_digest: report.source_digest.clone(),
+            source_epoch: identity.source_epoch.map(|epoch| epoch.to_string()),
+            target_epoch: identity.target_epoch.to_string(),
+            project_admission,
+            owner_authority: identity.owner_authority,
+            blocker_code,
+            first_failed_boundary,
+            mapping_status: MigrationMappingStatus::Planned,
+            archive_ref: admission_evidence
+                .as_ref()
+                .map(|evidence| evidence.archive_ref.clone()),
+            archive_digest: admission_evidence
+                .as_ref()
+                .map(|evidence| evidence.archive_digest.clone()),
+            admission_evidence,
+            created_at: identity.created_at,
+            updated_at: identity.updated_at,
+            source_repo: identity.source_repo,
+            source_branch: identity.source_branch,
+            source_head: identity.source_head,
+            source_tree: identity.source_tree,
+            records,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn validate(&self) -> Result<(), MigrationContractError> {
+        validate_contract_identifier("manifest.migration_id", &self.migration_id)?;
+        validate_contract_identifier("manifest.source_project_id", &self.source_project_id)?;
+        validate_contract_reference(
+            "manifest.canonical_project_cwd",
+            &self.canonical_project_cwd,
+        )?;
+        validate_contract_identifier(
+            "manifest.source_schema_version",
+            &self.source_schema_version,
+        )?;
+        validate_contract_identifier(
+            "manifest.target_schema_version",
+            &self.target_schema_version,
+        )?;
+        validate_contract_identifier(
+            "manifest.source_snapshot_digest",
+            &self.source_snapshot_digest,
+        )?;
+        validate_contract_identifier("manifest.target_epoch", &self.target_epoch)?;
+        validate_contract_identifier("manifest.owner_authority", &self.owner_authority)?;
+        validate_contract_identifier("manifest.created_at", &self.created_at)?;
+        validate_contract_identifier("manifest.updated_at", &self.updated_at)?;
+        if self.records.is_empty() {
+            return Err(MigrationContractError::missing("manifest.records"));
+        }
+        if self.project_admission == ProjectAdmission::Verified {
+            let evidence = self.admission_evidence.as_ref().ok_or_else(|| {
+                MigrationContractError::missing("manifest.project_admission_evidence")
+            })?;
+            evidence.validate()?;
+            if self.archive_ref.as_deref() != Some(evidence.archive_ref.as_str())
+                || self.archive_digest.as_deref() != Some(evidence.archive_digest.as_str())
+            {
+                return Err(MigrationContractError::invalid(
+                    "manifest.project_admission_evidence",
+                    "archive reference and digest must match the verified admission",
+                ));
+            }
+            validate_contract_reference(
+                "manifest.source_repo",
+                self.source_repo.as_deref().unwrap_or_default(),
+            )?;
+            if self.source_branch.is_some() != self.source_head.is_some()
+                || self.source_head.is_some() != self.source_tree.is_some()
+            {
+                return Err(MigrationContractError::invalid(
+                    "manifest.source_identity",
+                    "branch, head, and tree must be either all present or all null",
+                ));
+            }
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for record in &self.records {
+            record.validate()?;
+            if record.target_epoch != self.target_epoch {
+                return Err(MigrationContractError::EpochMismatch {
+                    field: "manifest.record.target_epoch",
+                    expected: self.target_epoch.parse::<u64>().map_err(|error| {
+                        MigrationContractError::invalid("manifest.target_epoch", error.to_string())
+                    })?,
+                    observed: record.target_epoch.parse::<u64>().map_err(|error| {
+                        MigrationContractError::invalid(
+                            "manifest.record.target_epoch",
+                            error.to_string(),
+                        )
+                    })?,
+                });
+            }
+            let key = format!(
+                "{}:{}:{}:{}",
+                self.source_project_id,
+                record.source_record_id,
+                record.source_record_digest,
+                record.target_epoch
+            );
+            if !keys.insert(key) {
+                return Err(MigrationContractError::invalid(
+                    "manifest.records",
+                    "duplicate source record mapping key",
+                ));
+            }
+        }
+        if matches!(
+            self.project_admission,
+            ProjectAdmission::ResetRequired
+                | ProjectAdmission::NeedsOperator
+                | ProjectAdmission::Aborted
+        ) && (self.blocker_code.is_none() || self.first_failed_boundary.is_none())
+        {
+            return Err(MigrationContractError::missing(
+                "manifest.project_admission_evidence",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn record_idempotency_key(&self, record: &MigrationManifestRecord) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.source_project_id,
+            record.source_record_id,
+            record.source_record_digest,
+            record.target_epoch
+        )
+    }
+}
+
+/// Evidence from a no-write rehearsal. It binds the verified-prefix replay,
+/// projection rebuild and fenced rollback decision to one immutable source.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MigrationRehearsal {
+    pub manifest: MigrationManifest,
+    pub verified_prefix_digest: String,
+    pub replayed_records: usize,
+    pub projection_bytes: Vec<u8>,
+    pub projection_digest: String,
+    pub rebuilt_projection_tasks: Vec<String>,
+    pub rollback_fence: TargetEpoch,
+    pub stop_error: String,
+}
+
+impl MigrationRehearsal {
+    pub fn no_write(
+        report: &InspectionReport,
+        prefix: &VerifiedPrefix,
+        identity: ManifestIdentity,
+    ) -> Result<Self, MigrationContractError> {
+        prefix.validate()?;
+        let manifest = MigrationManifest::from_report(report, identity)?;
+        prefix.verify_source_digest(&manifest.source_snapshot_digest)?;
+        let mut state = crate::server::state::State::default();
+        for record in &prefix.records {
+            let line = report
+                .records
+                .iter()
+                .find(|candidate| {
+                    candidate.line_number == record.line_number
+                        && candidate.record_id.as_deref() == Some(record.record_id.as_str())
+                        && candidate.sequence == Some(record.sequence)
+                })
+                .ok_or_else(|| {
+                    MigrationContractError::invalid(
+                        "rehearsal.verified_prefix",
+                        "prefix record is not present in the inspection report",
+                    )
+                })?;
+            let content = trim_line_ending(&line.raw_bytes);
+            let event: Event = serde_json::from_slice(content).map_err(|error| {
+                MigrationContractError::invalid(
+                    "rehearsal.event",
+                    format!(
+                        "verified prefix line {} does not deserialize: {error}",
+                        line.line_number
+                    ),
+                )
+            })?;
+            state.apply_checked(&event).map_err(|error| {
+                MigrationContractError::invalid(
+                    "rehearsal.reducer",
+                    format!(
+                        "verified prefix line {} was rejected by the reducer: {error}",
+                        line.line_number
+                    ),
+                )
+            })?;
+        }
+        let projection_bytes = serde_json::to_vec(&serde_json::json!({
+            "tasks": state.tasks.values().map(|task| task.id.clone()).collect::<Vec<_>>(),
+            "workers": state.workers.keys().cloned().collect::<Vec<_>>(),
+            "messages": state.msgs.keys().cloned().collect::<Vec<_>>(),
+        }))
+        .map_err(|error| {
+            MigrationContractError::invalid("rehearsal.projection", error.to_string())
+        })?;
+        let mut rebuilt_projection_tasks: Vec<String> =
+            state.tasks.keys().cloned().collect::<Vec<_>>();
+        rebuilt_projection_tasks.sort();
+        let projection_digest = digest_bytes(&projection_bytes);
+        let rollback_fence = TargetEpoch::new(
+            None,
+            manifest.target_epoch.parse::<u64>().map_err(|error| {
+                MigrationContractError::invalid("manifest.target_epoch", error.to_string())
+            })?,
+            0,
+        )?;
+        let stop_error = prefix
+            .stop_error
+            .clone()
+            .or_else(|| {
+                manifest
+                    .records
+                    .iter()
+                    .find_map(|record| record.blocker_code.clone())
+            })
+            .unwrap_or_else(|| "VERIFIED_PREFIX_COMPLETE".to_owned());
+        Ok(Self {
+            manifest,
+            verified_prefix_digest: prefix.prefix_digest.clone(),
+            replayed_records: prefix.records.len(),
+            projection_bytes,
+            projection_digest,
+            rebuilt_projection_tasks,
+            rollback_fence,
+            stop_error,
+        })
+    }
+}
+
 /// Pure migration transaction gate.  It can be constructed and validated in
 /// a copied fixture; no method here opens a live source, freezes a daemon,
 /// creates an archive, allocates a target sequence, or rebinds a runtime.
@@ -3153,5 +3800,257 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn inspection_manifest_maps_each_record_and_idempotency_key() {
+        let bytes = format!(
+            "{}{}{}",
+            direct_line("one", 1),
+            "{\"record_id\":\"task-2\",\"sequence\":2,\"ev\":\"TaskUpdated\",\"task\":{\"id\":\"task-2\",\"owner\":\"peer\",\"created_by\":\"master\",\"status\":\"closed\",\"created_ms\":1,\"updated_ms\":1}}\n",
+            "{\"record_id\":\"task-3\",\"sequence\":3,\"ev\":\"TaskUpdated\",\"task\":{\"id\":\"task-3\",\"owner\":\"peer\",\"created_by\":\"master\",\"status\":\"working\",\"created_ms\":1,\"updated_ms\":1}}\n"
+        );
+        let report = inspect_jsonl(bytes.as_bytes());
+        assert_eq!(report.records.len(), 3);
+        assert_eq!(report.records[0].classification, MappingClass::Direct);
+        assert_eq!(report.records[1].classification, MappingClass::Adapt);
+        assert_eq!(report.records[2].classification, MappingClass::Reset);
+
+        let manifest = MigrationManifest::from_report(
+            &report,
+            ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap(),
+        )
+        .expect("typed manifest");
+        manifest.validate().expect("manifest validates");
+
+        assert_eq!(manifest.source_snapshot_digest, report.source_digest);
+        assert_eq!(manifest.records.len(), 3);
+        assert_eq!(manifest.records[0].source_record_id, "one");
+        assert_eq!(manifest.records[0].source_record_type, "TaskUpdated");
+        assert_eq!(manifest.records[0].mapping_class, MappingClass::Direct);
+        assert_eq!(
+            manifest.records[0].source_disposition,
+            SourceDisposition::DirectReplay
+        );
+        assert_eq!(manifest.records[1].mapping_class, MappingClass::Adapt);
+        assert_eq!(
+            manifest.records[1].source_disposition,
+            SourceDisposition::AdaptReconcile
+        );
+        assert_eq!(manifest.records[2].mapping_class, MappingClass::Reset);
+        assert_eq!(
+            manifest.records[2].source_disposition,
+            SourceDisposition::RebuildRequired
+        );
+        assert_eq!(
+            manifest.records[2].blocker_code.as_deref(),
+            Some("MISSING_BINDING_EVIDENCE")
+        );
+        assert_eq!(
+            manifest.records[2].first_failed_boundary.as_deref(),
+            Some("binding")
+        );
+        assert_eq!(manifest.mapping_status, MigrationMappingStatus::Planned);
+        assert_eq!(manifest.project_admission, ProjectAdmission::ResetRequired);
+        assert_eq!(
+            manifest.blocker_code.as_deref(),
+            Some("MISSING_BINDING_EVIDENCE")
+        );
+        assert_eq!(manifest.first_failed_boundary.as_deref(), Some("binding"));
+        assert_eq!(
+            manifest.record_idempotency_key(&manifest.records[0]),
+            format!(
+                "project-1:one:{}:2",
+                manifest.records[0].source_record_digest
+            )
+        );
+
+        let serialized = serde_json::to_value(&manifest).expect("manifest serializes");
+        assert!(serialized.get("raw_bytes").is_none());
+        assert!(serialized["records"][0]["target_epoch"].as_str().is_some());
+        assert!(serialized["records"][0]["owner_authority"]
+            .as_str()
+            .unwrap()
+            .starts_with("inspection:"));
+    }
+
+    #[test]
+    fn no_write_rehearsal_replays_verified_prefix_and_rebuilds_projection() {
+        let bytes = format!("{}{}", direct_line("one", 1), direct_line("two", 2));
+        let report = inspect_jsonl(bytes.as_bytes());
+        let prefix = VerifiedPrefix::from_report(&report).expect("prefix");
+        assert!(prefix.complete);
+
+        let rehearsal = MigrationRehearsal::no_write(
+            &report,
+            &prefix,
+            ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap(),
+        )
+        .expect("rehearsal");
+        assert_eq!(rehearsal.replayed_records, 2);
+        assert_eq!(
+            rehearsal.rebuilt_projection_tasks,
+            vec!["task-one", "task-two"]
+        );
+        assert_eq!(rehearsal.verified_prefix_digest, prefix.prefix_digest);
+        assert_eq!(
+            rehearsal.projection_digest,
+            digest_bytes(&rehearsal.projection_bytes)
+        );
+        assert!(rehearsal.rollback_fence.validate_against(1, 0).is_ok());
+        assert_eq!(rehearsal.stop_error, "VERIFIED_PREFIX_COMPLETE");
+    }
+
+    #[test]
+    fn direct_inspection_alone_cannot_verify_project_admission() {
+        let report = inspect_jsonl(direct_line("one", 1).as_bytes());
+        assert_eq!(report.classification, MappingClass::Direct);
+
+        let manifest = MigrationManifest::from_report(
+            &report,
+            ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap(),
+        )
+        .expect("inspection manifest");
+
+        assert_eq!(manifest.project_admission, ProjectAdmission::NeedsOperator);
+        assert_eq!(manifest.archive_ref, None);
+        assert_eq!(manifest.archive_digest, None);
+        assert_eq!(
+            manifest.blocker_code.as_deref(),
+            Some("PROJECT_ADMISSION_EVIDENCE_ABSENT")
+        );
+    }
+
+    #[test]
+    fn verified_admission_requires_archive_and_explicit_source_identity() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../docs/migration-v1-history-manifest.schema.json"
+        ))
+        .expect("declared manifest schema parses");
+        assert!(schema["properties"]["admission_evidence"].is_object());
+        assert!(schema["allOf"]
+            .as_array()
+            .is_some_and(
+                |clauses| clauses.iter().any(|clause| clause["if"]["properties"]
+                    ["project_admission"]["const"]
+                    == "verified"
+                    && clause["then"]["required"]
+                        == serde_json::json!([
+                            "archive_ref",
+                            "archive_digest",
+                            "admission_evidence"
+                        ]))
+            ));
+
+        let report = inspect_jsonl(direct_line("one", 1).as_bytes());
+        let identity = ManifestIdentity {
+            source_repo: Some("/repo".to_owned()),
+            source_branch: Some("main".to_owned()),
+            source_head: Some("abc123".to_owned()),
+            source_tree: Some("tree123".to_owned()),
+            ..ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap()
+        };
+        let admission = MigrationAdmissionEvidence {
+            writer_frozen: true,
+            live_scope_verified: true,
+            current_source_verified: true,
+            source_identity_verified: true,
+            archive_ref: "archive/migration-1".to_owned(),
+            archive_digest: "sha256:archive".to_owned(),
+        };
+
+        let manifest =
+            MigrationManifest::from_report_with_admission(&report, identity, Some(admission))
+                .expect("verified manifest");
+
+        assert_eq!(manifest.project_admission, ProjectAdmission::Verified);
+        assert_eq!(manifest.archive_ref.as_deref(), Some("archive/migration-1"));
+        assert_eq!(manifest.archive_digest.as_deref(), Some("sha256:archive"));
+        let serialized = serde_json::to_value(&manifest).expect("verified manifest serializes");
+        assert_eq!(
+            serialized["admission_evidence"]["archive_ref"].as_str(),
+            Some("archive/migration-1")
+        );
+        assert_eq!(
+            serialized["admission_evidence"]["writer_frozen"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn rehearsal_fails_instead_of_emitting_projection_after_reducer_rejection() {
+        let rejected = Event::CommandRecorded {
+            command_id: String::new(),
+            receipt: crate::server::state::CommandReceipt {
+                operation_id: "operation-1".to_owned(),
+                outcome: serde_json::json!({}),
+                sequence: 1,
+                revision: 1,
+            },
+        };
+        let line = canonical_event_bytes(rejected, Some("command-1"), Some(1), true);
+        let report = inspect_jsonl(&line);
+        assert_eq!(report.classification, MappingClass::Direct);
+        let prefix = VerifiedPrefix::from_report(&report).expect("direct prefix");
+
+        let error = MigrationRehearsal::no_write(
+            &report,
+            &prefix,
+            ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap(),
+        )
+        .expect_err("reducer rejection must stop rehearsal");
+
+        assert!(matches!(
+            error,
+            MigrationContractError::Invalid {
+                field: "rehearsal.reducer",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn manifest_rejects_mapped_record_with_foreign_target_epoch() {
+        let report = inspect_jsonl(direct_line("one", 1).as_bytes());
+        let mut manifest = MigrationManifest::from_report(
+            &report,
+            ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap(),
+        )
+        .expect("manifest");
+        manifest.records[0].mapping_status = ManifestRecordStatus::Mapped;
+        manifest.records[0].target_sequence = Some(1);
+        manifest.records[0].target_entity_id = Some("task-one".to_owned());
+        manifest.records[0].target_epoch = "3".to_owned();
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(MigrationContractError::EpochMismatch {
+                field: "manifest.record.target_epoch",
+                expected: 2,
+                observed: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn needs_operator_manifest_keeps_top_level_admission_evidence() {
+        let bytes = format!(
+            "{}{}",
+            "{\"record_id\":\"task-1\",\"sequence\":1,\"ev\":\"TaskUpdated\",\"task\":{\"id\":\"task-1\",\"owner\":\"peer\",\"created_by\":\"master\",\"status\":\"closed\",\"created_ms\":1,\"updated_ms\":1}}\n",
+            direct_line("task-2", 2)
+        );
+        let report = inspect_jsonl(bytes.as_bytes());
+        let manifest = MigrationManifest::from_report(
+            &report,
+            ManifestIdentity::new("migration-1", "project-1", "/repo").unwrap(),
+        )
+        .expect("typed manifest");
+
+        assert_eq!(manifest.project_admission, ProjectAdmission::NeedsOperator);
+        assert_eq!(
+            manifest.blocker_code.as_deref(),
+            Some("LEGACY_BINDING_EVIDENCE_ABSENT")
+        );
+        assert_eq!(manifest.first_failed_boundary.as_deref(), Some("binding"));
     }
 }

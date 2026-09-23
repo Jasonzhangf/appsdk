@@ -9505,6 +9505,30 @@ fn verify_rejects_nested_and_noncanonical_contract_weakening() {
         &sdk_resources_before,
     );
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_rejects_parallel_zone_contract_dropping_live_closure() {
+    let root = temp_root("declared-zone-parallel-live-closure");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let project_path = root.join(".appsdk/project.json");
+    let project_before = fs::read(&project_path).unwrap();
+    let mut project: Value = serde_json::from_slice(&project_before).unwrap();
+    project["development_scenarios"]["enabled"] =
+        Value::Array(vec![Value::String("multi_worker_collaboration".into())]);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let zone_path = root.join("contracts/transitions/zone-transition.manifest.json");
+    let zone_projection_path =
+        root.join(".appsdk/contracts/transitions/zone-transition.manifest.json");
+    let zone_before = fs::read(&zone_path).unwrap();
     let mut v4_zone: Value = serde_json::from_slice(&zone_before).unwrap();
     for transition in v4_zone["transitions"].as_array_mut().unwrap() {
         if transition["from"].as_str() == Some("playground")
@@ -9531,12 +9555,18 @@ fn verify_rejects_nested_and_noncanonical_contract_weakening() {
         "contracts/transitions/zone-transition.manifest.json",
         &zone_projection_path,
     );
-    let accepted_v4_zone = run(&["verify", "--admission", root_text]);
+
+    let rejected = run(&["verify", "--admission", root_text]);
     assert!(
-        accepted_v4_zone.status.success(),
+        !rejected.status.success(),
         "stdout={} stderr={}",
-        String::from_utf8_lossy(&accepted_v4_zone.stdout),
-        String::from_utf8_lossy(&accepted_v4_zone.stderr)
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("INVALID_DECLARED_ZONE_CONTRACT"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
     );
     fs::remove_dir_all(root).unwrap();
 }

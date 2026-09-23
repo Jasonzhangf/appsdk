@@ -1759,51 +1759,6 @@ fn assert_declared_contracts(root: &Path, project: &Value) {
     {
         fail("INVALID_DECLARED_ZONE_CONTRACT");
     }
-    let routecodex_v4_zone_exception = |expected: &Value, actual: &Value| {
-        let Some(expected) = expected.as_object() else {
-            return false;
-        };
-        let Some(actual) = actual.as_object() else {
-            return false;
-        };
-        if expected.keys().len() != actual.keys().len()
-            || expected.get("from").and_then(Value::as_str) != Some("playground")
-            || expected.get("to").and_then(Value::as_str) != Some("active")
-        {
-            return false;
-        }
-        let Some(expected_records) = expected.get("record_required").and_then(Value::as_array)
-        else {
-            return false;
-        };
-        let Some(actual_records) = actual.get("record_required").and_then(Value::as_array) else {
-            return false;
-        };
-        let exception_record = Value::String("CollabLiveClosureRecordWhenParallel".into());
-        if !expected_records
-            .iter()
-            .any(|record| *record == exception_record)
-            || actual_records
-                .iter()
-                .any(|record| *record == exception_record)
-        {
-            return false;
-        }
-        let normalized_records = expected_records
-            .iter()
-            .filter(|record| **record != exception_record)
-            .cloned()
-            .collect::<Vec<_>>();
-        expected.iter().all(|(key, value)| {
-            if key == "record_required" {
-                actual.get(key).is_some_and(|actual_value| {
-                    *actual_value == Value::Array(normalized_records.clone())
-                })
-            } else {
-                actual.get(key) == Some(value)
-            }
-        })
-    };
     for transition in declared_transitions {
         let object = transition
             .as_object()
@@ -1865,7 +1820,7 @@ fn assert_declared_contracts(root: &Path, project: &Value) {
                     .is_some_and(|actual_key| actual_key == key)
             })
             .unwrap_or_else(|| fail("INVALID_DECLARED_ZONE_CONTRACT"));
-        if actual != expected && !routecodex_v4_zone_exception(expected, actual) {
+        if actual != expected {
             fail("INVALID_DECLARED_ZONE_CONTRACT");
         }
     }

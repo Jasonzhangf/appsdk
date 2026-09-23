@@ -119,28 +119,110 @@ fn handoff_with_relative_missing_worktree_fails_typed() {
 }
 
 #[test]
-fn handoff_with_absolute_missing_worktree_outside_playground_fails_typed() {
+fn handoff_with_unrelated_absolute_worktree_leaf_still_delivers() {
     let (server, root) = test_server();
     register(&server, "handoff-sender", "%handoff-sender");
     register(&server, "handoff-owner", "%handoff-owner");
-    let missing = "/tmp/m1-tailscale-replay-20260908T121151Z/worktree";
+    let unrelated = "/Volumes/extension/code/other-project/worktree";
     let response = handle_send(
         &server,
         "handoff-sender".into(),
         "handoff-owner".into(),
         "notify".into(),
-        Some("preflight candidate handoff".into()),
-        format!("preflight implementation at ({missing}) is gone"),
+        Some("unrelated worktree-leaf path".into()),
+        format!("see {unrelated} for reference"),
+        None,
+        "immediate".into(),
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_prose_url_worktree_segment_still_delivers() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("prose url".into()),
+        "reference https://example.com/docs/worktree for background".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(response.ok, "{response:?}");
+    assert_eq!(response.data["durable"], true);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_dot_prefixed_missing_worktree_fails_typed() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("dot-prefixed worktree reference".into()),
+        "preflight implementation lives at ./playground/gone-wt".into(),
         None,
         "immediate".into(),
     );
     assert!(!response.ok, "{response:?}");
     let error = response.error.unwrap_or_default();
     assert!(
-        error.contains("HANDOFF_TARGET_UNRESOLVED") && error.contains("m1-tailscale-replay"),
+        error.contains("HANDOFF_TARGET_UNRESOLVED") && error.contains("gone-wt"),
         "unexpected error: {error}"
     );
     assert_eq!(response.data["reason"], "worktree_path_missing");
+    assert_eq!(response.data["recorded"], false);
+    assert!(server.state.lock().unwrap().msgs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn handoff_with_registered_task_worktree_outside_playground_fails_typed() {
+    let (server, root) = test_server();
+    register(&server, "handoff-sender", "%handoff-sender");
+    register(&server, "handoff-owner", "%handoff-owner");
+    let registered = root.join("outside/wt");
+    server.commit(&[Event::TaskCreated {
+        task: TaskRec {
+            id: "task-handoff-registered-wt".into(),
+            owner: "handoff-owner".into(),
+            created_by: "handoff-owner".into(),
+            feature_id: None,
+            worktree_path: Some(registered.display().to_string()),
+            branch: None,
+            base_commit: None,
+            priority: "p1".into(),
+            status: "working".into(),
+            next_step: None,
+            wait: None,
+            created_ms: now_ms(),
+            updated_ms: now_ms(),
+        },
+    }]);
+    let response = handle_send(
+        &server,
+        "handoff-sender".into(),
+        "handoff-owner".into(),
+        "notify".into(),
+        Some("registered worktree reference".into()),
+        format!("preflight implementation lives at {}", registered.display()),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok, "{response:?}");
+    assert_eq!(response.data["reason"], "worktree_path_missing");
+    assert_eq!(response.data["recorded"], false);
     assert!(server.state.lock().unwrap().msgs.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }

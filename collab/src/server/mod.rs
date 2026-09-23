@@ -8797,6 +8797,22 @@ fn handle_task_register_with_next(
         .tasks
         .values()
         .find(|task| {
+            task.owner == task_owner
+                && task_resource_active(&task.status)
+                && (feature_id.is_some() && task.feature_id == feature_id
+                    || worktree_path.is_some() && task.worktree_path == worktree_path)
+        })
+        .cloned()
+    {
+        return Resp::err(format!(
+            "TASK_OWNER_ALREADY_HOLDS_RESOURCE: task {} already owns this feature/worktree for owner {}; continue {} instead of registering a parallel task, or use `collab task relocate {}` to change its worktree",
+            existing.id, task_owner, existing.id, existing.id
+        ));
+    }
+    if let Some(existing) = st
+        .tasks
+        .values()
+        .find(|task| {
             task_resource_active(&task.status)
                 && (feature_id.is_some() && task.feature_id == feature_id
                     || worktree_path.is_some() && task.worktree_path == worktree_path)

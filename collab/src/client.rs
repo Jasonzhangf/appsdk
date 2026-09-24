@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -93,38 +93,23 @@ pub fn call<T: DeserializeOwned>(sock: &Path, req: &Req) -> anyhow::Result<T> {
 
 pub fn resolve_route(
     sock: &Path,
-    session_id: &str,
-    native_thread_id: &str,
+    endpoint: &crate::proto::TmuxEndpoint,
 ) -> anyhow::Result<RouteResolution> {
+    crate::client::adapters::tmux::validate_endpoint(endpoint).map_err(anyhow::Error::msg)?;
     let route: RouteResolution = call(
         sock,
         &Req::RouteResolve {
-            session_id: session_id.to_owned(),
-            native_thread_id: native_thread_id.to_owned(),
+            tmux_endpoint: endpoint.clone(),
         },
     )?;
-    validate_route_resolution(route, session_id, native_thread_id)
-}
-
-pub fn resolve_route_with_stream(
-    stream: UnixStream,
-    session_id: &str,
-    native_thread_id: &str,
-) -> anyhow::Result<RouteResolution> {
-    let sock = stream
-        .peer_addr()
-        .ok()
-        .and_then(|addr| addr.as_pathname().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("<unknown>"));
-    let route: RouteResolution = call_with_stream(
-        &sock,
-        stream,
-        &Req::RouteResolve {
-            session_id: session_id.to_owned(),
-            native_thread_id: native_thread_id.to_owned(),
-        },
-        None,
-    )?;
+    let session_id = endpoint
+        .codex_session_id
+        .as_deref()
+        .unwrap_or(&endpoint.tmux_session_id);
+    let native_thread_id = endpoint
+        .codex_thread_id
+        .as_deref()
+        .unwrap_or(&endpoint.pane_id);
     validate_route_resolution(route, session_id, native_thread_id)
 }
 
@@ -247,32 +232,8 @@ pub fn call_with_runtime_identity_at_root<T: DeserializeOwned>(
     root: &Path,
     identity: &RuntimeIdentity,
 ) -> anyhow::Result<T> {
-    call_with_runtime_identity_at_root_selected_endpoint(sock, req, root, identity)
-}
-
-fn call_with_runtime_identity_at_root_selected_endpoint<T: DeserializeOwned>(
-    sock: &Path,
-    req: &Req,
-    root: &Path,
-    identity: &RuntimeIdentity,
-) -> anyhow::Result<T> {
     let project_context = ProjectContext::for_registered_route(root, identity)?;
-    let envelope = RequestEnvelope::new(req.clone(), Some(project_context));
-    let binding = adapters::binding_for_request(identity, &envelope)?;
-    if let Some(binding) = binding {
-        // An explicitly selected AppServer owns this attempt. Adapter errors
-        // are returned directly; the daemon remains a separate compatibility
-        // route when no AppServer endpoint was selected.
-        let adapter = adapters::AdapterRegistry::new().adapter(binding.endpoint);
-        let receipt = adapters::submit_registered(&adapter, &binding, &envelope)?;
-        return serde_json::from_value(receipt.response).with_context(|| {
-            format!(
-                "ADAPTER_UNKNOWN_RESPONSE: unexpected response shape from {} endpoint",
-                binding.endpoint.as_str()
-            )
-        });
-    }
-    call_with_context(sock, req, envelope.project_context)
+    call_with_context(sock, req, Some(project_context))
 }
 
 /// Submit registration and identity-recovery requests directly to the daemon.
@@ -651,6 +612,18 @@ mod tests {
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+    fn route_test_endpoint(session_id: &str, pane_id: &str) -> crate::proto::TmuxEndpoint {
+        crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/tmux-test.sock".into(),
+            server_pid: 1,
+            tmux_session_id: session_id.into(),
+            pane_id: pane_id.into(),
+            pane_pid: 2,
+            codex_session_id: None,
+            codex_thread_id: None,
+        }
+    }
+
     struct TempServerDir(PathBuf);
 
     impl TempServerDir {
@@ -821,7 +794,7 @@ mod tests {
             std::io::BufReader::new(&stream)
                 .read_line(&mut line)
                 .expect("read route request");
-            assert!(line.contains("\"native_thread_id\":\"thread-requested\""));
+            assert!(line.contains("\"pane_id\":\"%1\""));
             let root = env!("CARGO_MANIFEST_DIR");
             let response = json!({
                 "ok": true,
@@ -832,7 +805,7 @@ mod tests {
                 "agent_id": "agent-1",
                 "binding_id": "binding-1",
                 "endpoint_generation": 7,
-                "session_id": "session-requested",
+                "session_id": "$1",
                 "native_thread_id": "thread-other"
             });
             stream
@@ -840,8 +813,8 @@ mod tests {
                 .expect("write route response");
         });
 
-        let error =
-            resolve_route(&fixture.socket(), "session-requested", "thread-requested").unwrap_err();
+        let endpoint = route_test_endpoint("$1", "%1");
+        let error = resolve_route(&fixture.socket(), &endpoint).unwrap_err();
         assert!(
             error.to_string().contains("ROUTE_RESOLVE_INVALID"),
             "{error}"
@@ -867,7 +840,8 @@ mod tests {
                 .expect("write partial route response");
         });
 
-        let error = resolve_route(&fixture.socket(), "session-1", "thread-1").unwrap_err();
+        let endpoint = route_test_endpoint("$1", "%1");
+        let error = resolve_route(&fixture.socket(), &endpoint).unwrap_err();
         assert!(
             error.to_string().contains("unexpected response shape"),
             "{error}"
@@ -998,12 +972,20 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_mutation_never_reaches_a_selected_native_endpoint() {
+    fn runtime_identity_request_uses_daemon_even_when_appserver_env_is_set() {
         let fixture = TempServerDir::new("native-bypass");
         let listener = UnixListener::bind(fixture.socket()).expect("bind native fixture socket");
-        listener
-            .set_nonblocking(true)
-            .expect("native fixture socket is nonblocking");
+        let responder = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept daemon request");
+            let mut request = String::new();
+            std::io::BufReader::new(&mut stream)
+                .read_line(&mut request)
+                .expect("read daemon request");
+            assert!(request.contains("\"op\":\"Send\""), "{request}");
+            stream
+                .write_all(b"{\"ok\":true,\"data\":{\"sent\":true}}\n")
+                .expect("write daemon response");
+        });
         let identity = crate::identity::RuntimeIdentity {
             agent_id: crate::identity::AgentId::new("agent-1").unwrap(),
             runtime_id: crate::identity::RuntimeId::new("runtime-1").unwrap(),
@@ -1039,17 +1021,7 @@ mod tests {
             Some(value) => std::env::set_var(crate::client::adapters::APPSERVER_ENV, value),
             None => std::env::remove_var(crate::client::adapters::APPSERVER_ENV),
         }
-        let error = result.unwrap_err();
-        assert!(
-            error.to_string().contains("ADAPTER_ENDPOINT_UNAVAILABLE"),
-            "{error}"
-        );
-        // The authoritative request must fail closed before any byte reaches
-        // the selected native endpoint, so the endpoint cannot mutate state
-        // outside the resident daemon reducer and journal.
-        assert!(matches!(
-            listener.accept(),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-        ));
+        assert_eq!(result.unwrap(), json!({"data": {"sent": true}}));
+        responder.join().expect("daemon request responder");
     }
 }

@@ -18,11 +18,10 @@ fn tick_at(server: &Arc<Server>, now: i64) {
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
-    let due_recipients = due_deadline_recipients(server, now);
-    let readiness = deadline_recipient_readiness(server, &due_recipients);
-    tick_with_deadline_readiness_at(server, now, &|worker_id| {
-        readiness.get(worker_id).copied().flatten()
-    });
+    // tmux has no Codex turn-readiness signal, and user-input collision is
+    // outside this contract. Deadline wakeups use the normal notification
+    // path; pane output is observation only, never a consumption receipt.
+    tick_with_deadline_wake_at(server, now);
 }
 
 #[cfg(test)]
@@ -35,16 +34,7 @@ fn tick_with_idle_at(server: &Arc<Server>, now: i64, _can_receive: &dyn Fn(&str)
     tick_at(server, now);
 }
 
-#[cfg(test)]
-fn tick_with_deadline_readiness(server: &Arc<Server>, can_receive: &dyn Fn(&str) -> bool) {
-    tick_with_deadline_readiness_at(server, now_ms(), &|worker_id| Some(can_receive(worker_id)));
-}
-
-fn tick_with_deadline_readiness_at(
-    server: &Arc<Server>,
-    now: i64,
-    can_receive: &dyn Fn(&str) -> Option<bool>,
-) {
+fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
@@ -72,9 +62,9 @@ fn tick_with_deadline_readiness_at(
             lost_sub_ids.push(id);
             continue;
         };
-        // App Server candidates are verified at registration. A notification
-        // attempt performs its own bounded endpoint check; timers do not infer
-        // agent state from a terminal.
+        // Tmux endpoint identity is persisted at registration. A notification
+        // attempt performs its own bounded pane check; timers do not infer
+        // agent state from terminal output.
         if !super::subscription_matches_transport_by_worker(server, &id, &worker_id, &transport) {
             lost_sub_ids.push(id);
         }
@@ -293,29 +283,6 @@ fn tick_with_deadline_readiness_at(
             {
                 continue;
             }
-            if subscription.event == "deadline" {
-                match can_receive(&subscription.worker_id) {
-                    Some(true) => {}
-                    Some(false) => {
-                        due_events.push(Event::NotificationSkipped {
-                            subscription_id: subscription.id.clone(),
-                            reason: "deadline-master-busy-skipped".into(),
-                            due_ms: next_trigger.unwrap_or(now),
-                            skipped_ms: now,
-                        });
-                        continue;
-                    }
-                    None => {
-                        due_events.push(Event::NotificationSuppressed {
-                            subscription_id: subscription.id.clone(),
-                            status: "armed".into(),
-                            reason: "deadline-readiness-unavailable".into(),
-                            updated_ms: now,
-                        });
-                        continue;
-                    }
-                }
-            }
             if is_goal_deadline(subscription) {
                 let Some(key) = goal_deadline_key(subscription) else {
                     continue;
@@ -408,31 +375,6 @@ fn tick_with_deadline_readiness_at(
     }
 }
 
-fn due_deadline_recipients(server: &Server, now: i64) -> HashSet<String> {
-    let state = server.state.lock().unwrap();
-    if !server.config.timers.enabled {
-        return HashSet::new();
-    }
-    state
-        .notification_subscriptions
-        .values()
-        .filter(|subscription| {
-            subscription.status == "armed"
-                && subscription.expires_ms > now
-                && subscription.event == "deadline"
-                && next_subscription_trigger(subscription).is_some_and(|trigger| trigger <= now)
-                && !state.wake_bindings.iter().any(|(message_id, bound)| {
-                    bound == &subscription.id
-                        && state
-                            .msgs
-                            .get(message_id)
-                            .is_some_and(|message| message.state == "pending")
-                })
-        })
-        .map(|subscription| subscription.worker_id.clone())
-        .collect()
-}
-
 fn next_subscription_trigger(
     subscription: &crate::server::state::NotificationSubscription,
 ) -> Option<i64> {
@@ -452,44 +394,6 @@ fn next_subscription_trigger(
         .or(subscription.trigger_ms)
 }
 
-fn deadline_recipient_readiness(
-    server: &Server,
-    due_recipients: &HashSet<String>,
-) -> HashMap<String, Option<bool>> {
-    let workers = {
-        let state = server.state.lock().unwrap();
-        state
-            .workers
-            .values()
-            .filter(|worker| due_recipients.contains(&worker.id))
-            .filter_map(|worker| {
-                let transport = super::selected_transport_for_worker(worker)?;
-                let thread_id = transport.thread_id.clone()?;
-                Some((worker.id.clone(), transport, thread_id))
-            })
-            .collect::<Vec<_>>()
-    };
-    workers
-        .into_iter()
-        .map(|(worker_id, transport, thread_id)| {
-            let ready = (server.appserver_thread_status)(&transport, &thread_id)
-                .ok()
-                .and_then(|raw| raw.get("thread").cloned())
-                .and_then(|thread| {
-                    let thread_state = thread
-                        .get("status")
-                        .and_then(|status| status.get("type"))
-                        .and_then(serde_json::Value::as_str);
-                    thread
-                        .get("canAcceptDirectInput")
-                        .and_then(serde_json::Value::as_bool)
-                        .map(|can_accept| thread_state == Some("idle") && can_accept)
-                });
-            (worker_id, ready)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,7 +401,6 @@ mod tests {
     use crate::server::state::{
         Event, MigrationRecord, NotificationSubscription, State, TaskRec, WaitSpec,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn test_server() -> (Arc<Server>, std::path::PathBuf) {
@@ -531,6 +434,7 @@ mod tests {
                         namespace: Some(candidate.namespace.clone()),
                         session_id: Some(candidate.session_id.clone()),
                         thread_id: Some(candidate.thread_id.clone()),
+                        tmux_endpoint: None,
                         capabilities: vec!["send_message_to_thread".into()],
                         self_check: "test appserver".into(),
                     })
@@ -562,6 +466,11 @@ mod tests {
         assert!(response.ok, "worker registration failed: {response:?}");
     }
 
+    fn register_tmux(server: &Server, worker_id: &str, endpoint: crate::proto::TmuxEndpoint) {
+        let response = crate::server::peer_tests::register_tmux(server, worker_id, endpoint);
+        assert!(response.ok, "worker registration failed: {response:?}");
+    }
+
     fn register_master(server: &Server) {
         register(server, "master");
         let now = now_ms();
@@ -585,14 +494,15 @@ mod tests {
     fn master_idle_subscription(server: &Server, interval_ms: i64) -> String {
         let now = now_ms();
         let id = format!("sub-master-idle-{interval_ms}");
+        let (target, method) = subscription_target(server, "master");
         server.commit(&[Event::NotificationSubscribed {
             subscription: NotificationSubscription {
                 id: id.clone(),
                 worker_id: "master".into(),
                 event: "master-idle".into(),
                 subject: Some("master-idle".into()),
-                target: "thread-master".into(),
-                method: "appserver".into(),
+                target,
+                method,
                 trigger_ms: Some(now - 1),
                 trigger_times_ms: Vec::new(),
                 interval_ms: Some(interval_ms),
@@ -616,14 +526,15 @@ mod tests {
         trigger_ms: Option<i64>,
     ) -> String {
         let id = format!("sub-{worker_id}-{event}");
+        let (target, method) = subscription_target(server, worker_id);
         server.commit(&[Event::NotificationSubscribed {
             subscription: NotificationSubscription {
                 id: id.clone(),
                 worker_id: worker_id.into(),
                 event: event.into(),
                 subject: subject.map(str::to_owned),
-                target: format!("thread-{worker_id}"),
-                method: "appserver".into(),
+                target,
+                method,
                 trigger_ms,
                 trigger_times_ms: Vec::new(),
                 interval_ms: None,
@@ -642,14 +553,15 @@ mod tests {
     fn periodic_deadline_subscription(server: &Server, worker_id: &str, subject: &str) -> String {
         let now = now_ms();
         let id = format!("sub-{worker_id}-periodic-deadline");
+        let (target, method) = subscription_target(server, worker_id);
         server.commit(&[Event::NotificationSubscribed {
             subscription: NotificationSubscription {
                 id: id.clone(),
                 worker_id: worker_id.into(),
                 event: "deadline".into(),
                 subject: Some(subject.into()),
-                target: format!("thread-{worker_id}"),
-                method: "appserver".into(),
+                target,
+                method,
                 trigger_ms: Some(now - 1),
                 trigger_times_ms: Vec::new(),
                 interval_ms: Some(600_000),
@@ -663,6 +575,23 @@ mod tests {
             },
         }]);
         id
+    }
+
+    fn subscription_target(server: &Server, worker_id: &str) -> (String, String) {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get(worker_id)
+            .and_then(|worker| worker.transport.as_ref())
+            .map(|transport| {
+                (
+                    transport.thread_id.clone().unwrap_or_default(),
+                    transport.kind.as_str().to_owned(),
+                )
+            })
+            .unwrap_or_else(|| (format!("thread-{worker_id}"), "appserver".into()))
     }
 
     fn freeze_admission(server: &Server) {
@@ -768,38 +697,38 @@ mod tests {
     }
 
     #[test]
-    fn admission_freeze_blocks_deadline_readiness_probe() {
+    fn admission_freeze_blocks_deadline_wakeup_without_appserver_probe() {
         let (mut server, root) = test_server();
-        let probes = Arc::new(AtomicUsize::new(0));
-        {
-            let probes = Arc::clone(&probes);
-            Arc::get_mut(&mut server)
-                .expect("unique test server")
-                .appserver_thread_status = Arc::new(move |_, thread_id| {
-                probes.fetch_add(1, Ordering::SeqCst);
-                Ok(serde_json::json!({
-                    "thread": {
-                        "id": thread_id,
-                        "status": {"type": "idle"},
-                        "canAcceptDirectInput": true
-                    }
-                }))
-            });
-        }
-        register_master(&server);
+        let tmux = crate::server::peer_tests::IsolatedTmux::start(&root);
+        register_tmux(&server, "master", tmux.endpoints().remove(0));
+        let now = now_ms();
+        let promoted = crate::server::handle_master_promote(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "user-approved".into(),
+        );
+        assert!(promoted.ok, "master promotion failed: {promoted:?}");
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "idle".into(),
+                idle_since_ms: now - 900_001,
+                ..Record::default()
+            },
+        }]);
         periodic_deadline_subscription(&server, "master", "goal:frozen");
         freeze_admission(&server);
-        probes.store(0, Ordering::SeqCst);
 
         tick_at(&server, now_ms());
 
-        assert_eq!(probes.load(Ordering::SeqCst), 0);
         assert!(server.state.lock().unwrap().msgs.is_empty());
+        drop(tmux);
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn deadline_readiness_probes_only_due_deadline_recipients() {
+    fn deadline_wakeup_does_not_probe_appserver_readiness() {
         let (mut server, root) = test_server();
         let probes = Arc::new(Mutex::new(Vec::new()));
         {
@@ -817,8 +746,26 @@ mod tests {
                 }))
             });
         }
-        register_master(&server);
-        register(&server, "worker");
+        let tmux = crate::server::peer_tests::IsolatedTmux::start(&root);
+        let endpoints = tmux.endpoints();
+        register_tmux(&server, "master", endpoints[0].clone());
+        register_tmux(&server, "worker", endpoints[1].clone());
+        let now = now_ms();
+        let promoted = crate::server::handle_master_promote(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "user-approved".into(),
+        );
+        assert!(promoted.ok, "master promotion failed: {promoted:?}");
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "idle".into(),
+                idle_since_ms: now - 900_001,
+                ..Record::default()
+            },
+        }]);
         periodic_deadline_subscription(&server, "master", "periodic:due-master");
         subscribe(
             &server,
@@ -829,34 +776,26 @@ mod tests {
         );
         probes.lock().unwrap().clear();
 
-        let now = now_ms();
-        let due_recipients = due_deadline_recipients(&server, now);
-        assert_eq!(
-            due_recipients,
-            HashSet::from(["master".to_string()]),
-            "only the due deadline recipient should be eligible for readiness probing"
-        );
-        let readiness = deadline_recipient_readiness(&server, &due_recipients);
+        probes.lock().unwrap().clear();
+        tick_at(&server, now_ms());
 
-        let probes = probes.lock().unwrap();
-        assert_eq!(readiness.get("master"), Some(&Some(true)));
-        assert_eq!(readiness.get("worker"), None);
-        assert_eq!(
-            probes.as_slice(),
-            &["thread-master".to_string()],
-            "readiness probing must stay bounded to due deadline recipients"
-        );
-        drop(probes);
+        assert!(probes.lock().unwrap().is_empty());
+        assert!(server.state.lock().unwrap().msgs.values().any(|message| {
+            message.to == "master"
+                && message.subject.as_deref() == Some("deadline:periodic:due-master")
+        }));
+        drop(tmux);
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn deadline_status_probe_error_preserves_one_shot_worker_deadline() {
+    fn deadline_wakeup_does_not_depend_on_appserver_status_callback() {
         let (mut server, root) = test_server();
+        let tmux = crate::server::peer_tests::IsolatedTmux::start(&root);
+        register_tmux(&server, "worker", tmux.endpoints().remove(0));
         Arc::get_mut(&mut server)
             .expect("unique test server")
-            .appserver_thread_status = Arc::new(|_, _| Err("status probe failed".into()));
-        register(&server, "worker");
+            .appserver_thread_status = Arc::new(|_, _| panic!("AppServer probe must not run"));
         let subscription_id = subscribe(
             &server,
             "worker",
@@ -868,47 +807,11 @@ mod tests {
         tick_at(&server, now_ms());
 
         let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty());
+        assert_eq!(state.msgs.len(), 1);
         let subscription = &state.notification_subscriptions[&subscription_id];
         assert_eq!(subscription.status, "armed");
-        assert_eq!(subscription.fired_count, 0);
-        assert_eq!(
-            subscription.status_reason.as_deref(),
-            Some("deadline-readiness-unavailable")
-        );
         drop(state);
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn deadline_missing_can_accept_preserves_periodic_worker_deadline() {
-        let (mut server, root) = test_server();
-        Arc::get_mut(&mut server)
-            .expect("unique test server")
-            .appserver_thread_status = Arc::new(|_, thread_id| {
-            Ok(serde_json::json!({
-                "thread": {
-                    "id": thread_id,
-                    "status": {"type": "idle"}
-                }
-            }))
-        });
-        register(&server, "worker");
-        let subscription_id =
-            periodic_deadline_subscription(&server, "worker", "worker:periodic-missing-ready");
-
-        tick_at(&server, now_ms());
-
-        let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty());
-        let subscription = &state.notification_subscriptions[&subscription_id];
-        assert_eq!(subscription.status, "armed");
-        assert_eq!(subscription.fired_count, 0);
-        assert_eq!(
-            subscription.status_reason.as_deref(),
-            Some("deadline-readiness-unavailable")
-        );
-        drop(state);
+        drop(tmux);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1634,7 +1537,7 @@ mod tests {
                 event: "deadline".into(),
                 subject: Some("goal:inactive".into()),
                 target: "thread-master".into(),
-                method: "appserver".into(),
+                method: "tmux".into(),
                 trigger_ms: Some(now - 1),
                 trigger_times_ms: Vec::new(),
                 interval_ms: Some(600_000),
@@ -1700,7 +1603,7 @@ mod tests {
                 event: "deadline".into(),
                 subject: Some("goal:active".into()),
                 target: "thread-master".into(),
-                method: "appserver".into(),
+                method: "tmux".into(),
                 trigger_ms: Some(now - 1),
                 trigger_times_ms: Vec::new(),
                 interval_ms: Some(600_000),
@@ -1765,7 +1668,7 @@ mod tests {
                     event: "deadline".into(),
                     subject: Some("goal:revision-7".into()),
                     target: "thread-master".into(),
-                    method: "appserver".into(),
+                    method: "tmux".into(),
                     trigger_ms: Some(now - 1),
                     trigger_times_ms: Vec::new(),
                     interval_ms: None,
@@ -1790,104 +1693,6 @@ mod tests {
                 .filter(|message| message.subject.as_deref() == Some("deadline:goal:revision-7"))
                 .count(),
             1
-        );
-        drop(state);
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn periodic_deadline_skips_busy_master_and_records_due_state() {
-        let (server, root) = test_server();
-        register_master(&server);
-        let subscription_id =
-            periodic_deadline_subscription(&server, "master", "periodic:busy-master");
-
-        tick_with_deadline_readiness(&server, &|worker_id| worker_id != "master");
-
-        let state = server.state.lock().unwrap();
-        assert!(
-            state.msgs.is_empty(),
-            "busy master deadline timer must not create an AppServer wake"
-        );
-        let subscription = &state.notification_subscriptions[&subscription_id];
-        assert_eq!(subscription.status, "armed");
-        assert_eq!(subscription.fired_count, 1);
-        assert_eq!(
-            subscription.status_reason.as_deref(),
-            Some("deadline-master-busy-skipped")
-        );
-        assert!(!state.master_wake.goal_due);
-        assert_eq!(state.master_wake.delivery_state, "skipped-busy");
-        drop(state);
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn busy_goal_deadline_records_due_then_wakes_once_when_master_is_idle() {
-        let (server, root) = test_server();
-        register_master(&server);
-        let due_ms = now_ms() - 1234;
-        let subscription_id = "sub-goal-busy-master".to_string();
-        server.commit(&[Event::NotificationSubscribed {
-            subscription: NotificationSubscription {
-                id: subscription_id.clone(),
-                worker_id: "master".into(),
-                event: "deadline".into(),
-                subject: Some("goal:busy-master".into()),
-                target: "thread-master".into(),
-                method: "appserver".into(),
-                trigger_ms: Some(due_ms),
-                trigger_times_ms: Vec::new(),
-                interval_ms: None,
-                repeat_count: 1,
-                fired_count: 0,
-                expires_ms: now_ms() + 86_400_000,
-                status: "armed".into(),
-                created_ms: due_ms - 1,
-                updated_ms: due_ms - 1,
-                status_reason: None,
-            },
-        }]);
-
-        tick_with_deadline_readiness(&server, &|worker_id| worker_id != "master");
-
-        let state = server.state.lock().unwrap();
-        assert!(state.msgs.is_empty());
-        assert_eq!(
-            state.notification_subscriptions[&subscription_id].status,
-            "armed"
-        );
-        assert_eq!(
-            state.notification_subscriptions[&subscription_id].fired_count,
-            0
-        );
-        assert!(state.master_wake.goal_due);
-        assert_eq!(
-            state.master_wake.active_goal_revision,
-            Some(u64::try_from(due_ms).unwrap())
-        );
-        assert_eq!(state.master_wake.delivery_state, "skipped-busy");
-        drop(state);
-
-        tick_with_deadline_readiness(&server, &|worker_id| worker_id == "master");
-
-        let state = server.state.lock().unwrap();
-        assert_eq!(state.msgs.len(), 1);
-        assert_eq!(
-            state
-                .msgs
-                .values()
-                .filter(|message| message.subject.as_deref() == Some("deadline:goal:busy-master"))
-                .count(),
-            1
-        );
-        assert!(state
-            .wake_bindings
-            .values()
-            .any(|bound| bound == &subscription_id));
-        assert_eq!(
-            state.notification_subscriptions[&subscription_id].fired_count, 0,
-            "staging a pending automatic wake must not consume the one-shot before delivery"
         );
         drop(state);
         std::fs::remove_dir_all(root).ok();
@@ -1979,7 +1784,7 @@ mod tests {
                 event: "deadline".into(),
                 subject: Some("goal:worker".into()),
                 target: "thread-worker".into(),
-                method: "appserver".into(),
+                method: "tmux".into(),
                 trigger_ms: Some(now - 1),
                 trigger_times_ms: Vec::new(),
                 interval_ms: None,

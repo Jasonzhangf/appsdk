@@ -474,6 +474,7 @@ pub fn verify_candidate(candidate: &AppServerCandidate) -> Result<SelectedTransp
         namespace: Some(candidate.namespace.clone()),
         session_id: Some(candidate.session_id.clone()),
         thread_id: Some(thread_id.to_string()),
+        tmux_endpoint: None,
         capabilities: vec![
             "session_status".into(),
             "read_thread".into(),
@@ -1503,57 +1504,6 @@ mod tests {
         }
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn live_appserver_candidate_is_admitted_when_loaded_or_rejected_when_unloaded() {
-        let Some(candidate) = candidate_from_env().unwrap() else {
-            return;
-        };
-        match verify_candidate(&candidate) {
-            Ok(selected) => {
-                assert_eq!(selected.kind, TransportKind::AppServer);
-                assert_eq!(
-                    selected.endpoint.as_deref(),
-                    Some(candidate.endpoint.as_str())
-                );
-                assert_eq!(
-                    selected.namespace.as_deref(),
-                    Some(candidate.namespace.as_str())
-                );
-                assert_eq!(
-                    selected.thread_id.as_deref(),
-                    Some(candidate.thread_id.as_str())
-                );
-                assert!(selected
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == "send_message_to_thread"));
-                assert!(selected.self_check.contains("thread/read"));
-                assert!(selected.self_check.contains("turn/start"));
-                assert!(selected.self_check.contains("turn/steer"));
-                assert!(selected.self_check.contains("thread/turns/list"));
-                assert!(!selected.self_check.contains("thread/queue/add"));
-                assert!(!selected
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == "queue_wakeup"));
-            }
-            Err(AdapterError::RouteUnavailable { detail }) => {
-                assert!(detail.contains("persisted but not loaded"), "{detail}");
-            }
-            // A live probe runs from whatever cwd the developer is in, so a
-            // thread bound to another project root is a correct rejection.
-            Err(AdapterError::Unknown { detail, .. }) if detail.contains("thread cwd mismatch") => {
-                assert!(detail.contains("cwd mismatch"), "{detail}");
-            }
-            Err(AdapterError::Unknown { detail, .. })
-                if detail.contains("thread session mismatch") =>
-            {
-                assert!(detail.contains("session mismatch"), "{detail}");
-            }
-            Err(error) => panic!("unexpected live App Server self-check error: {error}"),
-        }
     }
 
     #[test]
@@ -3031,119 +2981,6 @@ mod tests {
         std::fs::remove_file(socket).ok();
     }
 
-    #[test]
-    fn default_notification_sink_starts_automatic_wake_without_sender_thread() {
-        let socket = temp_socket("notify-automatic");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            prepare_recipient_thread(&mut stream, "ok");
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            assert_eq!(request["params"]["threadId"], "thread-1");
-            assert_eq!(
-                request["params"]["clientUserMessageId"],
-                "message-automatic"
-            );
-            assert_eq!(
-                request["params"]["toolOutput"]["output"],
-                delegated_prompt(None, "message-automatic", "automatic body")
-            );
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-automatic", "status": "inProgress"}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-
-        let receipt = crate::server::default_appserver_notification_sink()(
-            &selected_transport(&socket),
-            None,
-            "automatic body",
-            "message-automatic",
-            false,
-        )
-        .unwrap();
-        assert_eq!(receipt["turn"]["status"], "inProgress");
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
-    #[test]
-    fn automatic_wake_does_not_require_queue_capability() {
-        let socket = temp_socket("notify-no-queue-capability");
-        let Some(listener) = bind_test_socket(&socket) else {
-            return;
-        };
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            handshake(&mut stream);
-            initialize(&mut stream);
-            prepare_recipient_thread(&mut stream, "ok");
-            let read_id = next_request_id(&mut stream);
-            respond(
-                &mut stream,
-                json!({
-                    "id": read_id,
-                    "result": {
-                        "thread": {
-                            "id": "thread-1",
-                            "status": {"type": "idle"}
-                        }
-                    }
-                }),
-            );
-            let request = next_request(&mut stream);
-            assert_eq!(request["method"], "turn/start");
-            respond(
-                &mut stream,
-                json!({
-                    "id": request["id"],
-                    "result": {
-                        "turn": {"id": "turn-no-queue", "status": "inProgress"}
-                    }
-                }),
-            );
-            stream.shutdown(Shutdown::Both).ok();
-        });
-        let transport = selected_transport(&socket);
-
-        let receipt = crate::server::default_appserver_notification_sink()(
-            &transport,
-            None,
-            "automatic body",
-            "message-automatic",
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(receipt["turn"]["status"], "inProgress");
-        server.join().unwrap();
-        std::fs::remove_file(socket).ok();
-    }
-
     fn selected_transport(socket: &Path) -> SelectedTransport {
         SelectedTransport {
             kind: TransportKind::AppServer,
@@ -3151,6 +2988,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test".into(),
         }

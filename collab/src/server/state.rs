@@ -232,7 +232,7 @@ impl NotificationSubscription {
         self.worker_id == worker_id
             && self.event == event
             && self.subject.as_deref() == subject
-            && self.method == "appserver"
+            && matches!(self.method.as_str(), "appserver" | "tmux")
             && self.status == "armed"
             && self.expires_ms > now
     }
@@ -578,6 +578,8 @@ pub enum Event {
     NotificationDeliveryAccepted {
         message_id: String,
         accepted_ms: i64,
+        #[serde(default)]
+        evidence: Option<serde_json::Value>,
     },
     NotificationSubscribed {
         subscription: NotificationSubscription,
@@ -740,6 +742,7 @@ pub struct State {
     pub notification_delivery_failures: HashMap<String, NotificationDeliveryFailure>,
     /// Last native attempt accepted for a durable message, if any.
     pub notification_delivery_accepted: HashMap<String, i64>,
+    pub notification_delivery_evidence: HashMap<String, serde_json::Value>,
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
@@ -842,7 +845,11 @@ impl State {
                     })?;
                 continue;
             };
-            if let Some(existing) = recovered.lookup_current_thread_route(&session, &thread) {
+            let existing = match binding.tmux_endpoint.as_ref() {
+                Some(endpoint) => recovered.lookup_tmux_route(endpoint),
+                None => recovered.lookup_current_thread_route(&session, &thread),
+            };
+            if let Some(existing) = existing {
                 if existing == &binding {
                     continue;
                 }
@@ -1152,9 +1159,14 @@ impl State {
             Event::NotificationDeliveryAccepted {
                 message_id,
                 accepted_ms,
+                evidence,
             } => {
                 self.notification_delivery_accepted
                     .insert(message_id.clone(), *accepted_ms);
+                if let Some(evidence) = evidence {
+                    self.notification_delivery_evidence
+                        .insert(message_id.clone(), evidence.clone());
+                }
             }
             Event::NotificationSubscribed { subscription } => {
                 self.notification_subscriptions
@@ -1568,6 +1580,9 @@ impl State {
 
     pub fn drop_message(&mut self, id: &str) {
         self.msgs.remove(id);
+        self.notification_delivery_failures.remove(id);
+        self.notification_delivery_accepted.remove(id);
+        self.notification_delivery_evidence.remove(id);
         self.delivery_modes.remove(id);
         self.delivery_source_threads.remove(id);
         self.wake_bindings.remove(id);
@@ -1694,9 +1709,14 @@ impl State {
             .collect();
         accepted.sort_by(|a, b| (a.1, a.0.as_str()).cmp(&(b.1, b.0.as_str())));
         events.extend(accepted.into_iter().map(|(message_id, accepted_ms)| {
+            let evidence = self
+                .notification_delivery_evidence
+                .get(&message_id)
+                .cloned();
             Event::NotificationDeliveryAccepted {
                 message_id,
                 accepted_ms,
+                evidence,
             }
         }));
         let mut messages: Vec<_> = self.msgs.values().cloned().collect();
@@ -1934,6 +1954,40 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static REPLAY_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn dropping_a_message_retires_its_notification_delivery_evidence() {
+        let mut state = State::default();
+        let message_id = "message-pruned";
+        state.notification_delivery_failures.insert(
+            message_id.into(),
+            NotificationDeliveryFailure {
+                message_id: message_id.into(),
+                operation: "notification.emitted".into(),
+                error: "TMUX_ENTER_SUBMIT_FAILED".into(),
+                failed_ms: 10,
+                retryable: false,
+            },
+        );
+        state
+            .notification_delivery_accepted
+            .insert(message_id.into(), 11);
+        state
+            .notification_delivery_evidence
+            .insert(message_id.into(), serde_json::json!({"consumed": false}));
+
+        state.drop_message(message_id);
+
+        assert!(!state
+            .notification_delivery_failures
+            .contains_key(message_id));
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key(message_id));
+        assert!(!state
+            .notification_delivery_evidence
+            .contains_key(message_id));
+    }
 
     fn replay_test_root(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -2878,6 +2932,7 @@ mod tests {
             endpoint_generation: 1,
             session_id: None,
             native_thread_id: Some(NativeThreadId::new("thread-legacy").unwrap()),
+            tmux_endpoint: None,
         };
         let events = vec![
             Event::GlobalProjectRegistered {
@@ -2938,6 +2993,7 @@ mod tests {
             endpoint_generation: 1,
             session_id: None,
             native_thread_id: Some(NativeThreadId::new("thread-legacy-mixed").unwrap()),
+            tmux_endpoint: None,
         };
         let strict = RuntimeBinding {
             project_scope: scope.clone(),
@@ -2948,6 +3004,7 @@ mod tests {
             endpoint_generation: 1,
             session_id: Some(crate::identity::SessionId::new("session-strict-mixed").unwrap()),
             native_thread_id: Some(NativeThreadId::new("thread-strict-mixed").unwrap()),
+            tmux_endpoint: None,
         };
         let mut st = State::default();
         st.apply(&Event::GlobalProjectRegistered {
@@ -3007,6 +3064,7 @@ mod tests {
             endpoint_generation: 1,
             session_id: None,
             native_thread_id: Some(NativeThreadId::new("thread-legacy-snapshot").unwrap()),
+            tmux_endpoint: None,
         };
         let strict = RuntimeBinding {
             project_scope: ProjectScopeId::new("/snapshot-strict").unwrap(),
@@ -3017,6 +3075,7 @@ mod tests {
             endpoint_generation: 1,
             session_id: Some(crate::identity::SessionId::new("session-strict").unwrap()),
             native_thread_id: Some(NativeThreadId::new("thread-strict").unwrap()),
+            tmux_endpoint: None,
         };
 
         let mut st = State::default();
@@ -3103,6 +3162,7 @@ mod tests {
             endpoint_generation: 4,
             session_id: None,
             native_thread_id: Some(NativeThreadId::new("thread-legacy-live").unwrap()),
+            tmux_endpoint: None,
         };
         let events = vec![
             Event::GlobalProjectRegistered {
@@ -3158,6 +3218,7 @@ mod tests {
             endpoint_generation: 1,
             session_id: None,
             native_thread_id: Some(NativeThreadId::new("thread-shared").unwrap()),
+            tmux_endpoint: None,
         };
         let events = vec![
             Event::GlobalProjectRegistered {

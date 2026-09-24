@@ -15,18 +15,18 @@
     "entrypoint": {"type": "string"},
     "collab_identity": {
       "type": "object",
-      "required": ["worker_id", "binding_id", "native_thread_id", "app_scope_id", "project_scope_id"],
+      "required": ["worker_id", "binding_id", "app_scope_id", "project_scope_id"],
       "properties": {
         "worker_id": {"type": "string"},
         "binding_id": {"type": "string"},
-        "native_thread_id": {"type": "string"},
+        "thread_id": {"type": "string"},
         "app_scope_id": {"type": "string"},
         "project_scope_id": {"type": "string"}
       }
     },
     "route_receipt": {
       "type": "object",
-      "required": ["daemon_live", "endpoint_generation", "route_scope", "storage_root", "resolved_at", "source"],
+      "required": ["daemon_live", "endpoint_generation", "route_scope", "storage_root", "tmux_endpoint", "resolved_at", "source"],
       "properties": {
         "daemon_live": {"const": true},
         "endpoint_generation": {"type": "integer", "minimum": 1},
@@ -39,6 +39,7 @@
           }
         },
         "storage_root": {"type": "string"},
+        "tmux_endpoint": {"$ref": "#/$defs/tmux_endpoint"},
         "resolved_at": {"type": "string"},
         "source": {"const": "collab_cli"}
       }
@@ -112,6 +113,20 @@
     "created_at": {"type": "string"}
   },
   "$defs": {
+    "tmux_endpoint": {
+      "type": "object",
+      "required": ["socket_path", "server_pid", "tmux_session_id", "pane_id", "pane_pid"],
+      "properties": {
+        "socket_path": {"type": "string", "minLength": 1},
+        "server_pid": {"type": "integer", "minimum": 1},
+        "tmux_session_id": {"type": "string", "pattern": "^\\$[0-9]+$"},
+        "pane_id": {"type": "string", "pattern": "^%[0-9]+$"},
+        "pane_pid": {"type": "integer", "minimum": 1},
+        "codex_session_id": {"type": "string"},
+        "codex_thread_id": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
     "path_receipt": {
       "type": "object",
       "required": ["evidence_id", "message_id", "challenge", "sender", "receiver", "source_commit", "artifact_hash", "environment_id", "entrypoint", "endpoint_generation", "observed_at"],

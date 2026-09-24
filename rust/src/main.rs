@@ -8417,13 +8417,41 @@ fn collab_live_closure_route(
     expected_app_scope: &str,
     expected_worker_id: &str,
     expected_binding_id: &str,
-    expected_native_thread_id: &str,
+    expected_tmux_endpoint: &Value,
 ) -> Value {
+    let endpoint = expected_tmux_endpoint;
+    let socket_path = endpoint
+        .get("socket_path")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_TMUX_ENDPOINT_INVALID"));
+    let server_pid = endpoint
+        .get("server_pid")
+        .and_then(Value::as_u64)
+        .filter(|pid| *pid > 0)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_TMUX_ENDPOINT_INVALID"));
+    let session_id = endpoint
+        .get("tmux_session_id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_TMUX_ENDPOINT_INVALID"));
+    let pane_id = endpoint
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("COLLAB_LIVE_CLOSURE_TMUX_ENDPOINT_INVALID"));
+    let tmux = format!("{socket_path},{server_pid},0");
     let mut context_command = Command::new("collab");
     context_command
         .arg("context")
         .current_dir(root)
-        .env("CODEX_THREAD_ID", expected_native_thread_id);
+        .env("TMUX", &tmux)
+        .env("TMUX_PANE", pane_id)
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID");
+    if let Some(value) = endpoint.get("codex_session_id").and_then(Value::as_str) {
+        context_command.env("CODEX_SESSION_ID", value);
+    }
+    if let Some(value) = endpoint.get("codex_thread_id").and_then(Value::as_str) {
+        context_command.env("CODEX_THREAD_ID", value);
+    }
     let context = run_goal_collab_command(context_command, GOAL_COLLAB_READ_TIMEOUT)
         .unwrap_or_else(|error| fail(error));
     if !context.status.success() {
@@ -8448,25 +8476,28 @@ fn collab_live_closure_route(
         .pointer("/identity/worker_id")
         .and_then(Value::as_str)
         != Some(expected_worker_id)
-        || context
-            .pointer("/identity/transport/thread_id")
-            .and_then(Value::as_str)
-            .is_none()
+        || context.pointer("/identity/transport/tmux_endpoint") != Some(expected_tmux_endpoint)
     {
         fail("COLLAB_LIVE_CLOSURE_IDENTITY_MISSING");
-    }
-    if context
-        .pointer("/identity/transport/thread_id")
-        .and_then(Value::as_str)
-        != Some(expected_native_thread_id)
-    {
-        fail("COLLAB_LIVE_CLOSURE_THREAD_MISMATCH");
     }
 
     let mut route_command = Command::new("collab");
     route_command
-        .args(["route", "resolve", "--native-thread-id"])
-        .arg(expected_native_thread_id);
+        .args(["route", "resolve", "--tmux-session-id"])
+        .arg(session_id)
+        .arg("--pane-id")
+        .arg(pane_id)
+        .current_dir(root)
+        .env("TMUX", &tmux)
+        .env("TMUX_PANE", pane_id)
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID");
+    if let Some(value) = endpoint.get("codex_session_id").and_then(Value::as_str) {
+        route_command.env("CODEX_SESSION_ID", value);
+    }
+    if let Some(value) = endpoint.get("codex_thread_id").and_then(Value::as_str) {
+        route_command.env("CODEX_THREAD_ID", value);
+    }
     let route = run_goal_collab_command(route_command, GOAL_COLLAB_READ_TIMEOUT)
         .unwrap_or_else(|error| fail(error));
     if !route.status.success() {
@@ -8489,7 +8520,7 @@ fn collab_live_closure_route(
         || route.get("app_scope_id").and_then(Value::as_str) != Some(expected_app_scope)
         || route.get("agent_id").and_then(Value::as_str) != Some(expected_worker_id)
         || route.get("binding_id").and_then(Value::as_str) != Some(expected_binding_id)
-        || route.get("native_thread_id").and_then(Value::as_str) != Some(expected_native_thread_id)
+        || route.get("tmux_endpoint") != Some(expected_tmux_endpoint)
         || route.get("storage_root").and_then(Value::as_str).is_none()
     {
         fail("COLLAB_LIVE_CLOSURE_ROUTE_INVALID");
@@ -8559,7 +8590,6 @@ fn assert_collab_live_closure(
         "/entrypoint",
         "/collab_identity/worker_id",
         "/collab_identity/binding_id",
-        "/collab_identity/native_thread_id",
         "/collab_identity/app_scope_id",
         "/collab_identity/project_scope_id",
         "/route_receipt/storage_root",
@@ -8619,11 +8649,12 @@ fn assert_collab_live_closure(
         "/collab_identity/worker_id",
         "collab-live-closure-record.json",
     );
-    let native_thread_id = record_str(
-        &closure,
-        "/collab_identity/native_thread_id",
-        "collab-live-closure-record.json",
-    );
+    let tmux_endpoint = closure
+        .pointer("/route_receipt/tmux_endpoint")
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| {
+            fail("INVALID_RECORD:collab-live-closure-record.json:/route_receipt/tmux_endpoint")
+        });
     let binding_id = record_str(
         &closure,
         "/collab_identity/binding_id",
@@ -8635,7 +8666,7 @@ fn assert_collab_live_closure(
         app_scope,
         worker_id,
         binding_id,
-        native_thread_id,
+        tmux_endpoint,
     );
     if route.get("endpoint_generation") != closure.pointer("/route_receipt/endpoint_generation")
         || route.get("project_scope") != closure.pointer("/route_receipt/route_scope/project_scope")
@@ -14090,6 +14121,84 @@ fn recover_collab_peer_identity(root: &Path) -> Result<Output, String> {
     run_goal_collab_command(command, collab_init_timeout())
 }
 
+fn validate_collab_tmux_init(value: &Value, canonical_root: &str) -> Result<(), String> {
+    let runtime = value
+        .get("runtime")
+        .ok_or_else(|| "COLLAB_INIT_RUNTIME_MISSING".to_string())?;
+    let selected = value
+        .get("transport_selected")
+        .ok_or_else(|| "COLLAB_INIT_TRANSPORT_MISSING".to_string())?;
+    let runtime_endpoint = runtime
+        .get("tmuxEndpoint")
+        .filter(|endpoint| endpoint.is_object())
+        .ok_or_else(|| "COLLAB_INIT_TMUX_ENDPOINT_MISSING".to_string())?;
+    let selected_endpoint = selected
+        .get("tmux_endpoint")
+        .filter(|endpoint| endpoint.is_object())
+        .ok_or_else(|| "COLLAB_INIT_TMUX_ENDPOINT_MISSING".to_string())?;
+    if runtime.get("transport").and_then(Value::as_str) != Some("tmux")
+        || selected.get("kind").and_then(Value::as_str) != Some("tmux")
+        || runtime_endpoint != selected_endpoint
+    {
+        return Err("COLLAB_INIT_TMUX_RUNTIME_TRANSPORT_MISMATCH".into());
+    }
+    if runtime
+        .get("runtimeId")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+        || runtime
+            .get("appserverId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("COLLAB_INIT_TMUX_RUNTIME_IDENTITY_MISSING".into());
+    }
+    if runtime.get("projectRoot").and_then(Value::as_str) != Some(canonical_root) {
+        return Err("COLLAB_INIT_RUNTIME_ROOT_MISMATCH".into());
+    }
+    let endpoint_valid = ["socket_path", "tmux_session_id", "pane_id"]
+        .iter()
+        .all(|key| {
+            runtime_endpoint[*key]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        && ["server_pid", "pane_pid"]
+            .iter()
+            .all(|key| runtime_endpoint[*key].as_u64().is_some_and(|pid| pid > 0));
+    let expected_session = runtime_endpoint["codex_session_id"]
+        .as_str()
+        .or_else(|| runtime_endpoint["tmux_session_id"].as_str());
+    let expected_thread = runtime_endpoint["codex_thread_id"]
+        .as_str()
+        .or_else(|| runtime_endpoint["pane_id"].as_str());
+    let has_capability = |object: &Value| {
+        object
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == Some("send_message_to_pane"))
+            })
+    };
+    if !endpoint_valid
+        || selected["endpoint"].as_str() != runtime_endpoint["socket_path"].as_str()
+        || selected["namespace"].as_str() != runtime_endpoint["tmux_session_id"].as_str()
+        || selected["session_id"].as_str() != expected_session
+        || selected["thread_id"].as_str() != expected_thread
+        || !has_capability(runtime)
+        || !has_capability(selected)
+        || runtime
+            .get("processId")
+            .and_then(Value::as_u64)
+            .is_none_or(|pid| pid == 0)
+    {
+        return Err("COLLAB_INIT_TMUX_RUNTIME_BINDING_INVALID".into());
+    }
+    Ok(())
+}
+
 fn initialize_collab_peer(root: &Path) {
     let output = match run_collab_init(root) {
         Ok(output) => output,
@@ -14163,12 +14272,39 @@ fn initialize_collab_peer(root: &Path) {
             let valid_transport = transport.is_some_and(|transport| {
                 matches!(
                     transport.get("kind").and_then(Value::as_str),
-                    Some("appserver")
+                    Some("appserver" | "tmux")
                 )
             });
             if value.get("ok").and_then(Value::as_bool) != Some(true) || !valid_transport {
                 eprintln!(
                     "COLLAB_INIT_INVALID_RESPONSE:{result}; shared collaboration unavailable; independent work may continue"
+                );
+                return;
+            }
+            if value["transport_selected"]["kind"].as_str() == Some("tmux") {
+                let canonical_root = match fs::canonicalize(root) {
+                    Ok(root) => root,
+                    Err(error) => {
+                        eprintln!("COLLAB_INIT_RUNTIME_ROOT_INVALID:{error}; shared collaboration unavailable; independent work may continue");
+                        return;
+                    }
+                };
+                if let Err(error) =
+                    validate_collab_tmux_init(&value, &canonical_root.to_string_lossy())
+                {
+                    eprintln!(
+                        "{error}; shared collaboration unavailable; independent work may continue"
+                    );
+                    return;
+                }
+                println!(
+                    "collab-channel {}",
+                    serde_json::json!({
+                        "runtime": value["runtime"],
+                        "runtime_receipt": null,
+                        "transport_selected": value["transport_selected"],
+                        "independent_work_allowed": true
+                    })
                 );
                 return;
             }
@@ -20358,6 +20494,110 @@ mod goal_collab_command_tests {
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
+
+    #[test]
+    fn goal_owner_context_requires_a_live_tmux_endpoint() {
+        let tmux_context = serde_json::json!({
+            "identity": {"transport": {
+                "kind": "tmux",
+                "endpoint": "/tmp/collab.sock",
+                "tmux_endpoint": {
+                    "socket_path": "/tmp/collab.sock",
+                    "server_pid": 123,
+                    "tmux_session_id": "$1",
+                    "pane_id": "%1",
+                    "pane_pid": 456
+                }
+            }},
+            "liveness": {
+                "live": true,
+                "presence": "present",
+                "transport_kind": "tmux",
+                "endpoint": "/tmp/collab.sock"
+            }
+        });
+        assert!(context_has_live_tmux_transport(&tmux_context));
+
+        let appserver_context = serde_json::json!({
+            "identity": {"transport": {"kind": "appserver", "thread_id": "thread-1"}},
+            "liveness": {"live": true, "transport_kind": "appserver"}
+        });
+        assert!(!context_has_live_tmux_transport(&appserver_context));
+
+        let mut unknown = tmux_context;
+        unknown["liveness"]["presence"] = Value::String("unknown".into());
+        assert!(!context_has_live_tmux_transport(&unknown));
+    }
+
+    #[test]
+    fn collab_tmux_init_requires_selected_endpoint_and_identity_anchor_match() {
+        let response = serde_json::json!({
+            "runtime": {
+                "runtimeId": "runtime-1",
+                "appserverId": "appserver-cli",
+                "transport": "tmux",
+                "tmuxEndpoint": {
+                    "socket_path": "/tmp/collab.sock",
+                    "server_pid": 123,
+                    "tmux_session_id": "$1",
+                    "pane_id": "%1",
+                    "pane_pid": 456,
+                    "codex_session_id": "session-1",
+                    "codex_thread_id": "thread-1"
+                },
+                "projectRoot": "/repo",
+                "capabilities": ["send_message_to_pane"],
+                "processId": 123
+            },
+            "transport_selected": {
+                "kind": "tmux",
+                "endpoint": "/tmp/collab.sock",
+                "namespace": "$1",
+                "session_id": "session-1",
+                "thread_id": "thread-1",
+                "tmux_endpoint": {
+                    "socket_path": "/tmp/collab.sock",
+                    "server_pid": 123,
+                    "tmux_session_id": "$1",
+                    "pane_id": "%1",
+                    "pane_pid": 456,
+                    "codex_session_id": "session-1",
+                    "codex_thread_id": "thread-1"
+                },
+                "capabilities": ["send_message_to_pane"]
+            }
+        });
+        assert!(validate_collab_tmux_init(&response, "/repo").is_ok());
+
+        let mut mismatched = response;
+        mismatched["transport_selected"]["endpoint"] = Value::String("/tmp/other.sock".into());
+        assert_eq!(
+            validate_collab_tmux_init(&mismatched, "/repo").unwrap_err(),
+            "COLLAB_INIT_TMUX_RUNTIME_BINDING_INVALID"
+        );
+    }
+}
+
+fn context_has_live_tmux_transport(context: &Value) -> bool {
+    let transport = &context["identity"]["transport"];
+    let endpoint = &transport["tmux_endpoint"];
+    transport["kind"].as_str() == Some("tmux")
+        && endpoint["socket_path"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        && endpoint["server_pid"].as_u64().is_some_and(|pid| pid > 0)
+        && endpoint["tmux_session_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        && endpoint["pane_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        && endpoint["pane_pid"].as_u64().is_some_and(|pid| pid > 0)
+        && transport["endpoint"].as_str() == endpoint["socket_path"].as_str()
+        && context["liveness"]["live"].as_bool() == Some(true)
+        && context["liveness"]["presence"].as_str() == Some("present")
+        && context["liveness"]["transport_kind"].as_str() == Some("tmux")
+        && context["liveness"]["endpoint"].as_str() == endpoint["socket_path"].as_str()
 }
 
 fn verified_goal_master(root: &Path) -> Result<String, String> {
@@ -20412,14 +20652,7 @@ fn verified_goal_master(root: &Path) -> Result<String, String> {
             owner, master_owner
         ));
     }
-    let context_transport = &context["identity"]["transport"];
-    if context_transport["kind"].as_str() != Some("appserver")
-        || context_transport["thread_id"]
-            .as_str()
-            .map_or(true, |thread| thread.trim().is_empty())
-        || context["liveness"]["live"].as_bool() != Some(true)
-        || context["liveness"]["transport_kind"].as_str() != Some("appserver")
-    {
+    if !context_has_live_tmux_transport(&context) {
         return Err("GOAL_OWNER_CONTEXT_TRANSPORT_NOT_LIVE".into());
     }
     match worker["suspected_offline"].as_bool() {

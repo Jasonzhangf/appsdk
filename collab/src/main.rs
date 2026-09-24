@@ -11,7 +11,7 @@ mod subagent;
 
 use clap::{Parser, Subcommand};
 use identity::{AppServerId, CommandId, Identity, OperationId, RuntimeIdentity};
-use proto::{ProjectContext, Req, Resp, SelectedTransport, TransportKind};
+use proto::{ProjectContext, Req, Resp, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -87,8 +87,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    #[command(hide = true)]
-    SubagentExec { file: std::path::PathBuf },
     /// Managed persistent agent peers (current project only)
     Subagent {
         #[command(subcommand)]
@@ -125,7 +123,7 @@ enum Cmd {
         #[command(subcommand)]
         command: MasterCmd,
     },
-    /// Resolve the daemon-owned route for a native App Server thread
+    /// Resolve the daemon-owned route for a tmux session and pane
     Route {
         #[command(subcommand)]
         command: RouteCmd,
@@ -438,20 +436,20 @@ enum MasterCmd {
 
 #[derive(Subcommand)]
 enum RouteCmd {
-    /// Resolve one thread without using the current cwd as a selector
+    /// Resolve the route bound to the current tmux session and pane
     Resolve {
-        #[arg(long = "session-id")]
+        #[arg(long = "tmux-session-id")]
         session_id: Option<String>,
-        #[arg(long = "native-thread-id")]
-        native_thread_id: Option<String>,
+        #[arg(long = "pane-id")]
+        pane_id: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 enum LiveClosureCmd {
     /// Send one challenge-bound message and observe target execution/consume.
-    /// The command fails closed unless native target history and the durable
-    /// message receipt bind to the same challenge and message ID.
+    /// The command fails closed unless the durable receive receipt binds to
+    /// the same challenge and message ID.
     Probe {
         #[arg(long)]
         closure_id: String,
@@ -559,8 +557,11 @@ fn register_with_runtime(
             token: ident.token.clone(),
             cwd,
             candidates: Some(proto::TransportCandidates {
-                appserver: crate::client::adapters::candidate_from_env()
-                    .map_err(anyhow::Error::msg)?,
+                appserver: None,
+                tmux: Some(
+                    crate::client::adapters::tmux::candidate_from_env()
+                        .map_err(anyhow::Error::msg)?,
+                ),
             }),
         },
         &scope.root,
@@ -617,24 +618,20 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
     let Some(transport) = ident.transport.as_ref() else {
         return Ok(false);
     };
-    // A thread-backed binding is only reusable when the persisted identity
-    // still carries both halves of the App Server address.  An identity
-    // written before session binding existed has a native thread and no
-    // session, so it can never resolve its own route and must re-register
-    // instead of being reported as reused.
-    if runtime.native_thread_id.is_some()
-        && (runtime.session_id.is_none() || transport.session_id.is_none())
-    {
-        return Ok(false);
-    }
-    if runtime.native_thread_id.is_some() {
-        let current_session = std::env::var("CODEX_SESSION_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let current_thread = std::env::var("CODEX_THREAD_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        if let (Some(thread), Some(session)) = (current_thread, current_session) {
+    if transport.kind == TransportKind::Tmux {
+        let Some(persisted_endpoint) = transport.tmux_endpoint.as_ref() else {
+            return Ok(false);
+        };
+        let Ok(current) = crate::client::adapters::tmux::candidate_from_env() else {
+            return Ok(false);
+        };
+        if !crate::client::adapters::tmux::same_pane_route(&current.endpoint, persisted_endpoint) {
+            return Ok(false);
+        }
+    } else if runtime.native_thread_id.is_some() {
+        let session = std::env::var("CODEX_SESSION_ID").ok();
+        let thread = std::env::var("CODEX_THREAD_ID").ok();
+        if let (Some(session), Some(thread)) = (session, thread) {
             let persisted_thread = runtime
                 .native_thread_id
                 .as_ref()
@@ -671,21 +668,15 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         // restart or re-registration the running daemon may hold no route for
         // this address even though the file still lists one.  Reuse is only
         // valid when the live daemon resolves the same session/thread.
-        let Some(thread_id) = runtime
-            .native_thread_id
+        let Some(endpoint) = ident
+            .transport
             .as_ref()
-            .map(crate::identity::NativeThreadId::as_str)
-        else {
-            return Ok(true);
-        };
-        let Some(session_id) = runtime
-            .session_id
-            .as_ref()
-            .map(crate::identity::SessionId::as_str)
+            .filter(|transport| transport.kind == crate::proto::TransportKind::Tmux)
+            .and_then(|transport| transport.tmux_endpoint.as_ref())
         else {
             return Ok(false);
         };
-        let resolved = client::resolve_route(&scope.sock_path(), session_id, thread_id);
+        let resolved = client::resolve_route(&scope.sock_path(), endpoint);
         Ok(resolved.is_ok())
     })
 }
@@ -707,7 +698,7 @@ fn runtime_for_request<'a>(ident: &'a Identity) -> anyhow::Result<&'a RuntimeIde
     Ok(runtime)
 }
 
-fn appserver_runtime_projection(
+fn registered_runtime_projection(
     scope: &Scope,
     ident: &Identity,
     daemon_pid: u32,
@@ -720,28 +711,45 @@ fn appserver_runtime_projection(
         .transport
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("registered identity is missing its transport"))?;
-    if transport.kind != crate::proto::TransportKind::AppServer {
-        anyhow::bail!("registered transport is not App Server");
-    }
-    let endpoint = transport
-        .endpoint
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("registered transport is missing its endpoint"))?;
-    let namespace = transport
-        .namespace
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("registered transport is missing its namespace"))?;
     if daemon_pid == 0 {
         anyhow::bail!("registered daemon PID is zero");
     }
     let project_root = std::fs::canonicalize(&scope.root)?;
+    if transport.kind != crate::proto::TransportKind::Tmux {
+        anyhow::bail!("TRANSPORT_UNSUPPORTED: registered runtime requires tmux");
+    }
+    let endpoint = transport
+        .tmux_endpoint
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("registered tmux transport is missing its endpoint"))?;
+    let expected_session = endpoint
+        .codex_session_id
+        .as_deref()
+        .unwrap_or(&endpoint.tmux_session_id);
+    let expected_thread = endpoint
+        .codex_thread_id
+        .as_deref()
+        .unwrap_or(&endpoint.pane_id);
+    if runtime
+        .session_id
+        .as_ref()
+        .map(ToString::to_string)
+        .as_deref()
+        != Some(expected_session)
+        || runtime
+            .native_thread_id
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref()
+            != Some(expected_thread)
+    {
+        anyhow::bail!("registered tmux endpoint does not match its runtime route");
+    }
     Ok(json!({
         "runtimeId": runtime.runtime_id,
         "appserverId": runtime.appserver_id,
-        "namespace": namespace,
-        "endpoint": endpoint,
+        "transport": "tmux",
+        "tmuxEndpoint": endpoint,
         "projectRoot": project_root,
         "capabilities": transport.capabilities,
         "processId": daemon_pid,
@@ -757,48 +765,14 @@ fn call_project<T: DeserializeOwned>(
     client::call_with_runtime_identity_at_root(&scope.sock_path(), request, &scope.root, runtime)
 }
 
-fn live_closure_target_transport(worker: &serde_json::Value) -> anyhow::Result<SelectedTransport> {
-    let transport = worker
-        .get("transport")
-        .filter(|value| value.is_object())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TRANSPORT_MISSING"))?;
-    let endpoint = transport
-        .get("endpoint")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_ENDPOINT_MISSING"))?;
-    let namespace = transport
-        .get("namespace")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_NAMESPACE_MISSING"))?;
-    let thread_id = transport
-        .get("thread_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_THREAD_MISSING"))?;
-    let session_id = transport
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_SESSION_MISSING"))?;
-    Ok(SelectedTransport {
-        kind: TransportKind::AppServer,
-        endpoint: Some(endpoint.to_owned()),
-        namespace: Some(namespace.to_owned()),
-        session_id: Some(session_id.to_owned()),
-        thread_id: Some(thread_id.to_string()),
-        capabilities: vec!["read_thread".into(), "thread/turns/list".into()],
-        self_check: "daemon-verified-live-closure-target-route".into(),
-    })
-}
-
 #[derive(Debug)]
+#[cfg(test)]
 struct LiveClosureExpectedNativeInputs {
     exact: Vec<String>,
     batch_category: String,
 }
 
+#[cfg(test)]
 fn live_closure_item_text(item: &serde_json::Value) -> Option<&str> {
     let payload = live_closure_item_payload(item);
     let item_type = payload.get("type").and_then(serde_json::Value::as_str);
@@ -821,10 +795,12 @@ fn live_closure_item_contains_challenge(item: &serde_json::Value, challenge: &st
     live_closure_item_text(item) == Some(challenge)
 }
 
+#[cfg(test)]
 fn live_closure_item_payload(item: &serde_json::Value) -> &serde_json::Value {
     item.get("item").unwrap_or(item)
 }
 
+#[cfg(test)]
 fn live_closure_item_turn_id(item: &serde_json::Value) -> Option<&str> {
     let turn_id = item
         .get("turnId")
@@ -842,6 +818,7 @@ fn live_closure_item_turn_id(item: &serde_json::Value) -> Option<&str> {
         .filter(|value| !value.trim().is_empty())
 }
 
+#[cfg(test)]
 fn live_closure_item_message_id(item: &serde_json::Value) -> Option<&str> {
     let payload = live_closure_item_payload(item);
     payload
@@ -852,6 +829,7 @@ fn live_closure_item_message_id(item: &serde_json::Value) -> Option<&str> {
         .filter(|value| !value.trim().is_empty())
 }
 
+#[cfg(test)]
 fn live_closure_function_call_output_fields(item: &serde_json::Value) -> Option<(&str, &str)> {
     let payload = live_closure_item_payload(item);
     if payload.get("type").and_then(serde_json::Value::as_str) != Some("functionCallOutput")
@@ -907,6 +885,7 @@ fn live_closure_function_call_output_fields(item: &serde_json::Value) -> Option<
     Some((client_message_id, challenge))
 }
 
+#[cfg(test)]
 fn live_closure_item_matches_input(
     item: &serde_json::Value,
     expected_inputs: &LiveClosureExpectedNativeInputs,
@@ -944,6 +923,7 @@ fn live_closure_item_matches_input(
         ))
 }
 
+#[cfg(test)]
 fn live_closure_expected_native_inputs(
     receipt: &serde_json::Value,
     message_id: &str,
@@ -1014,6 +994,7 @@ fn live_closure_expected_native_inputs(
     })
 }
 
+#[cfg(test)]
 fn live_closure_notification_category(notification: &str) -> Option<&str> {
     notification
         .split_once('[')
@@ -1021,6 +1002,7 @@ fn live_closure_notification_category(notification: &str) -> Option<&str> {
         .map(|(category, _)| category)
 }
 
+#[cfg(test)]
 fn live_closure_batch_input_contains_message(
     observed: &str,
     message_id: &str,
@@ -1048,6 +1030,7 @@ fn live_closure_batch_input_contains_message(
         .any(|(id, category)| id == message_id && category == expected_category)
 }
 
+#[cfg(test)]
 fn live_closure_page_cursor(page: &serde_json::Value) -> anyhow::Result<Option<String>> {
     for key in ["backwardsCursor", "nextCursor"] {
         let Some(value) = page.get(key) else {
@@ -1066,6 +1049,7 @@ fn live_closure_page_cursor(page: &serde_json::Value) -> anyhow::Result<Option<S
     Ok(None)
 }
 
+#[cfg(test)]
 fn read_live_closure_pages<F>(mut read_page: F) -> anyhow::Result<Vec<serde_json::Value>>
 where
     F: FnMut(Option<&str>) -> anyhow::Result<serde_json::Value>,
@@ -1094,6 +1078,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn live_closure_turn_items(turns: &[serde_json::Value]) -> anyhow::Result<Vec<serde_json::Value>> {
     let mut items = Vec::new();
     for (turn_index, turn) in turns.iter().enumerate() {
@@ -1159,6 +1144,7 @@ fn live_closure_turn_items(turns: &[serde_json::Value]) -> anyhow::Result<Vec<se
     Ok(items)
 }
 
+#[cfg(test)]
 fn live_closure_turns_read_error(error: client::adapters::AdapterError) -> anyhow::Error {
     if matches!(
         &error,
@@ -1172,6 +1158,7 @@ fn live_closure_turns_read_error(error: client::adapters::AdapterError) -> anyho
     anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TURNS_READ:{error}")
 }
 
+#[cfg(test)]
 fn wait_live_closure_fresh_thread_materialization<F>(
     mut observe: F,
     deadline: Instant,
@@ -1198,79 +1185,6 @@ where
             Err(error) => return Err(error),
         }
     }
-}
-
-fn observe_live_closure_target(
-    transport: &SelectedTransport,
-    challenge: &str,
-    expected_inputs: &LiveClosureExpectedNativeInputs,
-    message_id: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let thread_id = transport
-        .thread_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_THREAD_MISSING"))?;
-    let turns = read_live_closure_pages(|cursor| {
-        client::adapters::codex_app_server::read_thread_turns_with_items_page(
-            transport, thread_id, cursor,
-        )
-        .map_err(live_closure_turns_read_error)
-    })?;
-    let items = live_closure_turn_items(&turns)?;
-    let input = items
-        .iter()
-        .find(|item| live_closure_item_matches_input(item, expected_inputs, message_id));
-    let Some(input) = input else {
-        anyhow::bail!(
-            "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:challenge_or_message_not_observed"
-        );
-    };
-    let completed_turn = turns.iter().find(|turn| {
-        turn.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-            && turn
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| {
-                    live_closure_item_turn_id(input).is_some_and(|input_turn| input_turn == id)
-                })
-    });
-    let Some(completed_turn) = completed_turn else {
-        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:turn_not_completed");
-    };
-    let turn_id = completed_turn
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_TURN_ID_MISSING"))?;
-    let result_item = items.iter().rev().find(|item| {
-        let payload = live_closure_item_payload(item);
-        let item_type = payload.get("type").and_then(serde_json::Value::as_str);
-        payload
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| !id.is_empty())
-            && item_type != Some("userMessage")
-            && item_type != Some("user_message")
-            && live_closure_item_turn_id(item).is_some_and(|item_turn| item_turn == turn_id)
-    });
-    let Some(result_item) = result_item else {
-        anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:result_item_not_observed");
-    };
-    let result_item_id = live_closure_item_payload(result_item)
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_RESULT_ID_MISSING"))?;
-    Ok(json!({
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "status": "completed",
-        "challenge": challenge,
-        "message_id": message_id,
-        "result_item_id": result_item_id,
-        "observed_at": chrono::Utc::now().to_rfc3339(),
-        "source": "thread/turns/list(itemsView=full)"
-    }))
 }
 
 fn live_closure_observe(
@@ -1307,42 +1221,27 @@ fn live_closure_observe(
             })
         })
         .ok_or_else(|| anyhow::anyhow!("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE:{to}"))?;
-    let transport = live_closure_target_transport(target)?;
-    let message_status: serde_json::Value = call_project(
-        scope,
-        &ident,
-        &Req::MsgStatus {
-            msg_id: message_id.clone(),
-        },
-    )?;
-    let expected_inputs =
-        live_closure_expected_native_inputs(&message_status, &message_id, &challenge)?;
     let observation_deadline = Instant::now() + live_closure_timeout()?;
-    let target_execution = wait_live_closure_fresh_thread_materialization(
-        || observe_live_closure_target(&transport, &challenge, &expected_inputs, &message_id),
-        observation_deadline,
-        Duration::from_millis(500),
-    )?;
-    let receipt: serde_json::Value = call_project(
-        scope,
-        &ident,
-        &Req::MsgStatus {
-            msg_id: message_id.clone(),
+    let receipt = wait_live_closure_receipt(
+        || {
+            call_project(
+                scope,
+                &ident,
+                &Req::MsgStatus {
+                    msg_id: message_id.clone(),
+                },
+            )
         },
+        observation_deadline,
+        &message_id,
+        &challenge,
     )?;
-    if receipt.get("id").and_then(serde_json::Value::as_str) != Some(message_id.as_str())
-        || receipt.get("state").and_then(serde_json::Value::as_str) != Some("read")
-        || receipt.get("body").and_then(serde_json::Value::as_str) != Some(challenge.as_str())
-    {
-        anyhow::bail!("COLLAB_LIVE_CLOSURE_RECEIPT_NOT_CONSUMED");
-    }
     out(&json!({
-        "status": "target_execution_observed",
+        "status": "target_receive_committed",
         "closure_claim": false,
         "target_worker_id": to,
-        "target_execution": target_execution,
         "receipt": receipt,
-        "source": "target App Server thread/turns/list(itemsView=full) + collab msg status"
+        "source": "collab recv durable consumption receipt"
     }));
     Ok(())
 }
@@ -1632,64 +1531,7 @@ fn live_closure_probe(
     if message_id.is_empty() {
         anyhow::bail!("COLLAB_LIVE_CLOSURE_PROBE_MESSAGE_ID_MISSING");
     }
-    let message_status: serde_json::Value = if let Some(target_scope) = target_scope.as_ref() {
-        client::call_with_context(
-            &target_scope.sock_path(),
-            &Req::MsgStatus {
-                msg_id: message_id.to_owned(),
-            },
-            Some(cli_project_context(&target_scope.root)?),
-        )?
-    } else {
-        call_project(
-            scope,
-            &ident,
-            &Req::MsgStatus {
-                msg_id: message_id.to_owned(),
-            },
-        )?
-    };
-    let expected_inputs =
-        live_closure_expected_native_inputs(&message_status, message_id, &challenge)?;
-    let target_transport = live_closure_target_transport(target).map_err(|error| {
-        first_failure(
-            "COLLAB_LIVE_CLOSURE_TARGET_TRANSPORT_INVALID",
-            &error.to_string(),
-        );
-        error
-    })?;
     let observation_deadline = Instant::now() + timeout;
-    let target_execution = loop {
-        match observe_live_closure_target(
-            &target_transport,
-            &challenge,
-            &expected_inputs,
-            message_id,
-        ) {
-            Ok(execution) => break execution,
-            Err(error)
-                if error
-                    .to_string()
-                    .starts_with("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_PENDING:") =>
-            {
-                if Instant::now() >= observation_deadline {
-                    first_failure(
-                        "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_TIMEOUT",
-                        &error.to_string(),
-                    );
-                    anyhow::bail!("COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_TIMEOUT");
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Err(error) => {
-                first_failure(
-                    "COLLAB_LIVE_CLOSURE_TARGET_EXECUTION_READ_FAILED",
-                    &error.to_string(),
-                );
-                return Err(error);
-            }
-        }
-    };
     let receipt = wait_live_closure_receipt(
         || {
             if let Some(target_scope) = target_scope.as_ref() {
@@ -1776,9 +1618,8 @@ fn live_closure_probe(
             "reason": "the challenge was produced by the resident daemon and observed by the target, but no daemon restart/replay occurred in this probe"
         })),
         "endpoint_generation": endpoint_generation,
-        "target_execution": target_execution,
         "receipt": receipt,
-        "source": "collab daemon route + target App Server thread/turns/list(itemsView=full) + collab msg status"
+        "source": "collab daemon route + collab recv durable consumption receipt"
     }));
     Ok(())
 }
@@ -1836,13 +1677,13 @@ fn unregistered_context(
             json!([
                 "If the running daemon was started before the current `collab` binary was installed, it may predate resident-route replay. From the canonical project main checkout run `collab down`, then `collab up` once so the installed daemon binary is loaded.",
                 "From that same checkout run `appsdk init .` to restore the resident registration and route.",
-                "Verify with `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work.",
+                "Verify with `collab context`, `collab route resolve --pane-id <pane-id>`, and `collab master status` before sending work.",
                 "Only then rerun the original command. If any step fails, preserve its exact output and stop; do not loop initialization or replace transport with mailbox state."
             ])
         } else {
             json!([
                 "From the canonical project main checkout run `appsdk init .`.",
-                "Rerun the original command, then verify with `collab context` and `collab route resolve --native-thread-id <thread-id>`.",
+                "Rerun the original command, then verify with `collab context` and `collab route resolve --pane-id <pane-id>`.",
                 "If the error persists, preserve the exact output and stop; do not re-register a worktree."
             ])
         };
@@ -1953,6 +1794,20 @@ fn receive_recovery_banner(receive_id: &str) -> String {
     format!("recv receive_id={receive_id} recovery: collab recv --receive-id {receive_id}")
 }
 
+pub(crate) fn recv_request(
+    worker_id: String,
+    token: String,
+    timeout_seconds: u64,
+    receive_id: String,
+) -> Req {
+    Req::Poll {
+        worker_id,
+        token,
+        timeout_ms: timeout_seconds.saturating_mul(1000),
+        receive_id: Some(receive_id),
+    }
+}
+
 /// Publish the caller-owned receive identity and then dispatch the request.
 ///
 /// Claiming `receive_id` only after a successful reply cannot recover a route
@@ -1991,7 +1846,7 @@ fn main() {
 }
 
 const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
-const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: if the running daemon predates the installed collab binary, run `collab down`, then `collab up` once to load the installed binary; then verify `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
+const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: if the running daemon predates the installed collab binary, run `collab down`, then `collab up` once to load the installed binary; then verify `collab context`, `collab route resolve --pane-id <pane-id>`, and `collab master status` before sending work; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
 
 fn format_cli_error(error: &str) -> String {
     if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
@@ -2011,13 +1866,15 @@ fn format_cli_error(error: &str) -> String {
 
 fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
-        Cmd::SubagentExec { file } => subagent::exec_launch(&file),
         Cmd::Config => {
             crate::config::ensure_written()?;
             out(&crate::config::load(&scope::lifecycle_project_root()?)?);
             Ok(())
         }
         Cmd::Subagent { command } => {
+            if matches!(&command, subagent::Action::Start { .. }) {
+                anyhow::bail!("MANAGED_SUBAGENT_UNSUPPORTED: tmux cannot create a Codex thread; start the peer in its own tmux pane and register that pane");
+            }
             let scope = Scope::resolve()?;
             let query = subagent_observe_query(&command);
             if let Some((id, snapshot_lines)) = query {
@@ -2030,11 +1887,6 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 return Ok(());
             }
             let ident = me(&scope, None)?;
-            let launch_env = if matches!(command, subagent::Action::Start { .. }) {
-                std::env::vars().collect()
-            } else {
-                Default::default()
-            };
             let value: serde_json::Value = call_project(
                 &scope,
                 &ident,
@@ -2042,7 +1894,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     worker_id: ident.worker_id.clone(),
                     token: ident.token.clone(),
                     command,
-                    launch_env,
+                    launch_env: Default::default(),
                 },
             )?;
             out(&value);
@@ -2070,7 +1922,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 .trim()
                 .parse::<u32>()
                 .map_err(|error| anyhow::anyhow!("registered daemon PID is invalid: {error}"))?;
-            let runtime = appserver_runtime_projection(&scope, &ident, daemon_pid)?;
+            let runtime = registered_runtime_projection(&scope, &ident, daemon_pid)?;
             let task_board: serde_json::Value =
                 call_project(&scope, &ident, &Req::TaskStatus { task_id: None })?;
             out(&json!({
@@ -2247,27 +2099,25 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             command:
                 RouteCmd::Resolve {
                     session_id,
-                    native_thread_id,
+                    pane_id,
                 },
         } => {
             let host_paths = scope::HostPaths::resolve()?;
-            let native_thread_id = native_thread_id
-                .or_else(|| std::env::var("CODEX_THREAD_ID").ok())
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("route resolve requires --native-thread-id or CODEX_THREAD_ID")
-                })?;
-            let session_id = session_id
-                .or_else(|| std::env::var("CODEX_SESSION_ID").ok())
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("route resolve requires --session-id or CODEX_SESSION_ID")
-                })?;
-            let route = crate::client::resolve_route(
-                &host_paths.socket_path(),
-                &session_id,
-                &native_thread_id,
-            )?;
+            let candidate =
+                crate::client::adapters::tmux::candidate_from_env().map_err(anyhow::Error::msg)?;
+            if session_id
+                .as_deref()
+                .is_some_and(|value| value != candidate.endpoint.tmux_session_id)
+                || pane_id
+                    .as_deref()
+                    .is_some_and(|value| value != candidate.endpoint.pane_id)
+            {
+                anyhow::bail!(
+                    "ROUTE_RESOLVE_INVALID: requested identity does not match current tmux pane"
+                );
+            }
+            let route =
+                crate::client::resolve_route(&host_paths.socket_path(), &candidate.endpoint)?;
             out(&json!({
                 "canonical_root": route.canonical_root,
                 "storage_root": route.storage_root,
@@ -2278,6 +2128,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                 "endpoint_generation": route.endpoint_generation,
                 "session_id": route.session_id,
                 "native_thread_id": route.native_thread_id,
+                "tmux_endpoint": candidate.endpoint,
             }));
             Ok(())
         }
@@ -2319,15 +2170,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Root { command } | Cmd::Master { command } => {
             if matches!(command, MasterCmd::Status) {
                 let host_paths = scope::HostPaths::resolve()?;
-                let thread_id = std::env::var("CODEX_THREAD_ID").map_err(|_| anyhow::anyhow!(
-                    "master status requires CODEX_THREAD_ID; use `collab route resolve` to inspect an explicit thread"
-                ))?;
-                let session_id = std::env::var("CODEX_SESSION_ID").map_err(|_| {
-                    anyhow::anyhow!(
-                        "master status requires CODEX_SESSION_ID so the daemon can resolve the global binding"
-                    )
-                })?;
-                let route = scope::route_for_native_thread(&host_paths, &session_id, &thread_id)?;
+                let route = scope::route_for_tmux_pane(&host_paths)?;
                 let scope = Scope { root: route.root };
                 let v: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),
@@ -2599,15 +2442,18 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             // The caller must know the receive identity before consumption, not
             // only after a successful reply: a lost socket response still
             // leaves the exact replay command available on stderr.
-            let request = |receive_id: &str| Req::Poll {
-                worker_id: ident.worker_id.clone(),
-                token: ident.token.clone(),
-                timeout_ms: timeout.saturating_mul(1000),
-                receive_id: Some(receive_id.to_owned()),
-            };
             let v =
                 recv_with_published_identity(&mut std::io::stderr(), &receive_id, |receive_id| {
-                    call_project(&scope, &ident, &request(receive_id))
+                    call_project(
+                        &scope,
+                        &ident,
+                        &recv_request(
+                            ident.worker_id.clone(),
+                            ident.token.clone(),
+                            timeout,
+                            receive_id.to_owned(),
+                        ),
+                    )
                 })?;
             out(&v);
             Ok(())
@@ -2628,17 +2474,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         }
         Cmd::Context { worker } => {
             let host_paths = scope::HostPaths::resolve()?;
-            let thread_id = std::env::var("CODEX_THREAD_ID").map_err(|_| {
-                anyhow::anyhow!(
-                    "context requires CODEX_THREAD_ID so the daemon can resolve the global binding"
-                )
-            })?;
-            let session_id = std::env::var("CODEX_SESSION_ID").map_err(|_| {
-                anyhow::anyhow!(
-                    "context requires CODEX_SESSION_ID so the daemon can resolve the global binding"
-                )
-            })?;
-            let route = match scope::route_for_native_thread(&host_paths, &session_id, &thread_id) {
+            let route = match scope::route_for_tmux_pane(&host_paths) {
                 Ok(route) => route,
                 Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
                     let route_error = error.to_string();
@@ -2665,10 +2501,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             };
             let scope = Scope { root: route.root };
             let ident = identity::load_existing(&scope, worker)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no persisted Collab identity for CODEX_THREAD_ID {}",
-                    thread_id
-                )
+                anyhow::anyhow!("no persisted Collab identity for the current tmux pane")
             })?;
             if ident.transport.is_none() {
                 out(&unregistered_context(Some(&scope), Some(&ident), None)?);
@@ -2932,6 +2765,23 @@ mod tests {
             runtime,
             transport: None,
         }
+    }
+
+    #[test]
+    fn cli_rejects_managed_subagent_start_before_resolving_collab_context() {
+        let error = run(Cmd::Subagent {
+            command: subagent::Action::Start {
+                id: Some("child-test".into()),
+                runtime: None,
+            },
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("MANAGED_SUBAGENT_UNSUPPORTED:"),
+            "unexpected start result: {error:#}"
+        );
     }
 
     /// Bind the process environment to one explicit App Server address while
@@ -3859,7 +3709,7 @@ mod tests {
             "`collab up` once",
             "`appsdk init .`",
             "`collab context`",
-            "`collab route resolve --native-thread-id <thread-id>`",
+            "`collab route resolve --pane-id <pane-id>`",
             "`collab master status`",
         ] {
             assert!(
@@ -3901,7 +3751,7 @@ mod tests {
             "`collab up` once",
             "`appsdk init .`",
             "`collab context`",
-            "`collab route resolve --native-thread-id <thread-id>`",
+            "`collab route resolve --pane-id <pane-id>`",
             "`collab master status`",
         ] {
             assert!(
@@ -3931,7 +3781,7 @@ mod tests {
                 "`collab up` once",
                 "`appsdk init .`",
                 "`collab context`",
-                "`collab route resolve --native-thread-id <thread-id>`",
+                "`collab route resolve --pane-id <pane-id>`",
                 "`collab master status`",
             ] {
                 assert!(
@@ -3961,7 +3811,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_registration_reuses_a_valid_runtime_without_rebinding() {
+    fn ensure_registration_rejects_a_retired_appserver_runtime() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let root = test_root("registration-reuse");
         let state_root = root.join("global");
@@ -3992,13 +3842,13 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-worker-1".into()),
             thread_id: Some("thread-worker-1".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         });
-        let before = serde_json::to_value(&identity).unwrap();
-        let response = ensure_registration(&Scope { root: root.clone() }, &mut identity).unwrap();
-        assert_eq!(response, json!({"reused": true}));
-        assert_eq!(serde_json::to_value(&identity).unwrap(), before);
+        assert!(
+            !persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap()
+        );
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
         std::fs::remove_dir_all(root).ok();
     }
@@ -4071,6 +3921,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-worker-1".into()),
             thread_id: Some("thread-worker-1".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         });
@@ -4082,7 +3933,9 @@ mod tests {
             &identity
         )
         .unwrap());
-        assert!(persisted_runtime_matches_scope(
+        // A retired AppServer transport is not reusable even in its original
+        // project; the next mutating command must bind the current tmux pane.
+        assert!(!persisted_runtime_matches_scope(
             &Scope {
                 root: old_root.clone()
             },
@@ -4137,6 +3990,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: None,
             thread_id: Some("thread-legacy".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         });
@@ -4152,11 +4006,10 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    /// `collab init` on a unique persisted peer must send the *same* worker and
-    /// token to the daemon after the App Server address moved, and persist the
-    /// server-selected new binding under that identity.
+    /// `collab init` must not claim a persisted peer without a stable identity
+    /// anchor, even when that peer is the only identity in the project.
     #[test]
-    fn init_restores_the_persisted_identity_and_persists_the_new_binding() {
+    fn init_refuses_to_rebind_a_legacy_identity_without_a_matching_anchor() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let root = test_root("init-scope-rebind");
         // The daemon socket lives in the state root, so keep that path short
@@ -4172,6 +4025,18 @@ mod tests {
         std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
         std::fs::create_dir_all(&state_root).unwrap();
         std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        let tmux_fixture = crate::server::peer_tests::IsolatedTmux::start_single(&root);
+        let current_endpoint = tmux_fixture.endpoints().remove(0);
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var(
+            "TMUX",
+            format!(
+                "{},{},0",
+                current_endpoint.socket_path, current_endpoint.server_pid
+            ),
+        );
+        std::env::set_var("TMUX_PANE", &current_endpoint.pane_id);
         let route = json!({
             "version": 1,
             "op": "register",
@@ -4198,6 +4063,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-old".into()),
             thread_id: Some("thread-old".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         };
@@ -4224,17 +4090,25 @@ mod tests {
         )
         .unwrap();
 
-        // The route authority has to be listening before identity loading asks
-        // it whether the persisted address is dead.
+        // The route listener proves that init refuses before asking the daemon
+        // to resolve or re-register an unanchored legacy peer.
         let socket = state_root.join("server.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let request_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request_observed_by_server = request_observed.clone();
         let responder = std::thread::spawn(move || {
             use std::io::{BufRead, Write};
 
-            // 1. Identity loading asks the route authority whether the persisted
-            //    old address is still alive. It answers: provably dead.
-            let (mut route_stream, _) = listener.accept().unwrap();
+            let (mut route_stream, _) = match listener.accept() {
+                Ok(connection) => {
+                    request_observed_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                    connection
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(error) => panic!("route test listener failed: {error}"),
+            };
             let mut route_line = String::new();
             std::io::BufReader::new(&route_stream)
                 .read_line(&mut route_line)
@@ -4303,23 +4177,24 @@ mod tests {
         });
 
         set_current_session_thread("thread-new", "session-new");
-        let mut ident = identity::load_or_create_for_init(&Scope { root: root.clone() }).unwrap();
-        assert_eq!(ident.worker_id, "agent-peer");
-        assert_eq!(ident.token, "token-agent-peer");
-        ensure_registration(&Scope { root: root.clone() }, &mut ident).unwrap();
+        let result = identity::load_or_create_for_init(&Scope { root: root.clone() });
         responder.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
+            "unexpected init result: {error:#}"
+        );
+        assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
         clear_current_session_thread();
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
-
-        // The same identity now owns the new address on disk.
-        let stored: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&identity_path).unwrap()).unwrap();
-        assert_eq!(stored["worker_id"], "agent-peer");
-        assert_eq!(stored["runtime"]["native_thread_id"], "thread-new");
-        assert_eq!(stored["runtime"]["session_id"], "session-new");
-        assert_eq!(stored["runtime"]["endpoint_generation"], 2);
-        assert_eq!(stored["transport"]["thread_id"], "thread-new");
-        assert_eq!(stored["transport"]["session_id"], "session-new");
         std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
@@ -4377,6 +4252,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-thread-old".into()),
             thread_id: Some("thread-old".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         });
@@ -4452,12 +4328,10 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    /// An ordinary command must run the same dead-address adoption and
-    /// registration path as explicit init: after an App Server rotation the new
-    /// thread keeps the persisted worker and token, then commits the new
-    /// binding through the normal `Register` request.
+    /// An ordinary command cannot adopt a persisted peer without a matching
+    /// pane, session, or thread anchor.
     #[test]
-    fn ordinary_command_registration_restores_the_dead_address_identity() {
+    fn ordinary_command_refuses_an_unanchored_legacy_identity() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let root = test_root("ordinary-registration-rebind");
         let state_root = std::env::temp_dir().join(format!(
@@ -4471,6 +4345,18 @@ mod tests {
         std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
         std::fs::create_dir_all(&state_root).unwrap();
         std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        let tmux_fixture = crate::server::peer_tests::IsolatedTmux::start_single(&root);
+        let current_endpoint = tmux_fixture.endpoints().remove(0);
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var(
+            "TMUX",
+            format!(
+                "{},{},0",
+                current_endpoint.socket_path, current_endpoint.server_pid
+            ),
+        );
+        std::env::set_var("TMUX_PANE", &current_endpoint.pane_id);
         let route = json!({
             "version": 1,
             "op": "register",
@@ -4507,6 +4393,7 @@ mod tests {
                 namespace: Some("codex_tui".into()),
                 session_id: Some("session-old".into()),
                 thread_id: Some("thread-old".into()),
+                tmux_endpoint: None,
                 capabilities: vec!["send_message_to_thread".into()],
                 self_check: "test appserver".into(),
             }),
@@ -4524,11 +4411,21 @@ mod tests {
 
         let socket = state_root.join("server.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let request_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request_observed_by_server = request_observed.clone();
         let responder = std::thread::spawn(move || {
             use std::io::{BufRead, Write};
 
-            let (mut route_stream, _) = listener.accept().unwrap();
+            let (mut route_stream, _) = match listener.accept() {
+                Ok(connection) => {
+                    request_observed_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                    connection
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(error) => panic!("route test listener failed: {error}"),
+            };
             let mut route_line = String::new();
             std::io::BufReader::new(&route_stream)
                 .read_line(&mut route_line)
@@ -4594,47 +4491,32 @@ mod tests {
         });
 
         set_current_session_thread("thread-new", "session-new");
-        let ident = me(&Scope { root: root.clone() }, None).unwrap();
+        let result = me(&Scope { root: root.clone() }, None);
         responder.join().unwrap();
-        clear_current_session_thread();
-        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
-
-        assert_eq!(ident.worker_id, "agent-peer");
-        assert_eq!(ident.token, "token-agent-peer");
-        let runtime = ident.runtime.as_ref().unwrap();
-        assert_eq!(
-            runtime
-                .native_thread_id
-                .as_ref()
-                .map(identity::NativeThreadId::as_str),
-            Some("thread-new")
-        );
-        assert_eq!(
-            runtime.session_id.as_ref().map(identity::SessionId::as_str),
-            Some("session-new")
-        );
-        assert_eq!(runtime.endpoint_generation, 2);
-        let stored: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&identity_path).unwrap()).unwrap();
-        assert_eq!(stored["worker_id"], "agent-peer");
-        assert_eq!(stored["runtime"]["native_thread_id"], "thread-new");
-        assert_eq!(stored["runtime"]["session_id"], "session-new");
+        let error = result.unwrap_err();
         assert!(
-            !state_root
-                .join("identities")
-                .join("codex-thread-new")
-                .exists(),
-            "an ordinary command must not mint a second identity after adoption"
+            error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
+            "unexpected ordinary-command result: {error:#}"
         );
+        assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
+        clear_current_session_thread();
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
         std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
 
-    /// Context is the route-resolution entry point hit after an App Server
-    /// restart. A miss there must restore the dead-address identity rather than
-    /// ending at the old manual-recovery guidance.
+    /// Context may not restore an identity when the current invocation has no
+    /// matching tmux pane, Codex session, or Codex thread anchor.
     #[test]
-    fn context_route_miss_restores_the_dead_address_identity() {
+    fn context_route_miss_refuses_an_unproven_identity_restore() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let root = test_root("context-route-miss-rebind");
         let state_root = std::env::temp_dir().join(format!(
@@ -4684,6 +4566,7 @@ mod tests {
                 namespace: Some("codex_tui".into()),
                 session_id: Some("session-old".into()),
                 thread_id: Some("thread-old".into()),
+                tmux_endpoint: None,
                 capabilities: vec!["send_message_to_thread".into()],
                 self_check: "test appserver".into(),
             }),
@@ -4701,11 +4584,21 @@ mod tests {
 
         let socket = state_root.join("server.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let request_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request_observed_by_server = request_observed.clone();
         let responder = std::thread::spawn(move || {
             use std::io::{BufRead, Write};
 
-            let (mut route_stream, _) = listener.accept().unwrap();
+            let (mut route_stream, _) = match listener.accept() {
+                Ok(connection) => {
+                    request_observed_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                    connection
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(error) => panic!("route test listener failed: {error}"),
+            };
             let mut route_line = String::new();
             std::io::BufReader::new(&route_stream)
                 .read_line(&mut route_line)
@@ -4771,12 +4664,36 @@ mod tests {
         });
 
         set_current_session_thread("thread-new", "session-new");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::remove_var("TMUX_PANE");
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let (scope, ident) = context_identity_after_route_miss(None).unwrap().unwrap();
+        let recovery = context_identity_after_route_miss(None);
         std::env::set_current_dir(previous).unwrap();
+        if let Err(error) = recovery {
+            assert!(
+                error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
+                "unexpected recovery error: {error:#}"
+            );
+            responder.join().unwrap();
+            assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
+            clear_current_session_thread();
+            match previous_pane {
+                Some(value) => std::env::set_var("TMUX_PANE", value),
+                None => std::env::remove_var("TMUX_PANE"),
+            }
+            std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+            std::fs::remove_dir_all(state_root).ok();
+            std::fs::remove_dir_all(root).ok();
+            return;
+        }
+        let (scope, ident) = recovery.unwrap().unwrap();
         responder.join().unwrap();
         clear_current_session_thread();
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
         std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
 
         assert_eq!(scope.root, root.canonicalize().unwrap());
@@ -4810,7 +4727,7 @@ mod tests {
     }
 
     #[test]
-    fn init_runtime_projection_matches_appsdk_host_registry_contract() {
+    fn init_runtime_projection_requires_tmux_and_matches_host_registry_contract() {
         let root = test_root("runtime-projection");
         let runtime = RuntimeIdentity {
             agent_id: identity::AgentId::new("worker-1").unwrap(),
@@ -4828,23 +4745,46 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
             self_check: "test appserver".into(),
         });
+        let error = registered_runtime_projection(&Scope { root: root.clone() }, &identity, 4242)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("TRANSPORT_UNSUPPORTED"), "{error}");
+        identity.transport = Some(SelectedTransport {
+            kind: TransportKind::Tmux,
+            endpoint: Some("/tmp/tmux-test.sock".into()),
+            namespace: Some("$1".into()),
+            session_id: Some("session-1".into()),
+            thread_id: Some("thread-1".into()),
+            tmux_endpoint: Some(proto::TmuxEndpoint {
+                socket_path: "/tmp/tmux-test.sock".into(),
+                server_pid: 42,
+                tmux_session_id: "$1".into(),
+                pane_id: "%1".into(),
+                pane_pid: 43,
+                codex_session_id: Some("session-1".into()),
+                codex_thread_id: Some("thread-1".into()),
+            }),
+            capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+            self_check: "test tmux".into(),
+        });
         let projection =
-            appserver_runtime_projection(&Scope { root: root.clone() }, &identity, 4242).unwrap();
+            registered_runtime_projection(&Scope { root: root.clone() }, &identity, 4242).unwrap();
         assert_eq!(projection["runtimeId"], "runtime-thread-1");
         assert_eq!(projection["appserverId"], "tui-default");
-        assert_eq!(projection["namespace"], "codex_tui");
-        assert_eq!(projection["endpoint"], "unix:///tmp/codex.sock");
+        assert_eq!(projection["transport"], "tmux");
+        assert_eq!(projection["tmuxEndpoint"]["pane_id"], "%1");
         assert_eq!(
             projection["projectRoot"],
             root.canonicalize().unwrap().to_string_lossy().as_ref()
         );
-        assert_eq!(projection["capabilities"][0], "send_message_to_thread");
+        assert_eq!(projection["capabilities"][0], "send_message_to_pane");
         assert_eq!(projection["processId"], 4242);
         assert!(
-            appserver_runtime_projection(&Scope { root: root.clone() }, &identity, 0)
+            registered_runtime_projection(&Scope { root: root.clone() }, &identity, 0)
                 .unwrap_err()
                 .to_string()
                 .contains("PID is zero")
@@ -4931,6 +4871,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-other".into()),
             thread_id: Some("thread-other".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         });

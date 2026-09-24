@@ -61,7 +61,7 @@ The upgrade is a replacement, not a compatibility layer:
   command cache and verify `command -v` and `--version`; never keep an older
   binary as a fallback.
 - After the installed version is current, verify `collab status --all`,
-  `collab context`, and one live App Server send/consume/reply replay. Binary
+  `collab context`, and one live tmux send/recv receipt replay. Binary
   installation alone does not prove the running daemon or route is current.
 
 The global daemon can be shared by multiple projects. A binary upgrade alone
@@ -190,20 +190,14 @@ collab up
 - After restart prove one PID/socket, preserved durable state, identity rebind,
   migration verify, and one real subscribed notice.
 
-### Endpoint mismatch and not-loaded recovery
+### Tmux endpoint recovery
 
-When `collab context` reports `endpoint_live=false`, `identity_valid=false`,
-`presence=missing`, or `thread_state=notLoaded`, first classify the endpoint
-owner before changing lifecycle state. `persisted but not loaded` means the
-thread is durable but is not loaded by the selected App Server; it does not
-authorize a new registration or a `turn/start` attempt.
-
-Use the endpoint/thread recovery contract in
-[`state-paths.md`](state-paths.md#app-server-endpoint-and-thread-recovery).
-The recovery owner must preserve the selected endpoint, thread ID, binding
-generation, and active-writer evidence, then rebind through the supported
-peer path. A successful recovery requires a loaded thread and
-`endpoint_live=true` before any notification is sent.
+When `collab context` reports a missing pane, recover the same identity only
+through a unique current pane, Codex session, or Codex thread anchor in the
+same project. An unknown/error pane probe does not authorize master recovery.
+The route must bind to the current tmux socket/server/session/pane/process
+endpoint before notifications resume. See
+[`state-paths.md`](state-paths.md#tmux-route-and-identity-recovery).
 
 ## Deprecated commands
 

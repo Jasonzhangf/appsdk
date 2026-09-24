@@ -73,7 +73,7 @@ fn closure() -> Value {
         "collab_identity": {
             "worker_id": "worker-1",
             "binding_id": "binding-1",
-            "native_thread_id": "thread-1",
+            "thread_id": "thread-1",
             "app_scope_id": "app-1",
             "project_scope_id": "project-1"
         },
@@ -85,6 +85,15 @@ fn closure() -> Value {
                 "app_scope_id": "app-1"
             },
             "storage_root": "storage-1",
+            "tmux_endpoint": {
+                "socket_path": "/tmp/collab-live-closure.sock",
+                "server_pid": 12345,
+                "tmux_session_id": "$1",
+                "pane_id": "%1",
+                "pane_pid": 23456,
+                "codex_session_id": "session-1",
+                "codex_thread_id": "thread-1"
+            },
             "resolved_at": "2026-01-01T00:00:00Z",
             "source": "collab_cli"
         },

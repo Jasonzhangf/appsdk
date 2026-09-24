@@ -148,57 +148,81 @@ const LEGACY_HOST_DAEMON_LOCK_PATH: &str = "/tmp/collab-host.lock";
 const DAEMON_LIVE_CLOSURE_MODE: &str = "daemon-live-closure";
 const RESTART_REPLAY_PENDING_MODE: &str = "restart-replay-pending";
 
+#[cfg(test)]
 type AppServerCandidateCheck =
     dyn Fn(&crate::proto::AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync;
-type AppServerNotificationSink = dyn Fn(&SelectedTransport, Option<&str>, &str, &str, bool) -> Result<serde_json::Value, String>
+type TmuxNotificationSink = dyn Fn(&SelectedTransport, Option<&str>, &str, &str, bool) -> Result<serde_json::Value, String>
     + Send
     + Sync;
+#[cfg(test)]
+type TestNotificationSink = TmuxNotificationSink;
+#[cfg(test)]
 type AppServerThreadStatus =
     dyn Fn(&SelectedTransport, &str) -> Result<serde_json::Value, String> + Send + Sync;
+#[cfg(test)]
 type AppServerThreadArchive =
     dyn Fn(&SelectedTransport, &str) -> Result<serde_json::Value, String> + Send + Sync;
 
+#[cfg(test)]
 fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
     Arc::new(|candidate| {
         crate::client::adapters::verify_candidate(candidate).map_err(|error| error.to_string())
     })
 }
 
-pub(crate) fn default_appserver_notification_sink() -> Arc<AppServerNotificationSink> {
+fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
     Arc::new(|transport, source_thread_id, body, message_id, explicit| {
-        if explicit && source_thread_id.is_none() {
-            return Err(
-                "explicit App Server notification requires the sender native thread id".to_string(),
-            );
+        if transport.kind != TransportKind::Tmux {
+            return Err("TRANSPORT_UNSUPPORTED: Collab notifications require tmux".into());
         }
-        crate::client::adapters::immediate_notify(transport, source_thread_id, body, message_id)
-            .map_err(|error| error.to_string())
+        let _ = (source_thread_id, explicit);
+        let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
+            "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
+        })?;
+        crate::client::adapters::tmux::notify(endpoint, message_id, body)
     })
 }
 
+#[cfg(test)]
+pub(crate) fn default_appserver_notification_sink() -> Arc<TestNotificationSink> {
+    default_tmux_notification_sink()
+}
+
+fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
+    #[cfg(test)]
+    {
+        &server.appserver_notification_sink
+    }
+    #[cfg(not(test))]
+    {
+        &server.tmux_notification_sink
+    }
+}
+
+#[cfg(test)]
 fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
     Arc::new(|transport, thread_id| {
-        let mut status =
-            crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
-                .map_err(|error| error.to_string())?;
-        match crate::client::adapters::codex_app_server::read_turn_statuses(transport, thread_id) {
-            Ok(turns) => {
-                if let Some(data) = turns.get("data").and_then(serde_json::Value::as_array) {
-                    status["thread"]["turns"] = serde_json::Value::Array(data.clone());
-                }
+        if transport.kind == TransportKind::Tmux {
+            let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
+                "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
+            })?;
+            if endpoint.pane_id != thread_id {
+                return Err(
+                    "TMUX_ENDPOINT_MISMATCH: requested pane does not match selected endpoint"
+                        .into(),
+                );
             }
-            Err(error) => {
-                status["thread"]["turn_status_error"] = json!(error.to_string());
-            }
+            return crate::client::adapters::tmux::view(endpoint);
         }
-        Ok(status)
+        let _ = thread_id;
+        Err("TRANSPORT_UNSUPPORTED: Collab status requires a registered tmux pane".into())
     })
 }
 
+#[cfg(test)]
 pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> {
-    Arc::new(|transport, thread_id| {
-        crate::client::adapters::codex_app_server::archive_thread(transport, thread_id)
-            .map_err(|error| error.to_string())
+    Arc::new(|_transport, _thread_id| {
+        Err("TRANSPORT_UNSUPPORTED: tmux has no Codex thread archive operation".into())
     })
 }
 
@@ -515,9 +539,15 @@ pub struct Server {
     pub(crate) host_paths: HostPaths,
     pub state: Mutex<State>,
     pub journal: Mutex<std::fs::File>,
+    #[cfg(test)]
     pub appserver_candidate_check: Arc<AppServerCandidateCheck>,
-    pub appserver_notification_sink: Arc<AppServerNotificationSink>,
+    #[cfg(not(test))]
+    pub tmux_notification_sink: Arc<TmuxNotificationSink>,
+    #[cfg(test)]
+    pub appserver_notification_sink: Arc<TestNotificationSink>,
+    #[cfg(test)]
     pub appserver_thread_status: Arc<AppServerThreadStatus>,
+    #[cfg(test)]
     pub appserver_thread_archive: Arc<AppServerThreadArchive>,
     pub mailbox_notify: Notify,
 }
@@ -604,6 +634,7 @@ impl Server {
             namespace: Some("codex_tui".into()),
             session_id: Some(format!("session-{worker_id}")),
             thread_id: Some(thread_id.to_string()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver transport".into(),
         };
@@ -661,6 +692,23 @@ impl Server {
                         transport.session_id.as_deref(),
                         transport.thread_id.as_deref(),
                     ) {
+                        _ if transport.kind == TransportKind::Tmux => {
+                            let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
+                                "RUNTIME_BINDING_REJECTED: tmux transport has no endpoint"
+                                    .to_string()
+                            })?;
+                            let bytes = serde_json::to_vec(endpoint).map_err(|error| {
+                                format!("RUNTIME_BINDING_REJECTED: encode tmux endpoint: {error}")
+                            })?;
+                            let fingerprint =
+                                bytes
+                                    .into_iter()
+                                    .fold(0xcbf29ce484222325_u64, |mut hash, byte| {
+                                        hash ^= u64::from(byte);
+                                        hash.wrapping_mul(0x100000001b3)
+                                    });
+                            format!("runtime-tmux-{fingerprint:016x}")
+                        }
                         (Some(session_id), Some(thread_id)) => format!(
                             "runtime-{}-{}-{}",
                             transport.kind.as_str(),
@@ -712,7 +760,7 @@ impl Server {
             crate::identity::SessionId::new(session_id.clone())
                 .map_err(|error| error.to_string())?,
         );
-        let binding = RuntimeBinding::new_with_session(
+        let mut binding = RuntimeBinding::new_with_session(
             project_scope.clone(),
             app_scope,
             agent_id,
@@ -723,6 +771,8 @@ impl Server {
             native_thread_id,
         )
         .map_err(|error| error.to_string())?;
+        binding.tmux_endpoint = transport.tmux_endpoint.clone();
+        binding.validate().map_err(|error| error.to_string())?;
         let command_id = CommandId::new(format!("register-{binding_text}-{generation}"))
             .map_err(|error| error.to_string())?;
         let operation_id = OperationId::new(format!("register-op-{binding_text}-{generation}"))
@@ -1615,99 +1665,73 @@ impl Server {
 
 fn validate_transport_candidates(
     server: &Server,
-    worker_id: &str,
     candidates: &TransportCandidates,
     registration_cwd: &str,
 ) -> Result<SelectedTransport, String> {
-    let Some(mut candidate) = candidates.appserver.as_ref().cloned() else {
-        return Err("TRANSPORT_NONE: server self-check found no App Server candidate".into());
-    };
-    let requested_root = std::fs::canonicalize(registration_cwd)
-        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
-    let requested_root = requested_root.to_str().ok_or_else(|| {
-        "RUNTIME_BINDING_REJECTED: registration cwd must be valid UTF-8".to_string()
-    })?;
-    let candidate_root = std::fs::canonicalize(&server.root)
-        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: candidate root: {error}"))?;
-    if candidate_root != std::path::Path::new(requested_root) {
-        return Err(format!(
-            "RUNTIME_BINDING_REJECTED: registration cwd {requested_root} does not match App Server project root {}",
-            candidate_root.display()
-        ));
+    if candidates.appserver.is_some() {
+        return Err(if candidates.tmux.is_some() {
+            "TRANSPORT_AMBIGUOUS: multiple transport candidates were supplied".into()
+        } else {
+            "TRANSPORT_UNSUPPORTED: App Server registration is retired; register the current tmux pane".into()
+        });
     }
-    // The daemon derives the expected thread cwd from its authenticated
-    // registration context. A client-supplied cwd is not authoritative.
-    candidate.cwd = requested_root.to_owned();
-    let state = server.state.lock().unwrap();
-    match appserver_thread_binding(&state, &candidate.session_id, &candidate.thread_id) {
-        Ok(Some(binding)) if binding.agent_id.as_str() != worker_id => {
+    if let Some(candidate) = candidates.tmux.as_ref() {
+        let requested_root = std::fs::canonicalize(registration_cwd)
+            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
+        let candidate_root = std::fs::canonicalize(&server.root)
+            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: project root: {error}"))?;
+        if candidate_root != requested_root {
             return Err(format!(
-                "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
-                candidate.thread_id, binding.agent_id
+                "RUNTIME_BINDING_REJECTED: registration cwd {} does not match project root {}",
+                requested_root.display(),
+                candidate_root.display()
             ));
         }
-        Ok(_) => {}
-        Err(error) => return Err(error),
-    }
-    drop(state);
-    match (server.appserver_candidate_check)(&candidate) {
-        Ok(transport) => Ok(transport),
-        Err(error) => {
-            append_log(
-                &server.log_path(),
-                &format!(
-                    "APPSERVER_CANDIDATE_REJECTED worker={worker_id} endpoint={} thread_id={} error={error}",
-                    candidate.endpoint, candidate.thread_id
-                ),
-            );
-            Err(format!(
-                "TRANSPORT_NONE: App Server self-check failed: {error}"
-            ))
+        if !candidate.cwd.starts_with('/') {
+            return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd must be absolute".into());
         }
-    }
-}
-
-fn appserver_thread_binding<'a>(
-    state: &'a State,
-    session_id: &str,
-    thread_id: &str,
-) -> Result<Option<&'a RuntimeBinding>, String> {
-    let mut bindings = state
-        .global
-        .projects
-        .values()
-        .flat_map(|project| project.runtime_bindings.values())
-        .filter(|binding| {
-            binding
-                .session_id
-                .as_ref()
-                .is_some_and(|candidate| candidate.as_str() == session_id)
-                && binding
-                    .native_thread_id
-                    .as_ref()
-                    .is_some_and(|native_thread_id| native_thread_id.as_str() == thread_id)
+        match crate::client::adapters::tmux::probe(&candidate.endpoint)? {
+            crate::client::adapters::tmux::PanePresence::Present => {}
+            crate::client::adapters::tmux::PanePresence::Missing => {
+                return Err("TMUX_PANE_MISSING: registration pane is not live".into())
+            }
+            crate::client::adapters::tmux::PanePresence::Unknown => {
+                return Err("TMUX_PANE_UNKNOWN: registration pane liveness is uncertain".into())
+            }
+        }
+        if candidate
+            .endpoint
+            .codex_session_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+            || candidate
+                .endpoint
+                .codex_thread_id
+                .as_deref()
+                .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err("TMUX_IDENTITY_INVALID: empty Codex identity anchor".into());
+        }
+        return Ok(SelectedTransport {
+            kind: TransportKind::Tmux,
+            endpoint: Some(candidate.endpoint.socket_path.clone()),
+            namespace: Some(candidate.endpoint.tmux_session_id.clone()),
+            session_id: candidate
+                .endpoint
+                .codex_session_id
+                .clone()
+                .or_else(|| Some(candidate.endpoint.tmux_session_id.clone())),
+            thread_id: candidate
+                .endpoint
+                .codex_thread_id
+                .clone()
+                .or_else(|| Some(candidate.endpoint.pane_id.clone())),
+            tmux_endpoint: Some(candidate.endpoint.clone()),
+            capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+            self_check: "tmux socket, session, pane and pane pid verified".into(),
         });
-    let Some(binding) = bindings.next() else {
-        return Ok(None);
-    };
-    if bindings.next().is_some() {
-        return Err(format!(
-            "RUNTIME_BINDING_REJECTED: App Server thread {thread_id} is bound to multiple workers"
-        ));
     }
-    Ok(Some(binding))
-}
-
-fn current_thread_binding<'a>(
-    state: &'a State,
-    session_id: &crate::identity::SessionId,
-    thread_id: &str,
-) -> Result<Option<&'a RuntimeBinding>, String> {
-    let native_thread_id = NativeThreadId::new(thread_id.to_owned())
-        .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
-    Ok(state
-        .global
-        .lookup_current_thread_route(session_id, &native_thread_id))
+    Err("TRANSPORT_NONE: no tmux candidate was supplied".into())
 }
 
 type RouteKey = (String, String);
@@ -1727,7 +1751,7 @@ pub(crate) struct HostRouteRecord {
     pub(crate) registered_ms: i64,
 }
 
-pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: if the running daemon predates the installed collab binary, from the canonical project main checkout run `collab down`, then `collab up` once to load the installed binary; then run `appsdk init .` from that same checkout; verify `collab context`, `collab route resolve --native-thread-id <thread-id>`, and `collab master status` before sending work; preserve daemon state and do not re-register a worktree, edit routes.jsonl, copy identity tokens, start a second daemon, or use mailbox state as transport delivery";
+pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: if the running daemon predates the installed collab binary, from the canonical project main checkout run `collab down`, then `collab up` once to load the installed binary; then run `appsdk init .` from that same checkout; verify `collab context`, `collab route resolve --pane-id <pane-id>`, and `collab master status` before sending work; preserve daemon state and do not re-register a worktree, edit routes.jsonl, copy identity tokens, start a second daemon, or use mailbox state as transport delivery";
 
 struct RuntimeRoute {
     root: PathBuf,
@@ -2251,54 +2275,6 @@ impl ProjectRuntimeManager {
             .map_err(|error| format!("HOST_ROUTE_REPLAY_FAILED: restore resident route: {error}"))
     }
 
-    fn native_thread_binding(
-        &self,
-        session_id: &str,
-        thread_id: &str,
-    ) -> Result<Option<RuntimeBinding>, String> {
-        let runtimes = {
-            let routes = self.routes.lock().unwrap();
-            let mut runtimes = Vec::new();
-            for route in routes.values() {
-                let Some(runtime) = route.runtime.as_ref() else {
-                    continue;
-                };
-                if runtimes
-                    .iter()
-                    .any(|existing: &Arc<Server>| Arc::ptr_eq(existing, runtime))
-                {
-                    continue;
-                }
-                runtimes.push(runtime.clone());
-            }
-            runtimes
-        };
-        let mut bindings = Vec::new();
-        {
-            let state = self.host.state.lock().unwrap();
-            if let Some(binding) = appserver_thread_binding(&state, session_id, thread_id)? {
-                bindings.push(binding.clone());
-            }
-        }
-        for runtime in runtimes {
-            let state = runtime.state.lock().unwrap();
-            if let Some(binding) = appserver_thread_binding(&state, session_id, thread_id)? {
-                if !bindings.iter().any(|existing| existing == binding) {
-                    bindings.push(binding.clone());
-                }
-            }
-        }
-        let Some(binding) = bindings.first().cloned() else {
-            return Ok(None);
-        };
-        if bindings.iter().any(|candidate| candidate != &binding) {
-            return Err(format!(
-                "RUNTIME_BINDING_REJECTED: App Server thread {thread_id} is bound to multiple workers"
-            ));
-        }
-        Ok(Some(binding))
-    }
-
     fn validate_current_thread_candidate(
         &self,
         context: &ProjectContext,
@@ -2312,27 +2288,77 @@ impl ProjectRuntimeManager {
         else {
             return Ok(());
         };
-        let Some(candidate) = candidates.appserver.as_ref() else {
+        let Some(candidate) = candidates.tmux.as_ref() else {
             return Ok(());
         };
-        let Some(binding) =
-            self.native_thread_binding(&candidate.session_id, &candidate.thread_id)?
-        else {
-            return Ok(());
-        };
-        if binding.agent_id.as_str() != worker_id {
-            return Err(format!(
-                "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
-                candidate.thread_id, binding.agent_id
-            ));
+        let endpoint = &candidate.endpoint;
+        let mut runtimes = vec![self.host.clone()];
+        for runtime in self.runtimes() {
+            if !runtimes
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &runtime))
+            {
+                runtimes.push(runtime);
+            }
         }
-        if binding.app_scope_id != context.app_scope_id
-            || binding.project_scope != context.project_scope
-        {
+        let mut anchor_matches = Vec::new();
+        for runtime in runtimes {
+            let state = runtime.state.lock().unwrap();
+            for binding in state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+            {
+                let same_codex_session =
+                    endpoint.codex_session_id.as_deref().is_some_and(|session| {
+                        binding
+                            .session_id
+                            .as_ref()
+                            .map(crate::identity::SessionId::as_str)
+                            == Some(session)
+                    });
+                let same_codex_thread = endpoint.codex_thread_id.as_deref().is_some_and(|thread| {
+                    binding
+                        .native_thread_id
+                        .as_ref()
+                        .map(NativeThreadId::as_str)
+                        == Some(thread)
+                });
+                let same_tmux_pane = binding.tmux_endpoint.as_ref().is_some_and(|previous| {
+                    previous.socket_path == endpoint.socket_path
+                        && previous.server_pid == endpoint.server_pid
+                        && previous.tmux_session_id == endpoint.tmux_session_id
+                        && previous.pane_id == endpoint.pane_id
+                });
+                if (same_codex_session || same_codex_thread || same_tmux_pane)
+                    && !anchor_matches.iter().any(|existing| existing == binding)
+                {
+                    anchor_matches.push(binding.clone());
+                }
+            }
+        }
+        if anchor_matches.len() > 1 {
             return Err(
-                "RUNTIME_BINDING_REJECTED: App Server thread belongs to another project route"
+                "RUNTIME_BINDING_REJECTED: tmux identity anchor matches multiple persisted peers"
                     .to_owned(),
             );
+        }
+        if let Some(binding) = anchor_matches.first() {
+            if binding.agent_id.as_str() != worker_id {
+                return Err(format!(
+                    "RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker {}",
+                    binding.agent_id
+                ));
+            }
+            if binding.app_scope_id != context.app_scope_id
+                || binding.project_scope != context.project_scope
+            {
+                return Err(
+                    "RUNTIME_BINDING_REJECTED: tmux identity anchor belongs to another project route"
+                        .to_owned(),
+                );
+            }
         }
         Ok(())
     }
@@ -2361,10 +2387,28 @@ impl ProjectRuntimeManager {
         result
     }
 
+    #[cfg(test)]
     fn resolve_route_by_native_thread(
         &self,
         session_id: &str,
         native_thread_id: &str,
+    ) -> Result<RouteResolution, String> {
+        self.resolve_route_by_address(session_id, native_thread_id, None)
+    }
+
+    fn resolve_route_by_tmux_endpoint(
+        &self,
+        endpoint: &crate::proto::TmuxEndpoint,
+    ) -> Result<RouteResolution, String> {
+        crate::client::adapters::tmux::validate_endpoint(endpoint)?;
+        self.resolve_route_by_address(&endpoint.tmux_session_id, &endpoint.pane_id, Some(endpoint))
+    }
+
+    fn resolve_route_by_address(
+        &self,
+        session_id: &str,
+        native_thread_id: &str,
+        requested_tmux_endpoint: Option<&crate::proto::TmuxEndpoint>,
     ) -> Result<RouteResolution, String> {
         let session_id = crate::identity::SessionId::new(session_id.to_owned())
             .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
@@ -2375,7 +2419,23 @@ impl ProjectRuntimeManager {
         // threads.  cwd is execution context and is not part of this decision.
         let (binding, legacy) = {
             let state = self.host.state.lock().unwrap();
-            if let Some(binding) = state
+            if let Some(requested) = requested_tmux_endpoint {
+                if let Some(binding) = state.global.lookup_tmux_route(requested).cloned() {
+                    (binding, false)
+                } else if let Some(tombstone) = state.global.lookup_tmux_route_tombstone(requested)
+                {
+                    return Err(format!(
+                        "SESSION_THREAD_BINDING_STALE: tmux endpoint was retired; reboundTo=({}, {}); recovery: re-run the caller with its current pane endpoint; never revive the old route or hand-edit the journal",
+                        tombstone.rebound_to.session_id.as_ref().map(ToString::to_string).unwrap_or_default(),
+                        tombstone.rebound_to.native_thread_id.as_ref().map(ToString::to_string).unwrap_or_default()
+                    ));
+                } else {
+                    return Err(format!(
+                        "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to tmux socket {} session {} pane {}",
+                        requested.socket_path, requested.tmux_session_id, requested.pane_id
+                    ));
+                }
+            } else if let Some(binding) = state
                 .global
                 .lookup_current_thread_route(&session_id, &native_thread_id)
                 .cloned()
@@ -2492,26 +2552,63 @@ impl ProjectRuntimeManager {
                     )
                 })?
         };
-        let candidate = crate::proto::AppServerCandidate {
-            endpoint: transport.endpoint.ok_or_else(|| {
-                format!(
-                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no endpoint"
-                )
-            })?,
-            namespace: transport.namespace.ok_or_else(|| {
-                format!(
-                    "ROUTE_RESOLVE_INVALID: current route state for App Server thread {native_thread_id} has no namespace"
-                )
-            })?,
-            session_id: session_id.as_str().to_owned(),
-            thread_id: native_thread_id.as_str().to_owned(),
-            cwd: canonical_root.clone(),
-        };
-        (runtime.appserver_candidate_check)(&candidate).map_err(|error| {
-            format!(
-                "ROUTE_RESOLVE_INVALID: App Server thread {native_thread_id} identity verification failed: {error}"
-            )
-        })?;
+        match transport.kind {
+            TransportKind::Tmux => {
+                let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
+                    format!("ROUTE_RESOLVE_INVALID: tmux pane {native_thread_id} has no endpoint")
+                })?;
+                if let Some(requested) = requested_tmux_endpoint {
+                    if !crate::client::adapters::tmux::same_pane_route(requested, endpoint) {
+                        return Err(format!(
+                            "ROUTE_RESOLVE_NOT_FOUND: tmux endpoint does not match the current route for pane {native_thread_id}"
+                        ));
+                    }
+                }
+                match crate::client::adapters::tmux::probe(endpoint)
+                    .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))?
+                {
+                    crate::client::adapters::tmux::PanePresence::Present => {}
+                    crate::client::adapters::tmux::PanePresence::Missing => {
+                        return Err(format!(
+                            "ROUTE_RESOLVE_NOT_FOUND: tmux pane {native_thread_id} is gone"
+                        ));
+                    }
+                    crate::client::adapters::tmux::PanePresence::Unknown => {
+                        return Err(format!("ROUTE_RESOLVE_UNKNOWN: tmux pane {native_thread_id} liveness is uncertain"));
+                    }
+                }
+            }
+            #[cfg(test)]
+            TransportKind::AppServer => {
+                if requested_tmux_endpoint.is_some() {
+                    return Err(format!(
+                        "ROUTE_RESOLVE_NOT_FOUND: pane {native_thread_id} is not registered with a tmux endpoint"
+                    ));
+                }
+                let candidate = crate::proto::AppServerCandidate {
+                    endpoint: transport.endpoint.ok_or_else(|| {
+                        format!("ROUTE_RESOLVE_INVALID: current route state for thread {native_thread_id} has no endpoint")
+                    })?,
+                    namespace: transport.namespace.ok_or_else(|| {
+                        format!("ROUTE_RESOLVE_INVALID: current route state for thread {native_thread_id} has no namespace")
+                    })?,
+                    session_id: session_id.as_str().to_owned(),
+                    thread_id: native_thread_id.as_str().to_owned(),
+                    cwd: canonical_root.clone(),
+                };
+                (runtime.appserver_candidate_check)(&candidate).map_err(|error| {
+                    format!(
+                        "ROUTE_RESOLVE_INVALID: App Server identity verification failed: {error}"
+                    )
+                })?;
+            }
+            #[cfg(not(test))]
+            TransportKind::AppServer => {
+                return Err(format!(
+                    "TRANSPORT_UNSUPPORTED: App Server route for {native_thread_id} is retired"
+                ));
+            }
+        }
         let route = RouteResolution {
             app_scope_id: binding.app_scope_id,
             project_scope: binding.project_scope,
@@ -2571,14 +2668,16 @@ impl ProjectRuntimeManager {
                 "ROUTE_TRANSITION_INVALID: successful registration for {worker_id} has no session id"
             )
         })?;
-        let current = self
-            .host
-            .state
-            .lock()
-            .unwrap()
-            .global
-            .lookup_current_thread_route(session_id, native_thread_id)
-            .cloned();
+        let current = {
+            let state = self.host.state.lock().unwrap();
+            match binding.tmux_endpoint.as_ref() {
+                Some(endpoint) => state.global.lookup_tmux_route(endpoint),
+                None => state
+                    .global
+                    .lookup_current_thread_route(session_id, native_thread_id),
+            }
+            .cloned()
+        };
         if current.as_ref() == Some(&binding) {
             return Ok(());
         }
@@ -2850,9 +2949,15 @@ impl ProjectRuntimeManager {
             host_paths: self.host.host_paths.clone(),
             state: Mutex::new(state),
             journal: Mutex::new(journal_file),
+            #[cfg(test)]
             appserver_candidate_check: self.host.appserver_candidate_check.clone(),
+            #[cfg(not(test))]
+            tmux_notification_sink: self.host.tmux_notification_sink.clone(),
+            #[cfg(test)]
             appserver_notification_sink: self.host.appserver_notification_sink.clone(),
+            #[cfg(test)]
             appserver_thread_status: self.host.appserver_thread_status.clone(),
+            #[cfg(test)]
             appserver_thread_archive: self.host.appserver_thread_archive.clone(),
             mailbox_notify: Notify::new(),
         });
@@ -3175,7 +3280,7 @@ impl ProjectRuntimeManager {
     ) -> (Arc<Server>, Resp) {
         let Some(context) = project_context else {
             if matches!(req, Req::Ping) {
-                let response = dispatch_with_route_context(&self.host, req, None, None);
+                let response = dispatch_with_route_context(&self.host, req, None);
                 return (self.host.clone(), response);
             }
             return (
@@ -3224,12 +3329,7 @@ impl ProjectRuntimeManager {
                 if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
-                    dispatch_with_route_context(
-                        &runtime,
-                        req,
-                        Some(context.clone()),
-                        Some(self.host.as_ref()),
-                    )
+                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
                 };
             return self.finalize_registration(
                 runtime,
@@ -3267,12 +3367,7 @@ impl ProjectRuntimeManager {
                 if let Err(error) = validate_request_context(&runtime, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
-                    dispatch_with_route_context(
-                        &runtime,
-                        req,
-                        Some(context.clone()),
-                        Some(self.host.as_ref()),
-                    )
+                    dispatch_with_route_context(&runtime, req, Some(context.clone()))
                 };
             return self.finalize_registration(
                 runtime,
@@ -3311,12 +3406,7 @@ impl ProjectRuntimeManager {
                 if let Err(error) = validate_request_context(&self.host, &req, Some(&context)) {
                     Resp::err(error)
                 } else {
-                    dispatch_with_route_context(
-                        &self.host,
-                        req,
-                        Some(context.clone()),
-                        Some(self.host.as_ref()),
-                    )
+                    dispatch_with_route_context(&self.host, req, Some(context.clone()))
                 };
             if !response.ok {
                 return (self.host.clone(), response);
@@ -3378,12 +3468,7 @@ impl ProjectRuntimeManager {
         {
             Resp::err(error)
         } else {
-            dispatch_with_route_context(
-                &runtime,
-                req,
-                Some(context.clone()),
-                Some(self.host.as_ref()),
-            )
+            dispatch_with_route_context(&runtime, req, Some(context.clone()))
         };
         self.finalize_registration(
             runtime,
@@ -3783,7 +3868,7 @@ fn default_direct_message_events(
                     event: "direct-message".into(),
                     subject: None,
                     target: thread_id.into(),
-                    method: "appserver".into(),
+                    method: transport.kind.as_str().into(),
                     trigger_ms: None,
                     trigger_times_ms: Vec::new(),
                     interval_ms: None,
@@ -3800,10 +3885,38 @@ fn default_direct_message_events(
         }
         return events;
     }
-    // An armed default lease with a stale target is never silently rewritten
-    // by re-registration: the transport mismatch must stay visible so an
-    // explicit rebind or recovery decides the new target.
+    // The default lease is system-owned and must follow the registered
+    // transport. Keep an explicit journal transition before replacing a
+    // retired target so upgrades cannot leave the peer permanently unwoken.
     if current_is_armed {
+        let Some(thread_id) = transport.thread_id.as_deref() else {
+            return events;
+        };
+        events.push(Event::NotificationStatus {
+            subscription_id: default_id.clone(),
+            status: "transport-lost".into(),
+            updated_ms: now,
+        });
+        events.push(Event::NotificationSubscribed {
+            subscription: NotificationSubscription {
+                id: default_id,
+                worker_id: worker_id.into(),
+                event: "direct-message".into(),
+                subject: None,
+                target: thread_id.into(),
+                method: transport.kind.as_str().into(),
+                trigger_ms: None,
+                trigger_times_ms: Vec::new(),
+                interval_ms: None,
+                repeat_count: 1,
+                fired_count: 0,
+                expires_ms: now.saturating_add(DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000),
+                status: "armed".into(),
+                created_ms: now,
+                updated_ms: now,
+                status_reason: None,
+            },
+        });
         return events;
     }
     let Some(thread_id) = transport.thread_id.as_deref() else {
@@ -3816,7 +3929,7 @@ fn default_direct_message_events(
             event: "direct-message".into(),
             subject: None,
             target: thread_id.into(),
-            method: "appserver".into(),
+            method: transport.kind.as_str().into(),
             trigger_ms: None,
             trigger_times_ms: Vec::new(),
             interval_ms: None,
@@ -3893,7 +4006,7 @@ fn subscription_matches_transport(
     subscription: &NotificationSubscription,
     transport: &SelectedTransport,
 ) -> bool {
-    subscription.method == "appserver"
+    subscription.method == transport.kind.as_str()
         && transport
             .thread_id
             .as_deref()
@@ -3918,7 +4031,7 @@ pub(crate) fn subscription_matches_transport_by_worker(
             .is_some_and(|worker| selected_transport_for_worker(worker).as_ref() == Some(transport))
 }
 
-fn attempt_appserver_notification_with_at(
+fn attempt_tmux_notification_with_at(
     server: &Server,
     message_id: &str,
     subscription_id: &str,
@@ -3937,7 +4050,7 @@ fn attempt_appserver_notification_with_at(
         bool,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
-    attempt_appserver_notification_with_retry(
+    attempt_tmux_notification_with_retry(
         server,
         message_id,
         subscription_id,
@@ -3953,7 +4066,7 @@ fn attempt_appserver_notification_with_at(
     )
 }
 
-fn attempt_appserver_notification_with_retry(
+fn attempt_tmux_notification_with_retry(
     server: &Server,
     message_id: &str,
     subscription_id: &str,
@@ -3997,7 +4110,7 @@ fn attempt_appserver_notification_with_retry(
         || !subscription_matches_transport(subscription, transport)
     {
         return NotificationAttempt::NotAttempted(
-            "subscription does not match the selected App Server transport".into(),
+            "subscription does not match the selected tmux transport".into(),
         );
     }
     let mut batch = state
@@ -4100,7 +4213,7 @@ fn attempt_appserver_notification_with_retry(
             append_log(
                 &server.log_path(),
                 &format!(
-                    "APPSERVER_NOTIFICATION_ACCEPTED recipient={recipient} message={} explicit={explicit} receipt={receipt}",
+                    "TMUX_WAKE_SUBMITTED recipient={recipient} message={} explicit={explicit} receipt={receipt}",
                     seed_id
                 ),
             );
@@ -4113,6 +4226,7 @@ fn attempt_appserver_notification_with_retry(
                     .map(|message| Event::NotificationDeliveryAccepted {
                         message_id: message.1.clone(),
                         accepted_ms,
+                        evidence: Some(receipt.clone()),
                     })
                     .collect::<Vec<_>>(),
             );
@@ -4122,7 +4236,7 @@ fn attempt_appserver_notification_with_retry(
             append_log(
                 &server.log_path(),
                 &format!(
-                    "APPSERVER_NOTIFICATION_REJECTED recipient={recipient} message={} error={error}",
+                    "TMUX_WAKE_FAILED recipient={recipient} message={} error={error}",
                     seed_id
                 ),
             );
@@ -4138,12 +4252,25 @@ fn attempt_appserver_notification_with_retry(
                     },
                     error: error.clone(),
                     failed_ms: now,
-                    retryable: matches!(
-                        crate::client::adapters::AdapterError::notification_class_from_display(
-                            &error
-                        ),
-                        crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
-                    ),
+                    retryable: {
+                        #[cfg(test)]
+                        {
+                            matches!(
+                                crate::client::adapters::AdapterError::notification_class_from_display(
+                                    &error
+                                ),
+                                crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
+                            )
+                        }
+                        #[cfg(not(test))]
+                        {
+                            // Production wake transport is tmux. Its command
+                            // errors can be ambiguous after text submission, so
+                            // never classify them using retired AppServer error
+                            // prefixes or retry them automatically.
+                            false
+                        }
+                    },
                 }],
             );
             NotificationAttempt::Rejected(error)
@@ -4236,15 +4363,14 @@ fn attempt_notification_detailed_with_mode_at(
                     Event::NotificationDeliveryFailed {
                         message_id: message_id.to_string(),
                         operation: "notification.not_attempted".into(),
-                        error: "subscription does not match the selected App Server transport"
-                            .into(),
+                        error: "subscription does not match the selected tmux transport".into(),
                         failed_ms: now,
                         retryable: true,
                     },
                 ],
             );
             return NotificationAttempt::NotAttempted(
-                "subscription does not match the selected App Server transport".into(),
+                "subscription does not match the selected tmux transport".into(),
             );
         }
         let source_thread_id = state
@@ -4261,7 +4387,7 @@ fn attempt_notification_detailed_with_mode_at(
         let explicit = is_explicit_notification(&state, seed);
         (recipient, transport, source_thread_id, delay, explicit)
     };
-    let attempt = attempt_appserver_notification_with_at(
+    let attempt = attempt_tmux_notification_with_at(
         server,
         message_id,
         subscription_id,
@@ -4273,13 +4399,7 @@ fn attempt_notification_detailed_with_mode_at(
         now,
         explicit_retry,
         &|transport, source_thread_id, text, message_id, explicit| {
-            (server.appserver_notification_sink)(
-                transport,
-                source_thread_id,
-                text,
-                message_id,
-                explicit,
-            )
+            (notification_sink(server))(transport, source_thread_id, text, message_id, explicit)
         },
     );
     if let NotificationAttempt::NotAttempted(error) = &attempt {
@@ -4359,7 +4479,8 @@ fn notification_send_response(
     match notification {
         NotificationAttempt::Accepted => {
             data["durable"] = json!(true);
-            data["notification"] = json!("sent");
+            data["notification"] = json!("tmux-input-submitted");
+            data["consumed"] = json!(false);
             Resp::data(data)
         }
         NotificationAttempt::Rejected(error) => {
@@ -4369,9 +4490,9 @@ fn notification_send_response(
             data["failure"] = json!("notification_delivery_failed");
             data["repair_required"] = json!(true);
             data["escalation"] = json!(
-                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected transport, then retry explicitly"
+                "the message is durable but this tmux wake has an ambiguous paste/Enter outcome; do not retry this wake, have the recipient run collab recv, and send a new message if another wake is needed"
             );
-            Resp::err_data(format!("APPSERVER_NOTIFICATION_REJECTED: {error}"), data)
+            Resp::err_data(format!("TMUX_NOTIFICATION_REJECTED: {error}"), data)
         }
         NotificationAttempt::NotAttempted(error) => {
             data["durable"] = json!(true);
@@ -4380,9 +4501,9 @@ fn notification_send_response(
             data["failure"] = json!("notification_delivery_failed");
             data["repair_required"] = json!(true);
             data["escalation"] = json!(
-                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected transport, then retry explicitly"
+                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected tmux transport, then retry explicitly"
             );
-            Resp::err_data(format!("APPSERVER_NOTIFICATION_REJECTED: {error}"), data)
+            Resp::err_data(format!("TMUX_NOTIFICATION_REJECTED: {error}"), data)
         }
     }
 }
@@ -4472,7 +4593,7 @@ fn attempt_scheduler_notification(
         clear_scheduler_notification_claim(server, request_id, claim_ms);
         return SchedulerNotificationAttempt::Rejected;
     };
-    let notified = attempt_appserver_notification_with_retry(
+    let notified = attempt_tmux_notification_with_retry(
         server,
         message_id,
         subscription_id,
@@ -4485,13 +4606,7 @@ fn attempt_scheduler_notification(
         allow_retry,
         false,
         &|transport, source_thread_id, text, message_id, explicit| {
-            (server.appserver_notification_sink)(
-                transport,
-                source_thread_id,
-                text,
-                message_id,
-                explicit,
-            )
+            (notification_sink(server))(transport, source_thread_id, text, message_id, explicit)
         },
     );
     if notified.accepted() {
@@ -4586,6 +4701,7 @@ mod notification_batch_tests {
                         namespace: Some(candidate.namespace.clone()),
                         session_id: Some(candidate.session_id.clone()),
                         thread_id: Some(candidate.thread_id.clone()),
+                        tmux_endpoint: None,
                         capabilities: vec!["send_message_to_thread".into()],
                         self_check: "test appserver".into(),
                     })
@@ -4627,6 +4743,7 @@ mod notification_batch_tests {
                         namespace: Some("codex_tui".into()),
                         session_id: Some(format!("session-{worker_id}")),
                         thread_id: Some(format!("thread-{worker_id}")),
+                        tmux_endpoint: None,
                         capabilities: vec!["send_message_to_thread".into()],
                         self_check: "test appserver".into(),
                     }),
@@ -4779,13 +4896,14 @@ mod notification_batch_tests {
     }
 
     #[test]
-    fn default_notification_sink_requires_sender_thread_only_for_explicit_delivery() {
+    fn default_notification_sink_rejects_retired_appserver_transport() {
         let transport = SelectedTransport {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
             namespace: Some("codex_tui".into()),
             session_id: Some("session-thread-recipient".into()),
             thread_id: Some("thread-recipient".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "test appserver".into(),
         };
@@ -4793,7 +4911,7 @@ mod notification_batch_tests {
         let error = sink(&transport, None, "explicit", "message-explicit", true).unwrap_err();
         assert_eq!(
             error,
-            "explicit App Server notification requires the sender native thread id"
+            "TRANSPORT_UNSUPPORTED: Collab notifications require tmux"
         );
     }
 
@@ -5104,7 +5222,7 @@ pub(crate) fn attempt_notification_with_default(
         let explicit = is_explicit_notification(&state, seed);
         (recipient, transport, source_thread_id, delay, explicit)
     };
-    attempt_appserver_notification_with_at(
+    attempt_tmux_notification_with_at(
         server,
         message_id,
         subscription_id,
@@ -5212,6 +5330,16 @@ fn handle_notification_subscribe(
             });
         }
     }
+    let Some(worker) = state.workers.get(&worker_id).cloned() else {
+        return Resp::err("notification subscription requires a registered worker");
+    };
+    let Some(transport) = selected_transport_for_worker(&worker) else {
+        return Resp::err("registered worker has no server-selected transport");
+    };
+    let Some(thread_id) = transport.thread_id.clone() else {
+        return Resp::err("selected transport has no route address");
+    };
+    let target = thread_id;
     if goal_deadline {
         let requested_key = trigger_ms
             .or_else(|| trigger_times_ms.first().copied())
@@ -5220,7 +5348,7 @@ fn handle_notification_subscribe(
                     .clone()
                     .map(|subject| (worker_id.clone(), subject, trigger))
             });
-        if let Some(existing) = state
+        if let Some(mut existing) = state
             .notification_subscriptions
             .values()
             .filter(|subscription| {
@@ -5231,6 +5359,17 @@ fn handle_notification_subscribe(
             .min_by_key(|subscription| (subscription.created_ms, subscription.id.clone()))
             .cloned()
         {
+            if existing.method != transport.kind.as_str() || existing.target != target {
+                existing.method = transport.kind.as_str().into();
+                existing.target = target.clone();
+                existing.updated_ms = now;
+                server.commit_locked(
+                    &mut state,
+                    &[Event::NotificationSubscribed {
+                        subscription: existing.clone(),
+                    }],
+                );
+            }
             return Resp::data(json!({
                 "subscription": existing,
                 "one_shot": true,
@@ -5239,16 +5378,6 @@ fn handle_notification_subscribe(
             }));
         }
     }
-    let Some(worker) = state.workers.get(&worker_id).cloned() else {
-        return Resp::err("notification subscription requires a registered worker");
-    };
-    let Some(transport) = selected_transport_for_worker(&worker) else {
-        return Resp::err("registered worker has no server-selected transport");
-    };
-    let Some(thread_id) = transport.thread_id.clone() else {
-        return Resp::err("selected App Server transport has no thread_id");
-    };
-    let target = thread_id;
     let active = state
         .notification_subscriptions
         .values()
@@ -5316,7 +5445,7 @@ fn handle_notification_subscribe(
         event,
         subject,
         target,
-        method: "appserver".into(),
+        method: transport.kind.as_str().into(),
         trigger_ms,
         trigger_times_ms,
         interval_ms,
@@ -5415,7 +5544,7 @@ fn migration_issues(server: &Server, state: &State) -> Vec<String> {
             IdentityPresence::Present => {}
             IdentityPresence::Cold => {}
             IdentityPresence::Missing => issues.push(format!(
-                "worker {} has no live server-verified App Server transport",
+                "worker {} has no live registered tmux pane",
                 worker.id
             )),
             IdentityPresence::Unknown => issues.push(format!(
@@ -5712,7 +5841,7 @@ fn handle_migration_apply(server: &Server, worker_id: String, token: String) -> 
     Resp::data(json!({
         "migration": migration,
         "admission_frozen": true,
-        "next": "upgrade/restart the single daemon, rebind existing App Server identities, then run collab migrate verify",
+        "next": "upgrade/restart the single daemon, re-register existing peers from their current tmux panes, then run collab migrate verify",
     }))
 }
 
@@ -5846,7 +5975,7 @@ fn register_typed(
             }
         }
         (None, None) => {
-            Err("collab registration requires an app scope for an App Server transport".into())
+            Err("collab registration requires an app scope for a tmux transport".into())
         }
     };
     match typed {
@@ -6024,6 +6153,7 @@ pub(crate) fn retire_runtime_binding_after_route_failure(
     let mut retired = binding;
     retired.endpoint_generation = next_generation;
     retired.native_thread_id = None;
+    retired.tmux_endpoint = None;
     runtime
         .commit_checked(&[
             Event::GlobalRuntimeBound { binding: retired },
@@ -6081,15 +6211,13 @@ fn handle_register_with_app_scope_inner(
     recover_existing: bool,
 ) -> Resp {
     let candidates = candidates.unwrap_or_default();
-    let selected = match validate_transport_candidates(server, &worker_id, &candidates, &cwd) {
+    let selected = match validate_transport_candidates(server, &candidates, &cwd) {
         Ok(selected) => selected,
         Err(error) => return Resp::err(error),
     };
     let st = server.state.lock().unwrap();
     if st.admission_frozen() && !st.workers.contains_key(&worker_id) {
-        return Resp::err(
-            "MIGRATION_ADMISSION_FROZEN: only an existing App Server identity may rebind",
-        );
+        return Resp::err("MIGRATION_ADMISSION_FROZEN: only an existing identity may rebind");
     }
     if let Some(existing) = st.workers.get(&worker_id).cloned() {
         let existing_route_scope = match existing_route_scope(&st, &worker_id) {
@@ -6125,17 +6253,48 @@ fn handle_register_with_app_scope_inner(
                             .native_thread_id
                             .as_ref()
                             .map(|thread| thread.as_str().to_owned()),
+                        binding.tmux_endpoint.clone(),
                     )
                 })
         });
-        let same_runtime_key = existing_key.as_ref().is_some_and(|(session, thread)| {
-            session.as_deref() == selected.session_id.as_deref()
-                && thread.as_deref() == selected.thread_id.as_deref()
-        });
+        let same_runtime_key = existing_key
+            .as_ref()
+            .is_some_and(|(session, thread, endpoint)| {
+                session.as_deref() == selected.session_id.as_deref()
+                    && thread.as_deref() == selected.thread_id.as_deref()
+                    && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
+            });
         let same_thread = existing_key
             .as_ref()
-            .and_then(|(_, thread)| thread.as_deref())
+            .and_then(|(_, thread, _)| thread.as_deref())
             == selected.thread_id.as_deref();
+        if !same_runtime_key {
+            let binding_id =
+                match BindingId::new(sanitize_identifier(&format!("binding-{worker_id}"))) {
+                    Ok(binding_id) => binding_id,
+                    Err(error) => return Resp::err(error.to_string()),
+                };
+            let is_master_binding = existing_route_scope.as_ref().is_some_and(|route| {
+                st.global
+                    .lookup_master_grant_for(route, &binding_id)
+                    .is_some()
+            });
+            if is_master_binding {
+                match live_master_id(server, &st) {
+                    Ok(None) => {}
+                    Ok(Some(live_master)) => {
+                        return Resp::err(format!(
+                            "MASTER_RECOVERY_BLOCKED_LIVE: live master {live_master} exists; do not auto-recover or promote another identity"
+                        ));
+                    }
+                    Err(error) => {
+                        return Resp::err(format!(
+                            "MASTER_RECOVERY_BLOCKED_UNKNOWN: {error}; do not auto-recover or promote"
+                        ));
+                    }
+                }
+            }
+        }
         if existing.token != token && (!recover_existing || !same_thread) {
             return Resp::err(format!(
                 "worker_id {} already registered by another token",
@@ -6447,41 +6606,26 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
     })
 }
 
-fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
+fn worker_identity_presence(_server: &Server, worker: &WorkerRec) -> IdentityPresence {
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
     };
-    let (Some(endpoint), Some(namespace), Some(session_id), Some(thread_id)) = (
-        transport.endpoint,
-        transport.namespace,
-        transport.session_id,
-        transport.thread_id,
-    ) else {
-        return IdentityPresence::Missing;
-    };
-    let candidate = crate::proto::AppServerCandidate {
-        endpoint,
-        namespace,
-        session_id,
-        thread_id,
-        cwd: worker.cwd.clone(),
-    };
-    match (server.appserver_candidate_check)(&candidate) {
-        Ok(_) => IdentityPresence::Present,
-        Err(error) => {
-            // A positively unavailable route is a dead transport.  Timeouts,
-            // protocol failures, and all other inconclusive errors must not
-            // authorize orphan cleanup or authority changes.
-            if error.starts_with("ADAPTER_ROUTE_UNAVAILABLE:") {
-                IdentityPresence::Missing
-            } else {
+    if transport.kind == TransportKind::Tmux {
+        let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+            return IdentityPresence::Missing;
+        };
+        return match crate::client::adapters::tmux::probe(endpoint) {
+            Ok(crate::client::adapters::tmux::PanePresence::Present) => IdentityPresence::Present,
+            Ok(crate::client::adapters::tmux::PanePresence::Missing) => IdentityPresence::Missing,
+            Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
                 IdentityPresence::Unknown
             }
-        }
+        };
     }
+    IdentityPresence::Unknown
 }
 
-fn merge_appserver_presence(
+fn merge_transport_presence(
     identity_presence: IdentityPresence,
     status_presence: IdentityPresence,
 ) -> IdentityPresence {
@@ -6495,19 +6639,15 @@ fn worker_presence_with_view(
     server: &Server,
     worker: &WorkerRec,
 ) -> (IdentityPresence, serde_json::Value) {
-    if !worker
-        .transport
-        .as_ref()
-        .is_some_and(|transport| transport.kind == TransportKind::AppServer)
-    {
+    if worker.transport.is_none() {
         return (
             worker_identity_presence(server, worker),
             serde_json::Value::Null,
         );
     }
     let identity_presence = worker_identity_presence(server, worker);
-    let (status_presence, agent_view, _) = appserver_agent_view(server, worker);
-    let presence = merge_appserver_presence(identity_presence, status_presence);
+    let (status_presence, agent_view, _) = transport_agent_view(server, worker);
+    let presence = merge_transport_presence(identity_presence, status_presence);
     let presence = match (
         presence,
         agent_view
@@ -6528,8 +6668,8 @@ pub(crate) fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPr
     worker_presence_with_view(server, worker).0
 }
 
-fn appserver_agent_view(
-    server: &Server,
+fn transport_agent_view(
+    _server: &Server,
     worker: &WorkerRec,
 ) -> (IdentityPresence, serde_json::Value, serde_json::Value) {
     let Some(transport) = selected_transport_for_worker(worker) else {
@@ -6539,90 +6679,58 @@ fn appserver_agent_view(
             serde_json::Value::Null,
         );
     };
-    let Some(thread_id) = transport.thread_id.as_deref() else {
-        return (
-            IdentityPresence::Missing,
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-        );
-    };
-    let raw = match (server.appserver_thread_status)(&transport, thread_id) {
-        Ok(raw) => raw,
-        Err(error) if error.starts_with("ADAPTER_ROUTE_UNAVAILABLE:") => {
+    if transport.kind == TransportKind::Tmux {
+        let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
             return (
                 IdentityPresence::Missing,
+                serde_json::json!({"transport": "tmux", "error": "TMUX_ENDPOINT_MISSING"}),
                 serde_json::Value::Null,
-                serde_json::Value::Null,
-            )
-        }
-        Err(_) => {
-            return (
+            );
+        };
+        let presence = match crate::client::adapters::tmux::probe(endpoint) {
+            Ok(crate::client::adapters::tmux::PanePresence::Present) => IdentityPresence::Present,
+            Ok(crate::client::adapters::tmux::PanePresence::Missing) => IdentityPresence::Missing,
+            Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
+                return (
+                    IdentityPresence::Unknown,
+                    serde_json::json!({"transport": "tmux", "thread_state": "unknown"}),
+                    serde_json::Value::Null,
+                );
+            }
+        };
+        return match crate::client::adapters::tmux::view(endpoint) {
+            Ok(view) => (
+                presence,
+                serde_json::json!({
+                    "thread_state": view.get("thread_state").cloned().unwrap_or(serde_json::Value::String("unknown".into())),
+                    "active_flags": [],
+                    "can_accept_direct_input": view.pointer("/thread/canAcceptDirectInput").cloned().unwrap_or(serde_json::Value::Bool(false)),
+                    "latest_turn_status": view.pointer("/thread/turns/0/status").cloned().unwrap_or(serde_json::Value::Null),
+                    "latest_turn_error": null,
+                    "transport": "tmux",
+                    "pane_output_changed": view.get("pane_output_changed").cloned().unwrap_or(serde_json::Value::Bool(false)),
+                }),
+                view,
+            ),
+            Err(error) => (
                 IdentityPresence::Unknown,
+                serde_json::json!({"transport": "tmux", "thread_state": "unknown", "error": error}),
                 serde_json::Value::Null,
-                serde_json::Value::Null,
-            )
-        }
-    };
-    let Some(thread) = raw.get("thread") else {
-        return (
-            IdentityPresence::Unknown,
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-        );
-    };
-    let Some(status) = thread.get("status").and_then(serde_json::Value::as_object) else {
-        return (
-            IdentityPresence::Unknown,
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-        );
-    };
-    let Some(thread_state) = status.get("type").and_then(serde_json::Value::as_str) else {
-        return (
-            IdentityPresence::Unknown,
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-        );
-    };
-    let active_flags = status
-        .get("activeFlags")
-        .and_then(serde_json::Value::as_array)
-        .map(|flags| {
-            flags
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let can_accept_direct_input = thread
-        .get("canAcceptDirectInput")
-        .and_then(serde_json::Value::as_bool);
-    let latest_turn_status = thread
-        .get("turns")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|turns| turns.first())
-        .and_then(|turn| turn.get("status"))
-        .and_then(serde_json::Value::as_str);
-    let latest_turn_error = thread
-        .get("turn_status_error")
-        .and_then(serde_json::Value::as_str);
+            ),
+        };
+    }
     (
-        IdentityPresence::Present,
-        serde_json::json!({
-            "thread_state": thread_state,
-            "active_flags": active_flags,
-            "can_accept_direct_input": can_accept_direct_input,
-            "latest_turn_status": latest_turn_status,
-            "latest_turn_error": latest_turn_error,
-        }),
-        raw,
+        IdentityPresence::Unknown,
+        serde_json::json!({"transport": "unsupported", "thread_state": "unknown", "error": "TRANSPORT_UNSUPPORTED"}),
+        serde_json::Value::Null,
     )
 }
 
-/// Decide whether a new managed child would starve an already registered peer.
-/// The caller must use the returned peer for the scope before creating a child.
-pub(crate) fn registered_idle_peer_for_admission(
+/// Pick a live registered peer without assigning work the peer already owns.
+/// Tmux output can report idle as unknown before its observation window elapses;
+/// the user-input conflict is outside this transport contract, so liveness is
+/// the admission condition and pane state remains observational.
+pub(crate) fn registered_available_peer_for_admission(
     server: &Server,
     requester: &str,
 ) -> Option<(String, String)> {
@@ -6649,23 +6757,7 @@ pub(crate) fn registered_idle_peer_for_admission(
 
     let probed: Vec<WorkerRec> = candidates
         .into_iter()
-        .filter(|worker| {
-            if !matches!(worker_presence(server, worker), IdentityPresence::Present) {
-                return false;
-            }
-            if !worker
-                .transport
-                .as_ref()
-                .is_some_and(|transport| transport.kind == TransportKind::AppServer)
-            {
-                return true;
-            }
-            let (_, agent_view, _) = appserver_agent_view(server, worker);
-            agent_view
-                .get("can_accept_direct_input")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
+        .filter(|worker| matches!(worker_presence(server, worker), IdentityPresence::Present))
         .collect();
 
     let state = server.state.lock().unwrap();
@@ -6684,10 +6776,7 @@ pub(crate) fn registered_idle_peer_for_admission(
                 .values()
                 .any(|task| task.owner == worker.id && task_resource_active(&task.status))
         {
-            return Some((
-                worker.id,
-                "live registered peer is idle, owned, and has no actionable task".into(),
-            ));
+            return Some((worker.id, "live registered peer has no active task".into()));
         }
     }
     None
@@ -6842,7 +6931,7 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
                 worker
                     .transport
                     .as_ref()
-                    .is_some_and(|transport| transport.kind == TransportKind::AppServer)
+                    .is_some_and(|transport| transport.kind == TransportKind::Tmux)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -6924,7 +7013,7 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
                             }),
                             body: if offline {
                                 format!(
-                                    "Worker {} changed from online to offline. Action required: run snapshot if owned work is blocked, inspect tasks, and reassign or close stale work with evidence.",
+                                    "Worker {} changed from online to offline. Action required: inspect its durable tasks with `collab task status` and mailbox with `collab inbox`; reassign or close stale work only with evidence.",
                                     worker.id
                                 )
                             } else {
@@ -6952,99 +7041,21 @@ fn record_ordinary_peer_presence_edges(server: &Server, worker_filter: Option<&s
     }
 }
 
-/// Admit a Start request to an already registered idle peer when the caller is
-/// the live master. This is shared by the daemon dispatch path and the direct
-/// subagent handler so neither entry point can bypass scheduler admission.
-pub(crate) fn scheduler_admit_subagent_start(
-    server: &Server,
-    worker_id: &str,
-    token: &str,
-    requested_id: Option<&str>,
-    requested_runtime: Option<&str>,
-) -> Result<Option<Resp>, Resp> {
-    if requested_id.is_some_and(|id| !crate::subagent::valid_id(id))
-        || requested_runtime.is_some_and(|runtime| !crate::subagent::valid_runtime(runtime))
-    {
-        return Ok(None);
-    }
-    let authenticated = {
-        let state = server.state.lock().unwrap();
-        verify(&state, worker_id, token).is_ok()
-    };
-    if !authenticated {
-        return Ok(None);
-    }
-
-    if requested_id.is_some() {
-        return Ok(None);
-    }
-
-    // Snapshot the master identity, then probe outside the state mutex for the
-    // same reason as registered_idle_peer_for_admission.
-    let master = {
-        let state = server.state.lock().unwrap();
-        let route_scope = match server_route_scope(server, &state) {
-            Ok(route_scope) => route_scope,
-            Err(error) => {
-                return Err(Resp::err(format!(
-                    "scheduler admission requires a unique route scope: {error}"
-                )))
-            }
-        };
-        current_master_worker_id(&state, route_scope.as_ref())
-            .as_ref()
-            .and_then(|id| state.workers.get(id))
-            .cloned()
-    };
-    let Some(master) = master else {
-        return Ok(None);
-    };
-    if master.id != worker_id || worker_presence(server, &master) != IdentityPresence::Present {
-        return Ok(None);
-    }
-
-    let (decision, peer_id, managed_subagent_id, reason) =
-        if let Some((peer_id, reason)) = registered_idle_peer_for_admission(server, worker_id) {
-            ("use-registered-peer", peer_id, None, reason)
-        } else if let Some((id, peer_id, reason)) =
-            idle_managed_subagent_for_admission(server, worker_id)
-        {
-            ("reuse-idle-managed-subagent", peer_id, Some(id), reason)
-        } else {
-            let live_managed = live_managed_subagent_count(server, worker_id);
-            let cap = server.config.subagent.max_concurrent as usize;
-            if live_managed < cap {
-                let admission = json!({
-                    "decision": "create-managed-subagent",
-                    "managed_subagent_id": serde_json::Value::Null,
-                    "reason": "no eligible live registered peer or idle managed subagent capacity",
-                });
-                record_scheduler_admission(server, admission)?;
-                return Ok(None);
-            }
-            return Err(Resp::err(
-                "no eligible live registered peer or idle managed subagent capacity",
-            ));
-        };
-    let managed_subagent = managed_subagent_id
-        .as_ref()
-        .map(|id| json!({"id": id, "worker_id": peer_id}))
-        .unwrap_or(serde_json::Value::Null);
-    let admission = json!({
-        "decision": decision,
-        "worker_id": peer_id,
-        "managed_subagent_id": managed_subagent_id,
-        "reason": reason,
-    });
-    record_scheduler_admission(server, admission.clone())?;
-    Ok(Some(Resp::data(json!({
-        "admission": admission,
-        "managed_subagent": managed_subagent,
-    }))))
-}
-
 fn record_scheduler_admission(server: &Server, admission: serde_json::Value) -> Result<(), Resp> {
     ensure_scheduler_admission_audit(server, &admission).map(|_| ())
+}
+
+#[cfg(test)]
+fn scheduler_admit_subagent_start(
+    _server: &Server,
+    _worker_id: &str,
+    _token: &str,
+    _requested_id: Option<&str>,
+    _requested_runtime: Option<&str>,
+) -> Result<Option<Resp>, Resp> {
+    Err(Resp::err(
+        "MANAGED_SUBAGENT_UNSUPPORTED: start a peer in its own tmux pane",
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7500,7 +7511,7 @@ pub(crate) fn handle_scheduler_dispatch(
         if let Some(response) = scheduler_dispatch_deduplicated(server, &worker_id, &request_id) {
             return response;
         }
-        let candidate = registered_idle_peer_for_admission(server, &worker_id)
+        let candidate = registered_available_peer_for_admission(server, &worker_id)
             .map(|(peer, reason)| (peer, None, reason, "use-registered-peer"))
             .or_else(|| {
                 idle_managed_subagent_for_admission(server, &worker_id).map(
@@ -7522,16 +7533,8 @@ pub(crate) fn handle_scheduler_dispatch(
             {
                 return response;
             }
-            let live_managed = live_managed_subagent_count(server, &worker_id);
-            let cap = server.config.subagent.max_concurrent as usize;
-            if live_managed < cap {
-                return Resp::data(json!({
-                    "decision": "create-managed-subagent",
-                    "reason": "no eligible live registered peer or idle managed subagent capacity",
-                }));
-            }
             return Resp::err(
-                "scheduler dispatch has no eligible live peer or idle managed subagent capacity",
+                "MANAGED_SUBAGENT_UNSUPPORTED: no live registered tmux peer is available for dispatch",
             );
         };
 
@@ -7958,55 +7961,20 @@ fn handle_worker_snapshot(
     target_id: String,
     lines: usize,
 ) -> Resp {
-    let (transport, thread_id) = {
-        let state = server.state.lock().unwrap();
-        if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
-            return error;
-        }
-        let Some(target) = state.workers.get(&target_id) else {
-            return Resp::err(format!("target worker {} not registered", target_id));
-        };
-        let Some(transport) = target.transport.clone() else {
-            return Resp::err(format!("worker {} has no registered transport", target_id));
-        };
-        let Some(thread_id) = transport.thread_id.clone() else {
-            return Resp::err(format!(
-                "worker {} has no bound App Server thread; snapshot evidence is unavailable",
-                target_id
-            ));
-        };
-        (transport, thread_id)
+    let state = server.state.lock().unwrap();
+    if let Err(error) = verify_master_actor(server, &state, &worker_id, &token) {
+        return error;
+    }
+    let Some(target) = state.workers.get(&target_id) else {
+        return Resp::err(format!("target worker {} not registered", target_id));
     };
+    if target.transport.is_none() {
+        return Resp::err(format!("worker {} has no registered transport", target_id));
+    }
     if !(1..=200).contains(&lines) {
         return Resp::err("snapshot lines must be 1..200");
     }
-    let items = match crate::client::adapters::codex_app_server::read_thread_items(
-        &transport, &thread_id, lines,
-    ) {
-        Ok(items) => items,
-        Err(error) => return Resp::err(error.to_string()),
-    };
-    let text = match serde_json::to_string_pretty(&items) {
-        Ok(text) => text,
-        Err(error) => return Resp::err(format!("serialize worker snapshot: {error}")),
-    };
-    let tail: Vec<_> = text.lines().rev().take(lines).collect();
-    let captured_ms = now_ms();
-    if let Err(error) = server.commit_checked(&[Event::WorkerSnapshotCaptured {
-        worker_id: target_id.clone(),
-        thread_id: thread_id.clone(),
-        captured_ms,
-    }]) {
-        return Resp::err(format!("worker snapshot receipt journal failure: {error}"));
-    }
-    Resp::data(json!({
-        "worker_id": target_id,
-        "captured_ms": captured_ms,
-        "thread_id": thread_id,
-        "snapshot_receipt": true,
-        "items": items,
-        "text_tail": tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-    }))
+    Resp::err("WORKER_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the worker's durable mailbox and task state")
 }
 
 fn master_assignment_view(
@@ -10373,6 +10341,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             "endpoint": transport.endpoint,
             "namespace": transport.namespace,
             "thread_id": transport.thread_id,
+            "tmux_endpoint": transport.tmux_endpoint,
             "self_check": transport.self_check,
         })
     });
@@ -10479,7 +10448,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         "master": master,
         "recorded_unusable": recorded_unusable,
         "authority": authority,
-        "truth": "server journal, mailbox, and live App Server probes; context is read-only",
+        "truth": "server journal, mailbox, and live transport probes; context is read-only",
     }))
 }
 
@@ -10775,73 +10744,21 @@ fn worker_status_summary_with_maps(
     let active = tasks
         .values()
         .find(|task| task.owner == w.id && !matches!(task.status.as_str(), "closed" | "cancelled"));
-    let is_appserver = w
-        .transport
-        .as_ref()
-        .is_some_and(|transport| transport.kind == TransportKind::AppServer);
-    let (presence, endpoint_live, ownership, identity_valid, agent_state, appserver) =
-        if is_appserver {
-            let (presence, agent_view) = worker_presence_with_view(server, w);
-            let endpoint_live = presence == IdentityPresence::Present;
-            let ownership = endpoint_live.then_some(Ok(true));
-            // Identity validity is proven by the binding itself, which a cold
-            // peer still carries; it must not be conflated with residency.
-            let identity_valid =
-                matches!(presence, IdentityPresence::Present | IdentityPresence::Cold);
-            let thread_state = agent_view
-                .get("thread_state")
-                .and_then(serde_json::Value::as_str);
-            let active_flags = agent_view
-                .get("active_flags")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let agent_state = match (presence, thread_state) {
-                // A verified identity whose thread is cold on this endpoint.
-                (IdentityPresence::Cold, Some("notLoaded")) => "not_loaded",
-                (IdentityPresence::Missing, Some("systemError")) => "system_error",
-                (IdentityPresence::Missing, Some("notLoaded")) => "not_loaded",
-                (IdentityPresence::Missing, _) => "absent",
-                (IdentityPresence::Unknown, _) => "unknown",
-                (IdentityPresence::Present, Some("active"))
-                    if active_flags.iter().any(|flag| flag == "waitingOnApproval") =>
-                {
-                    "waiting_approval"
-                }
-                (IdentityPresence::Present, Some("active"))
-                    if active_flags.iter().any(|flag| flag == "waitingOnUserInput") =>
-                {
-                    "waiting_input"
-                }
-                (IdentityPresence::Present, Some("active")) => "working",
-                (IdentityPresence::Present, Some("idle")) => "idle",
-                (IdentityPresence::Present, Some("systemError")) => "system_error",
-                (IdentityPresence::Present, Some("notLoaded")) => "not_loaded",
-                _ => "unknown",
-            };
-            (
-                presence,
-                endpoint_live,
-                ownership,
-                identity_valid,
-                agent_state,
-                agent_view,
-            )
-        } else {
-            let presence = worker_presence(server, w);
-            let endpoint_live = presence == IdentityPresence::Present;
-            let ownership = None;
-            let identity_valid = false;
-            let agent_state = "absent";
-            (
-                presence,
-                endpoint_live,
-                ownership,
-                identity_valid,
-                agent_state,
-                serde_json::Value::Null,
-            )
-        };
+    let (presence, transport_view) = worker_presence_with_view(server, w);
+    let endpoint_live = presence == IdentityPresence::Present;
+    let identity_valid = matches!(presence, IdentityPresence::Present | IdentityPresence::Cold);
+    let thread_state = transport_view
+        .get("thread_state")
+        .and_then(serde_json::Value::as_str);
+    let agent_state = match (presence, thread_state) {
+        (IdentityPresence::Missing, _) => "absent",
+        (IdentityPresence::Unknown, _) => "unknown",
+        (IdentityPresence::Cold, _) => "cold",
+        (IdentityPresence::Present, Some("idle")) => "idle",
+        (IdentityPresence::Present, Some("working")) => "working",
+        (IdentityPresence::Present, Some("active")) => "working",
+        _ => "unknown",
+    };
     let unacked_notifications = msgs
         .values()
         .filter(|m| m.to == w.id && m.state == "delivered")
@@ -10868,11 +10785,9 @@ fn worker_status_summary_with_maps(
     let diagnostic = if status == "unknown" {
         None
     } else if status == "lost" {
-        Some("registered transport is not live; verify App Server route or thread")
+        Some("registered transport is not live; verify the tmux pane binding")
     } else if status == "identity-mismatch" {
-        Some("selected transport is not live or owned by a different identity; verify route")
-    } else if suspected_offline {
-        Some("unresponsive; run snapshot: collab subagent snapshot <id> --lines 40")
+        Some("selected transport does not prove the registered identity; verify its binding")
     } else {
         None
     };
@@ -10896,9 +10811,9 @@ fn worker_status_summary_with_maps(
             IdentityPresence::Unknown => "unknown",
         },
         "endpoint_live": (presence != IdentityPresence::Unknown).then_some(endpoint_live),
-        "identity_valid": (presence != IdentityPresence::Unknown && ownership != Some(Err(()))).then_some(identity_valid),
+        "identity_valid": (presence != IdentityPresence::Unknown).then_some(identity_valid),
         "agent_state": agent_state,
-        "appserver": appserver,
+        "transport_view": transport_view,
         "unacked_notifications": unacked_notifications,
         "pending_notifications": pending_notifications,
         "notifications_paused": notifications_paused,
@@ -11212,15 +11127,18 @@ fn validate_cli_register_rebind(
         let persisted_worker = state.workers.get(worker_id);
         orphan_recovery = persisted_worker.is_none();
         if persisted_worker.is_some_and(|worker| worker.token != token) {
-            let Some(candidate) = candidates
-                .as_ref()
-                .and_then(|candidates| candidates.appserver.as_ref())
-            else {
+            let Some(candidates) = candidates.as_ref() else {
                 return Err(
-                    "RUNTIME_BINDING_REJECTED: CLI rebind requires an App Server candidate"
+                    "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane"
                         .to_owned(),
                 );
             };
+            if candidates.appserver.is_some() {
+                return Err(
+                    "TRANSPORT_UNSUPPORTED: App Server rebind is retired; register the current tmux pane"
+                        .to_owned(),
+                );
+            }
             let same_runtime_thread = is_provisional_cli_runtime(project_context, worker_id)
                 || project_context
                     .runtime_context
@@ -11229,9 +11147,14 @@ fn validate_cli_register_rebind(
                         runtime.agent_id == binding.agent_id
                             && runtime.native_thread_id == binding.native_thread_id
                     });
-            let candidate_owner =
-                appserver_thread_binding(&state, &candidate.session_id, &candidate.thread_id)
-                    .map(|binding| binding.map(|binding| binding.agent_id.as_str()))?;
+            let candidate_owner = if let Some(candidate) = candidates.tmux.as_ref() {
+                state
+                    .global
+                    .lookup_tmux_route(&candidate.endpoint)
+                    .map(|binding| binding.agent_id.as_str())
+            } else {
+                None
+            };
             if candidate_owner != Some(worker_id) || !same_runtime_thread {
                 return Err(
                     "RUNTIME_BINDING_REJECTED: worker token does not match the registered identity"
@@ -11292,20 +11215,25 @@ fn validate_cli_register_rebind(
         }
     }
 
-    let candidate = candidates
-        .as_ref()
-        .and_then(|candidates| candidates.appserver.as_ref())
-        .filter(|candidate| !candidate.endpoint.is_empty())
-        .ok_or_else(|| {
-            "RUNTIME_BINDING_REJECTED: CLI rebind requires an App Server candidate".to_owned()
-        })?;
     let state = server.state.lock().unwrap();
-    let candidate_binding =
-        appserver_thread_binding(&state, &candidate.session_id, &candidate.thread_id)?;
+    let candidates = candidates.as_ref().ok_or_else(|| {
+        "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned()
+    })?;
+    let Some(candidate) = candidates.tmux.as_ref() else {
+        return Err(
+            "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned(),
+        );
+    };
+    let candidate_binding = state.global.lookup_tmux_route(&candidate.endpoint);
+    let candidate_thread = candidate
+        .endpoint
+        .codex_thread_id
+        .as_deref()
+        .unwrap_or(&candidate.endpoint.pane_id);
     if orphan_recovery {
         let Some(candidate_binding) = candidate_binding else {
             return Err(
-                "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted App Server thread"
+                "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted tmux pane"
                     .to_owned(),
             );
         };
@@ -11313,25 +11241,25 @@ fn validate_cli_register_rebind(
             || candidate_binding.binding_id != expected_binding_id
             || candidate_binding.app_scope_id != route_scope.app_scope_id
             || candidate_binding.project_scope != route_scope.project_scope_id
-            || persisted_thread_id.as_deref() != Some(candidate.thread_id.as_str())
+            || persisted_thread_id.as_deref() != Some(candidate_thread)
         {
             return Err(
-                "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted App Server thread"
+                "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted tmux pane"
                     .to_owned(),
             );
         }
     } else if let Some(candidate_binding) = candidate_binding {
         if candidate_binding.agent_id.as_str() != worker_id {
             return Err(format!(
-                "RUNTIME_BINDING_REJECTED: candidate App Server thread {} is already bound to worker {}",
-                candidate.thread_id, candidate_binding.agent_id
+                "RUNTIME_BINDING_REJECTED: candidate tmux pane {candidate_thread} is already bound to worker {}",
+                candidate_binding.agent_id
             ));
         }
         if candidate_binding.app_scope_id != route_scope.app_scope_id
             || candidate_binding.project_scope != route_scope.project_scope_id
         {
             return Err(
-                "RUNTIME_BINDING_REJECTED: candidate App Server thread belongs to another project route"
+                "RUNTIME_BINDING_REJECTED: candidate transport belongs to another project route"
                     .to_owned(),
             );
         }
@@ -11418,7 +11346,6 @@ fn dispatch_with_route_context(
     server: &Arc<Server>,
     req: Req,
     project_context: Option<ProjectContext>,
-    route_owner: Option<&Server>,
 ) -> Resp {
     if mutation_blocked_during_migration(&req) && server.state.lock().unwrap().admission_frozen() {
         return Resp::err(
@@ -11443,21 +11370,14 @@ fn dispatch_with_route_context(
             worker_id,
             token,
             command,
-            launch_env,
-        } => match app_scope {
-            Some(app_scope) => crate::subagent::handle_with_env_for_app_scope(
-                server,
-                route_owner.unwrap_or(server.as_ref()),
-                &worker_id,
-                &token,
-                command,
-                app_scope,
-                launch_env,
-            ),
-            None => {
-                crate::subagent::handle_with_env(server, &worker_id, &token, command, launch_env)
-            }
-        },
+            launch_env: _,
+        } => crate::subagent::handle_with_env(
+            server,
+            &worker_id,
+            &token,
+            command,
+            std::collections::BTreeMap::new(),
+        ),
         Req::Register {
             worker_id,
             token,
@@ -11705,6 +11625,7 @@ fn dispatch_with_route_context(
         Req::MsgStatus { msg_id } => {
             let st = server.state.lock().unwrap();
             let in_mem = st.msgs.get(&msg_id).cloned();
+            let transport_evidence = st.notification_delivery_evidence.get(&msg_id).cloned();
             let msg = in_mem.or_else(|| {
                 let path = server
                     .storage_root
@@ -11716,6 +11637,9 @@ fn dispatch_with_route_context(
                     .and_then(|s| serde_json::from_str::<Message>(&s).ok())
             });
             let answered = st.answered(&msg_id);
+            let consumed = st.receive_receipts.values().any(|receipt| {
+                receipt.message_ids.iter().any(|received| received == &msg_id)
+            });
             drop(st);
             match msg {
                 Some(m) => Resp::data(json!({
@@ -11723,6 +11647,8 @@ fn dispatch_with_route_context(
                     "subject": m.subject, "body": m.body,
                     "state": m.state, "wake_attempts": m.wake_attempt_count,
                     "created_at": iso(m.created_ms), "answered": answered,
+                    "wake_transport_evidence": transport_evidence,
+                    "consumed_by_recv": consumed,
                 })),
                 None => Resp::err(format!("message {} not found", msg_id)),
             }
@@ -12154,7 +12080,7 @@ fn dispatch_with_route_context(
 }
 
 fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
-    dispatch_with_route_context(server, req, None, None)
+    dispatch_with_route_context(server, req, None)
 }
 
 fn request_requires_project_context(req: &Req) -> bool {
@@ -12241,35 +12167,6 @@ fn validate_wire_route_principals(
             WireRoutePrincipal::Authenticated { worker_id, .. }
             | WireRoutePrincipal::Selected { worker_id } => worker_id,
         };
-        if let Req::Register {
-            candidates: Some(candidates),
-            ..
-        } = req
-        {
-            if let Some(candidate) = candidates.appserver.as_ref() {
-                if let Some(binding) = current_thread_binding(
-                    &state,
-                    &crate::identity::SessionId::new(candidate.session_id.clone())
-                        .map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?,
-                    &candidate.thread_id,
-                )? {
-                    if binding.agent_id.as_str() != worker_id {
-                        return Err(format!(
-                            "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
-                            candidate.thread_id, binding.agent_id
-                        ));
-                    }
-                    if binding.app_scope_id != route_scope.app_scope_id
-                        || binding.project_scope != route_scope.project_scope_id
-                    {
-                        return Err(
-                            "RUNTIME_BINDING_REJECTED: App Server thread belongs to another project route"
-                                .to_owned(),
-                        );
-                    }
-                }
-            }
-        }
         let bindings = state
             .global
             .projects
@@ -12505,6 +12402,10 @@ mod host_route_registry_tests {
     use crate::identity::RuntimeIdentity;
     use crate::proto::AppServerCandidate;
 
+    thread_local! {
+        static TEST_TMUX: std::cell::RefCell<Option<(super::peer_tests::IsolatedTmux, usize)>> = const { std::cell::RefCell::new(None) };
+    }
+
     static TEST_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     fn test_server() -> (Arc<Server>, PathBuf, PathBuf) {
@@ -12578,6 +12479,7 @@ mod host_route_registry_tests {
             namespace: Some(candidate.namespace.clone()),
             session_id: Some(candidate.session_id.clone()),
             thread_id: Some(candidate.thread_id.clone()),
+            tmux_endpoint: None,
             capabilities: vec![
                 "session_status".into(),
                 "read_thread".into(),
@@ -12588,34 +12490,110 @@ mod host_route_registry_tests {
     }
 
     fn test_candidates(thread_id: &str) -> Option<TransportCandidates> {
+        let mut endpoint = TEST_TMUX.with(|fixture| {
+            let mut fixture = fixture.borrow_mut();
+            let (tmux, endpoint_index) = fixture.get_or_insert_with(|| {
+                (
+                    super::peer_tests::IsolatedTmux::start(Path::new(env!("CARGO_MANIFEST_DIR"))),
+                    0,
+                )
+            });
+            let endpoint = if *endpoint_index == 0 {
+                tmux.endpoints().remove(0)
+            } else {
+                tmux.add_session()
+            };
+            *endpoint_index += 1;
+            endpoint
+        });
+        endpoint.codex_session_id = Some(format!("session-{thread_id}"));
+        endpoint.codex_thread_id = Some(thread_id.to_owned());
         Some(TransportCandidates {
-            appserver: Some(AppServerCandidate {
-                endpoint: format!("unix:///tmp/collab-{thread_id}.sock"),
-                namespace: "codex_tui".into(),
-                session_id: format!("session-{thread_id}"),
-                thread_id: thread_id.into(),
+            appserver: None,
+            tmux: Some(crate::proto::TmuxCandidate {
+                endpoint,
                 cwd: env!("CARGO_MANIFEST_DIR").into(),
             }),
         })
     }
 
+    fn test_candidates_at(thread_id: &str, cwd: &Path) -> Option<TransportCandidates> {
+        let mut candidates = test_candidates(thread_id)?;
+        candidates.tmux.as_mut()?.cwd = cwd.display().to_string();
+        Some(candidates)
+    }
+
     fn test_selected_transport(thread_id: &str) -> SelectedTransport {
         let candidate = test_candidates(thread_id)
-            .and_then(|candidates| candidates.appserver)
-            .expect("appserver candidate");
+            .and_then(|candidates| candidates.tmux)
+            .expect("tmux candidate");
         SelectedTransport {
-            kind: TransportKind::AppServer,
-            endpoint: Some(candidate.endpoint),
-            namespace: Some(candidate.namespace),
-            session_id: Some(candidate.session_id),
-            thread_id: Some(candidate.thread_id),
-            capabilities: vec![
-                "session_status".into(),
-                "read_thread".into(),
-                "send_message_to_thread".into(),
-            ],
-            self_check: "test selected App Server transport".into(),
+            kind: TransportKind::Tmux,
+            endpoint: Some(candidate.endpoint.socket_path.clone()),
+            namespace: Some(candidate.endpoint.tmux_session_id.clone()),
+            session_id: candidate
+                .endpoint
+                .codex_session_id
+                .clone()
+                .or_else(|| Some(candidate.endpoint.tmux_session_id.clone())),
+            thread_id: candidate
+                .endpoint
+                .codex_thread_id
+                .clone()
+                .or_else(|| Some(candidate.endpoint.pane_id.clone())),
+            tmux_endpoint: Some(candidate.endpoint),
+            capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+            self_check: "test selected tmux transport".into(),
         }
+    }
+
+    #[test]
+    fn notification_subscription_transport_must_match_tmux_or_appserver_kind() {
+        let endpoint = crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/collab-test.sock".into(),
+            server_pid: 12,
+            tmux_session_id: "$1".into(),
+            pane_id: "%2".into(),
+            pane_pid: 34,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        let transport = SelectedTransport {
+            kind: TransportKind::Tmux,
+            endpoint: Some(endpoint.socket_path.clone()),
+            namespace: Some(endpoint.tmux_session_id.clone()),
+            session_id: Some(endpoint.tmux_session_id.clone()),
+            thread_id: Some(endpoint.pane_id.clone()),
+            tmux_endpoint: Some(endpoint),
+            capabilities: vec!["send_message_to_pane".into()],
+            self_check: "test tmux transport".into(),
+        };
+        let subscription = |method: &str| NotificationSubscription {
+            id: "subscription-1".into(),
+            worker_id: "worker-1".into(),
+            event: "direct-message".into(),
+            subject: None,
+            target: "%2".into(),
+            method: method.into(),
+            trigger_ms: None,
+            trigger_times_ms: vec![],
+            interval_ms: None,
+            repeat_count: 1,
+            fired_count: 0,
+            expires_ms: i64::MAX,
+            status: "armed".into(),
+            created_ms: 0,
+            updated_ms: 0,
+            status_reason: None,
+        };
+        assert!(subscription_matches_transport(
+            &subscription("tmux"),
+            &transport
+        ));
+        assert!(!subscription_matches_transport(
+            &subscription("appserver"),
+            &transport
+        ));
     }
 
     fn context_with_app(root: &Path, app_scope: &str) -> ProjectContext {
@@ -12690,6 +12668,37 @@ mod host_route_registry_tests {
         }
     }
 
+    fn test_candidates_for_registered(
+        server: &Server,
+        root: &Path,
+        worker_id: &str,
+        app_scope: &str,
+    ) -> Option<TransportCandidates> {
+        let project_scope = GlobalState::canonical_project_scope(root).unwrap();
+        let route_scope = RouteScope {
+            app_scope_id: AppServerId::new(app_scope).unwrap(),
+            project_scope_id: project_scope,
+        };
+        let binding = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &route_scope,
+                &BindingId::new(format!("binding-{worker_id}")).unwrap(),
+            )
+            .cloned()
+            .unwrap();
+        Some(TransportCandidates {
+            appserver: None,
+            tmux: Some(crate::proto::TmuxCandidate {
+                endpoint: binding.tmux_endpoint?,
+                cwd: root.display().to_string(),
+            }),
+        })
+    }
+
     fn notification_subscribe_request(worker_id: &str, token: &str) -> Req {
         Req::NotificationSubscribe {
             worker_id: worker_id.into(),
@@ -12705,9 +12714,11 @@ mod host_route_registry_tests {
     }
 
     #[test]
-    fn server_selects_the_verified_appserver_candidate() {
+    fn appserver_registration_is_rejected_without_candidate_check() {
         let (mut server, root, _) = test_server();
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
+        with_appserver_check(&mut server, |_| {
+            panic!("App Server candidate check must not run")
+        });
         let appserver = AppServerCandidate {
             endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
             namespace: "codex_tui".into(),
@@ -12715,17 +12726,16 @@ mod host_route_registry_tests {
             thread_id: "thread-1".into(),
             cwd: root.display().to_string(),
         };
-        let selected = validate_transport_candidates(
+        let error = validate_transport_candidates(
             &server,
-            "worker-1",
             &TransportCandidates {
                 appserver: Some(appserver),
+                tmux: None,
             },
             root.to_str().unwrap(),
         )
-        .unwrap();
-        assert_eq!(selected.kind, TransportKind::AppServer);
-        assert_eq!(selected.thread_id.as_deref(), Some("thread-1"));
+        .unwrap_err();
+        assert!(error.starts_with("TRANSPORT_UNSUPPORTED:"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -12733,11 +12743,10 @@ mod host_route_registry_tests {
     fn appserver_self_check_failure_is_explicit_and_has_no_fallback() {
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |_| {
-            Err("server self-check rejected App Server candidate".into())
+            panic!("App Server candidate check must not run")
         });
         let error = validate_transport_candidates(
             &server,
-            "worker-1",
             &TransportCandidates {
                 appserver: Some(AppServerCandidate {
                     endpoint: "unix:///tmp/collab-missing-appserver.sock".into(),
@@ -12746,11 +12755,12 @@ mod host_route_registry_tests {
                     thread_id: "thread-1".into(),
                     cwd: root.display().to_string(),
                 }),
+                tmux: None,
             },
             root.to_str().unwrap(),
         )
         .unwrap_err();
-        assert!(error.starts_with("TRANSPORT_NONE:"), "{error}");
+        assert!(error.starts_with("TRANSPORT_UNSUPPORTED:"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -12762,8 +12772,10 @@ mod host_route_registry_tests {
         });
         let error = validate_transport_candidates(
             &server,
-            "worker-1",
-            &TransportCandidates { appserver: None },
+            &TransportCandidates {
+                appserver: None,
+                tmux: None,
+            },
             root.to_str().unwrap(),
         )
         .unwrap_err();
@@ -12772,23 +12784,27 @@ mod host_route_registry_tests {
     }
 
     #[test]
-    fn registration_rejects_a_cwd_that_is_not_the_server_project_root() {
+    fn tmux_registration_rejects_a_cwd_that_is_not_the_server_project_root() {
         let (mut server, root, _) = test_server();
         let other = root.with_file_name(format!(
             "{}-registration-other",
             root.file_name().unwrap().to_string_lossy()
         ));
         std::fs::create_dir_all(&other).unwrap();
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let error = validate_transport_candidates(
             &server,
-            "worker-1",
             &TransportCandidates {
-                appserver: Some(AppServerCandidate {
-                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-                    namespace: "codex_tui".into(),
-                    session_id: "session-thread-1".into(),
-                    thread_id: "thread-1".into(),
+                appserver: None,
+                tmux: Some(crate::proto::TmuxCandidate {
+                    endpoint: crate::proto::TmuxEndpoint {
+                        socket_path: "/tmp/collab-test-tmux.sock".into(),
+                        server_pid: 1,
+                        tmux_session_id: "$1".into(),
+                        pane_id: "%1".into(),
+                        pane_pid: 2,
+                        codex_session_id: None,
+                        codex_thread_id: None,
+                    },
                     cwd: other.display().to_string(),
                 }),
             },
@@ -12796,10 +12812,7 @@ mod host_route_registry_tests {
         )
         .unwrap_err();
         assert!(error.starts_with("RUNTIME_BINDING_REJECTED:"), "{error}");
-        assert!(
-            error.contains("does not match App Server project root"),
-            "{error}"
-        );
+        assert!(error.contains("does not match project root"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(other).unwrap();
     }
@@ -12868,66 +12881,40 @@ mod host_route_registry_tests {
     }
 
     #[test]
-    fn registration_allows_server_to_refresh_an_appserver_identity() {
-        let (mut server, root, _) = test_server();
+    fn registration_reuses_the_registered_tmux_pane_identity() {
+        let (server, root, _) = test_server();
         let app_scope = AppServerId::new("app-a").unwrap();
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let first = handle_register_with_app_scope(
             &server,
             "worker-1".into(),
             "token-1".into(),
             root.display().to_string(),
             Some(app_scope.clone()),
-            Some(TransportCandidates {
-                appserver: Some(AppServerCandidate {
-                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-                    namespace: "codex_tui".into(),
-                    session_id: "session-thread-1".into(),
-                    thread_id: "thread-1".into(),
-                    cwd: root.display().to_string(),
-                }),
-            }),
+            test_candidates("thread-1"),
         );
         assert!(first.ok, "{first:?}");
-        assert_eq!(first.data["transport_selected"]["kind"], "appserver");
 
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
         let second = handle_register_with_app_scope(
             &server,
             "worker-1".into(),
             "token-1".into(),
             root.display().to_string(),
             Some(app_scope),
-            Some(TransportCandidates {
-                appserver: Some(AppServerCandidate {
-                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-                    namespace: "codex_tui".into(),
-                    session_id: "session-thread-1".into(),
-                    thread_id: "thread-1".into(),
-                    cwd: root.display().to_string(),
-                }),
-            }),
+            test_candidates_for_registered(&server, &root, "worker-1", "app-a"),
         );
         assert!(second.ok, "{second:?}");
-        assert_eq!(second.data["transport_selected"]["kind"], "appserver");
+        assert_eq!(second.data["transport_selected"]["kind"], "tmux");
         let worker = server.state.lock().unwrap().workers["worker-1"].clone();
         assert_eq!(
             worker.transport.as_ref().map(|transport| &transport.kind),
-            Some(&TransportKind::AppServer)
+            Some(&TransportKind::Tmux)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn appserver_notification_turn_acceptance_stays_pending_and_unread() {
-        let (mut server, root, _) = test_server();
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-        let sink_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let sink_called_for_server = sink_called.clone();
-        with_appserver_notification_sink(&mut server, move |_, _, _, _, _| {
-            sink_called_for_server.store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok(serde_json::json!({"accepted": true}))
-        });
+    fn tmux_notification_acceptance_stays_pending_and_unread() {
+        let (server, root, _) = test_server();
         let app_scope = AppServerId::new("app-a").unwrap();
         let registered = handle_register_with_app_scope(
             &server,
@@ -12935,15 +12922,7 @@ mod host_route_registry_tests {
             "token-1".into(),
             root.display().to_string(),
             Some(app_scope),
-            Some(TransportCandidates {
-                appserver: Some(AppServerCandidate {
-                    endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-                    namespace: "codex_tui".into(),
-                    session_id: "session-thread-1".into(),
-                    thread_id: "thread-1".into(),
-                    cwd: root.display().to_string(),
-                }),
-            }),
+            test_candidates("thread-1"),
         );
         assert!(registered.ok, "{registered:?}");
         let subscribed = handle_notification_subscribe(
@@ -12992,44 +12971,17 @@ mod host_route_registry_tests {
             },
         ]);
 
-        let selected = {
-            let state = server.state.lock().unwrap();
-            state.workers["worker-1"].transport.clone().unwrap()
-        };
-        let attempted = attempt_appserver_notification_with_at(
+        assert!(attempt_notification_with_at(
             &server,
             &message_id,
             &subscription_id,
-            "worker-1",
-            &selected,
-            None,
-            0,
-            true,
-            now_ms(),
-            false,
-            &|transport, source_thread_id, text, message_id, explicit| {
-                (server.appserver_notification_sink)(
-                    transport,
-                    source_thread_id,
-                    text,
-                    message_id,
-                    explicit,
-                )
-            },
-        );
-        assert!(
-            attempted.accepted(),
-            "the server-selected endpoint accepted turn/start"
-        );
-        assert!(
-            sink_called.load(std::sync::atomic::Ordering::Relaxed),
-            "the App Server notification sink must be exercised"
-        );
+            now_ms()
+        ));
         let state = server.state.lock().unwrap();
         assert_eq!(state.msgs[&message_id].state, "pending");
         assert_eq!(
             state.msgs[&message_id].wake_attempt_count, 1,
-            "turn/start acceptance records one notification attempt"
+            "tmux input submission records one notification attempt"
         );
         assert_ne!(state.msgs[&message_id].state, "delivered");
         assert_ne!(state.msgs[&message_id].state, "read");
@@ -13037,6 +12989,89 @@ mod host_route_registry_tests {
             .inbox_of("worker-1")
             .iter()
             .any(|m| m.id == message_id));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_tmux_notification_keeps_message_unread_without_receive_receipt() {
+        let (mut server, root, _) = test_server();
+        let registered = handle_register_with_app_scope(
+            &server,
+            "worker-1".into(),
+            "token-1".into(),
+            root.display().to_string(),
+            Some(AppServerId::new("app-a").unwrap()),
+            test_candidates("thread-1"),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let subscribed = handle_notification_subscribe(
+            &server,
+            "worker-1".into(),
+            "token-1".into(),
+            "direct-message".into(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            1,
+            60,
+        );
+        assert!(subscribed.ok, "{subscribed:?}");
+        let subscription_id = subscribed.data["subscription"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let message_id = gen_msg_id();
+        server.commit(&[
+            Event::Sent {
+                msg: Message {
+                    id: message_id.clone(),
+                    from: "sender".into(),
+                    to: "worker-1".into(),
+                    mtype: "notify".into(),
+                    subject: Some("wake-failed".into()),
+                    body: "failed tmux wake must not count as consumption".into(),
+                    in_reply_to: None,
+                    created_ms: now_ms(),
+                    state: "pending".into(),
+                    wake_attempt_count: 0,
+                    last_wake_attempt_ms: 0,
+                    retry_attempted: false,
+                },
+            },
+            Event::WakeBound {
+                message_id: message_id.clone(),
+                subscription_id: subscription_id.clone(),
+            },
+            Event::DeliveryMode {
+                msg_id: message_id.clone(),
+                mode: "explicit-notification".into(),
+                source_thread_id: None,
+            },
+        ]);
+        Arc::get_mut(&mut server)
+            .unwrap()
+            .appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+            Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into())
+        });
+
+        assert!(!attempt_notification_with_at(
+            &server,
+            &message_id,
+            &subscription_id,
+            now_ms()
+        ));
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.msgs[&message_id].state, "pending");
+        assert!(!state
+            .notification_delivery_accepted
+            .contains_key(&message_id));
+        assert!(state.receive_receipts.is_empty());
+        assert_eq!(
+            state.notification_delivery_failures[&message_id].error,
+            "TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure"
+        );
+        drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -13262,6 +13297,7 @@ mod host_route_registry_tests {
             namespace: Some("codex_tui".into()),
             session_id: Some("session-thread-current".into()),
             thread_id: Some("thread-current".into()),
+            tmux_endpoint: None,
             capabilities: vec!["send_message_to_thread".into()],
             self_check: "server verified".into(),
         };
@@ -13802,77 +13838,63 @@ mod host_route_registry_tests {
     }
 
     #[test]
-    fn native_thread_route_resolution_checks_the_canonical_root_not_the_client_cwd() {
-        let (mut server, root, _) = test_server();
+    fn tmux_route_resolution_uses_the_registered_canonical_project() {
+        let (server, root, _) = test_server();
         let canonical_root = root.canonicalize().unwrap();
-        let reject_route_resolve = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let reject_route_resolve_for_check = reject_route_resolve.clone();
-        let canonical_for_check = canonical_root.clone();
-        with_appserver_check(&mut server, move |candidate| {
-            if candidate.thread_id == "thread-cwd-owner"
-                && reject_route_resolve_for_check.load(std::sync::atomic::Ordering::Relaxed)
-                && candidate.cwd != canonical_for_check.to_string_lossy()
-            {
-                return Err(format!(
-                    "thread/read must be addressed by the canonical root {}, observed {}",
-                    canonical_for_check.display(),
-                    candidate.cwd
-                ));
-            }
-            Ok(verified_appserver(candidate))
-        });
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let app = "app-thread-cwd-route";
         let thread = "thread-cwd-owner";
-        let session = "session-thread-cwd-owner";
+        let candidates = test_candidates_at(thread, &canonical_root).unwrap();
+        let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
         let (_, registered) = manager.dispatch_sync(
             Some(context_with_app(&root, app)),
             Req::Register {
                 worker_id: "worker-cwd-owner".into(),
                 token: "token-worker-cwd-owner".into(),
                 cwd: root.display().to_string(),
-                candidates: Some(TransportCandidates {
-                    appserver: Some(AppServerCandidate {
-                        endpoint: "unix:///tmp/collab-thread-cwd.sock".into(),
-                        namespace: "codex_tui".into(),
-                        session_id: session.into(),
-                        thread_id: thread.into(),
-                        cwd: canonical_root.to_string_lossy().into_owned(),
-                    }),
-                }),
+                candidates: Some(candidates),
             },
         );
         assert!(registered.ok, "{registered:?}");
-        reject_route_resolve.store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Route resolution re-verifies the thread against the canonical root,
-        // not against whatever cwd the caller happened to use.
-        let resolved = manager
-            .resolve_route_by_native_thread(session, thread)
-            .unwrap();
+        // Route resolution uses the persisted tmux endpoint and does not
+        // derive or re-probe an App Server thread from caller cwd.
+        let resolved = manager.resolve_route_by_tmux_endpoint(&endpoint).unwrap();
         assert_eq!(resolved.agent_id.as_str(), "worker-cwd-owner");
+        assert_eq!(resolved.canonical_root, canonical_root.to_string_lossy());
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
-    async fn wire_route_resolution_is_context_free_and_read_only() {
+    async fn wire_route_resolution_checks_the_full_tmux_endpoint_and_is_read_only() {
         let (server, root, journal_path) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         register_known_project_with_app(&server, &root, "app-wire-route");
-        let binding = RuntimeBinding::new_with_session(
+        let endpoint = crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/tmux-registered-route.sock".into(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 99,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        let mut binding = RuntimeBinding::new_with_session(
             GlobalState::canonical_project_scope(&root).unwrap(),
             AppServerId::new("app-wire-route").unwrap(),
             AgentId::new("agent-wire-route").unwrap(),
             RuntimeId::new("runtime-wire-route").unwrap(),
             BindingId::new("binding-wire-route").unwrap(),
             3,
-            Some(crate::identity::SessionId::new("session-thread-wire-route").unwrap()),
-            Some(NativeThreadId::new("thread-wire-route").unwrap()),
+            Some(crate::identity::SessionId::new("$1").unwrap()),
+            Some(NativeThreadId::new("%1").unwrap()),
         )
         .unwrap();
+        binding.tmux_endpoint = Some(endpoint.clone());
+        binding.validate().unwrap();
         server
             .state
             .lock()
@@ -13912,15 +13934,31 @@ mod host_route_registry_tests {
                 token: "token-wire-route".into(),
                 cwd: root.to_string_lossy().into_owned(),
                 registered_ms: now_ms(),
-                transport: Some(test_selected_transport("thread-wire-route")),
+                transport: Some(SelectedTransport {
+                    kind: TransportKind::Tmux,
+                    endpoint: Some("/tmp/tmux-registered-route.sock".into()),
+                    namespace: Some("$1".into()),
+                    session_id: Some("$1".into()),
+                    thread_id: Some("%1".into()),
+                    tmux_endpoint: Some(endpoint),
+                    capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+                    self_check: "isolated route fixture".into(),
+                }),
             },
         }]);
 
         assert!(validate_request_context(
             &server,
             &Req::RouteResolve {
-                session_id: "session-thread-wire-route".into(),
-                native_thread_id: "thread-wire-route".into(),
+                tmux_endpoint: crate::proto::TmuxEndpoint {
+                    socket_path: "/tmp/tmux-wire-route.sock".into(),
+                    server_pid: 1,
+                    tmux_session_id: "$1".into(),
+                    pane_id: "%1".into(),
+                    pane_pid: 2,
+                    codex_session_id: None,
+                    codex_thread_id: None,
+                },
             },
             None,
         )
@@ -13931,19 +13969,159 @@ mod host_route_registry_tests {
             manager,
             None,
             Req::RouteResolve {
-                session_id: "session-thread-wire-route".into(),
-                native_thread_id: "thread-wire-route".into(),
+                tmux_endpoint: crate::proto::TmuxEndpoint {
+                    socket_path: "/tmp/tmux-wire-route.sock".into(),
+                    server_pid: 1,
+                    tmux_session_id: "$1".into(),
+                    pane_id: "%1".into(),
+                    pane_pid: 2,
+                    codex_session_id: None,
+                    codex_thread_id: None,
+                },
             },
             tokio::sync::watch::channel(false).1,
         )
         .await;
-        assert!(response.ok, "{response:?}");
-        let route: RouteResolution = serde_json::from_value(response.data).unwrap();
-        assert_eq!(route.native_thread_id.as_str(), "thread-wire-route");
-        assert_eq!(route.app_scope_id.as_str(), "app-wire-route");
+        assert!(
+            !response.ok,
+            "a different tmux socket must not resolve this pane route"
+        );
+        assert!(response.error.as_deref().is_some_and(
+            |error| error.contains("no registered Collab route is bound to tmux socket")
+        ));
         assert_eq!(mutation_snapshot(&server), before);
         assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    struct IsolatedTmuxServer {
+        socket_path: PathBuf,
+    }
+
+    impl IsolatedTmuxServer {
+        fn start(root: &Path, name: &str) -> anyhow::Result<Self> {
+            let socket_path = root.join(format!("{name}.sock"));
+            let output = std::process::Command::new("tmux")
+                .args([
+                    "-S",
+                    socket_path.to_str().unwrap(),
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "shared-name",
+                    "sleep 60",
+                ])
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "start isolated tmux {name}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(Self { socket_path })
+        }
+
+        fn endpoint(&self) -> anyhow::Result<crate::proto::TmuxEndpoint> {
+            let output = std::process::Command::new("tmux")
+                .args([
+                    "-S",
+                    self.socket_path.to_str().unwrap(),
+                    "display-message",
+                    "-p",
+                    "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+                ])
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "inspect isolated tmux: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let text = String::from_utf8(output.stdout)?;
+            let fields = text.trim_end().split('\t').collect::<Vec<_>>();
+            if fields.len() != 4 {
+                anyhow::bail!("unexpected isolated tmux endpoint output: {text:?}");
+            }
+            Ok(crate::proto::TmuxEndpoint {
+                socket_path: self.socket_path.to_string_lossy().into_owned(),
+                server_pid: fields[0].parse()?,
+                tmux_session_id: fields[1].to_owned(),
+                pane_id: fields[2].to_owned(),
+                pane_pid: fields[3].parse()?,
+                codex_session_id: None,
+                codex_thread_id: None,
+            })
+        }
+    }
+
+    impl Drop for IsolatedTmuxServer {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["-S", self.socket_path.to_str().unwrap(), "kill-server"])
+                .output();
+        }
+    }
+
+    #[tokio::test]
+    async fn tmux_routes_with_same_session_and_pane_on_different_sockets_are_distinct() {
+        let (server, root, _) = test_server();
+        let tmux_a = IsolatedTmuxServer::start(&root, "route-a").unwrap();
+        let tmux_b = IsolatedTmuxServer::start(&root, "route-b").unwrap();
+        let endpoint_a = tmux_a.endpoint().unwrap();
+        let endpoint_b = tmux_b.endpoint().unwrap();
+        assert_eq!(endpoint_a.tmux_session_id, endpoint_b.tmux_session_id);
+        assert_eq!(endpoint_a.pane_id, endpoint_b.pane_id);
+        assert_ne!(endpoint_a.socket_path, endpoint_b.socket_path);
+
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        register_known_project_with_app(&server, &root, "app-tmux-collision");
+        for (worker_id, token, endpoint) in [
+            ("worker-tmux-a", "token-tmux-a", endpoint_a.clone()),
+            ("worker-tmux-b", "token-tmux-b", endpoint_b.clone()),
+        ] {
+            let (_, response) = manager.dispatch_sync(
+                Some(context_with_app(&root, "app-tmux-collision")),
+                Req::Register {
+                    worker_id: worker_id.into(),
+                    token: token.into(),
+                    cwd: root.to_string_lossy().into_owned(),
+                    candidates: Some(TransportCandidates {
+                        appserver: None,
+                        tmux: Some(crate::proto::TmuxCandidate {
+                            endpoint,
+                            cwd: root.to_string_lossy().into_owned(),
+                        }),
+                    }),
+                },
+            );
+            assert!(response.ok, "{response:?}");
+        }
+
+        let route_a = manager.resolve_route_by_tmux_endpoint(&endpoint_a).unwrap();
+        let route_b = manager.resolve_route_by_tmux_endpoint(&endpoint_b).unwrap();
+        assert_eq!(route_a.agent_id.as_str(), "worker-tmux-a");
+        assert_eq!(route_b.agent_id.as_str(), "worker-tmux-b");
+
+        let replayed = replay_from_journal(&server.root, &server.journal_path).unwrap();
+        assert_eq!(
+            replayed
+                .global
+                .lookup_tmux_route(&endpoint_a)
+                .map(|binding| binding.agent_id.as_str()),
+            Some("worker-tmux-a")
+        );
+        assert_eq!(
+            replayed
+                .global
+                .lookup_tmux_route(&endpoint_b)
+                .map(|binding| binding.agent_id.as_str()),
+            Some("worker-tmux-b")
+        );
+
+        drop(tmux_b);
+        drop(tmux_a);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -14196,7 +14374,7 @@ mod host_route_registry_tests {
     }
 
     #[tokio::test]
-    async fn same_thread_session_rotation_rebinds_generation_and_fences_old_pair() {
+    async fn same_thread_session_rotation_rebinds_tmux_generation_and_fences_old_pair() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -14206,15 +14384,10 @@ mod host_route_registry_tests {
         let context = context_with_app(&root, app);
         let shared_thread = "thread-same-session-worker";
         let candidates = |session_id: &str| {
-            Some(TransportCandidates {
-                appserver: Some(AppServerCandidate {
-                    endpoint: "unix:///tmp/collab-same-thread-session.sock".into(),
-                    namespace: "codex_tui".into(),
-                    session_id: session_id.into(),
-                    thread_id: shared_thread.into(),
-                    cwd: root.display().to_string(),
-                }),
-            })
+            let mut candidates = test_candidates(shared_thread).unwrap();
+            candidates.tmux.as_mut().unwrap().endpoint.codex_session_id =
+                Some(session_id.to_owned());
+            Some(candidates)
         };
 
         let (_, first) = manager.dispatch_sync(
@@ -14270,7 +14443,7 @@ mod host_route_registry_tests {
     }
 
     #[tokio::test]
-    async fn distinct_sessions_can_share_one_native_thread_without_overwriting_routes() {
+    async fn duplicate_codex_thread_anchor_cannot_bind_two_tmux_peers() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -14278,50 +14451,42 @@ mod host_route_registry_tests {
         let context = context_with_app(&root, app);
         let shared_thread = "thread-session-pair-worker";
         let candidates = |session_id: &str| {
-            Some(TransportCandidates {
-                appserver: Some(AppServerCandidate {
-                    endpoint: "unix:///tmp/collab-session-pair.sock".into(),
-                    namespace: "codex_tui".into(),
-                    session_id: session_id.into(),
-                    thread_id: shared_thread.into(),
-                    cwd: root.display().to_string(),
-                }),
-            })
+            let mut candidates = test_candidates(shared_thread).unwrap();
+            candidates.tmux.as_mut().unwrap().endpoint.codex_session_id =
+                Some(session_id.to_owned());
+            Some(candidates)
         };
 
-        for (worker_id, token, session_id) in [
-            (
-                "session-pair-worker-a",
-                "token-session-pair-worker-a",
-                "session-pair-a",
-            ),
-            (
-                "session-pair-worker-b",
-                "token-session-pair-worker-b",
-                "session-pair-b",
-            ),
-        ] {
-            let (_, response) = manager.dispatch_sync(
-                Some(context.clone()),
-                Req::Register {
-                    worker_id: worker_id.into(),
-                    token: token.into(),
-                    cwd: root.display().to_string(),
-                    candidates: candidates(session_id),
-                },
-            );
-            assert!(response.ok, "{response:?}");
-        }
+        let (_, first_registration) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "session-pair-worker-a".into(),
+                token: "token-session-pair-worker-a".into(),
+                cwd: root.display().to_string(),
+                candidates: candidates("session-pair-a"),
+            },
+        );
+        assert!(first_registration.ok, "{first_registration:?}");
+
+        let (_, second_registration) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::Register {
+                worker_id: "session-pair-worker-b".into(),
+                token: "token-session-pair-worker-b".into(),
+                cwd: root.display().to_string(),
+                candidates: candidates("session-pair-b"),
+            },
+        );
+        assert!(!second_registration.ok, "{second_registration:?}");
+        assert!(second_registration.error.as_deref().is_some_and(|error| {
+            error.starts_with("RUNTIME_BINDING_REJECTED:")
+                && error.contains("identity anchor is already bound")
+        }));
 
         let first = manager
             .resolve_route_by_native_thread("session-pair-a", shared_thread)
             .unwrap();
-        let second = manager
-            .resolve_route_by_native_thread("session-pair-b", shared_thread)
-            .unwrap();
         assert_eq!(first.agent_id.as_str(), "session-pair-worker-a");
-        assert_eq!(second.agent_id.as_str(), "session-pair-worker-b");
-        assert_ne!(first.binding_id, second.binding_id);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -14548,6 +14713,25 @@ mod host_route_registry_tests {
                 .cloned()
                 .unwrap()
         };
+        let old_endpoint = binding
+            .tmux_endpoint
+            .as_ref()
+            .expect("registered test peer must have a tmux endpoint");
+        let pane_termination = std::process::Command::new("tmux")
+            .args([
+                "-S",
+                &old_endpoint.socket_path,
+                "kill-pane",
+                "-t",
+                &old_endpoint.pane_id,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            pane_termination.status.success(),
+            "kill only the test-owned old master pane: {}",
+            String::from_utf8_lossy(&pane_termination.stderr)
+        );
         manager
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -14637,8 +14821,9 @@ mod host_route_registry_tests {
                 "session-thread-host-route-compensation-old",
                 "thread-host-route-compensation-old",
             )
-            .unwrap();
-        assert_eq!(old.binding_id, binding.binding_id);
+            .unwrap_err();
+        assert!(old.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{old}");
+        assert!(old.contains("is gone"), "{old}");
         let new = manager
             .resolve_route_by_native_thread(
                 "session-thread-host-route-compensation-new",
@@ -14654,8 +14839,8 @@ mod host_route_registry_tests {
                 "session-thread-host-route-compensation-old",
                 "thread-host-route-compensation-old",
             )
-            .unwrap();
-        assert_eq!(old.binding_id, binding.binding_id);
+            .unwrap_err();
+        assert!(old.starts_with("ROUTE_RESOLVE_NOT_FOUND"), "{old}");
         let missing = replayed
             .resolve_route_by_native_thread(
                 "session-thread-host-route-compensation-new",
@@ -15440,18 +15625,8 @@ mod host_route_registry_tests {
     }
 
     #[tokio::test]
-    async fn manager_cross_project_appserver_masters_send_and_reject_forged_source_evidence() {
-        let (mut server, host_root, _) = test_server();
-        let notification_sources = Arc::new(Mutex::new(Vec::new()));
-        let notification_sources_for_sink = notification_sources.clone();
-        with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-        with_appserver_notification_sink(&mut server, move |_, source, _, _, _| {
-            notification_sources_for_sink
-                .lock()
-                .unwrap()
-                .push(source.map(str::to_owned));
-            Ok(json!({"queued": true}))
-        });
+    async fn manager_cross_project_tmux_masters_send_and_reject_forged_source_evidence() {
+        let (server, host_root, _) = test_server();
 
         let project_a = host_root.with_file_name(format!(
             "{}-cross-project-a",
@@ -15475,29 +15650,19 @@ mod host_route_registry_tests {
         let master_b = "cross-project-master-b";
         let token_a = "token-cross-project-master-a";
         let token_b = "token-cross-project-master-b";
-        let appserver_candidate = |thread_id: &str| AppServerCandidate {
-            endpoint: format!("unix:///tmp/collab-{thread_id}.sock"),
-            namespace: "codex_app".into(),
-            session_id: format!("session-{thread_id}"),
-            thread_id: thread_id.into(),
-            cwd: project_a.display().to_string(),
-        };
-
         let (source_runtime, source_registration) = manager.dispatch_sync(
             Some(context_with_app(&project_a, app_a)),
             Req::Register {
                 worker_id: master_a.into(),
                 token: token_a.into(),
                 cwd: project_a.display().to_string(),
-                candidates: Some(TransportCandidates {
-                    appserver: Some(appserver_candidate("thread-a")),
-                }),
+                candidates: test_candidates_at("thread-a", &project_a),
             },
         );
         assert!(source_registration.ok, "{source_registration:?}");
         assert_eq!(
             source_registration.data["transport_selected"]["kind"],
-            "appserver"
+            "tmux"
         );
         assert_eq!(
             source_registration.data["transport_selected"]["thread_id"],
@@ -15510,15 +15675,13 @@ mod host_route_registry_tests {
                 worker_id: master_b.into(),
                 token: token_b.into(),
                 cwd: project_b.display().to_string(),
-                candidates: Some(TransportCandidates {
-                    appserver: Some(appserver_candidate("thread-b")),
-                }),
+                candidates: test_candidates_at("thread-b", &project_b),
             },
         );
         assert!(target_registration.ok, "{target_registration:?}");
         assert_eq!(
             target_registration.data["transport_selected"]["kind"],
-            "appserver"
+            "tmux"
         );
         assert_eq!(
             target_registration.data["transport_selected"]["thread_id"],
@@ -15574,7 +15737,7 @@ mod host_route_registry_tests {
             source_master_approval: approval.clone(),
             source_master_assigned_ms: assigned_ms,
             to: master_b.into(),
-            subject: "cross-project appserver route".into(),
+            subject: "cross-project tmux route".into(),
             body: "durable cross-project message".into(),
             in_reply_to: None,
         };
@@ -15589,10 +15752,8 @@ mod host_route_registry_tests {
         assert_eq!(delivered.data["cross_project"], true);
         assert_eq!(delivered.data["source_master"], master_a);
         assert_eq!(delivered.data["target_master"], master_b);
-        assert_eq!(
-            notification_sources.lock().unwrap().as_slice(),
-            [Some("thread-a".to_string())]
-        );
+        assert_eq!(delivered.data["notification"], "tmux-input-submitted");
+        assert_eq!(delivered.data["consumed"], false);
         let message_id = delivered.data["msg_id"].as_str().unwrap().to_owned();
         assert!(target_runtime
             .state
@@ -16407,7 +16568,12 @@ mod host_route_registry_tests {
                 worker_id: "routecodex-master".into(),
                 token: "token-routecodex-master".into(),
                 cwd: external_root.display().to_string(),
-                candidates: test_candidates("thread-routecodex-master"),
+                candidates: test_candidates_for_registered(
+                    &runtime,
+                    &external_root,
+                    "routecodex-master",
+                    "routecodex-app",
+                ),
             },
         );
         assert!(repeated.ok, "{repeated:?}");
@@ -17626,7 +17792,12 @@ mod host_route_registry_tests {
                 worker_id: "wire-worker".into(),
                 token: "token-wire-worker".into(),
                 cwd: root.display().to_string(),
-                candidates: test_candidates("thread-wire-worker"),
+                candidates: test_candidates_for_registered(
+                    &server,
+                    &root,
+                    "wire-worker",
+                    "app-wire",
+                ),
             },
         )
         .await;
@@ -17727,6 +17898,7 @@ mod host_route_registry_tests {
                     namespace: Some("codex_tui".into()),
                     session_id: Some("session-thread-worker-a".into()),
                     thread_id: Some("thread-worker-a".into()),
+                    tmux_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 },
@@ -17762,6 +17934,7 @@ mod host_route_registry_tests {
                     namespace: Some("codex_tui".into()),
                     session_id: Some("session-thread-worker-b".into()),
                     thread_id: Some("thread-worker-b".into()),
+                    tmux_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 },
@@ -18499,6 +18672,14 @@ mod host_route_registry_tests {
         )
         .await;
         assert!(first.ok, "{first:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            worker_id,
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
         let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
         let old_context = context_with_runtime(&root, app, &old_runtime);
         let stale_request = notification_subscribe_request(worker_id, token);
@@ -18576,8 +18757,33 @@ mod host_route_registry_tests {
         )
         .await;
         assert!(first.ok, "{first:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            worker_id,
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
         let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
+        let recovery_candidates =
+            test_candidates_for_registered(&server, &root, worker_id, app).unwrap();
+        let tmux_endpoint = &recovery_candidates.tmux.as_ref().unwrap().endpoint;
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_tmux_route(tmux_endpoint)
+                .map(|binding| binding.agent_id.as_str()),
+            Some(worker_id)
+        );
+        assert_eq!(
+            provisional,
+            RuntimeIdentity::cli_adapter(worker_id).unwrap()
+        );
 
         let recovered = dispatch_wire(
             server.clone(),
@@ -18586,7 +18792,7 @@ mod host_route_registry_tests {
                 worker_id: worker_id.into(),
                 token: new_token.into(),
                 cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
+                candidates: Some(recovery_candidates),
             },
         )
         .await;
@@ -18634,6 +18840,14 @@ mod host_route_registry_tests {
         )
         .await;
         assert!(first.ok, "{first:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            worker_id,
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
         let persisted_runtime = runtime_for_registered(&server, &root, worker_id, app);
 
         let recovered = dispatch_wire(
@@ -18643,7 +18857,7 @@ mod host_route_registry_tests {
                 worker_id: worker_id.into(),
                 token: new_token.into(),
                 cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
+                candidates: test_candidates_for_registered(&server, &root, worker_id, app),
             },
         )
         .await;
@@ -18681,6 +18895,14 @@ mod host_route_registry_tests {
         )
         .await;
         assert!(registered.ok, "{registered:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            worker_id,
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
         let old_runtime = runtime_for_registered(&server, &root, worker_id, app);
         write_global_identity(
             &server.host_paths,
@@ -18703,7 +18925,7 @@ mod host_route_registry_tests {
                 worker_id: worker_id.into(),
                 token: token.into(),
                 cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
+                candidates: test_candidates_for_registered(&server, &root, worker_id, app),
             },
         )
         .await;
@@ -18758,6 +18980,14 @@ mod host_route_registry_tests {
         )
         .await;
         assert!(registered.ok, "{registered:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            worker_id,
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
         let runtime = runtime_for_registered(&server, &root, worker_id, app);
         write_global_identity(
             &server.host_paths,
@@ -18951,6 +19181,14 @@ mod host_route_registry_tests {
         )
         .await;
         assert!(registered.ok, "{registered:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            worker_id,
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
         let runtime = runtime_for_registered(&server, &root, worker_id, app);
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
 
@@ -18987,19 +19225,19 @@ mod host_route_registry_tests {
                 worker_id: "other-worker".into(),
                 token: "token-other-worker".into(),
                 cwd: root.display().to_string(),
-                candidates: Some(TransportCandidates {
-                    appserver: Some(AppServerCandidate {
-                        endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-                        namespace: "codex_tui".into(),
-                        session_id: "session-thread-another-worker".into(),
-                        thread_id: "thread-another-worker".into(),
-                        cwd: root.display().to_string(),
-                    }),
-                }),
+                candidates: test_candidates("thread-another-worker"),
             },
         )
         .await;
         assert!(other.ok, "{other:?}");
+        commit_current_thread_route_for_runtime(
+            &server,
+            &server,
+            "other-worker",
+            &root.display().to_string(),
+            Some(&AppServerId::new(app).unwrap()),
+        )
+        .unwrap();
 
         let before = mutation_snapshot(&server);
         let before_journal = std::fs::read(&journal_path).unwrap();
@@ -19011,15 +19249,7 @@ mod host_route_registry_tests {
                 worker_id: worker_id.into(),
                 token: token.into(),
                 cwd: root.display().to_string(),
-                candidates: Some(TransportCandidates {
-                    appserver: Some(AppServerCandidate {
-                        endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-                        namespace: "codex_tui".into(),
-                        session_id: "session-thread-another-worker".into(),
-                        thread_id: "thread-another-worker".into(),
-                        cwd: root.display().to_string(),
-                    }),
-                }),
+                candidates: test_candidates_for_registered(&server, &root, "other-worker", app),
             },
         )
         .await;
@@ -19271,7 +19501,7 @@ async fn dispatch_wire(
             if let Err(error) = validate_request_context(&server, &req, project_context.as_ref()) {
                 return Resp::err(error);
             }
-            dispatch_with_route_context(&server, req, project_context, None)
+            dispatch_with_route_context(&server, req, project_context)
         })
         .await
         .unwrap_or_else(|e| Resp::err(format!("handler join error: {}", e))),
@@ -19289,20 +19519,16 @@ async fn dispatch_wire_routed(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> (Arc<Server>, Resp) {
     match req {
-        Req::RouteResolve {
-            session_id,
-            native_thread_id,
-        } => {
-            let response =
-                match manager.resolve_route_by_native_thread(&session_id, &native_thread_id) {
-                    Ok(route) => match serde_json::to_value(route) {
-                        Ok(value) => Resp::data(value),
-                        Err(error) => {
-                            Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
-                        }
-                    },
-                    Err(error) => Resp::err(error),
-                };
+        Req::RouteResolve { tmux_endpoint } => {
+            let response = match manager.resolve_route_by_tmux_endpoint(&tmux_endpoint) {
+                Ok(route) => match serde_json::to_value(route) {
+                    Ok(value) => Resp::data(value),
+                    Err(error) => {
+                        Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
+                    }
+                },
+                Err(error) => Resp::err(error),
+            };
             (manager.host.clone(), response)
         }
         Req::Poll {
@@ -20040,10 +20266,16 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         host_paths: host_paths.clone(),
         state: Mutex::new(state),
         journal: Mutex::new(journal_file),
+        #[cfg(test)]
         appserver_candidate_check: default_appserver_candidate_check(),
+        #[cfg(test)]
         appserver_notification_sink: default_appserver_notification_sink(),
+        #[cfg(test)]
         appserver_thread_status: default_appserver_thread_status(),
+        #[cfg(test)]
         appserver_thread_archive: default_appserver_thread_archive(),
+        #[cfg(not(test))]
+        tmux_notification_sink: default_tmux_notification_sink(),
         mailbox_notify: Notify::new(),
     });
     restore_registered_peer_default_leases(&server);
@@ -20186,6 +20418,7 @@ mod reducer_binding_tests {
                     namespace: Some(candidate.namespace.clone()),
                     session_id: Some(candidate.session_id.clone()),
                     thread_id: Some(candidate.thread_id.clone()),
+                    tmux_endpoint: None,
                     capabilities: vec!["send_message_to_thread".into()],
                     self_check: "test appserver".into(),
                 })
@@ -20941,12 +21174,14 @@ mod scheduler_admission_tests {
             )
         };
         let first = start(None, "token-master");
-        assert!(first.ok, "{first:?}");
-        assert_eq!(first.data["admission"]["decision"], "use-registered-peer");
-        assert_eq!(first.data["admission"]["worker_id"], "idle-peer");
+        assert!(!first.ok, "tmux cannot create a managed Codex thread");
+        assert!(first
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
         let second = start(None, "token-master");
-        assert!(second.ok, "{second:?}");
-        assert_eq!(second.data["admission"], first.data["admission"]);
+        assert!(!second.ok, "repeated Start stays explicitly unsupported");
         let direct = crate::subagent::handle_with_env(
             &server,
             "master",
@@ -20957,19 +21192,16 @@ mod scheduler_admission_tests {
             },
             Default::default(),
         );
-        assert!(direct.ok, "{direct:?}");
-        assert_eq!(direct.data["admission"], first.data["admission"]);
+        assert!(!direct.ok, "direct Start stays explicitly unsupported");
         let state = server.state.lock().unwrap();
         assert!(state.subagents.is_empty());
         assert!(state.tasks.is_empty());
         assert!(state.msgs.is_empty());
         drop(state);
-        assert_eq!(
-            std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-                .unwrap()
-                .matches("scheduler_admission")
-                .count(),
-            3
+        assert!(
+            !std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
+                .unwrap_or_default()
+                .contains("scheduler_admission")
         );
 
         let denied = start(None, "wrong-token");
@@ -21032,10 +21264,7 @@ mod scheduler_admission_tests {
             .expect_err("ambiguous route must not authorize scheduler admission")
             .error
             .unwrap_or_default();
-        assert!(
-            error.contains("scheduler admission requires a unique route scope"),
-            "{error}"
-        );
+        assert!(error.contains("MANAGED_SUBAGENT_UNSUPPORTED"), "{error}");
 
         let server = Arc::new(server);
         let dispatched = dispatch(
@@ -21087,7 +21316,7 @@ mod scheduler_admission_tests {
                 updated_ms: now_ms(),
             },
         }]);
-        assert!(registered_idle_peer_for_admission(&server, "master").is_none());
+        assert!(registered_available_peer_for_admission(&server, "master").is_none());
         std::fs::remove_dir_all(root).unwrap();
 
         let (server, root) = test_server();
@@ -21109,7 +21338,7 @@ mod scheduler_admission_tests {
                 runtime: Some("codex".into()),
             },
         }]);
-        assert!(registered_idle_peer_for_admission(&server, "master").is_none());
+        assert!(registered_available_peer_for_admission(&server, "master").is_none());
         assert_eq!(
             idle_managed_subagent_for_admission(&server, "master")
                 .map(|(id, _, _)| id)
@@ -21120,22 +21349,18 @@ mod scheduler_admission_tests {
     }
 
     #[test]
-    fn admission_excludes_appserver_peer_that_cannot_accept_direct_input() {
+    fn admission_uses_live_tmux_presence_without_appserver_status() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "not-loaded-peer", "%not-loaded-peer");
-        server.appserver_thread_status = Arc::new(|_, thread_id| {
-            Ok(serde_json::json!({
-                "thread": {
-                    "id": thread_id,
-                    "status": {"type": "notLoaded"},
-                    "canAcceptDirectInput": false,
-                    "turns": [{"status": "interrupted"}]
-                }
-            }))
-        });
+        server.appserver_thread_status = Arc::new(|_, _| panic!("AppServer status is retired"));
 
-        assert!(registered_idle_peer_for_admission(&server, "master").is_none());
+        assert_eq!(
+            registered_available_peer_for_admission(&server, "master")
+                .map(|(id, _)| id)
+                .as_deref(),
+            Some("not-loaded-peer")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21174,12 +21399,12 @@ mod scheduler_admission_tests {
                 launch_env: Default::default(),
             },
         );
-        assert!(reused.ok, "{reused:?}");
-        assert_eq!(
-            reused.data["admission"]["decision"],
-            "reuse-idle-managed-subagent"
-        );
-        assert_eq!(reused.data["managed_subagent"]["id"], "existing-child");
+        assert!(!reused.ok, "tmux cannot create a managed Codex thread");
+        assert!(reused
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
 
         let existing = crate::subagent::handle_with_env(
             &server,
@@ -21191,8 +21416,11 @@ mod scheduler_admission_tests {
             },
             Default::default(),
         );
-        assert!(existing.ok, "{existing:?}");
-        assert_eq!(existing.data["reused"], true);
+        assert!(!existing.ok);
+        assert!(existing
+            .error
+            .unwrap()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
 
         let invalid_id = crate::subagent::handle_with_env(
             &server,
@@ -21205,7 +21433,10 @@ mod scheduler_admission_tests {
             Default::default(),
         );
         assert!(!invalid_id.ok);
-        assert!(invalid_id.error.unwrap().contains("invalid subagent ID"));
+        assert!(invalid_id
+            .error
+            .unwrap()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
         let invalid_runtime = crate::subagent::handle_with_env(
             &server,
             "master",
@@ -21220,7 +21451,7 @@ mod scheduler_admission_tests {
         assert!(invalid_runtime
             .error
             .unwrap()
-            .contains("runtime must be codex"));
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21255,8 +21486,12 @@ mod scheduler_admission_tests {
             Some("requested-child"),
             Some("codex"),
         )
-        .unwrap();
-        assert!(admission.is_none(), "{admission:?}");
+        .unwrap_err();
+        assert!(admission
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21285,8 +21520,9 @@ mod scheduler_admission_tests {
         assert!(result
             .error
             .unwrap()
-            .contains("scheduler admission audit failed"));
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
         assert!(server.state.lock().unwrap().subagents.is_empty());
+        assert!(server.state.lock().unwrap().scheduler_admissions.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21295,14 +21531,17 @@ mod scheduler_admission_tests {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         promote_master(&server);
-        let decision =
+        let unsupported =
             scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
-                .unwrap();
-        assert!(decision.is_none());
-        let audit =
-            std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl")).unwrap();
-        assert!(audit.contains("create-managed-subagent"));
-        assert!(audit.contains("no eligible live registered peer"));
+                .unwrap_err();
+        assert!(unsupported
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
+        let audit = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
+            .unwrap_or_default();
+        assert!(!audit.contains("create-managed-subagent"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21340,60 +21579,15 @@ mod scheduler_admission_tests {
             },
         ]);
 
-        let below_cap =
-            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
-                .unwrap()
-                .expect("idle child below cap must be reused");
-        assert_eq!(
-            below_cap.data["admission"]["decision"],
-            "reuse-idle-managed-subagent"
-        );
-
-        server.commit(&[
-            Event::SubagentUpdated {
-                subagent: crate::subagent::Record {
-                    id: "child-a".into(),
-                    parent: "master".into(),
-                    peer: "managed-a".into(),
-                    status: "working".into(),
-                    thread_id: Some("thread-managed-a".into()),
-                    profile: None,
-                    created_ms: now_ms(),
-                    ready_deadline_ms: now_ms() + 10_000,
-                    last_message: None,
-                    error: None,
-                    probe_failures: vec![],
-                    runtime: Some("codex".into()),
-                },
-            },
-            Event::Registered {
-                worker: WorkerRec {
-                    id: "managed-a".into(),
-                    token: "token-managed-a".into(),
-                    cwd: root.display().to_string(),
-                    registered_ms: now_ms(),
-                    transport: Some(test_appserver_transport("thread-managed-a")),
-                },
-            },
-        ]);
-
-        let busy_child =
-            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
-                .unwrap();
-        assert!(
-            busy_child.is_none(),
-            "busy child must not be reused, and below-cap creation stays on the start path: {busy_child:?}"
-        );
-
-        server.config.subagent.max_concurrent = 1;
-        let at_cap =
+        let unsupported =
             scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
                 .unwrap_err();
-        assert!(at_cap
+        assert!(unsupported
             .error
             .as_deref()
             .unwrap_or_default()
-            .contains("no eligible live registered peer or idle managed subagent capacity"));
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21431,17 +21625,19 @@ mod scheduler_admission_tests {
                 },
             },
         ]);
-        assert_eq!(live_managed_subagent_count(&server, "master"), 1);
-        let decision =
-            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
-                .unwrap();
         assert_eq!(
-            decision
-                .as_ref()
-                .and_then(|response| response.data["admission"]["decision"].as_str()),
-            Some("use-registered-peer"),
-            "ordinary peer must be saturated before managed capacity: {decision:?}"
+            live_managed_subagent_count(&server, "master"),
+            0,
+            "retired AppServer child bindings do not count as live tmux peers"
         );
+        let unsupported =
+            scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
+                .unwrap_err();
+        assert!(unsupported
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MANAGED_SUBAGENT_UNSUPPORTED"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -21574,7 +21770,7 @@ mod scheduler_admission_tests {
             )
         };
         assert_eq!(
-            registered_idle_peer_for_admission(&server, "master")
+            registered_available_peer_for_admission(&server, "master")
                 .map(|(id, _)| id)
                 .as_deref(),
             Some("peer")

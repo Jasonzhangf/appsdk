@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(test)]
 use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -96,27 +97,14 @@ pub struct Record {
 /// How a managed child was finalized. Archiving is the preferred outcome, but
 /// a session root on another volume cannot be archived in place; that case is
 /// reported as a named terminal cleanup instead of an unbounded error.
-const CLOSE_OUTCOME_ARCHIVED: &str = "closed_archived";
-const CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE: &str = "closed_archive_unavailable";
-const CLOSE_OUTCOME_ARCHIVE_FAILED: &str = "closed_archive_failed";
-
-fn archive_unavailable_error(error: &str) -> bool {
-    error.contains("Cross-device link (os error 18)")
-        || error.contains("ADAPTER_CAPABILITY_UNAVAILABLE")
-}
+const CLOSE_OUTCOME_RECORD_ONLY: &str = "closed_record_only";
 
 fn close_archive_error(outcome: &str, error: &str) -> String {
     format!("CLOSE_OUTCOME={outcome}: {error}")
 }
 
-fn recorded_close_outcome(record: &Record) -> &'static str {
-    match record.error.as_deref() {
-        Some(error) if error.contains(CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE) => {
-            CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE
-        }
-        Some(error) if error.contains(CLOSE_OUTCOME_ARCHIVE_FAILED) => CLOSE_OUTCOME_ARCHIVE_FAILED,
-        _ => CLOSE_OUTCOME_ARCHIVED,
-    }
+fn recorded_close_outcome(_record: &Record) -> &'static str {
+    CLOSE_OUTCOME_RECORD_ONLY
 }
 pub(crate) fn observe(
     server: &Server,
@@ -153,35 +141,20 @@ pub(crate) fn observe(
         if !(1..=200).contains(&lines) {
             bail!("snapshot lines must be 1..200");
         }
-        let thread_id = record
-            .thread_id
-            .as_deref()
-            .context("subagent has no App Server thread binding")?;
-        let transport = transport.context("subagent has no registered App Server transport")?;
-        let items = crate::client::adapters::codex_app_server::read_thread_items(
-            &transport, thread_id, lines,
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let text = serde_json::to_string_pretty(&items)?;
-        let tail: Vec<_> = text.lines().rev().take(lines).collect();
-        let mut value = json!({
-            "subagent_id": record.id,
-            "captured_ms": now_ms(),
-            "thread_id": thread_id,
-            "items": items,
-            "text_tail": tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        });
-        merge_follow_up(&mut value);
-        return Ok(value);
+        bail!("SUBAGENT_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the peer's durable mailbox and task state");
     }
-    let thread_status = match (record.thread_id.as_deref(), transport.as_ref()) {
-        (Some(thread_id), Some(transport)) => {
-            (server.appserver_thread_status)(transport, thread_id)
-                .map_err(|error| anyhow::anyhow!("{error}"))?
+    let transport_view = match transport.as_ref() {
+        Some(transport) if transport.kind == crate::proto::TransportKind::Tmux => {
+            let endpoint = transport
+                .tmux_endpoint
+                .as_ref()
+                .context("TMUX_ENDPOINT_MISSING: registered subagent has no pane binding")?;
+            crate::client::adapters::tmux::view(endpoint).map_err(anyhow::Error::msg)?
         }
-        _ => serde_json::Value::Null,
+        Some(_) => bail!("TRANSPORT_UNSUPPORTED: subagent status requires a tmux pane binding"),
+        None => serde_json::Value::Null,
     };
-    let observed = if thread_status.is_null() {
+    let observed = if transport_view.is_null() {
         "unknown"
     } else {
         record.status.as_str()
@@ -190,7 +163,7 @@ pub(crate) fn observe(
         "subagent": record,
         "observed_status": observed,
         "observed_ms": now_ms(),
-        "thread_status": thread_status,
+        "transport_view": transport_view,
         "keepalive": keepalive,
         "mailbox": mailbox,
         "tasks": tasks
@@ -227,6 +200,7 @@ pub(crate) fn valid_runtime(runtime: &str) -> bool {
     runtime == "codex"
 }
 
+#[cfg(test)]
 fn role_brief_prompt(role_brief: &serde_json::Value) -> Result<String> {
     let required = |field: &str| {
         role_brief
@@ -268,6 +242,7 @@ fn role_brief_prompt(role_brief: &serde_json::Value) -> Result<String> {
     ))
 }
 
+#[cfg(test)]
 fn child_prompt(record: &Record, role_brief: &serde_json::Value) -> Result<String> {
     let role_contract = role_brief_prompt(role_brief)?;
     Ok(format!(
@@ -288,6 +263,7 @@ Each dispatched message has a canonical task named task-<message-id>. working cl
     ))
 }
 
+#[cfg(test)]
 fn launch_args(
     runtime: &str,
     profile: &config::Profile,
@@ -345,6 +321,7 @@ fn launch_args(
     Ok(("codex".into(), args))
 }
 
+#[cfg(test)]
 fn finish_probe(child: &mut std::process::Child, timeout: Duration) -> Result<()> {
     let started = Instant::now();
     loop {
@@ -368,6 +345,7 @@ fn finish_probe(child: &mut std::process::Child, timeout: Duration) -> Result<()
     }
 }
 
+#[cfg(test)]
 fn probe_with(
     executable: &std::path::Path,
     runtime: &str,
@@ -458,6 +436,7 @@ fn notify(
     Ok(response.data)
 }
 
+#[cfg(test)]
 fn child_appserver_candidate(
     parent_transport: &crate::proto::SelectedTransport,
     root: &std::path::Path,
@@ -472,6 +451,7 @@ fn child_appserver_candidate(
     child_appserver_candidate_from_session(parent_transport, root, &child_session_id, thread_id)
 }
 
+#[cfg(test)]
 fn child_session_id_from_thread_status(thread_status: &serde_json::Value) -> Result<String> {
     thread_status
         .pointer("/thread/sessionId")
@@ -481,6 +461,7 @@ fn child_session_id_from_thread_status(thread_status: &serde_json::Value) -> Res
         .context("child App Server thread/read response is missing thread.sessionId")
 }
 
+#[cfg(test)]
 fn child_appserver_candidate_from_session(
     parent_transport: &crate::proto::SelectedTransport,
     root: &std::path::Path,
@@ -503,11 +484,13 @@ fn child_appserver_candidate_from_session(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum ChildNotificationFailureAction {
     PreserveRouteBinding,
     RetireRouteBinding,
 }
 
+#[cfg(test)]
 fn child_notification_failure_action(
     error: &crate::client::adapters::AdapterError,
 ) -> ChildNotificationFailureAction {
@@ -523,6 +506,7 @@ fn child_notification_failure_action(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn child_notification_failure_result(
     route_owner: &Server,
     server: &Server,
@@ -576,34 +560,7 @@ fn child_notification_failure_result(
     );
 }
 
-#[derive(Serialize, Deserialize)]
-struct LaunchSpec {
-    executable: String,
-    args: Vec<String>,
-    env: std::collections::BTreeMap<String, String>,
-}
-
-pub fn exec_launch(file: &std::path::Path) -> Result<()> {
-    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
-    let metadata = std::fs::symlink_metadata(file)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        bail!("unsafe launch manifest");
-    }
-    let spec: LaunchSpec = serde_json::from_slice(&std::fs::read(file)?)?;
-    std::fs::remove_file(file)?;
-    if spec.executable.is_empty() || spec.executable.starts_with('-') {
-        bail!("unsafe launch executable");
-    }
-    let mut command = Command::new(&spec.executable);
-    command.env_clear().envs(spec.env).args(spec.args);
-    for key in ["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    Err(command.exec().into())
-}
-
+#[cfg(test)]
 fn launch(
     server: &Server,
     route_owner: &Server,
@@ -680,6 +637,7 @@ fn launch(
         app_scope.cloned(),
         Some(crate::proto::TransportCandidates {
             appserver: Some(candidate),
+            tmux: None,
         }),
     );
     if !registered.ok {
@@ -840,46 +798,20 @@ fn launch(
 }
 #[cfg(test)]
 pub fn handle(server: &Server, actor: &str, token: &str, action: Action) -> Resp {
-    handle_with_env(server, actor, token, action, std::env::vars().collect())
+    handle_with_env(
+        server,
+        actor,
+        token,
+        action,
+        std::collections::BTreeMap::new(),
+    )
 }
 pub fn handle_with_env(
     server: &Server,
     actor: &str,
     token: &str,
     action: Action,
-    environment: std::collections::BTreeMap<String, String>,
-) -> Resp {
-    handle_with_env_route(server, server, actor, token, action, None, environment)
-}
-
-pub(crate) fn handle_with_env_for_app_scope(
-    server: &Server,
-    route_owner: &Server,
-    actor: &str,
-    token: &str,
-    action: Action,
-    app_scope: AppServerId,
-    environment: std::collections::BTreeMap<String, String>,
-) -> Resp {
-    handle_with_env_route(
-        server,
-        route_owner,
-        actor,
-        token,
-        action,
-        Some(app_scope),
-        environment,
-    )
-}
-
-fn handle_with_env_route(
-    server: &Server,
-    route_owner: &Server,
-    actor: &str,
-    token: &str,
-    action: Action,
-    app_scope: Option<AppServerId>,
-    environment: std::collections::BTreeMap<String, String>,
+    _environment: std::collections::BTreeMap<String, String>,
 ) -> Resp {
     if let Action::Dispatch {
         request_id,
@@ -908,158 +840,28 @@ fn handle_with_env_route(
             next_step,
         );
     }
-    if let Action::Start {
-        ref id,
-        ref runtime,
-    } = action
-    {
-        match crate::server::scheduler_admit_subagent_start(
-            server,
-            actor,
-            token,
-            id.as_deref(),
-            runtime.as_deref(),
-        ) {
-            Ok(Some(response)) => return response,
-            Ok(None) => {}
-            Err(response) => return response,
+    if matches!(&action, Action::Start { .. }) {
+        let state = server.state.lock().unwrap();
+        if !state
+            .workers
+            .get(actor)
+            .is_some_and(|worker| worker.token == token)
+        {
+            return Resp::err("subagent authentication failed");
         }
+        return Resp::err("MANAGED_SUBAGENT_UNSUPPORTED: tmux cannot create a Codex thread; start the peer in its own tmux pane and register that pane");
     }
-    match run(
-        server,
-        route_owner,
-        actor,
-        token,
-        action,
-        environment,
-        app_scope,
-    ) {
+    match run(server, actor, token, action) {
         Ok(value) => Resp::data(value),
         Err(e) => Resp::err(e.to_string()),
     }
 }
-fn run(
-    server: &Server,
-    route_owner: &Server,
-    actor: &str,
-    token: &str,
-    action: Action,
-    environment: std::collections::BTreeMap<String, String>,
-    app_scope: Option<AppServerId>,
-) -> Result<serde_json::Value> {
+fn run(server: &Server, actor: &str, token: &str, action: Action) -> Result<serde_json::Value> {
     {
         let state = server.state.lock().unwrap();
         if !state.workers.get(actor).is_some_and(|w| w.token == token) {
             bail!("subagent authentication failed");
         }
-    }
-    if let Action::Start { id, runtime } = action {
-        config::ensure_written()?;
-        let mut config = config::load(&server.root)?;
-        if let Some(runtime) = runtime {
-            if !valid_runtime(runtime.as_str()) {
-                bail!("subagent.runtime must be codex");
-            }
-            config.subagent.runtime = runtime;
-        }
-        let id = id.unwrap_or_else(|| format!("sa-{:016x}", rand::random::<u64>()));
-        if !valid_id(&id) {
-            bail!("invalid subagent ID");
-        }
-        let cwd_name = server
-            .root
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let prefix: String = cwd_name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .take(32)
-            .collect();
-        let peer = config
-            .subagent
-            .name_template
-            .replace("{cwd_name}", &prefix)
-            .replace("{short_id}", &id);
-        if !valid_id(&peer) {
-            bail!("subagent name must contain only ASCII letters, digits, dash or underscore and be <=80 characters");
-        }
-        let mut record = Record {
-            id: id.clone(),
-            parent: actor.into(),
-            peer,
-            status: "probing".into(),
-            thread_id: None,
-            profile: None,
-            created_ms: now_ms(),
-            ready_deadline_ms: 0,
-            last_message: None,
-            error: None,
-            probe_failures: Vec::new(),
-            runtime: Some(config.subagent.runtime.clone()),
-        };
-        {
-            let mut state = server.state.lock().unwrap();
-            if let Some(existing) = state.subagents.get(&id) {
-                if existing.parent != actor {
-                    bail!("subagent belongs to another parent");
-                }
-                if can_reuse_existing(existing) {
-                    let existing = existing.clone();
-                    return Ok(follow_up(&existing, true));
-                }
-                record = existing.clone();
-                record.runtime = Some(config.subagent.runtime.clone());
-            } else {
-                server
-                    .commit_locked_checked(
-                        &mut state,
-                        &[Event::SubagentUpdated {
-                            subagent: record.clone(),
-                        }],
-                    )
-                    .map_err(|error| anyhow::anyhow!("subagent start journal failure: {error}"))?;
-            }
-        }
-        if let Err(e) = launch(
-            server,
-            route_owner,
-            &mut record,
-            &config.subagent,
-            environment,
-            app_scope.as_ref(),
-        ) {
-            let msg = e.to_string();
-            record.error = Some(msg.clone());
-            if msg.contains("timed out") {
-                record.status = "probing".into();
-                server
-                    .commit_checked(&[Event::SubagentUpdated {
-                        subagent: record.clone(),
-                    }])
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "subagent start outcome unknown: probe timed out and journal commit failed: {error}"
-                        )
-                    })?;
-                return Ok(follow_up(&record, false));
-            }
-            record.status = "failed".into();
-        }
-        server
-            .commit_checked(&[Event::SubagentUpdated {
-                subagent: record.clone(),
-            }])
-            .map_err(|error| {
-                anyhow::anyhow!("subagent start outcome unknown: journal commit failed: {error}")
-            })?;
-        return Ok(follow_up(&record, false));
     }
     if matches!(action, Action::List) {
         let state = server.state.lock().unwrap();
@@ -1098,48 +900,7 @@ fn run(
         bail!("only the creating parent or live master may manage this subagent");
     }
     match action {
-        Action::Snapshot { lines, .. } => {
-            let thread_id = record
-                .thread_id
-                .as_deref()
-                .context("subagent has no App Server thread binding")?
-                .to_owned();
-            let transport = state
-                .workers
-                .get(&record.peer)
-                .and_then(|worker| worker.transport.clone())
-                .context("subagent has no registered App Server transport")?;
-            if !(1..=200).contains(&lines) {
-                bail!("snapshot lines must be 1..200");
-            }
-            drop(state);
-            let items = crate::client::adapters::codex_app_server::read_thread_items(
-                &transport, &thread_id, lines,
-            )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-            let text = serde_json::to_string_pretty(&items)?;
-            let tail: Vec<_> = text.lines().rev().take(lines).collect();
-            let captured_ms = now_ms();
-            server
-                .commit_checked(&[Event::SubagentSnapshotCaptured {
-                    subagent_id: record.id.clone(),
-                    thread_id: thread_id.clone(),
-                    captured_ms,
-                }])
-                .map_err(|error| {
-                    anyhow::anyhow!("subagent snapshot receipt journal failure: {error}")
-                })?;
-            let mut value = json!({
-                "subagent_id": record.id,
-                "captured_ms": captured_ms,
-                "thread_id": thread_id,
-                "snapshot_receipt": true,
-                "items": items,
-                "text_tail": tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-            });
-            merge_follow_up(&mut value);
-            return Ok(value);
-        }
+        Action::Snapshot { .. } => bail!("SUBAGENT_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the peer's durable mailbox and task state"),
         Action::Rearm { .. } => {
             server
                 .commit_locked_checked(
@@ -1338,12 +1099,9 @@ fn run(
                 .get(&record.id)
                 .filter(|receipt| record.thread_id.as_deref() == Some(receipt.thread_id.as_str()))
                 .cloned();
-            // A definitive Missing thread can never produce the pre-close
-            // snapshot, so retirement is allowed once it holds no unresolved
-            // responsibility. Cold and Unknown keep the snapshot gate: a cold
-            // thread is still addressable and an inconclusive probe is not
-            // evidence of death.
-            let mut retired_without_snapshot = false;
+            // A missing pane cannot provide a new snapshot, so close is
+            // allowed only after its durable Collab responsibilities resolve.
+            // Unknown and live panes still require an existing snapshot.
             let snapshot_captured_ms = match snapshot {
                 Some(snapshot) => Some(snapshot.captured_ms),
                 None => {
@@ -1356,11 +1114,10 @@ fn run(
                         || !subagent_responsibilities_resolved(&state, &record)
                     {
                         bail!(
-                            "subagent {} requires a successful snapshot of its bound App Server thread before close",
+                            "subagent {} requires a successful snapshot of its live tmux pane before close",
                             record.id
                         );
                     }
-                    retired_without_snapshot = true;
                     None
                 }
             };
@@ -1375,90 +1132,19 @@ fn run(
                 )
                 .map_err(|error| anyhow::anyhow!("subagent close journal failure: {error}"))?;
             drop(state);
-            if let (false, Some(thread_id)) =
-                (retired_without_snapshot, record.thread_id.as_deref())
-            {
-                let (transport, peer_cwd) = {
-                    let state = server.state.lock().unwrap();
-                    let peer_cwd = state
-                        .workers
-                        .get(&record.peer)
-                        .map(|worker| worker.cwd.clone())
-                        .unwrap_or_else(|| server.root.display().to_string());
-                    let transport = state
-                        .workers
-                        .get(&record.peer)
-                        .and_then(|worker| worker.transport.clone())
-                        .context("subagent has no registered App Server transport")?;
-                    (transport, peer_cwd)
-                };
-                let close_outcome = match (server.appserver_thread_archive)(&transport, thread_id) {
-                    Ok(_) => CLOSE_OUTCOME_ARCHIVED,
-                    Err(error) => {
-                        let archive_error = error.to_string();
-                        let close_outcome = if archive_unavailable_error(&archive_error) {
-                            CLOSE_OUTCOME_ARCHIVE_UNAVAILABLE
-                        } else {
-                            CLOSE_OUTCOME_ARCHIVE_FAILED
-                        };
-                        record.thread_id = None;
-                        record.error = Some(close_archive_error(close_outcome, &archive_error));
-                        if let Err(cleanup_error) =
-                            crate::server::retire_current_thread_route_after_launch_failure(
-                                route_owner,
-                                server,
-                                &record.peer,
-                                &peer_cwd,
-                                app_scope.as_ref(),
-                            )
-                        {
-                            record.error = Some(close_archive_error(
-                                close_outcome,
-                                &format!("{archive_error}; route cleanup failed: {cleanup_error}"),
-                            ));
-                        }
-                        if let Err(cleanup_error) =
-                            crate::server::retire_runtime_binding_after_route_failure(
-                                server,
-                                &record.peer,
-                                &peer_cwd,
-                                app_scope.as_ref(),
-                                &record.parent,
-                                "subagent close archive unavailable",
-                            )
-                        {
-                            record.error = Some(close_archive_error(
-                                close_outcome,
-                                &format!(
-                                    "{}; binding cleanup failed: {cleanup_error}",
-                                    record.error.clone().unwrap_or_default()
-                                ),
-                            ));
-                        }
-                        close_outcome
-                    }
-                };
-                record.status = "closed".into();
-                server
-                    .commit_checked(&[Event::SubagentUpdated {
-                        subagent: record.clone(),
-                    }])
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "subagent close outcome unknown: archive stage completed but journal commit failed: {error}"
-                        )
-                    })?;
-                return close_result(&record, snapshot_captured_ms, close_outcome);
-            }
             record.status = "closed".into();
+            record.error = Some(close_archive_error(
+                CLOSE_OUTCOME_RECORD_ONLY,
+                "tmux cannot archive or terminate a peer pane; its registration and route remain active",
+            ));
             server
                 .commit_checked(&[Event::SubagentUpdated {
                     subagent: record.clone(),
                 }])
                 .map_err(|error| {
-                    anyhow::anyhow!("subagent close outcome unknown: external close completed but journal commit failed: {error}")
+                    anyhow::anyhow!("subagent close outcome unknown: record-only close journal commit failed: {error}")
                 })?;
-            return close_result(&record, snapshot_captured_ms, CLOSE_OUTCOME_ARCHIVED);
+            return close_result(&record, snapshot_captured_ms, CLOSE_OUTCOME_RECORD_ONLY);
         }
         _ => unreachable!(),
     }
@@ -1652,6 +1338,7 @@ mod tests {
             namespace: Some("codex_tui".into()),
             session_id: None,
             thread_id: Some("01a0c48b-parent-thread".into()),
+            tmux_endpoint: None,
             capabilities: vec![],
             self_check: "parent verified".into(),
         };
@@ -1725,18 +1412,7 @@ mod tests {
         crate::identity::BindingId,
     ) {
         let app_scope = AppServerId::new("tui-default").unwrap();
-        let response = crate::server::handle_register_with_app_scope_unfinalized(
-            server,
-            child_id.into(),
-            format!("token-{child_id}"),
-            root.display().to_string(),
-            Some(app_scope.clone()),
-            Some(crate::proto::TransportCandidates {
-                appserver: Some(crate::server::peer_tests::test_appserver_candidate(
-                    thread_id,
-                )),
-            }),
-        );
+        let response = crate::server::peer_tests::register(server, child_id, thread_id);
         assert!(response.ok, "{response:?}");
         crate::server::commit_current_thread_route_for_runtime(
             server,
@@ -1765,21 +1441,10 @@ mod tests {
     #[test]
     fn close_reports_named_terminal_outcome_when_archive_is_impossible() {
         let (mut server, root) = crate::server::peer_tests::test_server();
-        let registered = crate::server::handle_register_with_app_scope_unfinalized(
-            &server,
-            "parent".into(),
-            "token-parent".into(),
-            root.display().to_string(),
-            Some(AppServerId::new("tui-default").unwrap()),
-            Some(crate::proto::TransportCandidates {
-                appserver: Some(crate::server::peer_tests::test_appserver_candidate(
-                    "thread-parent",
-                )),
-            }),
-        );
+        let registered = crate::server::peer_tests::register(&server, "parent", "thread-parent");
         assert!(registered.ok, "{registered:?}");
         let child_id = "child-archive-unavailable";
-        let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
+        let (_app_scope, session_id, native_thread_id, route_scope, binding_id) =
             register_child_route(&server, &root, child_id, "thread-child-archive-unavailable");
         server.commit(&[Event::SubagentUpdated {
             subagent: Record {
@@ -1803,30 +1468,28 @@ mod tests {
             captured_ms: now_ms(),
         }]);
         server.appserver_thread_archive = std::sync::Arc::new(|_, _| {
-            Err("ADAPTER_UNKNOWN: rpc unknown: failed to archive session: thread-store internal error: failed to archive thread: Cross-device link (os error 18)".into())
+            panic!("tmux close must not call the retired AppServer archive adapter")
         });
         let server = std::sync::Arc::new(server);
 
-        let response = crate::subagent::handle_with_env_for_app_scope(
-            &server,
+        let response = crate::subagent::handle_with_env(
             &server,
             "parent",
             "token-parent",
             Action::Close {
                 id: "subagent-archive-unavailable".into(),
             },
-            app_scope.clone(),
             std::collections::BTreeMap::new(),
         );
 
         assert!(response.ok, "{response:?}");
         assert_eq!(
-            response.data["close_outcome"], "closed_archive_unavailable",
+            response.data["close_outcome"], "closed_record_only",
             "{response:?}"
         );
         assert!(response.data["subagent"]["error"]
             .as_str()
-            .is_some_and(|error| error.contains("Cross-device link (os error 18)")));
+            .is_some_and(|error| error.contains("registration and route remain active")));
         let state = server.state.lock().unwrap();
         assert_eq!(
             state.subagents["subagent-archive-unavailable"].status,
@@ -1835,13 +1498,13 @@ mod tests {
         assert!(state
             .global
             .lookup_current_thread_route(&session_id, &native_thread_id)
-            .is_none());
+            .is_some());
         assert_eq!(
             state
                 .global
                 .lookup_binding_for(&route_scope, &binding_id)
                 .and_then(|binding| binding.native_thread_id.clone()),
-            None
+            Some(native_thread_id.clone())
         );
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -1850,21 +1513,10 @@ mod tests {
     #[test]
     fn close_reports_archive_failed_when_archiving_returns_an_unclassified_error() {
         let (mut server, root) = crate::server::peer_tests::test_server();
-        let registered = crate::server::handle_register_with_app_scope_unfinalized(
-            &server,
-            "parent".into(),
-            "token-parent".into(),
-            root.display().to_string(),
-            Some(AppServerId::new("tui-default").unwrap()),
-            Some(crate::proto::TransportCandidates {
-                appserver: Some(crate::server::peer_tests::test_appserver_candidate(
-                    "thread-parent",
-                )),
-            }),
-        );
+        let registered = crate::server::peer_tests::register(&server, "parent", "thread-parent");
         assert!(registered.ok, "{registered:?}");
         let child_id = "child-archive-failed";
-        let (app_scope, session_id, native_thread_id, route_scope, binding_id) =
+        let (_app_scope, session_id, native_thread_id, route_scope, binding_id) =
             register_child_route(&server, &root, child_id, "thread-child-archive-failed");
         server.commit(&[Event::SubagentUpdated {
             subagent: Record {
@@ -1887,42 +1539,41 @@ mod tests {
             thread_id: native_thread_id.to_string(),
             captured_ms: now_ms(),
         }]);
-        server.appserver_thread_archive =
-            std::sync::Arc::new(|_, _| Err("ADAPTER_TIMEOUT: archive timed out".into()));
+        server.appserver_thread_archive = std::sync::Arc::new(|_, _| {
+            panic!("tmux close must not call the retired AppServer archive adapter")
+        });
         let server = std::sync::Arc::new(server);
 
-        let response = crate::subagent::handle_with_env_for_app_scope(
-            &server,
+        let response = crate::subagent::handle_with_env(
             &server,
             "parent",
             "token-parent",
             Action::Close {
                 id: "subagent-archive-failed".into(),
             },
-            app_scope,
             std::collections::BTreeMap::new(),
         );
 
         assert!(response.ok, "{response:?}");
         assert_eq!(
-            response.data["close_outcome"], "closed_archive_failed",
+            response.data["close_outcome"], "closed_record_only",
             "{response:?}"
         );
         assert!(response.data["subagent"]["error"]
             .as_str()
-            .is_some_and(|error| error.contains("archive timed out")));
+            .is_some_and(|error| error.contains("registration and route remain active")));
         let state = server.state.lock().unwrap();
         assert_eq!(state.subagents["subagent-archive-failed"].status, "closed");
         assert!(state
             .global
             .lookup_current_thread_route(&session_id, &native_thread_id)
-            .is_none());
+            .is_some());
         assert_eq!(
             state
                 .global
                 .lookup_binding_for(&route_scope, &binding_id)
                 .and_then(|binding| binding.native_thread_id.clone()),
-            None
+            Some(native_thread_id.clone())
         );
         drop(state);
         std::fs::remove_dir_all(root).unwrap();

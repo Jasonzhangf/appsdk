@@ -1,0 +1,326 @@
+{
+  "runId": "team_20260923125709_8de85128f3fd6570",
+  "generatedAt": "2026-09-23T12:57:19.377Z",
+  "summary": {
+    "wallMs": 6995,
+    "totalCost": 0,
+    "totalTokens": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "totalTokens": 0
+    },
+    "modelBreakdown": {},
+    "subagentCount": 1,
+    "eventCount": 24,
+    "tokensPerSec": 0,
+    "eventsPerSec": 3.43,
+    "workflow": "research",
+    "goal": "Inspect project-local and user-global skills named appsdk-migration, appsdk-project-governance, and project-memory. Determine intended ownership and safest minimal way to eliminate collision while pre",
+    "parentModel": "openai-codex/gpt-6-luna"
+  },
+  "subagents": [
+    {
+      "taskId": "01_explore",
+      "role": "explorer",
+      "model": "",
+      "modelRouting": "openai-codex/gpt-6-luna",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0
+      },
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+      },
+      "timeline": {
+        "phases": {
+          "launch": 219,
+          "respawn": 0,
+          "startup": 5548,
+          "activeWork": 0,
+          "drain": 5,
+          "finalize": null,
+          "total": null,
+          "wall": 5553
+        },
+        "progressCount": 1,
+        "maxGap": 0
+      },
+      "tools": 0,
+      "assistantMsgs": 0,
+      "messageEndCount": 0,
+      "apiErrors": 0,
+      "spawnCount": 1,
+      "exitCode": 1,
+      "error": "Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n",
+      "attempts": 1,
+      "modelAttempts": [
+        {
+          "model": "openai-codex/gpt-6-luna",
+          "success": false,
+          "exitCode": 1,
+          "error": "Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n"
+        }
+      ],
+      "status": "failed",
+      "pid": 73975,
+      "spawnMs": 1790168229483,
+      "exitMs": 1790168235036,
+      "hasTranscript": false,
+      "resource": {
+        "taskId": "01_explore",
+        "pid": 73975,
+        "samples": 2,
+        "peakRssBytes": 733102080,
+        "peakCpuPct": 212.6,
+        "p95RssBytes": 733102080,
+        "p95CpuPct": 212.6,
+        "avgRssBytes": 537280512,
+        "avgCpuPct": 165.9,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790168231356,
+            "pid": 73975,
+            "rssBytes": 341458944,
+            "cpuPct": 212.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790168233352,
+            "pid": 73975,
+            "rssBytes": 733102080,
+            "cpuPct": 119.1,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    }
+  ],
+  "problems": [
+    {
+      "severity": 1,
+      "type": "exit_code",
+      "taskId": "01_explore",
+      "message": "Worker exit Error (1) — Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n",
+      "value": 1
+    },
+    {
+      "severity": 2,
+      "type": "task_status",
+      "taskId": "01_explore",
+      "message": "Task status: failed",
+      "value": "failed"
+    },
+    {
+      "severity": 2,
+      "type": "task.failed",
+      "taskId": "01_explore",
+      "message": "Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n",
+      "seq": 13
+    },
+    {
+      "severity": 2,
+      "type": "workflow.phase_failed",
+      "message": "Workflow phase 'explore' failed.",
+      "seq": 17
+    },
+    {
+      "severity": 3,
+      "type": "recovery.attempted",
+      "taskId": "01_explore",
+      "message": "Task failed: Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n",
+      "seq": 22
+    },
+    {
+      "severity": 5,
+      "type": "deliverable_warning",
+      "message": "Missing workflow output files: research-summary.md",
+      "seq": 19
+    }
+  ],
+  "bottlenecks": [],
+  "resources": {
+    "sampleCount": 10,
+    "peakRssBytes": 733102080,
+    "peakCpuPct": 212.6,
+    "rssGrowthBytes": 400818176,
+    "spanMs": 6052,
+    "byPid": [
+      {
+        "pid": 71673,
+        "label": "root",
+        "peakRss": 216055808,
+        "peakCpu": 16.9,
+        "firstRss": 211910656,
+        "lastRss": 216055808
+      },
+      {
+        "pid": 73854,
+        "label": "child",
+        "peakRss": 46940160,
+        "peakCpu": 17.6,
+        "firstRss": 41910272,
+        "lastRss": 46940160
+      },
+      {
+        "pid": 73975,
+        "label": "child",
+        "peakRss": 733102080,
+        "peakCpu": 212.6,
+        "firstRss": 341458944,
+        "lastRss": 733102080
+      }
+    ],
+    "perSubagent": [
+      {
+        "taskId": "01_explore",
+        "pid": 73975,
+        "samples": 2,
+        "peakRssBytes": 733102080,
+        "peakCpuPct": 212.6,
+        "p95RssBytes": 733102080,
+        "p95CpuPct": 212.6,
+        "avgRssBytes": 537280512,
+        "avgCpuPct": 165.9,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790168231356,
+            "pid": 73975,
+            "rssBytes": 341458944,
+            "cpuPct": 212.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790168233352,
+            "pid": 73975,
+            "rssBytes": 733102080,
+            "cpuPct": 119.1,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    ],
+    "firstSample": {
+      "ts": 1790168229299,
+      "pid": 71673,
+      "ppid": 0,
+      "label": "root",
+      "rssBytes": 211910656,
+      "heapBytes": 0,
+      "cpuPct": 16.9
+    },
+    "lastSample": {
+      "ts": 1790168235351,
+      "pid": 73854,
+      "ppid": 0,
+      "label": "child",
+      "rssBytes": 46940160,
+      "heapBytes": 0,
+      "cpuPct": 0
+    }
+  },
+  "anomalies": [
+    {
+      "severity": "HIGH",
+      "category": "run_not_completed",
+      "subagent": "(run)",
+      "message": "run terminated via run.failed (not run.completed) — aborted/blocked/failed"
+    },
+    {
+      "severity": "HIGH",
+      "category": "workflow",
+      "subagent": "(run)",
+      "message": "workflow.phase_failed: Workflow phase 'explore' failed."
+    },
+    {
+      "severity": "HIGH",
+      "category": "task_failed",
+      "subagent": "01_explore",
+      "message": "subagent exited status=\"failed\" (exitCode=1): Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n"
+    },
+    {
+      "severity": "HIGH",
+      "category": "task_status",
+      "subagent": "01_explore",
+      "message": "task_status: Task status: failed"
+    },
+    {
+      "severity": "HIGH",
+      "category": "task",
+      "subagent": "01_explore",
+      "message": "task.failed: Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "missing_transcript",
+      "subagent": "01_explore",
+      "message": "no transcript found — token/cost reported as 0 (potential silent undercount if the subagent did real work)"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "model_retry",
+      "subagent": "01_explore",
+      "message": "model retry/fallback: 1 attempt(s), 1 model(s) [openai-codex/gpt-6-luna] (1 failed)"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "sustained_cpu",
+      "subagent": "01_explore",
+      "message": "sustained high CPU 212.6% (p95) — likely CPU-bound (loop / heavy tool)"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "recovery",
+      "subagent": "01_explore",
+      "message": "recovery.attempted: Task failed: Error: Failed to load extension \"/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions\": Failed to load extension: Cannot find module '/Users/fanzhang/.pi/agent/npm/node_modules/@codexstar/pi-agent-teams/extensions'\nRequire stack:\n- /Users/fanzhang/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-OJP47DM6.js\nHint: Start without extensions using \"pi -ne\".\n"
+    },
+    {
+      "severity": "LOW",
+      "category": "deliverable_warning",
+      "subagent": "(run)",
+      "message": "deliverable_warning: Missing workflow output files: research-summary.md"
+    },
+    {
+      "severity": "LOW",
+      "category": "slow_phase",
+      "subagent": "01_explore",
+      "message": "phase \"startup\" took 5.5s (>5s)"
+    }
+  ],
+  "typeCounts": {
+    "run.created": 1,
+    "run.running": 2,
+    "hook.executed": 5,
+    "runtime.resolved": 1,
+    "task.started": 1,
+    "task.progress": 2,
+    "worker.spawned": 1,
+    "worker.exit": 1,
+    "worker.close": 1,
+    "task.failed": 1,
+    "crew.task.retry_attempt": 1,
+    "workflow.phase_failed": 1,
+    "run.failed": 1,
+    "run.deliverable_warning": 1,
+    "run.terminal_preserved": 1,
+    "policy.escalated": 1,
+    "recovery.attempted": 1,
+    "run.goal_achievement": 1
+  }
+}

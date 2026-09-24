@@ -6,3 +6,11 @@ dist/
 /playground/
 /appsdk-*-macos-*
 rust/target/
+
+/.crew/*
+!/.crew/artifacts/
+!/.crew/graphs/
+/.crew/artifacts/*
+!/.crew/artifacts/.gitkeep
+/.crew/graphs/*
+!/.crew/graphs/.gitkeep

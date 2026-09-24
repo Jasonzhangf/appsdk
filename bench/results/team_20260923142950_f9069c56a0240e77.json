@@ -1,0 +1,1675 @@
+{
+  "runId": "team_20260923142950_f9069c56a0240e77",
+  "generatedAt": "2026-09-23T14:31:56.080Z",
+  "summary": {
+    "wallMs": 122583,
+    "totalCost": 0.01570748,
+    "totalTokens": {
+      "input": 109590,
+      "output": 3824,
+      "cacheRead": 283648,
+      "cacheWrite": 0,
+      "totalTokens": 397062
+    },
+    "modelBreakdown": {
+      "gpt-6-luna": 4
+    },
+    "subagentCount": 4,
+    "eventCount": 133,
+    "tokensPerSec": 31.2,
+    "eventsPerSec": 1.08,
+    "workflow": "review",
+    "goal": "独立只读 review 已完成的实现规划文档 docs/goals/appsdk-collab-pi-agent-teams-adapter-plan.md。范围仅该文档及其引用的 Pi Agent Teams 源码/项目流程。按 ~/.pi/agent/skills/codex-review/review-standards.md 检查：实现 DAG 是否从 scope/teamId 注册、ma",
+    "parentModel": "openai-codex/gpt-6-luna"
+  },
+  "subagents": [
+    {
+      "taskId": "01_explore",
+      "role": "explorer",
+      "model": "gpt-6-luna",
+      "modelRouting": "openai-codex/gpt-6-luna",
+      "usage": {
+        "input": 37927,
+        "output": 1494,
+        "cacheRead": 68096,
+        "cacheWrite": 0,
+        "totalTokens": 107517
+      },
+      "cost": {
+        "input": 0.0037927000000000004,
+        "output": 0.0007469999999999999,
+        "cacheRead": 0.00068096,
+        "cacheWrite": 0,
+        "total": 0.00522066
+      },
+      "timeline": {
+        "phases": {
+          "launch": 123,
+          "respawn": 0,
+          "startup": 1007,
+          "activeWork": 48330,
+          "drain": 6,
+          "finalize": 48,
+          "total": 49514,
+          "wall": 49343
+        },
+        "progressCount": 22,
+        "maxGap": 22991
+      },
+      "tools": 12,
+      "assistantMsgs": 4,
+      "messageEndCount": 16,
+      "apiErrors": 0,
+      "spawnCount": 1,
+      "exitCode": 0,
+      "attempts": 1,
+      "modelAttempts": [
+        {
+          "model": "openai-codex/gpt-6-luna",
+          "success": true,
+          "exitCode": 0
+        }
+      ],
+      "status": "completed",
+      "pid": 72209,
+      "spawnMs": 1790173790613,
+      "exitMs": 1790173839956,
+      "hasTranscript": true,
+      "resource": {
+        "taskId": "01_explore",
+        "pid": 72209,
+        "samples": 24,
+        "peakRssBytes": 241860608,
+        "peakCpuPct": 9.7,
+        "p95RssBytes": 239321088,
+        "p95CpuPct": 5.6,
+        "avgRssBytes": 213625515,
+        "avgCpuPct": 1.4,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173792584,
+            "pid": 72209,
+            "rssBytes": 238616576,
+            "cpuPct": 9.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173794586,
+            "pid": 72209,
+            "rssBytes": 239206400,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173796588,
+            "pid": 72209,
+            "rssBytes": 239321088,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173798588,
+            "pid": 72209,
+            "rssBytes": 241860608,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173800589,
+            "pid": 72209,
+            "rssBytes": 208306176,
+            "cpuPct": 5.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173802592,
+            "pid": 72209,
+            "rssBytes": 210665472,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173804590,
+            "pid": 72209,
+            "rssBytes": 211238912,
+            "cpuPct": 0.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173806592,
+            "pid": 72209,
+            "rssBytes": 213778432,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173808590,
+            "pid": 72209,
+            "rssBytes": 214597632,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173810594,
+            "pid": 72209,
+            "rssBytes": 215121920,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173812596,
+            "pid": 72209,
+            "rssBytes": 207044608,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173814598,
+            "pid": 72209,
+            "rssBytes": 208470016,
+            "cpuPct": 1.2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173816599,
+            "pid": 72209,
+            "rssBytes": 208470016,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173818598,
+            "pid": 72209,
+            "rssBytes": 208486400,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173820601,
+            "pid": 72209,
+            "rssBytes": 208486400,
+            "cpuPct": 0.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173822599,
+            "pid": 72209,
+            "rssBytes": 208486400,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173824603,
+            "pid": 72209,
+            "rssBytes": 208502784,
+            "cpuPct": 1.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173826601,
+            "pid": 72209,
+            "rssBytes": 208502784,
+            "cpuPct": 1.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173828603,
+            "pid": 72209,
+            "rssBytes": 208633856,
+            "cpuPct": 1.2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173830603,
+            "pid": 72209,
+            "rssBytes": 203505664,
+            "cpuPct": 1.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173832606,
+            "pid": 72209,
+            "rssBytes": 203522048,
+            "cpuPct": 1.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173834606,
+            "pid": 72209,
+            "rssBytes": 203685888,
+            "cpuPct": 2.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173836609,
+            "pid": 72209,
+            "rssBytes": 204242944,
+            "cpuPct": 1.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173838611,
+            "pid": 72209,
+            "rssBytes": 204259328,
+            "cpuPct": 0,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "02_code-review",
+      "role": "reviewer",
+      "model": "gpt-6-luna",
+      "modelRouting": "openai-codex/gpt-6-luna",
+      "usage": {
+        "input": 27053,
+        "output": 955,
+        "cacheRead": 78848,
+        "cacheWrite": 0,
+        "totalTokens": 106856
+      },
+      "cost": {
+        "input": 0.0027053000000000003,
+        "output": 0.0004775,
+        "cacheRead": 0.00078848,
+        "cacheWrite": 0,
+        "total": 0.00397128
+      },
+      "timeline": {
+        "phases": {
+          "launch": 187,
+          "respawn": 0,
+          "startup": 981,
+          "activeWork": 43335,
+          "drain": 6,
+          "finalize": 68,
+          "total": 44577,
+          "wall": 44322
+        },
+        "progressCount": 16,
+        "maxGap": 11032
+      },
+      "tools": 4,
+      "assistantMsgs": 5,
+      "messageEndCount": 9,
+      "apiErrors": 0,
+      "spawnCount": 1,
+      "exitCode": 0,
+      "attempts": 1,
+      "modelAttempts": [
+        {
+          "model": "openai-codex/gpt-6-luna",
+          "success": true,
+          "exitCode": 0
+        }
+      ],
+      "status": "completed",
+      "pid": 78185,
+      "spawnMs": 1790173840329,
+      "exitMs": 1790173884651,
+      "hasTranscript": true,
+      "resource": {
+        "taskId": "02_code-review",
+        "pid": 78185,
+        "samples": 22,
+        "peakRssBytes": 241631232,
+        "peakCpuPct": 89.6,
+        "p95RssBytes": 241598464,
+        "p95CpuPct": 5.3,
+        "avgRssBytes": 211544250,
+        "avgCpuPct": 5.4,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173840615,
+            "pid": 78185,
+            "rssBytes": 136052736,
+            "cpuPct": 89.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173842613,
+            "pid": 78185,
+            "rssBytes": 238272512,
+            "cpuPct": 3.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173844610,
+            "pid": 78185,
+            "rssBytes": 238714880,
+            "cpuPct": 2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173846612,
+            "pid": 78185,
+            "rssBytes": 239239168,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173848617,
+            "pid": 78185,
+            "rssBytes": 240467968,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173850615,
+            "pid": 78185,
+            "rssBytes": 240680960,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173852618,
+            "pid": 78185,
+            "rssBytes": 241598464,
+            "cpuPct": 4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173854617,
+            "pid": 78185,
+            "rssBytes": 241631232,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173856618,
+            "pid": 78185,
+            "rssBytes": 210092032,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173858616,
+            "pid": 78185,
+            "rssBytes": 208846848,
+            "cpuPct": 1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173860618,
+            "pid": 78185,
+            "rssBytes": 210403328,
+            "cpuPct": 1.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173862620,
+            "pid": 78185,
+            "rssBytes": 197279744,
+            "cpuPct": 0.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173864620,
+            "pid": 78185,
+            "rssBytes": 198295552,
+            "cpuPct": 1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173866621,
+            "pid": 78185,
+            "rssBytes": 198459392,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173868620,
+            "pid": 78185,
+            "rssBytes": 198606848,
+            "cpuPct": 1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173870625,
+            "pid": 78185,
+            "rssBytes": 199606272,
+            "cpuPct": 5.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173872626,
+            "pid": 78185,
+            "rssBytes": 200245248,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173874625,
+            "pid": 78185,
+            "rssBytes": 201572352,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173876625,
+            "pid": 78185,
+            "rssBytes": 203112448,
+            "cpuPct": 2.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173878628,
+            "pid": 78185,
+            "rssBytes": 203407360,
+            "cpuPct": 1.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173880627,
+            "pid": 78185,
+            "rssBytes": 203440128,
+            "cpuPct": 1.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173882630,
+            "pid": 78185,
+            "rssBytes": 203948032,
+            "cpuPct": 0,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "03_security-review",
+      "role": "security-reviewer",
+      "model": "gpt-6-luna",
+      "modelRouting": "openai-codex/gpt-6-luna",
+      "usage": {
+        "input": 25773,
+        "output": 742,
+        "cacheRead": 88064,
+        "cacheWrite": 0,
+        "totalTokens": 114579
+      },
+      "cost": {
+        "input": 0.0025773000000000007,
+        "output": 0.000371,
+        "cacheRead": 0.0008806399999999999,
+        "cacheWrite": 0,
+        "total": 0.00382894
+      },
+      "timeline": {
+        "phases": {
+          "launch": 98,
+          "respawn": 0,
+          "startup": 1051,
+          "activeWork": 28470,
+          "drain": 6,
+          "finalize": 62,
+          "total": 29687,
+          "wall": 29527
+        },
+        "progressCount": 19,
+        "maxGap": 6876
+      },
+      "tools": 7,
+      "assistantMsgs": 5,
+      "messageEndCount": 12,
+      "apiErrors": 0,
+      "spawnCount": 1,
+      "exitCode": 0,
+      "attempts": 1,
+      "modelAttempts": [
+        {
+          "model": "openai-codex/gpt-6-luna",
+          "success": true,
+          "exitCode": 0
+        }
+      ],
+      "status": "completed",
+      "pid": 78194,
+      "spawnMs": 1790173840331,
+      "exitMs": 1790173869858,
+      "hasTranscript": true,
+      "resource": {
+        "taskId": "03_security-review",
+        "pid": 78194,
+        "samples": 15,
+        "peakRssBytes": 239747072,
+        "peakCpuPct": 77.5,
+        "p95RssBytes": 239747072,
+        "p95CpuPct": 77.5,
+        "avgRssBytes": 207409425,
+        "avgCpuPct": 6.9,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173840622,
+            "pid": 78194,
+            "rssBytes": 120307712,
+            "cpuPct": 77.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173842619,
+            "pid": 78194,
+            "rssBytes": 236109824,
+            "cpuPct": 5.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173844617,
+            "pid": 78194,
+            "rssBytes": 236552192,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173846617,
+            "pid": 78194,
+            "rssBytes": 238485504,
+            "cpuPct": 1.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173848623,
+            "pid": 78194,
+            "rssBytes": 239747072,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173850620,
+            "pid": 78194,
+            "rssBytes": 207618048,
+            "cpuPct": 4.8,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173852624,
+            "pid": 78194,
+            "rssBytes": 210731008,
+            "cpuPct": 1.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173854623,
+            "pid": 78194,
+            "rssBytes": 210812928,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173856623,
+            "pid": 78194,
+            "rssBytes": 210878464,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173858622,
+            "pid": 78194,
+            "rssBytes": 210878464,
+            "cpuPct": 0.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173860624,
+            "pid": 78194,
+            "rssBytes": 197410816,
+            "cpuPct": 2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173862627,
+            "pid": 78194,
+            "rssBytes": 197656576,
+            "cpuPct": 2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173864626,
+            "pid": 78194,
+            "rssBytes": 197738496,
+            "cpuPct": 2.2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173866626,
+            "pid": 78194,
+            "rssBytes": 198098944,
+            "cpuPct": 2.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173868625,
+            "pid": 78194,
+            "rssBytes": 198115328,
+            "cpuPct": 0,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "04_verify",
+      "role": "verifier",
+      "model": "gpt-6-luna",
+      "modelRouting": "openai-codex/gpt-6-luna",
+      "usage": {
+        "input": 18837,
+        "output": 633,
+        "cacheRead": 48640,
+        "cacheWrite": 0,
+        "totalTokens": 68110
+      },
+      "cost": {
+        "input": 0.0018837,
+        "output": 0.00031649999999999994,
+        "cacheRead": 0.0004864,
+        "cacheWrite": 0,
+        "total": 0.0026866000000000004
+      },
+      "timeline": {
+        "phases": {
+          "launch": 113,
+          "respawn": 0,
+          "startup": 957,
+          "activeWork": 26742,
+          "drain": 5,
+          "finalize": 74,
+          "total": 27891,
+          "wall": 27704
+        },
+        "progressCount": 13,
+        "maxGap": 7123
+      },
+      "tools": 3,
+      "assistantMsgs": 4,
+      "messageEndCount": 7,
+      "apiErrors": 0,
+      "spawnCount": 1,
+      "exitCode": 0,
+      "attempts": 1,
+      "modelAttempts": [
+        {
+          "model": "openai-codex/gpt-6-luna",
+          "success": true,
+          "exitCode": 0
+        }
+      ],
+      "status": "completed",
+      "pid": 84038,
+      "spawnMs": 1790173884944,
+      "exitMs": 1790173912648,
+      "hasTranscript": true,
+      "resource": {
+        "taskId": "04_verify",
+        "pid": 84038,
+        "samples": 13,
+        "peakRssBytes": 238239744,
+        "peakCpuPct": 16.9,
+        "p95RssBytes": 238239744,
+        "p95CpuPct": 16.9,
+        "avgRssBytes": 215169812,
+        "avgCpuPct": 3.7,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173886630,
+            "pid": 84038,
+            "rssBytes": 232259584,
+            "cpuPct": 16.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173888630,
+            "pid": 84038,
+            "rssBytes": 235651072,
+            "cpuPct": 2.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173890631,
+            "pid": 84038,
+            "rssBytes": 237682688,
+            "cpuPct": 1.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173892633,
+            "pid": 84038,
+            "rssBytes": 238239744,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173894633,
+            "pid": 84038,
+            "rssBytes": 204046336,
+            "cpuPct": 14.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173896632,
+            "pid": 84038,
+            "rssBytes": 207732736,
+            "cpuPct": 4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173898635,
+            "pid": 84038,
+            "rssBytes": 208420864,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173900635,
+            "pid": 84038,
+            "rssBytes": 208437248,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173902637,
+            "pid": 84038,
+            "rssBytes": 209158144,
+            "cpuPct": 1.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173904637,
+            "pid": 84038,
+            "rssBytes": 212353024,
+            "cpuPct": 1.8,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173906637,
+            "pid": 84038,
+            "rssBytes": 200835072,
+            "cpuPct": 0.8,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173908642,
+            "pid": 84038,
+            "rssBytes": 200900608,
+            "cpuPct": 1.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173910640,
+            "pid": 84038,
+            "rssBytes": 201490432,
+            "cpuPct": 0.1,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    }
+  ],
+  "problems": [],
+  "bottlenecks": [
+    {
+      "taskId": "01_explore",
+      "phase": "total",
+      "durationMs": 49514,
+      "label": "explorer total wall"
+    },
+    {
+      "taskId": "02_code-review",
+      "phase": "total",
+      "durationMs": 44577,
+      "label": "reviewer total wall"
+    }
+  ],
+  "resources": {
+    "sampleCount": 198,
+    "peakRssBytes": 296239104,
+    "peakCpuPct": 89.6,
+    "rssGrowthBytes": 83820544,
+    "spanMs": 122107,
+    "byPid": [
+      {
+        "pid": 71673,
+        "label": "root",
+        "peakRss": 296239104,
+        "peakCpu": 15.2,
+        "firstRss": 296222720,
+        "lastRss": 293109760
+      },
+      {
+        "pid": 72058,
+        "label": "child",
+        "peakRss": 48087040,
+        "peakCpu": 2.7,
+        "firstRss": 41730048,
+        "lastRss": 48087040
+      },
+      {
+        "pid": 72209,
+        "label": "child",
+        "peakRss": 241860608,
+        "peakCpu": 9.7,
+        "firstRss": 238616576,
+        "lastRss": 204259328
+      },
+      {
+        "pid": 78185,
+        "label": "child",
+        "peakRss": 241631232,
+        "peakCpu": 89.6,
+        "firstRss": 136052736,
+        "lastRss": 203948032
+      },
+      {
+        "pid": 78194,
+        "label": "child",
+        "peakRss": 239747072,
+        "peakCpu": 77.5,
+        "firstRss": 120307712,
+        "lastRss": 198115328
+      },
+      {
+        "pid": 84038,
+        "label": "child",
+        "peakRss": 238239744,
+        "peakCpu": 16.9,
+        "firstRss": 232259584,
+        "lastRss": 201490432
+      }
+    ],
+    "perSubagent": [
+      {
+        "taskId": "01_explore",
+        "pid": 72209,
+        "samples": 24,
+        "peakRssBytes": 241860608,
+        "peakCpuPct": 9.7,
+        "p95RssBytes": 239321088,
+        "p95CpuPct": 5.6,
+        "avgRssBytes": 213625515,
+        "avgCpuPct": 1.4,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173792584,
+            "pid": 72209,
+            "rssBytes": 238616576,
+            "cpuPct": 9.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173794586,
+            "pid": 72209,
+            "rssBytes": 239206400,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173796588,
+            "pid": 72209,
+            "rssBytes": 239321088,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173798588,
+            "pid": 72209,
+            "rssBytes": 241860608,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173800589,
+            "pid": 72209,
+            "rssBytes": 208306176,
+            "cpuPct": 5.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173802592,
+            "pid": 72209,
+            "rssBytes": 210665472,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173804590,
+            "pid": 72209,
+            "rssBytes": 211238912,
+            "cpuPct": 0.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173806592,
+            "pid": 72209,
+            "rssBytes": 213778432,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173808590,
+            "pid": 72209,
+            "rssBytes": 214597632,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173810594,
+            "pid": 72209,
+            "rssBytes": 215121920,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173812596,
+            "pid": 72209,
+            "rssBytes": 207044608,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173814598,
+            "pid": 72209,
+            "rssBytes": 208470016,
+            "cpuPct": 1.2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173816599,
+            "pid": 72209,
+            "rssBytes": 208470016,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173818598,
+            "pid": 72209,
+            "rssBytes": 208486400,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173820601,
+            "pid": 72209,
+            "rssBytes": 208486400,
+            "cpuPct": 0.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173822599,
+            "pid": 72209,
+            "rssBytes": 208486400,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173824603,
+            "pid": 72209,
+            "rssBytes": 208502784,
+            "cpuPct": 1.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173826601,
+            "pid": 72209,
+            "rssBytes": 208502784,
+            "cpuPct": 1.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173828603,
+            "pid": 72209,
+            "rssBytes": 208633856,
+            "cpuPct": 1.2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173830603,
+            "pid": 72209,
+            "rssBytes": 203505664,
+            "cpuPct": 1.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173832606,
+            "pid": 72209,
+            "rssBytes": 203522048,
+            "cpuPct": 1.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173834606,
+            "pid": 72209,
+            "rssBytes": 203685888,
+            "cpuPct": 2.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173836609,
+            "pid": 72209,
+            "rssBytes": 204242944,
+            "cpuPct": 1.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173838611,
+            "pid": 72209,
+            "rssBytes": 204259328,
+            "cpuPct": 0,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      },
+      {
+        "taskId": "02_code-review",
+        "pid": 78185,
+        "samples": 22,
+        "peakRssBytes": 241631232,
+        "peakCpuPct": 89.6,
+        "p95RssBytes": 241598464,
+        "p95CpuPct": 5.3,
+        "avgRssBytes": 211544250,
+        "avgCpuPct": 5.4,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173840615,
+            "pid": 78185,
+            "rssBytes": 136052736,
+            "cpuPct": 89.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173842613,
+            "pid": 78185,
+            "rssBytes": 238272512,
+            "cpuPct": 3.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173844610,
+            "pid": 78185,
+            "rssBytes": 238714880,
+            "cpuPct": 2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173846612,
+            "pid": 78185,
+            "rssBytes": 239239168,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173848617,
+            "pid": 78185,
+            "rssBytes": 240467968,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173850615,
+            "pid": 78185,
+            "rssBytes": 240680960,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173852618,
+            "pid": 78185,
+            "rssBytes": 241598464,
+            "cpuPct": 4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173854617,
+            "pid": 78185,
+            "rssBytes": 241631232,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173856618,
+            "pid": 78185,
+            "rssBytes": 210092032,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173858616,
+            "pid": 78185,
+            "rssBytes": 208846848,
+            "cpuPct": 1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173860618,
+            "pid": 78185,
+            "rssBytes": 210403328,
+            "cpuPct": 1.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173862620,
+            "pid": 78185,
+            "rssBytes": 197279744,
+            "cpuPct": 0.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173864620,
+            "pid": 78185,
+            "rssBytes": 198295552,
+            "cpuPct": 1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173866621,
+            "pid": 78185,
+            "rssBytes": 198459392,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173868620,
+            "pid": 78185,
+            "rssBytes": 198606848,
+            "cpuPct": 1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173870625,
+            "pid": 78185,
+            "rssBytes": 199606272,
+            "cpuPct": 5.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173872626,
+            "pid": 78185,
+            "rssBytes": 200245248,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173874625,
+            "pid": 78185,
+            "rssBytes": 201572352,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173876625,
+            "pid": 78185,
+            "rssBytes": 203112448,
+            "cpuPct": 2.1,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173878628,
+            "pid": 78185,
+            "rssBytes": 203407360,
+            "cpuPct": 1.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173880627,
+            "pid": 78185,
+            "rssBytes": 203440128,
+            "cpuPct": 1.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173882630,
+            "pid": 78185,
+            "rssBytes": 203948032,
+            "cpuPct": 0,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      },
+      {
+        "taskId": "03_security-review",
+        "pid": 78194,
+        "samples": 15,
+        "peakRssBytes": 239747072,
+        "peakCpuPct": 77.5,
+        "p95RssBytes": 239747072,
+        "p95CpuPct": 77.5,
+        "avgRssBytes": 207409425,
+        "avgCpuPct": 6.9,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173840622,
+            "pid": 78194,
+            "rssBytes": 120307712,
+            "cpuPct": 77.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173842619,
+            "pid": 78194,
+            "rssBytes": 236109824,
+            "cpuPct": 5.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173844617,
+            "pid": 78194,
+            "rssBytes": 236552192,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173846617,
+            "pid": 78194,
+            "rssBytes": 238485504,
+            "cpuPct": 1.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173848623,
+            "pid": 78194,
+            "rssBytes": 239747072,
+            "cpuPct": 0.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173850620,
+            "pid": 78194,
+            "rssBytes": 207618048,
+            "cpuPct": 4.8,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173852624,
+            "pid": 78194,
+            "rssBytes": 210731008,
+            "cpuPct": 1.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173854623,
+            "pid": 78194,
+            "rssBytes": 210812928,
+            "cpuPct": 0.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173856623,
+            "pid": 78194,
+            "rssBytes": 210878464,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173858622,
+            "pid": 78194,
+            "rssBytes": 210878464,
+            "cpuPct": 0.3,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173860624,
+            "pid": 78194,
+            "rssBytes": 197410816,
+            "cpuPct": 2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173862627,
+            "pid": 78194,
+            "rssBytes": 197656576,
+            "cpuPct": 2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173864626,
+            "pid": 78194,
+            "rssBytes": 197738496,
+            "cpuPct": 2.2,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173866626,
+            "pid": 78194,
+            "rssBytes": 198098944,
+            "cpuPct": 2.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173868625,
+            "pid": 78194,
+            "rssBytes": 198115328,
+            "cpuPct": 0,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      },
+      {
+        "taskId": "04_verify",
+        "pid": 84038,
+        "samples": 13,
+        "peakRssBytes": 238239744,
+        "peakCpuPct": 16.9,
+        "p95RssBytes": 238239744,
+        "p95CpuPct": 16.9,
+        "avgRssBytes": 215169812,
+        "avgCpuPct": 3.7,
+        "attributed": true,
+        "descendantPids": [],
+        "trajectory": [
+          {
+            "ts": 1790173886630,
+            "pid": 84038,
+            "rssBytes": 232259584,
+            "cpuPct": 16.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173888630,
+            "pid": 84038,
+            "rssBytes": 235651072,
+            "cpuPct": 2.4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173890631,
+            "pid": 84038,
+            "rssBytes": 237682688,
+            "cpuPct": 1.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173892633,
+            "pid": 84038,
+            "rssBytes": 238239744,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173894633,
+            "pid": 84038,
+            "rssBytes": 204046336,
+            "cpuPct": 14.7,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173896632,
+            "pid": 84038,
+            "rssBytes": 207732736,
+            "cpuPct": 4,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173898635,
+            "pid": 84038,
+            "rssBytes": 208420864,
+            "cpuPct": 0.9,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173900635,
+            "pid": 84038,
+            "rssBytes": 208437248,
+            "cpuPct": 0.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173902637,
+            "pid": 84038,
+            "rssBytes": 209158144,
+            "cpuPct": 1.5,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173904637,
+            "pid": 84038,
+            "rssBytes": 212353024,
+            "cpuPct": 1.8,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173906637,
+            "pid": 84038,
+            "rssBytes": 200835072,
+            "cpuPct": 0.8,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173908642,
+            "pid": 84038,
+            "rssBytes": 200900608,
+            "cpuPct": 1.6,
+            "isDescendant": false,
+            "firstSample": false
+          },
+          {
+            "ts": 1790173910640,
+            "pid": 84038,
+            "rssBytes": 201490432,
+            "cpuPct": 0.1,
+            "isDescendant": false,
+            "firstSample": false
+          }
+        ]
+      }
+    ],
+    "firstSample": {
+      "ts": 1790173790530,
+      "pid": 71673,
+      "ppid": 0,
+      "label": "root",
+      "rssBytes": 296222720,
+      "heapBytes": 0,
+      "cpuPct": 13.5
+    },
+    "lastSample": {
+      "ts": 1790173912637,
+      "pid": 72058,
+      "ppid": 0,
+      "label": "child",
+      "rssBytes": 48087040,
+      "heapBytes": 0,
+      "cpuPct": 0.7
+    }
+  },
+  "anomalies": [
+    {
+      "severity": "MEDIUM",
+      "category": "large_gap",
+      "subagent": "01_explore",
+      "message": "single event-gap of 23.0s (>15s) — an LLM turn or tool stalled"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "slow_phase",
+      "subagent": "01_explore",
+      "message": "phase \"activeWork\" took 48.3s (>40s)"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "slow_phase",
+      "subagent": "02_code-review",
+      "message": "phase \"activeWork\" took 43.3s (>40s)"
+    }
+  ],
+  "typeCounts": {
+    "run.created": 1,
+    "run.running": 5,
+    "runtime.resolved": 1,
+    "hook.executed": 14,
+    "task.started": 4,
+    "task.progress": 74,
+    "worker.spawned": 4,
+    "worker.final_drain": 4,
+    "worker.exit": 4,
+    "worker.close": 4,
+    "task.completed": 4,
+    "workflow.phase_completed": 4,
+    "task.budget_fair_share": 4,
+    "task.parallel_start": 1,
+    "run.budget_warning": 2,
+    "run.completed": 1,
+    "policy.action": 1,
+    "run.goal_achievement": 1
+  }
+}

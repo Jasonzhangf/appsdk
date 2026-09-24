@@ -4076,6 +4076,76 @@ fn init_existing_collab_control_project_recovers_identity_without_preparation() 
 }
 
 #[test]
+fn init_accepts_registered_tmux_collab_channel_without_appserver_runtime_registration() {
+    let root = temp_root("init-tmux-collab-channel");
+    fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    let endpoint = serde_json::json!({
+        "socket_path": "/tmp/collab-tmux-init.sock",
+        "server_pid": 4242,
+        "tmux_session_id": "$1",
+        "pane_id": "%1",
+        "pane_pid": 4343,
+        "codex_session_id": "session-tmux-init",
+        "codex_thread_id": "thread-tmux-init"
+    });
+    let response = serde_json::json!({
+        "ok": true,
+        "runtime": {
+            "runtimeId": "runtime-tmux-init",
+            "appserverId": "appserver-cli",
+            "transport": "tmux",
+            "tmuxEndpoint": endpoint,
+            "projectRoot": root.canonicalize().unwrap(),
+            "capabilities": ["send_message_to_pane", "probe_pane"],
+            "processId": 4242
+        },
+        "transport_selected": {
+            "kind": "tmux",
+            "endpoint": "/tmp/collab-tmux-init.sock",
+            "namespace": "$1",
+            "session_id": "session-tmux-init",
+            "thread_id": "thread-tmux-init",
+            "tmux_endpoint": endpoint,
+            "capabilities": ["send_message_to_pane", "probe_pane"],
+            "self_check": "server verified registered tmux pane"
+        }
+    });
+    fs::write(
+        &fake_collab,
+        format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", response),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let registry_root = test_global_registry_root_for_project(&root);
+    let output = Command::new(binary())
+        .args(["init", root.to_str().unwrap()])
+        .current_dir(&root)
+        .env("APPSDK_HOME", &registry_root)
+        .env("PATH", &fake_bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("collab-channel"), "{stdout}");
+    assert!(stdout.contains("\"kind\":\"tmux\""), "{stdout}");
+    assert!(stdout.contains("\"runtime_receipt\":null"), "{stdout}");
+    assert!(
+        !registry_root.join("runtimes.jsonl").exists(),
+        "tmux pane identity must not be recorded as an AppServer runtime"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_sdk_source_workspace_uses_canonical_zone_transition_contract() {
     let root = temp_root("init-sdk-source-workspace");
     fs::create_dir_all(root.join("contracts/transitions")).unwrap();
@@ -12462,10 +12532,18 @@ source_commit="__SOURCE_COMMIT__"
 artifact_hash="__ARTIFACT_HASH__"
 case "$1 $2" in
   "context ")
-    printf '%s\n' '{"registered":true,"project_root":"fixture-project","liveness":{"live":true,"presence":"present","transport_kind":"appserver"},"identity":{"worker_id":"fixture-worker","kind":"peer","transport":{"kind":"appserver","thread_id":"fixture-thread"}}}'
+    if [ "$TMUX" != "/tmp/collab-live-closure.sock,12345,0" ] || [ "$TMUX_PANE" != "%1" ] || [ "$CODEX_SESSION_ID" != "session-fixture-thread" ] || [ "$CODEX_THREAD_ID" != "fixture-thread" ]; then
+      printf '%s\n' 'fixture collab stub: missing or incorrect tmux endpoint environment' >&2
+      exit 65
+    fi
+    printf '%s\n' '{"registered":true,"project_root":"fixture-project","liveness":{"live":true,"presence":"present","transport_kind":"tmux"},"identity":{"worker_id":"fixture-worker","kind":"peer","transport":{"kind":"tmux","tmux_endpoint":{"socket_path":"/tmp/collab-live-closure.sock","server_pid":12345,"tmux_session_id":"$1","pane_id":"%1","pane_pid":23456,"codex_session_id":"session-fixture-thread","codex_thread_id":"fixture-thread"}}}}'
     ;;
   "route resolve")
-    printf '%s\n' '{"app_scope_id":"fixture-app","project_scope":"fixture-project","canonical_root":"fixture-project","storage_root":"fixture-storage","agent_id":"fixture-worker","binding_id":"fixture-binding","endpoint_generation":1,"native_thread_id":"fixture-thread"}'
+    if [ "$#" -ne 6 ] || [ "$3" != "--tmux-session-id" ] || [ "$4" != '$1' ] || [ "$5" != "--pane-id" ] || [ "$6" != "%1" ] || [ "$TMUX" != "/tmp/collab-live-closure.sock,12345,0" ] || [ "$TMUX_PANE" != "%1" ]; then
+      printf '%s\n' 'fixture collab stub: route resolve requires exact tmux session and pane arguments' >&2
+      exit 65
+    fi
+    printf '%s\n' '{"app_scope_id":"fixture-app","project_scope":"fixture-project","canonical_root":"fixture-project","storage_root":"fixture-storage","agent_id":"fixture-worker","binding_id":"fixture-binding","endpoint_generation":1,"native_thread_id":"fixture-thread","tmux_endpoint":{"socket_path":"/tmp/collab-live-closure.sock","server_pid":12345,"tmux_session_id":"$1","pane_id":"%1","pane_pid":23456,"codex_session_id":"session-fixture-thread","codex_thread_id":"fixture-thread"}}'
     ;;
   "msg collab-"*)
     case "$2" in
@@ -12594,7 +12672,7 @@ fn write_collab_live_closure_fixture(
         "collab_identity": {
             "worker_id": "fixture-worker",
             "binding_id": "fixture-binding",
-            "native_thread_id": "fixture-thread",
+            "thread_id": "fixture-thread",
             "app_scope_id": "fixture-app",
             "project_scope_id": "fixture-project"
         },
@@ -12606,6 +12684,15 @@ fn write_collab_live_closure_fixture(
                 "app_scope_id": "fixture-app"
             },
             "storage_root": "fixture-storage",
+            "tmux_endpoint": {
+                "socket_path": "/tmp/collab-live-closure.sock",
+                "server_pid": 12345,
+                "tmux_session_id": "$1",
+                "pane_id": "%1",
+                "pane_pid": 23456,
+                "codex_session_id": "session-fixture-thread",
+                "codex_thread_id": "fixture-thread"
+            },
             "resolved_at": "2026-01-01T00:06:40Z",
             "source": "collab_cli"
         },
@@ -20926,7 +21013,7 @@ case "$1 $2" in
     printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
     ;;
   "notify unsubscribe")
     if [ "${RECONCILE_CANCEL:-}" = "1" ]; then
@@ -21178,7 +21265,8 @@ case "$1 $2" in
     printf '%s\n' "{\"master\":{\"worker_id\":\"${MASTER_WORKER:-master-peer}\",\"endpoint_live\":${MASTER_LIVE:-true}}}"
     ;;
   "context ")
-    printf '%s\n' "{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"${CONTEXT_TRANSPORT_KIND:-appserver}\",\"thread_id\":\"${CONTEXT_THREAD_ID:-thread-master-peer}\"}},\"liveness\":{\"live\":${CONTEXT_LIVE:-true},\"transport_kind\":\"appserver\"}}"
+    transport_kind=${CONTEXT_TRANSPORT_KIND:-tmux}
+    printf '%s\n' "{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"$transport_kind\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}},\"liveness\":{\"live\":${CONTEXT_LIVE:-true},\"presence\":\"present\",\"transport_kind\":\"$transport_kind\",\"endpoint\":\"/tmp/collab.sock\"}}"
     ;;
   "notify status") printf '%s\n' '{"subscriptions":[]}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"owner-gate-sub"}' ;;
@@ -21250,7 +21338,7 @@ case "$1 $2" in
     esac
     ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"missing-fields-sub"}' ;;
   *) exit 64 ;;
 esac
@@ -21311,7 +21399,7 @@ case "$1 $2" in
     wait
     ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"large-output-sub"}' ;;
   *) exit 64 ;;
 esac
@@ -21366,7 +21454,7 @@ fn goal_subscribe_allows_slow_collab_write_within_write_budget() {
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify subscribe")
     /bin/sleep 20
     printf '%s\n' '{"subscription_id":"slow-subscribe-write"}'
@@ -21490,7 +21578,7 @@ fn goal_subscribe_computes_the_trigger_immediately_before_the_collab_call() {
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify status") printf '%s\n' '{"subscriptions":[]}' ;;
   "notify subscribe")
     printf '%s\n' "$*" > notify-args
@@ -21583,7 +21671,7 @@ subscription() {
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context "*|"context") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context "*|"context") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}},"role":"master"},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify status")
     if [ -f cancelled.marker ]; then
       printf '%s\n' '{"subscriptions":[]}'
@@ -21712,7 +21800,7 @@ fn goal_subscribe_failure_does_not_report_active() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"appserver\",\"thread_id\":\"thread-master-peer\"}},\"liveness\":{\"live\":true,\"transport_kind\":\"appserver\"}}' ;;\n  *) printf '%s\\n' 'daemon stopped' >&2; exit 44 ;;\nesac\n",
+"#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}},\"liveness\":{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}' ;;\n  *) printf '%s\\n' 'daemon stopped' >&2; exit 44 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -21779,7 +21867,7 @@ case "$1 $2" in
     printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
     ;;
   *)
     exit 64
@@ -21854,7 +21942,7 @@ case "$1 $2" in
     printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
     ;;
   "notify subscribe")
     count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
@@ -21996,7 +22084,7 @@ case "$1 $2" in
     printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}'
     ;;
   "context ")
-    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}'
+    printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}'
     ;;
   "notify unsubscribe")
     printf '%s\n' 'unsubscribe failed' >&2
@@ -22084,7 +22172,7 @@ fn goal_lifecycle_reconciles_legacy_subject_and_exposes_one_shot_recovery() {
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify subscribe") printf '%s\n' '{"subscription_id":"sub-periodic"}' ;;
   "notify status")
     if [ "${STATUS_EXPIRED:-}" = "1" ]; then
@@ -22293,7 +22381,7 @@ fn goal_subscribe_rearms_consumed_subscription_without_cancel() {
 case "$1 $2" in
   "status --all") printf '%s\n' '{"workers":[{"id":"master-peer","role":"master","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
   "master status") printf '%s\n' '{"master":{"worker_id":"master-peer","endpoint_live":true}}' ;;
-  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-master-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
+  "context ") printf '%s\n' '{"identity":{"worker_id":"master-peer","kind":"peer","transport":{"kind":"tmux","endpoint":"/tmp/collab.sock","tmux_endpoint":{"socket_path":"/tmp/collab.sock","server_pid":123,"tmux_session_id":"$1","pane_id":"%1","pane_pid":456}}},"liveness":{"live":true,"presence":"present","transport_kind":"tmux","endpoint":"/tmp/collab.sock"}}' ;;
   "notify subscribe")
     count=$((`/bin/cat subscribe-count 2>/dev/null || printf '0'` + 1))
     printf '%s' "$count" > subscribe-count
@@ -22458,7 +22546,7 @@ fn goal_subscribe_persistence_failure_retains_reconciliation_state() {
     fs::write(
         &fake_collab,
         format!(
-            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"master status\") printf '%s\\n' '{{\"master\":{{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{{\"kind\":\"appserver\",\"thread_id\":\"thread-master-peer\"}}}},\"liveness\":{{\"live\":true,\"transport_kind\":\"appserver\"}}}}' ;;\n  *) touch '{}' ; printf '%s\\n' '{{\"subscription_id\":\"orphan\"}}' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{{\"workers\":[{{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}}],\"tasks\":[],\"subagents\":[]}}' ;;\n  \"master status\") printf '%s\\n' '{{\"master\":{{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}}}' ;;\n  \"context \") printf '%s\\n' '{{\"identity\":{{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}}}}},\"liveness\":{{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}}}' ;;\n  *) touch '{}' ; printf '%s\\n' '{{\"subscription_id\":\"orphan\"}}' ;;\nesac\n",
             marker.display()
         ),
     )
@@ -22593,7 +22681,7 @@ fn goal_subscribe_timeout_failure_remains_explicit() {
     fs::create_dir_all(&fake_bin).unwrap();
     fs::write(
         fake_bin.join("collab"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"appserver\",\"thread_id\":\"thread-master-peer\"}},\"liveness\":{\"live\":true,\"transport_kind\":\"appserver\"}}' ;;\n  \"notify subscribe\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"status --all\") printf '%s\\n' '{\"workers\":[{\"id\":\"master-peer\",\"role\":\"master\",\"endpoint_live\":true,\"identity_valid\":true,\"suspected_offline\":false}],\"tasks\":[],\"subagents\":[]}' ;;\n  \"master status\") printf '%s\\n' '{\"master\":{\"worker_id\":\"master-peer\",\"endpoint_live\":true}}' ;;\n  \"context \") printf '%s\\n' '{\"identity\":{\"worker_id\":\"master-peer\",\"kind\":\"peer\",\"transport\":{\"kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\",\"tmux_endpoint\":{\"socket_path\":\"/tmp/collab.sock\",\"server_pid\":123,\"tmux_session_id\":\"$1\",\"pane_id\":\"%1\",\"pane_pid\":456}}},\"liveness\":{\"live\":true,\"presence\":\"present\",\"transport_kind\":\"tmux\",\"endpoint\":\"/tmp/collab.sock\"}}' ;;\n  \"notify subscribe\") printf '%s\\n' 'collab request timed out' >&2; exit 124 ;;\n  *) printf '%s\\n' 'unexpected collab command' >&2; exit 64 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&fake_bin.join("collab"), fs::Permissions::from_mode(0o755)).unwrap();

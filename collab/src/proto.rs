@@ -10,14 +10,36 @@ use crate::scope::{ProjectScopeId, RouteScope};
 pub enum TransportKind {
     #[serde(rename = "appserver")]
     AppServer,
+    #[serde(rename = "tmux")]
+    Tmux,
 }
 
 impl TransportKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AppServer => "appserver",
+            Self::Tmux => "tmux",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxEndpoint {
+    pub socket_path: String,
+    pub server_pid: u32,
+    pub tmux_session_id: String,
+    pub pane_id: String,
+    pub pane_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxCandidate {
+    pub endpoint: TmuxEndpoint,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +55,8 @@ pub struct AppServerCandidate {
 pub struct TransportCandidates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appserver: Option<AppServerCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<TmuxCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +70,8 @@ pub struct SelectedTransport {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_endpoint: Option<TmuxEndpoint>,
     pub capabilities: Vec<String>,
     pub self_check: String,
 }
@@ -385,13 +411,11 @@ pub enum Req {
         worker_id: String,
         token: String,
     },
-    /// Resolve the unique registered project route for one native App Server
-    /// thread. This is a daemon-owned read-only lookup: callers must not
-    /// select a route by cwd or by reading routes.jsonl directly. cwd is
-    /// execution context and is deliberately absent from this request.
+    /// Resolve the unique registered project route for one tmux pane. The
+    /// complete endpoint prevents equal session/pane names on different tmux
+    /// servers from selecting one another's route. cwd is deliberately absent.
     RouteResolve {
-        session_id: String,
-        native_thread_id: String,
+        tmux_endpoint: TmuxEndpoint,
     },
     MsgStatus {
         msg_id: String,

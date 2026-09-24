@@ -22,7 +22,9 @@ collab notify unsubscribe <subscription-id>
 ```
 
 - AppSDK project initialization creates/refreshes the seven-day reusable default
-  `direct-message` lease through official `collab init`. An explicit owner
+  `direct-message` lease through official `collab init`. Re-registering a peer
+  follows its currently selected tmux transport and replaces a persisted
+  default lease whose transport or target belongs to a retired route. An explicit owner
   unsubscribe of that lease stays cancelled; later `register` / `context` /
   `ack` must not silently re-arm it. Last owned `collab task close` cancels
   the owner's direct-message auto-notify. There is no `collab notify close`
@@ -37,17 +39,13 @@ collab notify unsubscribe <subscription-id>
   ends any subscription; one attempted batch exhausts only its messages on a
   reusable direct-message lease.
 - Before every attempt, the daemon revalidates owner, event, subject, TTL,
-  selected App Server thread liveness and ownership, worker
-  registration match, Agent presence, and Agent state. If the selected
-  transport is dead, unowned, or mismatched (`identity-mismatch`), or the agent
-  is `absent`, the subscription transitions to its explicit unavailable state
-  to prevent notification storms. `absent` and `unknown` produce zero
-  transport input.
+  selected tmux pane liveness and ownership, worker registration match, and
+  presence. A dead, unowned, or mismatched pane transitions to its explicit
+  unavailable state. `absent` and `unknown` produce zero transport input.
 - Timer ticks, restart, replay, re-registration, or delivery mode cannot reset
-  the one-attempt lifetime cap. App Server automatic delivery is a bounded
-  interrupt: `turn/steer` for exactly one in-progress turn, otherwise
-  `turn/start`. Acceptance by either method only proves the wake was submitted;
-  it is not execution, read, reply, task progress, or lifecycle evidence.
+  the one-attempt lifetime cap. Automatic delivery pastes a bounded wake into
+  the tmux pane and sends Enter separately. Success means input was submitted;
+  it does not prove execution, read, reply, task progress, or lifecycle.
 - Unacknowledged notification throttling (Backpressure): To prevent notification
   storms and terminal pollution, push knocks pause when unacknowledged notifications
   reach `max_unacked` (default 3, range 1-5). Run `collab ack <id>` or `collab ack --all`
@@ -58,22 +56,24 @@ collab notify unsubscribe <subscription-id>
   messages for the recipient, capped at 3 previews per batch knock. Excess
   messages remain in the inbox with `[+N more pending in inbox]`. When unacked
   notifications reach the throttle cap, the batch preview appends an
-  `[ACK REQUIRED: ...]` notice. Combine previews into one line with one final
-  Enter; reserve attempts before sending. Failed, absent, unknown, or uncertain
+  `[ACK REQUIRED: ...]` notice. Combine previews into one paste operation and
+  send Enter separately; reserve attempts before sending. Failed, absent, unknown, or uncertain
   ordinary delivery remains pending; automatic eligibility still respects the
   bound event window and the lifetime attempt cap. Explicit notification
   delivery is never an automatic timer candidate; a later explicit operation
-  must be used when its first delivery failed.
+  must be used when the failure proves no input was submitted. A paste/Enter
+  command error has an ambiguous input outcome and is not retryable for that
+  message: the mailbox entry remains durable, and the recipient should run
+  `collab recv`; send a new message if another wake is needed. The send error
+  includes the durable message ID and states this recovery path.
 - P0 urgency is explicit: only a typed goal/deadline interrupt is marked P0. A blocked
   task, wait-timeout, or scheduling blocker is P1 operational work and must not be
   reclassified as a P0 interrupt by subject text alone.
 - One safe preview contains notification ID, abbreviated subject, and one-line
-  original body. Control characters are escaped. An explicit
-  `collab sendmessage` is delivered through the App Server immediate path.
-  Daemon-generated wakeup and long-horizon notifications use that same path
-  after readiness gates: `turn/steer` for exactly one in-progress turn,
-  otherwise `turn/start`. Turn acceptance is not execution, read, or reply.
-  The server owns both operation choices.
+  original body. Control characters are escaped. Explicit `collab sendmessage`
+  and daemon-generated wakeups use the selected tmux pane; paste and Enter
+  success do not create a receive receipt. Only `collab recv` consumption
+  commits the durable receipt visible to the sender.
 - Full subject/body remains in the mailbox without a matching subscription.
   This outcome is not a sender-selected `mailbox-only` mode.
 - A failed/lost/delayed/duplicate wake never rolls back mailbox truth or counts
@@ -101,9 +101,10 @@ collab who
   ACK is not required. `collab msg`, `collab inbox`, and `collab context` are
   read-only and do not consume messages. Keep `ack` for legacy clients or
   explicit recovery of already-delivered messages.
-- `collab worker status [worker-id]` inspects real-time worker health, including
-  `endpoint_live`, `identity_valid`, `agent_state`, `unacked_notifications`,
-  `notifications_paused`, `suspected_offline`, and `active_task`.
+- `collab worker status [worker-id]` inspects real-time pane presence and worker
+  health, including `endpoint_live`, `identity_valid`, `agent_state`,
+  `unacked_notifications`, `notifications_paused`, `suspected_offline`, and
+  `active_task`.
 
 After a preview, compare its ID/subject, urgency, current task, and interruption
 cost. Read durable details only when appropriate:

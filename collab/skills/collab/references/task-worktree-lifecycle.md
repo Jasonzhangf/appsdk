@@ -117,14 +117,14 @@ Route escalation by worker type:
   task. If no live master exists, report to the collaborator that initiated
   the task.
 - A peer becomes master only after explicit user approval for that peer and
-  project, with a live registered App Server identity verified. If a live master
+  project, with a live registered tmux identity verified. If a live master
   exists, only that master may `collab master delegate`; if none exists, the
   peer may `collab master promote --approval` itself. `appsdk init` proves
   initialization of the current peer, not master ownership. A dead recorded
   thread is not a live master. Codex root is not Collab master.
 - Master compiles the goal into a dependency graph, then parallel unique-write
-  scopes. It assigns managed subagents with `appsdk subagent start` and
-  `send` only when delivery conditions (done-iff, artifacts, in/out of
+  scopes. It assigns registered peers with `collab sendmessage` only when
+  delivery conditions (done-iff, artifacts, in/out of
   scope, forbidden edits) and test conditions (exact commands, expected
   results, evidence location) are unambiguous. Do not equally split a large
   goal or share a write scope. Workers execute only the approved assignment

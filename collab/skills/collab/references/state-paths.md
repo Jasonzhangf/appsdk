@@ -77,12 +77,16 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 ## Identity and role
 
-- The current client is Codex only. Identity is bound to the Codex sessionID,
-  the internal App Server native thread, and the canonical project cwd.
+- The current client is Codex only. The current route is bound to the exact
+  tmux socket/server/session/pane/process endpoint. Codex sessionID and threadID
+  are optional identity-recovery anchors within the canonical project scope.
+  `TMUX_ENDPOINT_MISSING` means the command did not inherit the registered pane
+  environment; run it from that pane and retry. Do not reconstruct an endpoint
+  from a stale route or manually edit route state.
 - A Git worktree does not inherit `.agent-collab/` and is not an identity
   context. Resolve `collab context`, `collab master status`, registration, and
   recovery from the canonical project main tree. The daemon requires
-  sessionID, threadID, and canonical cwd to match the same current binding;
+  one unique pane, sessionID, or threadID anchor to recover the same identity;
   historical routes are not candidates and `routes.jsonl` must not be read to
   guess one. Never register the worktree as a second peer or create a second
   route.
@@ -102,9 +106,10 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 - Workers never choose transport themselves. The server validates the candidate
   and selects the channel.
-- App Server is the supported transport. A selected transport must include its
-  server self-check and a live native thread.
-- Do not inspect terminal environment paths or infer identity from a pane.
+- Tmux is the supported transport. A selected transport must include its
+  server self-check and a current endpoint whose liveness is present.
+- Do not treat pane presence as evidence of Codex turn state or message
+  consumption.
 
 ## Registration verification
 
@@ -128,44 +133,30 @@ separately, report the exact context error to the live master, and use the
 migration/reset owner only when that owner explicitly decides the project-local
 control plane is unrecoverable.
 
-## App Server endpoint and thread recovery
+## Tmux route and identity recovery
 
-A registered route is live only when the selected App Server endpoint owns the
-same native thread and the thread is loaded. `persisted but not loaded`,
-`notLoaded`, or an active-writer conflict means the durable registration and
-the current TUI runtime are on different endpoints; it is not a reason to
-re-register, edit `routes.jsonl`, copy a token, or start another daemon.
+A registered route is live only when the saved tmux socket/server/session/pane
+endpoint resolves to the same pane. A missing pane is absent; a failed probe is
+unknown and cannot authorize master recovery. Pane presence does not establish
+Codex turn state or message consumption.
 
 Diagnose read-only from the canonical project main checkout:
 
 ```sh
 collab context
-collab route resolve --session-id <session-id> --native-thread-id <thread-id>
+collab route resolve --tmux-session-id <tmux-session-id> --pane-id <pane-id>
 collab worker status <peer-id>
 ```
 
-Record the selected endpoint, native thread ID, binding generation,
-`endpoint_live`, `identity_valid`, `presence`, `agent.thread_state`, and the
-exact error. The recovery owner must then prove the endpoint owner:
-
-1. The endpoint in the selected transport must be the App Server that owns the
-   current Codex TUI/thread. A managed control socket is valid only when the
-   current thread is loaded there.
-2. If the current TUI owns the thread but is not connected to the selected
-   managed endpoint, the route endpoint must be corrected through the
-   supported peer rebind/recovery path. Do not point the route at a test or
-   disposable socket.
-3. If the selected App Server reports the thread as not loaded after recovery
-   on the current connection, do not call `turn/start` or `turn/steer`. The
-   current contract fails closed when native recovery cannot load the thread.
-4. If the endpoint reports an active writer conflict, identify the exact
-   lock/owner and resolve the runtime ownership. Do not kill a process by name,
-   remove a lock by hand, or start a second daemon.
-5. After the endpoint/thread owner is corrected, run `collab worker recover`
-   once, then `collab context`. Success requires `endpoint_live=true`,
-   `identity_valid=true`, `presence=present`, and a loaded thread. A command
-   acceptance without those fields is not recovery.
+Route resolution compares optional supplied IDs with the current pane and
+returns the current registered binding; it does not use them to select another
+pane. If a persisted peer must recover on a new pane, `appsdk init .` may reuse
+the original identity only when a current pane, Codex session ID, or Codex
+thread ID uniquely matches that peer in the same project scope. Conflicting,
+ambiguous, cross-project, missing, or unknown evidence fails closed. Master
+identity recovery preserves the original grant and is permitted only when no
+live master exists. Never edit `routes.jsonl`, identity files, journal, or
+mailbox to force recovery, and never start a second daemon.
 
 The canonical project main checkout owns identity lookup, registration, and
-recovery. Never create a worktree-local peer or endpoint to make the route
-appear live.
+recovery. Never create a worktree-local peer to make the route appear live.

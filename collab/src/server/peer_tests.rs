@@ -2,9 +2,288 @@ use super::*;
 use crate::identity::{runtime_from_registration_receipt, BindingId, RuntimeId, SessionId};
 use crate::server::notification_contract::JournalError;
 use crate::server::state::{default_priority, is_goal_deadline, TaskRec};
+use std::cell::RefCell;
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+
+pub(crate) struct IsolatedTmux {
+    socket: PathBuf,
+    owner_root: PathBuf,
+}
+
+impl IsolatedTmux {
+    pub(crate) fn start(root: &std::path::Path) -> Self {
+        Self::start_with_spare_pane(root, true)
+    }
+
+    pub(crate) fn start_single(root: &std::path::Path) -> Self {
+        Self::start_with_spare_pane(root, false)
+    }
+
+    fn start_with_spare_pane(root: &std::path::Path, spare_pane: bool) -> Self {
+        static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
+        let socket = std::env::temp_dir().join(format!(
+            "ctmux-{}-{}.sock",
+            std::process::id(),
+            SOCKET_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                socket.to_str().unwrap(),
+                "new-session",
+                "-d",
+                "-s",
+                "worker-snapshot-test",
+                "sleep 60",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "start isolated tmux: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if spare_pane {
+            let split = Command::new("tmux")
+                .args([
+                    "-S",
+                    socket.to_str().unwrap(),
+                    "split-window",
+                    "-d",
+                    "-t",
+                    "worker-snapshot-test:0",
+                    "sleep 60",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                split.status.success(),
+                "split isolated tmux: {}",
+                String::from_utf8_lossy(&split.stderr)
+            );
+        }
+        Self {
+            socket,
+            owner_root: root.to_path_buf(),
+        }
+    }
+
+    pub(crate) fn endpoints(&self) -> Vec<crate::proto::TmuxEndpoint> {
+        let panes = Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().unwrap(),
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id}",
+            ])
+            .output()
+            .unwrap();
+        assert!(panes.status.success());
+        String::from_utf8(panes.stdout)
+            .unwrap()
+            .lines()
+            .map(|pane_id| {
+                let output = Command::new("tmux")
+                    .args([
+                        "-S",
+                        self.socket.to_str().unwrap(),
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane_id,
+                        "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let line = String::from_utf8(output.stdout).unwrap();
+                let fields = line.trim_end().split('\t').collect::<Vec<_>>();
+                assert_eq!(fields.len(), 4);
+                crate::proto::TmuxEndpoint {
+                    socket_path: self.socket.to_string_lossy().into_owned(),
+                    server_pid: fields[0].parse().unwrap(),
+                    tmux_session_id: fields[1].into(),
+                    pane_id: fields[2].into(),
+                    pane_pid: fields[3].parse().unwrap(),
+                    codex_session_id: None,
+                    codex_thread_id: None,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn add_session(&self) -> crate::proto::TmuxEndpoint {
+        static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+        let session = format!(
+            "worker-snapshot-test-{}-{}",
+            std::process::id(),
+            SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let created = Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().unwrap(),
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "sleep 60",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "add isolated tmux session: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().unwrap(),
+                "display-message",
+                "-p",
+                "-t",
+                &format!("{session}:0"),
+                "#{pid}\t#{session_id}\t#{pane_id}\t#{pane_pid}",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "inspect isolated tmux session: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let fields = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .split('\t')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 4);
+        crate::proto::TmuxEndpoint {
+            socket_path: self.socket.to_string_lossy().into_owned(),
+            server_pid: fields[0].parse().unwrap(),
+            tmux_session_id: fields[1].clone(),
+            pane_id: fields[2].clone(),
+            pane_pid: fields[3].parse().unwrap(),
+            codex_session_id: None,
+            codex_thread_id: None,
+        }
+    }
+
+    fn kill_pane(&self, pane_id: &str) {
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().unwrap(),
+                "kill-pane",
+                "-t",
+                pane_id,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "kill test-owned tmux pane {pane_id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn kill_server(&self) {
+        let _ = Command::new("tmux")
+            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
+            .output();
+    }
+}
+
+thread_local! {
+    static REGISTERED_TEST_TMUX: RefCell<Option<(IsolatedTmux, usize)>> = const { RefCell::new(None) };
+}
+
+impl Drop for IsolatedTmux {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
+            .output();
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+pub(super) fn register_tmux(
+    server: &Server,
+    id: &str,
+    endpoint: crate::proto::TmuxEndpoint,
+) -> Resp {
+    handle_register_with_app_scope(
+        server,
+        id.into(),
+        format!("token-{id}"),
+        server.root.display().to_string(),
+        Some(AppServerId::new("tui-default").unwrap()),
+        Some(TransportCandidates {
+            appserver: None,
+            tmux: Some(crate::proto::TmuxCandidate {
+                endpoint,
+                cwd: server.root.display().to_string(),
+            }),
+        }),
+    )
+}
+
+fn retire_registered_test_pane(binding: &crate::server::global_state::RuntimeBinding) {
+    let pane_id = binding
+        .tmux_endpoint
+        .as_ref()
+        .expect("test peer has a tmux endpoint")
+        .pane_id
+        .clone();
+    REGISTERED_TEST_TMUX.with(|fixture| {
+        fixture
+            .borrow()
+            .as_ref()
+            .expect("test tmux fixture exists")
+            .0
+            .kill_pane(&pane_id)
+    });
+}
+
+pub(super) fn kill_registered_worker_pane(server: &Server, worker_id: &str) {
+    let endpoint = server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get(worker_id)
+        .and_then(|worker| worker.transport.as_ref())
+        .and_then(|transport| transport.tmux_endpoint.as_ref())
+        .expect("test worker has a registered tmux endpoint")
+        .clone();
+    REGISTERED_TEST_TMUX.with(|fixture| {
+        fixture
+            .borrow()
+            .as_ref()
+            .expect("test tmux fixture exists")
+            .0
+            .kill_pane(&endpoint.pane_id)
+    });
+}
+
+fn stop_registered_test_tmux_server() {
+    REGISTERED_TEST_TMUX.with(|fixture| {
+        let mut fixture = fixture.borrow_mut();
+        fixture
+            .as_ref()
+            .expect("test tmux fixture exists")
+            .0
+            .kill_server();
+        *fixture = None;
+    });
+}
 
 #[test]
 fn handoff_to_unregistered_recipient_fails_typed_before_recording() {
@@ -72,6 +351,18 @@ fn handoff_with_registered_recipient_and_existing_path_succeeds() {
     let (server, root) = test_server();
     register(&server, "handoff-sender", "%handoff-sender");
     register(&server, "handoff-owner", "%handoff-owner");
+    let sender_endpoint = registered_binding(&server, "handoff-sender")
+        .tmux_endpoint
+        .expect("sender has a tmux binding");
+    let recipient_endpoint = registered_binding(&server, "handoff-owner")
+        .tmux_endpoint
+        .expect("recipient has a tmux binding");
+    assert_eq!(sender_endpoint.socket_path, recipient_endpoint.socket_path);
+    assert_ne!(
+        sender_endpoint.tmux_session_id,
+        recipient_endpoint.tmux_session_id
+    );
+    assert_ne!(sender_endpoint.pane_id, recipient_endpoint.pane_id);
     let worktree = root.join("playground/handoff-live");
     std::fs::create_dir_all(&worktree).unwrap();
     let response = handle_send(
@@ -332,36 +623,54 @@ pub(crate) fn test_appserver_transport(thread_id: &str) -> SelectedTransport {
         namespace: Some("codex_tui".into()),
         session_id: Some(format!("session-{thread_id}")),
         thread_id: Some(thread_id.into()),
+        tmux_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     }
 }
 
-pub(crate) fn test_appserver_candidate(thread_id: &str) -> crate::proto::AppServerCandidate {
-    crate::proto::AppServerCandidate {
-        endpoint: "unix:///tmp/collab-test-appserver.sock".into(),
-        namespace: "codex_tui".into(),
-        session_id: format!("session-{thread_id}"),
-        thread_id: thread_id.into(),
-        cwd: env!("CARGO_MANIFEST_DIR").into(),
+fn test_tmux_transport(thread_id: &str) -> SelectedTransport {
+    let endpoint = crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/collab-test-tmux.sock".into(),
+        server_pid: 1,
+        tmux_session_id: "$test".into(),
+        pane_id: "%0".into(),
+        pane_pid: 2,
+        codex_session_id: Some(format!("session-{thread_id}")),
+        codex_thread_id: Some(thread_id.into()),
+    };
+    SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some(endpoint.socket_path.clone()),
+        namespace: Some(endpoint.tmux_session_id.clone()),
+        session_id: endpoint.codex_session_id.clone(),
+        thread_id: endpoint.codex_thread_id.clone(),
+        tmux_endpoint: Some(endpoint),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "test tmux transport".into(),
     }
 }
 
-pub(super) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
+pub(crate) fn register(server: &Server, id: &str, thread_id: &str) -> Resp {
     let thread_id = thread_id
         .strip_prefix('%')
         .map(|legacy_fixture| format!("thread-{legacy_fixture}"))
         .unwrap_or_else(|| thread_id.to_string());
-    handle_register_with_app_scope(
-        server,
-        id.into(),
-        format!("token-{id}"),
-        server.root.display().to_string(),
-        Some(AppServerId::new("tui-default").unwrap()),
-        Some(TransportCandidates {
-            appserver: Some(test_appserver_candidate(&thread_id)),
-        }),
-    )
+    let mut endpoint = REGISTERED_TEST_TMUX.with(|fixture| {
+        let mut fixture = fixture.borrow_mut();
+        let (tmux, endpoint_index) =
+            fixture.get_or_insert_with(|| (IsolatedTmux::start(&server.root), 0));
+        let endpoint = if *endpoint_index == 0 {
+            tmux.endpoints().remove(0)
+        } else {
+            tmux.add_session()
+        };
+        *endpoint_index += 1;
+        endpoint
+    });
+    endpoint.codex_session_id = Some(format!("session-{thread_id}"));
+    endpoint.codex_thread_id = Some(thread_id);
+    register_tmux(server, id, endpoint)
 }
 
 fn promote_master(server: &Server, worker_id: &str, approval: &str) {
@@ -878,6 +1187,20 @@ fn goal_deadline_registration_deduplicates_same_deadline() {
         86_400,
     );
     assert!(first.ok, "{}", first.error.unwrap_or_default());
+    {
+        let mut state = server.state.lock().unwrap();
+        let mut legacy = state.notification_subscriptions
+            [first.data["subscription"]["id"].as_str().unwrap()]
+        .clone();
+        legacy.method = "appserver".into();
+        legacy.target = "legacy-thread-master".into();
+        server.commit_locked(
+            &mut state,
+            &[Event::NotificationSubscribed {
+                subscription: legacy,
+            }],
+        );
+    }
     let second = handle_notification_subscribe(
         &server,
         "master".into(),
@@ -896,6 +1219,8 @@ fn goal_deadline_registration_deduplicates_same_deadline() {
         second.data["subscription"]["id"],
         first.data["subscription"]["id"]
     );
+    assert_eq!(second.data["subscription"]["method"], "tmux");
+    assert_eq!(second.data["subscription"]["target"], "thread-master");
     assert_eq!(
         server
             .state
@@ -1540,6 +1865,7 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
         namespace: Some("codex_tui".into()),
         session_id: Some(format!("session-{shared_thread}")),
         thread_id: Some(shared_thread.into()),
+        tmux_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };
@@ -1568,6 +1894,7 @@ fn typed_token_rotation_rejects_dual_key_session_mismatch() {
         namespace: Some("codex_tui".into()),
         session_id: Some(other_session.into()),
         thread_id: Some(shared_thread.into()),
+        tmux_endpoint: None,
         capabilities: vec!["send_message_to_thread".into()],
         self_check: "test appserver".into(),
     };
@@ -1745,24 +2072,13 @@ fn subagent_req(command: crate::subagent::Action) -> Req {
 
 #[test]
 fn missing_subagent_retires_without_snapshot_when_responsibilities_are_resolved() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "parent", "%parent");
     register(&server, "child", "%child");
     server.commit(&[Event::SubagentUpdated {
         subagent: subagent_record("missing-retire", "idle", "child"),
     }]);
-    let archive_calls = Arc::new(AtomicU32::new(0));
-    let archive_calls_for_stub = Arc::clone(&archive_calls);
-    server.appserver_candidate_check = Arc::new(|_| {
-        Err(
-            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
-                .into(),
-        )
-    });
-    server.appserver_thread_archive = Arc::new(move |_, _| {
-        archive_calls_for_stub.fetch_add(1, Ordering::SeqCst);
-        Ok(json!({"archived": true}))
-    });
+    kill_registered_worker_pane(&server, "child");
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
         worker_presence(&server, &child),
@@ -1779,7 +2095,6 @@ fn missing_subagent_retires_without_snapshot_when_responsibilities_are_resolved(
     assert!(response.ok, "{response:?}");
     assert_eq!(response.data["subagent"]["status"], "closed");
     assert!(response.data["snapshot_captured_ms"].is_null());
-    assert_eq!(archive_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         server.state.lock().unwrap().subagents["missing-retire"].status,
         "closed"
@@ -1788,27 +2103,20 @@ fn missing_subagent_retires_without_snapshot_when_responsibilities_are_resolved(
 }
 
 #[test]
-fn cold_subagent_still_requires_a_snapshot_before_close() {
+fn live_tmux_subagent_still_requires_a_snapshot_before_close() {
     let (mut server, root) = test_server();
     register(&server, "parent", "%parent");
     register(&server, "child", "%child");
     server.commit(&[Event::SubagentUpdated {
         subagent: subagent_record("cold-retire", "idle", "child"),
     }]);
-    server.appserver_thread_status = Arc::new(|_, thread_id| {
-        Ok(json!({
-            "thread": {
-                "id": thread_id,
-                "status": {"type": "notLoaded"},
-                "canAcceptDirectInput": false
-            }
-        }))
-    });
+    server.appserver_thread_status =
+        Arc::new(|_, _| panic!("tmux close must not inspect AppServer thread status"));
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
         worker_presence(&server, &child),
-        IdentityPresence::Cold,
-        "notLoaded thread must stay Cold, not Missing"
+        IdentityPresence::Present,
+        "live tmux pane presence is independent of retired AppServer thread state"
     );
     let server = Arc::new(server);
     let response = dispatch(
@@ -1832,7 +2140,7 @@ fn cold_subagent_still_requires_a_snapshot_before_close() {
 
 #[test]
 fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "parent", "%parent");
     register(&server, "child", "%child");
     server.commit(&[
@@ -1857,12 +2165,7 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
             },
         },
     ]);
-    server.appserver_candidate_check = Arc::new(|_| {
-        Err(
-            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
-                .into(),
-        )
-    });
+    kill_registered_worker_pane(&server, "child");
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(worker_presence(&server, &child), IdentityPresence::Missing);
     let server = Arc::new(server);
@@ -1886,20 +2189,18 @@ fn missing_subagent_with_unresolved_responsibility_still_requires_a_snapshot() {
 }
 
 #[test]
-fn unknown_subagent_still_requires_a_snapshot_before_close() {
+fn live_subagent_still_requires_a_snapshot_before_close() {
     let (mut server, root) = test_server();
     register(&server, "parent", "%parent");
     register(&server, "child", "%child");
     server.commit(&[Event::SubagentUpdated {
         subagent: subagent_record("unknown-retire", "idle", "child"),
     }]);
-    server.appserver_candidate_check =
-        Arc::new(|_| Err("ADAPTER_TIMEOUT: candidate self-check timed out".into()));
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
         worker_presence(&server, &child),
-        IdentityPresence::Unknown,
-        "inconclusive probe must stay Unknown"
+        IdentityPresence::Present,
+        "the registered tmux pane is the presence authority"
     );
     let server = Arc::new(server);
     let response = dispatch(
@@ -1922,43 +2223,30 @@ fn unknown_subagent_still_requires_a_snapshot_before_close() {
 }
 
 #[test]
-fn subagent_start_journal_failure_does_not_launch_or_write_success() {
-    use crate::server::SubagentJournalFault::{StartAppend, StartSync};
-
-    for fault in [StartAppend, StartSync] {
-        let (mut server, root) = test_server();
-        register(&server, "parent", "%parent");
-        promote_master(&server, "parent", "start journal regression");
-        let server = Arc::new(server);
-        crate::server::inject_subagent_journal_fault(fault);
-        let result = dispatch(
-            &server,
-            subagent_req(crate::subagent::Action::Start {
-                id: Some("start-journal-fault".into()),
-                runtime: Some("codex".into()),
-            }),
-        );
-        assert!(!result.ok, "{fault:?}: {result:?}");
-        let state = server.state.lock().unwrap();
-        assert!(state.subagents.is_empty());
-        assert!(state.journal_poison.is_some());
-        drop(state);
-        assert!(!root
-            .join(".agent-collab/server/launch-start-journal-fault.json")
-            .exists());
-        let replayed = replay(&root).unwrap();
-        match fault {
-            StartAppend => assert!(replayed.subagents.is_empty()),
-            StartSync => {
-                assert!(replayed
-                    .subagents
-                    .values()
-                    .all(|record| record.status != "starting" && record.status != "failed"));
-            }
-            _ => unreachable!(),
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
+fn subagent_start_fails_explicitly_without_creating_a_codex_thread() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start(&root);
+    register_tmux(&server, "parent", tmux.endpoints().remove(0));
+    let server = Arc::new(server);
+    let result = dispatch(
+        &server,
+        subagent_req(crate::subagent::Action::Start {
+            id: Some("tmux-child".into()),
+            runtime: Some("codex".into()),
+        }),
+    );
+    assert_eq!(
+        result.error.as_deref(),
+        Some("MANAGED_SUBAGENT_UNSUPPORTED: tmux cannot create a Codex thread; start the peer in its own tmux pane and register that pane")
+    );
+    let state = server.state.lock().unwrap();
+    assert!(state.subagents.is_empty());
+    assert!(state.journal_poison.is_none());
+    drop(state);
+    assert!(replay(&root).unwrap().subagents.is_empty());
+    drop(server);
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -2495,6 +2783,19 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
     assert_eq!(observed.data["notification_channel"], "none");
     assert!(observed.data.get("screen_tail").is_none());
     assert!(observed.data["tasks"].as_array().unwrap().len() == 1);
+    let snapshot = crate::subagent::handle(
+        &server,
+        "parent",
+        "token-parent",
+        Action::Snapshot {
+            id: "managed".into(),
+            lines: 40,
+        },
+    );
+    assert_eq!(
+        snapshot.error.as_deref(),
+        Some("SUBAGENT_SNAPSHOT_UNSUPPORTED: tmux panes do not expose durable Codex thread history; inspect the peer's durable mailbox and task state")
+    );
     let ready = crate::subagent::handle(
         &server,
         "child",
@@ -2508,7 +2809,7 @@ fn managed_subagent_is_authenticated_persistent_and_replayable() {
         .error
         .as_deref()
         .unwrap_or_default()
-        .starts_with("APPSERVER_NOTIFICATION_REJECTED:"));
+        .starts_with("TMUX_NOTIFICATION_REJECTED:"));
     assert_eq!(
         server.state.lock().unwrap().subagents["managed"].status,
         "idle"
@@ -3513,10 +3814,53 @@ fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() 
 }
 
 #[test]
+fn worker_snapshot_rejects_tmux_without_writing_a_receipt() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start(&root);
+    let endpoints = tmux.endpoints();
+    assert_eq!(endpoints.len(), 2);
+    assert!(register_tmux(&server, "snapshot-master", endpoints[0].clone()).ok);
+    assert!(register_tmux(&server, "snapshot-peer", endpoints[1].clone()).ok);
+    let promoted = super::handle_master_promote(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "approved for worker snapshot test".into(),
+    );
+    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+
+    let revision_before = server.state.lock().unwrap().revision;
+    let journal_before = std::fs::read(&server.journal_path).unwrap();
+    let response = super::handle_worker_snapshot(
+        &server,
+        "snapshot-master".into(),
+        "token-snapshot-master".into(),
+        "snapshot-peer".into(),
+        40,
+    );
+    assert!(!response.ok);
+    assert!(response
+        .error
+        .unwrap()
+        .starts_with("WORKER_SNAPSHOT_UNSUPPORTED:"));
+    let state = server.state.lock().unwrap();
+    assert!(!state.worker_snapshots.contains_key("snapshot-peer"));
+    assert_eq!(state.revision, revision_before);
+    drop(state);
+    assert_eq!(std::fs::read(&server.journal_path).unwrap(), journal_before);
+
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
     let (server, root) = test_server();
-    register(&server, "master", "%master");
-    register(&server, "ordinary", "%ordinary");
+    let tmux = IsolatedTmux::start(&root);
+    let endpoints = tmux.endpoints();
+    assert_eq!(endpoints.len(), 2);
+    assert!(register_tmux(&server, "master", endpoints[0].clone()).ok);
+    assert!(register_tmux(&server, "ordinary", endpoints[1].clone()).ok);
     assert!(
         super::handle_master_promote(
             &server,
@@ -3553,9 +3897,27 @@ fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
         .unwrap()
         .contains("master authority required"));
 
+    let revision_before_snapshot = server.state.lock().unwrap().revision;
+    let unsupported_snapshot = super::handle_worker_snapshot(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "ordinary".into(),
+        40,
+    );
+    assert!(!unsupported_snapshot.ok);
+    assert!(unsupported_snapshot
+        .error
+        .unwrap()
+        .starts_with("WORKER_SNAPSHOT_UNSUPPORTED:"));
+    let state = server.state.lock().unwrap();
+    assert!(!state.worker_snapshots.contains_key("ordinary"));
+    assert_eq!(state.revision, revision_before_snapshot);
+    drop(state);
+
     server.commit(&[Event::WorkerSnapshotCaptured {
         worker_id: "ordinary".into(),
-        thread_id: "thread-ordinary".into(),
+        thread_id: endpoints[1].pane_id.clone(),
         captured_ms: now_ms(),
     }]);
     let closed = super::handle_worker_close(
@@ -3587,8 +3949,9 @@ fn ordinary_worker_requires_its_own_snapshot_and_closes_idempotently() {
     );
     assert_eq!(
         replayed.worker_snapshots["ordinary"].thread_id,
-        "thread-ordinary"
+        endpoints[1].pane_id
     );
+    drop(tmux);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -3684,7 +4047,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
     let target_context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
     assert_eq!(target_context.data["identity"]["role"], "master");
     assert_eq!(target_context.data["role_brief"]["role"], "master");
-    let workers = dispatch_with_route_context(&server, Req::Workers, None, None);
+    let workers = dispatch_with_route_context(&server, Req::Workers, None);
     let target_worker = workers.data["workers"]
         .as_array()
         .unwrap()
@@ -3692,7 +4055,7 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
         .find(|worker| worker["id"] == "peer-b")
         .unwrap();
     assert_eq!(target_worker["role_brief"]["role"], "master");
-    let status = dispatch_with_route_context(&server, Req::StatusAll, None, None);
+    let status = dispatch_with_route_context(&server, Req::StatusAll, None);
     let target_status = status.data["workers"]
         .as_array()
         .unwrap()
@@ -3751,9 +4114,9 @@ fn role_contract_is_identical_across_context_workers_and_status() {
         );
     }
 
-    let workers = dispatch_with_route_context(&server, Req::Workers, None, None);
+    let workers = dispatch_with_route_context(&server, Req::Workers, None);
     assert!(workers.ok, "{workers:?}");
-    let status = dispatch_with_route_context(&server, Req::StatusAll, None, None);
+    let status = dispatch_with_route_context(&server, Req::StatusAll, None);
     assert!(status.ok, "{status:?}");
     for worker in workers.data["workers"].as_array().unwrap() {
         let id = worker["id"].as_str().unwrap();
@@ -3770,8 +4133,8 @@ fn role_contract_is_identical_across_context_workers_and_status() {
 }
 
 #[test]
-fn dead_master_transport_is_not_claimable_and_allows_approved_self_promote() {
-    let (mut server, root) = test_server();
+fn absent_tmux_master_allows_approved_peer_promotion() {
+    let (server, root) = test_server();
     register(&server, "peer-a", "thread-a");
     register(&server, "peer-b", "thread-b");
     assert!(
@@ -3783,16 +4146,7 @@ fn dead_master_transport_is_not_claimable_and_allows_approved_self_promote() {
         )
         .ok
     );
-    server.appserver_candidate_check = Arc::new(|candidate| {
-        if candidate.thread_id == "thread-b" {
-            Ok(test_appserver_transport("thread-b"))
-        } else {
-            Err(crate::client::adapters::AdapterError::RouteUnavailable {
-                detail: "thread is not live".into(),
-            }
-            .to_string())
-        }
-    });
+    peer_tests::kill_registered_worker_pane(&server, "peer-a");
     let status = super::handle_master_status(&server);
     assert!(status.data["master"].is_null(), "{status:?}");
     assert_eq!(status.data["recorded_unusable"]["worker_id"], "peer-a");
@@ -3814,8 +4168,8 @@ fn dead_master_transport_is_not_claimable_and_allows_approved_self_promote() {
 }
 
 #[test]
-fn not_loaded_master_thread_is_recorded_unusable_and_allows_approved_self_promote() {
-    let (mut server, root) = test_server();
+fn live_tmux_master_cannot_be_superseded_by_approved_peer_promotion() {
+    let (server, root) = test_server();
     register(&server, "peer-a", "thread-a");
     register(&server, "peer-b", "thread-b");
     assert!(
@@ -3827,26 +4181,14 @@ fn not_loaded_master_thread_is_recorded_unusable_and_allows_approved_self_promot
         )
         .ok
     );
-    server.appserver_thread_status = Arc::new(|_, thread_id| {
-        Ok(serde_json::json!({
-            "thread": {
-                "id": thread_id,
-                "status": {"type": if thread_id == "thread-a" {"notLoaded"} else {"idle"}},
-                "canAcceptDirectInput": thread_id != "thread-a"
-            }
-        }))
-    });
-
     let status = super::handle_master_status(&server);
-    assert!(status.data["master"].is_null(), "{status:?}");
-    assert_eq!(status.data["recorded_unusable"]["worker_id"], "peer-a");
+    assert_eq!(status.data["master"]["worker_id"], "peer-a", "{status:?}");
     assert_eq!(
         super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
-        None
+        Some("peer-a".into())
     );
     let context = handle_context(&server, "peer-b".into(), "token-peer-b".into());
-    assert!(context.data["master"].is_null(), "{context:?}");
-    assert_eq!(context.data["recorded_unusable"]["worker_id"], "peer-a");
+    assert_eq!(context.data["master"]["worker_id"], "peer-a", "{context:?}");
 
     let promoted = super::handle_master_promote(
         &server,
@@ -3854,10 +4196,10 @@ fn not_loaded_master_thread_is_recorded_unusable_and_allows_approved_self_promot
         "token-peer-b".into(),
         "user approved peer-b after the previous master thread became unusable".into(),
     );
-    assert!(promoted.ok, "{}", promoted.error.unwrap_or_default());
+    assert!(!promoted.ok, "a live tmux master must retain ownership");
     assert_eq!(
         super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-b".into())
+        Some("peer-a".into())
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -3933,41 +4275,7 @@ fn cross_project_send_requires_master_endpoints_on_both_sides() {
 }
 
 fn register_appserver(server: &mut Server, id: &str, thread_id: &str) -> Resp {
-    let app_scope = AppServerId::new("appserver-test").unwrap();
-    let candidate = crate::proto::AppServerCandidate {
-        endpoint: format!("unix:///tmp/collab-appserver-{id}.sock"),
-        namespace: "codex_tui".into(),
-        session_id: format!("session-{thread_id}"),
-        thread_id: thread_id.into(),
-        cwd: server.root.display().to_string(),
-    };
-    let candidate_for_closure = candidate.clone();
-    let checked = {
-        let expected = thread_id.to_owned();
-        move |candidate: &crate::proto::AppServerCandidate| {
-            assert_eq!(candidate.thread_id, expected);
-            Ok(SelectedTransport {
-                kind: TransportKind::AppServer,
-                endpoint: Some(candidate.endpoint.clone()),
-                namespace: Some(candidate.namespace.clone()),
-                session_id: Some(candidate.session_id.clone()),
-                thread_id: Some(candidate.thread_id.clone()),
-                capabilities: vec!["send_message_to_thread".into()],
-                self_check: "test App Server candidate".into(),
-            })
-        }
-    };
-    server.appserver_candidate_check = Arc::new(checked);
-    handle_register_with_app_scope(
-        server,
-        id.into(),
-        format!("token-{id}"),
-        server.root.display().to_string(),
-        Some(app_scope),
-        Some(TransportCandidates {
-            appserver: Some(candidate_for_closure),
-        }),
-    )
+    register(server, id, thread_id)
 }
 
 #[test]
@@ -3977,28 +4285,27 @@ fn init_registration_result_exposes_persisted_runtime_identity() {
     assert!(registration.ok, "{registration:?}");
     let runtime =
         runtime_from_registration_receipt(&registration.data, "peer-init", &root).unwrap();
+    assert_eq!(registration.data["transport_selected"]["kind"], "tmux");
     assert_eq!(
-        runtime.runtime_id.as_str(),
-        "runtime-appserver-session-thread-init-thread-init"
+        runtime.session_id.as_ref().unwrap().as_str(),
+        registration.data["transport_selected"]["session_id"]
+            .as_str()
+            .unwrap()
     );
     assert_eq!(
         runtime.native_thread_id.as_ref().unwrap().as_str(),
-        "thread-init"
+        registration.data["transport_selected"]["thread_id"]
+            .as_str()
+            .unwrap()
     );
-    assert_eq!(registration.data["transport_selected"]["kind"], "appserver");
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn master_promotion_requires_live_transport() {
+fn master_promotion_requires_live_tmux_pane() {
     let (mut server, root) = test_server();
     register(&server, "peer-a", "thread-a");
-    server.appserver_candidate_check = Arc::new(|_| {
-        Err(crate::client::adapters::AdapterError::RouteUnavailable {
-            detail: "thread is not live".into(),
-        }
-        .to_string())
-    });
+    retire_registered_test_pane(&registered_binding(&server, "peer-a"));
     let denied = super::handle_master_promote(
         &server,
         "peer-a".into(),
@@ -4011,11 +4318,11 @@ fn master_promotion_requires_live_transport() {
 }
 
 #[test]
-fn master_promotion_allows_verified_appserver() {
+fn master_promotion_allows_live_tmux_peer() {
     let (mut server, root) = test_server();
     let registered = register_appserver(&mut server, "peer-appserver", "thread-appserver");
     assert!(registered.ok, "{registered:?}");
-    assert_eq!(registered.data["transport_selected"]["kind"], "appserver");
+    assert_eq!(registered.data["transport_selected"]["kind"], "tmux");
     let promoted = super::handle_master_promote(
         &server,
         "peer-appserver".into(),
@@ -4085,6 +4392,8 @@ fn master_authority_is_generation_bound_and_replays_from_typed_grant() {
         assert_eq!(grant.endpoint_generation, binding.endpoint_generation);
         (binding.route_scope(), binding.endpoint_generation)
     };
+
+    retire_registered_test_pane(&registered_binding(&server, "peer-appserver"));
 
     let reconnected = register_appserver(&mut server, "peer-appserver", "thread-appserver-next");
     assert!(reconnected.ok, "{reconnected:?}");
@@ -4157,23 +4466,9 @@ fn same_runtime_registration_recovery_preserves_master_authority() {
         (binding.route_scope(), binding.endpoint_generation)
     };
 
-    let recovered = super::handle_register_with_app_scope_inner(
-        &server,
-        "peer-appserver".into(),
-        "token-peer-appserver".into(),
-        root.display().to_string(),
-        Some(AppServerId::new("appserver-test").unwrap()),
-        Some(TransportCandidates {
-            appserver: Some(crate::proto::AppServerCandidate {
-                endpoint: "unix:///tmp/collab-appserver-peer-appserver.sock".into(),
-                namespace: "codex_tui".into(),
-                session_id: "session-thread-appserver".into(),
-                thread_id: "thread-appserver".into(),
-                cwd: root.display().to_string(),
-            }),
-        }),
-        true,
-    );
+    retire_registered_test_pane(&registered_binding(&server, "peer-appserver"));
+
+    let recovered = register_appserver(&mut server, "peer-appserver", "thread-appserver-recovered");
     assert!(recovered.ok, "{recovered:?}");
     assert_eq!(recovered.data["recovered"], true);
     assert_eq!(recovered.data["role_brief"]["role"], "master");
@@ -4212,38 +4507,9 @@ fn same_runtime_registration_recovery_preserves_master_authority() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Rebind one registered worker onto a new App Server thread, which is the
-/// generation replacement a real registration recovery performs.
+/// Register the same peer against its next distinct pane/session fixture.
 fn recover_worker_on_new_thread(server: &mut Server, id: &str, thread_id: &str) -> Resp {
-    let app_scope = AppServerId::new("appserver-test").unwrap();
-    let candidate = crate::proto::AppServerCandidate {
-        endpoint: format!("unix:///tmp/collab-appserver-{id}.sock"),
-        namespace: "codex_tui".into(),
-        session_id: format!("session-{thread_id}"),
-        thread_id: thread_id.into(),
-        cwd: server.root.display().to_string(),
-    };
-    server.appserver_candidate_check = Arc::new(|candidate: &crate::proto::AppServerCandidate| {
-        Ok(SelectedTransport {
-            kind: TransportKind::AppServer,
-            endpoint: Some(candidate.endpoint.clone()),
-            namespace: Some(candidate.namespace.clone()),
-            session_id: Some(candidate.session_id.clone()),
-            thread_id: Some(candidate.thread_id.clone()),
-            capabilities: vec!["send_message_to_thread".into()],
-            self_check: "test App Server candidate".into(),
-        })
-    });
-    handle_register_with_app_scope(
-        server,
-        id.into(),
-        format!("token-{id}"),
-        server.root.display().to_string(),
-        Some(app_scope),
-        Some(TransportCandidates {
-            appserver: Some(candidate),
-        }),
-    )
+    register(server, id, thread_id)
 }
 
 fn registered_binding(server: &Server, id: &str) -> crate::server::global_state::RuntimeBinding {
@@ -4268,6 +4534,23 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
     promote_master(&server, "recover-master", "user approved recover-master");
 
     let previous = registered_binding(&server, "recover-master");
+    let original_grant = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_master_grant_for(&previous.route_scope(), &previous.binding_id)
+        .unwrap()
+        .clone();
+    let legacy_promotion_events_before = std::fs::read_to_string(&server.journal_path)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|event| event["ev"] == "MasterAssigned")
+        })
+        .count();
+    retire_registered_test_pane(&previous);
     let recovered =
         recover_worker_on_new_thread(&mut server, "recover-master", "thread-recover-master-new");
     assert!(recovered.ok, "{recovered:?}");
@@ -4288,6 +4571,11 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
         .lookup_master_grant_for(&route_scope, &previous.binding_id)
         .expect("same-principal recovery must reissue the master grant");
     assert_eq!(grant.endpoint_generation, current.endpoint_generation);
+    assert_eq!(current.agent_id, previous.agent_id);
+    assert_eq!(grant.agent_id, original_grant.agent_id);
+    assert_eq!(grant.granted_by, original_grant.granted_by);
+    assert_eq!(grant.approval, original_grant.approval);
+    assert_eq!(grant.granted_at_ms, original_grant.granted_at_ms);
     assert_eq!(
         state
             .global
@@ -4299,6 +4587,62 @@ fn wire_master_recover_reissues_master_grant_for_new_generation() {
     let status = super::handle_master_status(&server);
     assert!(status.ok, "{status:?}");
     assert_eq!(status.data["master"]["worker_id"], "recover-master");
+    let legacy_promotion_events_after = std::fs::read_to_string(&server.journal_path)
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|event| event["ev"] == "MasterAssigned")
+        })
+        .count();
+    assert_eq!(
+        legacy_promotion_events_after, legacy_promotion_events_before,
+        "master recovery must not emit a new promotion event"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wire_master_recovery_is_rejected_while_master_is_live() {
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "live-master", "thread-live-master-old");
+    assert!(registered.ok, "{registered:?}");
+    promote_master(&server, "live-master", "user approved live-master");
+    let previous = registered_binding(&server, "live-master");
+
+    let recovered =
+        recover_worker_on_new_thread(&mut server, "live-master", "thread-live-master-new");
+    assert!(!recovered.ok, "{recovered:?}");
+    assert!(recovered
+        .error
+        .as_deref()
+        .unwrap()
+        .starts_with("MASTER_RECOVERY_BLOCKED_LIVE:"));
+    let state = server.state.lock().unwrap();
+    let current = state
+        .global
+        .lookup_binding_for(&previous.route_scope(), &previous.binding_id)
+        .unwrap();
+    assert_eq!(current.endpoint_generation, previous.endpoint_generation);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wire_master_recovery_is_rejected_when_liveness_is_unknown() {
+    let (mut server, root) = test_server();
+    let registered = register_appserver(&mut server, "unknown-master", "thread-unknown-master-old");
+    assert!(registered.ok, "{registered:?}");
+    promote_master(&server, "unknown-master", "user approved unknown-master");
+    stop_registered_test_tmux_server();
+
+    let recovered =
+        recover_worker_on_new_thread(&mut server, "unknown-master", "thread-unknown-master-new");
+    assert!(!recovered.ok, "{recovered:?}");
+    assert!(recovered
+        .error
+        .as_deref()
+        .unwrap()
+        .starts_with("MASTER_RECOVERY_BLOCKED_UNKNOWN:"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -4362,6 +4706,7 @@ fn recovered_master_keeps_goal_deadline_scheduling() {
         "recover-deadline",
         "user approved recover-deadline",
     );
+    retire_registered_test_pane(&registered_binding(&server, "recover-deadline"));
     let recovered =
         recover_worker_on_new_thread(&mut server, "recover-deadline", "thread-deadline-new");
     assert!(recovered.ok, "{recovered:?}");
@@ -4695,12 +5040,75 @@ fn registration_creates_one_finite_default_direct_message_subscription() {
         .collect();
     assert_eq!(subscriptions.len(), 1);
     assert_eq!(subscriptions[0].event, "direct-message");
-    assert_eq!(subscriptions[0].method, "appserver");
+    assert_eq!(subscriptions[0].method, "tmux");
     assert_eq!(subscriptions[0].target, "thread-peer");
     assert_eq!(subscriptions[0].status, "armed");
     assert!(subscriptions[0].expires_ms > now_ms());
     drop(state);
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
+    let (mut server, root) = test_server();
+    assert!(register(&server, "sender", "thread-sender").ok);
+    assert!(register(&server, "recipient", "thread-recipient").ok);
+    {
+        let mut state = server.state.lock().unwrap();
+        server.commit_locked(
+            &mut state,
+            &[Event::NotificationSubscribed {
+                subscription: NotificationSubscription {
+                    id: "sub-default-direct-message-recipient".into(),
+                    worker_id: "recipient".into(),
+                    event: "direct-message".into(),
+                    subject: None,
+                    target: "legacy-thread-recipient".into(),
+                    method: "appserver".into(),
+                    trigger_ms: None,
+                    trigger_times_ms: Vec::new(),
+                    interval_ms: None,
+                    repeat_count: 1,
+                    fired_count: 0,
+                    expires_ms: now_ms() + 60_000,
+                    status: "armed".into(),
+                    created_ms: now_ms(),
+                    updated_ms: now_ms(),
+                    status_reason: None,
+                },
+            }],
+        );
+    }
+
+    assert!(register(&server, "recipient", "thread-recipient").ok);
+    let lease = server.state.lock().unwrap().notification_subscriptions
+        ["sub-default-direct-message-recipient"]
+        .clone();
+    assert_eq!(lease.method, "tmux");
+    assert_eq!(lease.target, "thread-recipient");
+    assert_eq!(lease.status, "armed");
+
+    server.appserver_notification_sink = Arc::new(|transport, _, _, _, _| {
+        if transport.kind != TransportKind::Tmux {
+            return Err("expected tmux wake transport".into());
+        }
+        Ok(serde_json::json!({"text_submitted": true, "enter_submitted": true, "consumed": false}))
+    });
+    let sent = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("upgrade wake".into()),
+        "legacy lease must not suppress tmux wake".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(sent.ok, "{sent:?}");
+    assert_eq!(sent.data["notification"], "tmux-input-submitted");
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -4725,7 +5133,7 @@ fn cancelled_default_lease_stays_suppressed_until_explicit_subscribe() {
     assert!(default_direct_message_events(
         &state,
         "peer",
-        &test_appserver_transport("thread-peer"),
+        &test_tmux_transport("thread-peer"),
         now_ms()
     )
     .is_empty());
@@ -4779,12 +5187,8 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
         },
     });
 
-    let events = default_direct_message_events(
-        &state,
-        "peer",
-        &test_appserver_transport("thread-peer"),
-        now,
-    );
+    let events =
+        default_direct_message_events(&state, "peer", &test_tmux_transport("thread-peer"), now);
     let default = events
         .iter()
         .find_map(|event| match event {
@@ -4808,7 +5212,7 @@ fn registration_adds_default_lease_when_only_short_direct_message_lease_exists()
     assert!(default_direct_message_events(
         &state,
         "peer",
-        &test_appserver_transport("thread-peer"),
+        &test_tmux_transport("thread-peer"),
         now + 1
     )
     .is_empty());
@@ -4823,7 +5227,7 @@ fn daemon_replay_restores_default_lease_for_registered_peer() {
             token: "token-peer".into(),
             cwd: "/tmp".into(),
             registered_ms: 1,
-            transport: Some(test_appserver_transport("thread-peer")),
+            transport: Some(test_tmux_transport("thread-peer")),
         },
     });
 
@@ -4836,7 +5240,7 @@ fn daemon_replay_restores_default_lease_for_registered_peer() {
 }
 
 #[test]
-fn daemon_restart_restores_default_lease_from_registered_appserver_transport() {
+fn daemon_restart_restores_default_lease_from_registered_tmux_transport() {
     let mut state = State::default();
     state.apply(&Event::Registered {
         worker: WorkerRec {
@@ -4844,7 +5248,7 @@ fn daemon_restart_restores_default_lease_from_registered_appserver_transport() {
             token: "token-peer".into(),
             cwd: "/tmp".into(),
             registered_ms: 1,
-            transport: Some(test_appserver_transport("thread-current")),
+            transport: Some(test_tmux_transport("thread-current")),
         },
     });
 
@@ -4865,7 +5269,7 @@ fn daemon_restart_reuses_existing_deadline_without_recreating_it() {
             token: "token-peer".into(),
             cwd: "/tmp".into(),
             registered_ms: 1,
-            transport: Some(test_appserver_transport("thread-current")),
+            transport: Some(test_tmux_transport("thread-current")),
         },
     });
     let original = NotificationSubscription {
@@ -5072,12 +5476,9 @@ fn retention_skips_fresh_messages_and_frozen_admission() {
 #[test]
 fn fresh_default_does_not_skip_legacy_duplicate_cleanup() {
     let mut state = State::default();
-    for event in default_direct_message_events(
-        &state,
-        "peer",
-        &test_appserver_transport("thread-one"),
-        1000,
-    ) {
+    for event in
+        default_direct_message_events(&state, "peer", &test_tmux_transport("thread-one"), 1000)
+    {
         state.apply(&event);
     }
     let mut old = state
@@ -5088,12 +5489,9 @@ fn fresh_default_does_not_skip_legacy_duplicate_cleanup() {
         .clone();
     old.id = "sub-legacy".into();
     state.apply(&Event::NotificationSubscribed { subscription: old });
-    for event in default_direct_message_events(
-        &state,
-        "peer",
-        &test_appserver_transport("thread-one"),
-        2000,
-    ) {
+    for event in
+        default_direct_message_events(&state, "peer", &test_tmux_transport("thread-one"), 2000)
+    {
         state.apply(&event);
     }
     assert_eq!(
@@ -5111,7 +5509,7 @@ fn fresh_default_does_not_skip_legacy_duplicate_cleanup() {
     assert!(default_direct_message_events(
         &state,
         "peer",
-        &test_appserver_transport("thread-one"),
+        &test_tmux_transport("thread-one"),
         2000
     )
     .is_empty());
@@ -5136,12 +5534,9 @@ fn default_subscription_renews_matching_target_and_keeps_stale_target_visible() 
         .clone();
     let ttl = DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000;
     for (thread_id, time) in [("thread-one", ttl), ("thread-one", ttl * 3)] {
-        for event in default_direct_message_events(
-            &state,
-            "peer",
-            &test_appserver_transport(thread_id),
-            time,
-        ) {
+        for event in
+            default_direct_message_events(&state, "peer", &test_tmux_transport(thread_id), time)
+        {
             state.apply(&event);
         }
         assert_eq!(state.notification_subscriptions.len(), 1);
@@ -5151,17 +5546,18 @@ fn default_subscription_renews_matching_target_and_keeps_stale_target_visible() 
         assert_eq!(sub.expires_ms, time + ttl);
     }
 
-    // A changed App Server thread must not silently rewrite the armed lease
-    // target from a re-registration path; the stale target stays visible until
-    // an explicit rebind/recovery decides the new address.
-    let events = default_direct_message_events(
-        &state,
-        "peer",
-        &test_appserver_transport("thread-two"),
-        ttl * 4,
-    );
-    assert!(events.is_empty(), "{events:?}");
-    assert_eq!(state.notification_subscriptions[&id].target, "thread-one");
+    // A changed peer identity is a route change. The system-owned wake lease
+    // must move to the newly registered tmux route instead of keeping a stale
+    // AppServer-era target.
+    let events =
+        default_direct_message_events(&state, "peer", &test_tmux_transport("thread-two"), ttl * 4);
+    assert!(events.iter().any(|event| matches!(event, Event::NotificationSubscribed { subscription }
+        if subscription.id == id && subscription.target == "thread-two" && subscription.method == "tmux")));
+    for event in &events {
+        state.apply(event);
+    }
+    assert_eq!(state.notification_subscriptions[&id].target, "thread-two");
+    assert_eq!(state.notification_subscriptions[&id].method, "tmux");
     assert_eq!(state.notification_subscriptions.len(), 1);
 }
 
@@ -6296,20 +6692,11 @@ fn owner_force_close_when_no_live_master_is_allowed() {
 
 #[test]
 fn registered_peer_force_closes_orphaned_owner_with_no_live_master() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "owner", "thread-owner");
     register(&server, "peer", "thread-peer");
     assert!(create_task(&server, "owner", "orphan", "feature").ok);
-    server.appserver_candidate_check = Arc::new(|candidate| {
-        if candidate.thread_id == "thread-owner" {
-            Err(crate::client::adapters::AdapterError::RouteUnavailable {
-                detail: "owner route lost".into(),
-            }
-            .to_string())
-        } else {
-            Ok(test_appserver_transport(&candidate.thread_id))
-        }
-    });
+    kill_registered_worker_pane(&server, "owner");
     let resp = handle_task_close(
         &server,
         "peer".into(),
@@ -6331,20 +6718,11 @@ fn registered_peer_force_closes_orphaned_owner_with_no_live_master() {
 
 #[test]
 fn repeated_orphan_force_close_is_idempotent_after_journal_replay() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "owner", "thread-owner");
     register(&server, "peer", "thread-peer");
     assert!(create_task(&server, "owner", "orphan", "feature").ok);
-    server.appserver_candidate_check = Arc::new(|candidate| {
-        if candidate.thread_id == "thread-owner" {
-            Err(crate::client::adapters::AdapterError::RouteUnavailable {
-                detail: "owner route lost".into(),
-            }
-            .to_string())
-        } else {
-            Ok(test_appserver_transport(&candidate.thread_id))
-        }
-    });
+    kill_registered_worker_pane(&server, "owner");
     let reason = "owner route lost; replay closes the same orphan";
     let first = handle_task_close(
         &server,
@@ -7026,6 +7404,13 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
         },
     );
     assert!(read.ok);
+    let endpoint = server.state.lock().unwrap().workers["peer"]
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .clone()
+        .unwrap();
     let rebound = dispatch(
         &server,
         Req::Register {
@@ -7033,7 +7418,11 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
             token: "token-peer".into(),
             cwd: root.display().to_string(),
             candidates: Some(crate::proto::TransportCandidates {
-                appserver: Some(test_appserver_candidate("thread-peer")),
+                appserver: None,
+                tmux: Some(crate::proto::TmuxCandidate {
+                    endpoint: endpoint.clone(),
+                    cwd: root.display().to_string(),
+                }),
             }),
         },
     );
@@ -7045,13 +7434,17 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
             token: "token-new-peer".into(),
             cwd: root.display().to_string(),
             candidates: Some(crate::proto::TransportCandidates {
-                appserver: Some(test_appserver_candidate("thread-new-peer")),
+                appserver: None,
+                tmux: Some(crate::proto::TmuxCandidate {
+                    endpoint,
+                    cwd: root.display().to_string(),
+                }),
             }),
         },
     );
     assert_eq!(
         new_identity.error.as_deref(),
-        Some("MIGRATION_ADMISSION_FROZEN: only an existing App Server identity may rebind")
+        Some("MIGRATION_ADMISSION_FROZEN: only an existing identity may rebind")
     );
     assert_eq!(server.state.lock().unwrap().workers.len(), 1);
     std::fs::remove_dir_all(root).ok();
@@ -7060,20 +7453,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
 #[test]
 fn authenticated_send_uses_registered_cwd_for_authoritative_route_scope() {
     let (server, root) = test_server();
-    let registered_cwd = root.clone();
-    assert!(
-        handle_register_with_app_scope(
-            &server,
-            "sender".into(),
-            "token-sender".into(),
-            registered_cwd.display().to_string(),
-            Some(AppServerId::new("tui-default").unwrap()),
-            Some(TransportCandidates {
-                appserver: Some(test_appserver_candidate("thread-sender")),
-            }),
-        )
-        .ok
-    );
+    assert!(register(&server, "sender", "thread-sender").ok);
     assert!(register(&server, "recipient", "%recipient").ok);
 
     let mut request = authenticated_send(&root, "sender", "recipient", "scope");
@@ -7515,7 +7895,7 @@ fn worktree_path_budget_accepts_short_slug_and_rejects_escape() {
 }
 
 #[test]
-fn appserver_notification_contains_id_subject_and_original_body() {
+fn tmux_notification_requests_durable_receive() {
     let text = notification_text(&Message {
         id: "message-id".into(),
         from: "sender".into(),
@@ -7533,10 +7913,125 @@ fn appserver_notification_contains_id_subject_and_original_body() {
     .unwrap();
     assert_eq!(
         text,
-        "COLLAB_NOTIFY message-id [release] RESOURCE_RELEASED feature=shared | P1 ACTION: the resource is free; resume the task that waited on it. Details: collab msg message-id. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
+        "COLLAB_NOTIFY message-id [release] RESOURCE_RELEASED feature=shared | P1 ACTION: the resource is free; resume the task that waited on it. Details: run `collab recv` to consume this durable notification; inspect `collab msg message-id` for details. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
     );
     assert!(!text.contains("ACK this notice"));
     assert!(text.contains("READ IS NOT DONE"));
+}
+
+#[tokio::test]
+async fn tmux_peer_send_then_collab_recv_commits_queryable_consumption() {
+    let (mut server, root) = test_server();
+    let tmux = IsolatedTmux::start(&root);
+    let endpoints = tmux.endpoints();
+    assert!(register_tmux(&server, "tmux-a", endpoints[0].clone()).ok);
+    assert!(register_tmux(&server, "tmux-b", endpoints[1].clone()).ok);
+    server.appserver_notification_sink = default_appserver_notification_sink();
+    server.config.notifications.enabled = true;
+
+    let subscription = handle_notification_subscribe(
+        &server,
+        "tmux-b".into(),
+        "token-tmux-b".into(),
+        "direct-message".into(),
+        None,
+        None,
+        Vec::new(),
+        None,
+        1,
+        3600,
+    );
+    assert!(subscription.ok, "subscription failed: {subscription:?}");
+
+    let sent = handle_send(
+        &server,
+        "tmux-a".into(),
+        "tmux-b".into(),
+        "notify".into(),
+        Some("tmux durable receive".into()),
+        "execute collab recv for this message".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(sent.ok, "send failed: {sent:?}");
+    assert_eq!(sent.data["notification"], "tmux-input-submitted");
+    assert_eq!(sent.data["consumed"], false);
+    let message_id = sent.data["msg_id"].as_str().expect("message id").to_owned();
+    let server = Arc::new(server);
+    let route_scope = crate::scope::RouteScope {
+        app_scope_id: AppServerId::new("tui-default").unwrap(),
+        project_scope_id: crate::server::global_state::GlobalState::canonical_project_scope(&root)
+            .unwrap(),
+    };
+    let binding = server
+        .state
+        .lock()
+        .unwrap()
+        .global
+        .lookup_binding_for(&route_scope, &BindingId::new("binding-tmux-b").unwrap())
+        .unwrap()
+        .clone();
+    let runtime = crate::identity::RuntimeIdentity {
+        agent_id: binding.agent_id,
+        runtime_id: binding.runtime_id,
+        appserver_id: binding.app_scope_id,
+        endpoint_generation: binding.endpoint_generation,
+        binding_id: binding.binding_id,
+        session_id: binding.session_id,
+        native_thread_id: binding.native_thread_id,
+    };
+    let project_context =
+        crate::proto::ProjectContext::for_registered_route(&root, &runtime).unwrap();
+    let before_recv = dispatch(
+        &server,
+        Req::MsgStatus {
+            msg_id: message_id.clone(),
+        },
+    );
+    assert!(before_recv.ok, "message status failed: {before_recv:?}");
+    assert_eq!(before_recv.data["consumed_by_recv"], false);
+
+    // Build the exact Poll request used by the production `collab recv`
+    // command; the server handler then commits consumption and its receipt.
+    let request = crate::recv_request(
+        "tmux-b".into(),
+        "token-tmux-b".into(),
+        0,
+        "tmux-b-recv-1".into(),
+    );
+    let Req::Poll {
+        worker_id,
+        token,
+        timeout_ms,
+        receive_id,
+    } = request
+    else {
+        panic!("collab recv must issue a Poll request");
+    };
+    assert_eq!(worker_id, "tmux-b");
+    assert_eq!(receive_id.as_deref(), Some("tmux-b-recv-1"));
+    let received = handle_poll_async_with_context(
+        server.clone(),
+        worker_id,
+        Some(token),
+        timeout_ms,
+        Some(project_context),
+        receive_id,
+    )
+    .await;
+    assert!(received.ok, "collab recv failed: {received:?}");
+    assert_eq!(received.data["count"], 1);
+    assert_eq!(received.data["messages"][0]["id"], message_id);
+    assert_eq!(received.data["receive_id"], "tmux-b-recv-1");
+
+    let consumed = dispatch(&server, Req::MsgStatus { msg_id: message_id });
+    assert!(consumed.ok, "message status failed: {consumed:?}");
+    assert_eq!(consumed.data["consumed_by_recv"], true);
+    assert_eq!(consumed.data["state"], "read");
+
+    drop(server);
+    drop(tmux);
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
@@ -7563,7 +8058,8 @@ fn appserver_notification_classifies_priority_and_names_one_action() {
 
     assert!(notify("worker-idle: w1").contains("P1 ACTION: dispatch work to this idle capacity"));
     assert!(notify("master-idle: master").contains("P1 ACTION: run the scheduling pass"));
-    assert!(notify("worker-unresponsive: w1").contains("P1 ACTION: snapshot the thread"));
+    assert!(notify("worker-unresponsive: w1")
+        .contains("P1 ACTION: inspect durable tasks and mailbox for this worker"));
     assert!(notify("task-keepalive 1/3").contains("P1 ACTION: continue your own task"));
     assert!(notify("blocker:task").contains("P1 ACTION:"));
     assert!(notify("unblock:task").contains("P1 ACTION:"));
@@ -7652,7 +8148,7 @@ fn appserver_notification_abbreviates_subject_and_escapes_body_controls() {
     .unwrap();
     assert_eq!(
         text,
-        "COLLAB_NOTIFY message-id [this subject is deliberately longer than forty …] line one\\nline two\\t中文 | P1 ACTION: do the in-scope action the message asks for. Details: collab msg message-id. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
+        "COLLAB_NOTIFY message-id [this subject is deliberately longer than forty …] line one\\nline two\\t中文 | P1 ACTION: do the in-scope action the message asks for. Details: run `collab recv` to consume this durable notification; inspect `collab msg message-id` for details. | READ IS NOT DONE: never end your turn on an ACK, a read, or a summary. After handling, resume your current task; if you own none, run `appsdk longhorizon show` and take work."
     );
 }
 
@@ -7837,22 +8333,19 @@ fn explicit_peer_notification_accepts_arbitrary_durable_body() {
     );
     assert_eq!(state.msgs[message_id].subject.as_deref(), Some("review"));
     assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
-    assert_eq!(response.data["notification"], "sent");
+    assert_eq!(response.data["notification"], "tmux-input-submitted");
+    assert_eq!(response.data["consumed"], false);
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn explicit_send_reports_appserver_rejection_after_durable_commit() {
+fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
-    server.appserver_notification_sink = Arc::new(|_, _, _, _, _| {
-        Err(
-            "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
-                .into(),
-        )
-    });
+    server.appserver_notification_sink =
+        Arc::new(|_, _, _, _, _| Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into()));
 
     let response = handle_send(
         &server,
@@ -7867,37 +8360,39 @@ fn explicit_send_reports_appserver_rejection_after_durable_commit() {
     assert!(!response.ok);
     assert_eq!(
         response.error.as_deref(),
-        Some(
-            "APPSERVER_NOTIFICATION_REJECTED: ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
-        )
+        Some("TMUX_NOTIFICATION_REJECTED: TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure")
     );
     assert_eq!(response.data["durable"], true);
     assert_eq!(response.data["notification"], "subscribed-not-sent");
     assert_eq!(
         response.data["notification_error"],
-        "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+        "TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure"
     );
     assert_eq!(response.data["failure"], "notification_delivery_failed");
     assert_eq!(response.data["repair_required"], true);
-    assert!(response.data["escalation"]
-        .as_str()
-        .unwrap()
-        .contains("live master"));
+    let escalation = response.data["escalation"].as_str().unwrap();
+    assert!(escalation.contains("collab recv"), "{escalation}");
+    assert!(
+        escalation.contains("do not retry this wake"),
+        "{escalation}"
+    );
+    assert!(!escalation.contains("retry explicitly"), "{escalation}");
     let message_id = response.data["msg_id"].as_str().unwrap();
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
     assert_eq!(state.msgs[message_id].state, "pending");
     assert_eq!(
         state.notification_delivery_failures[message_id].error,
-        "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+        "TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure"
     );
+    assert!(!state.notification_delivery_failures[message_id].retryable);
     drop(state);
     let replayed = replay(&root).unwrap();
     let failure = &replayed.notification_delivery_failures[message_id];
     assert_eq!(failure.operation, "notification.emitted");
     assert_eq!(
         failure.error,
-        "ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded by the App Server"
+        "TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure"
     );
     assert!(failure.failed_ms > 0);
 
@@ -7990,7 +8485,7 @@ fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     assert_eq!(third.data["msg_id"], message_id);
     assert_eq!(
         third.error.as_deref(),
-        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+        Some("TMUX_NOTIFICATION_REJECTED: no notification batch is ready")
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     let replayed = replay(&root).unwrap();
@@ -8038,7 +8533,7 @@ fn explicit_retry_is_refused_for_an_accepted_original_attempt() {
     assert_eq!(duplicate.data["msg_id"], message_id);
     assert_eq!(
         duplicate.error.as_deref(),
-        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+        Some("TMUX_NOTIFICATION_REJECTED: no notification batch is ready")
     );
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
@@ -8084,7 +8579,7 @@ fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
     assert!(!duplicate.ok);
     assert_eq!(
         duplicate.error.as_deref(),
-        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+        Some("TMUX_NOTIFICATION_REJECTED: no notification batch is ready")
     );
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
@@ -8131,7 +8626,7 @@ fn explicit_retry_is_refused_for_a_decode_failure() {
     assert!(!duplicate.ok);
     assert_eq!(
         duplicate.error.as_deref(),
-        Some("APPSERVER_NOTIFICATION_REJECTED: no notification batch is ready")
+        Some("TMUX_NOTIFICATION_REJECTED: no notification batch is ready")
     );
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[&message_id].wake_attempt_count, 1);
@@ -8141,7 +8636,7 @@ fn explicit_retry_is_refused_for_a_decode_failure() {
 }
 
 #[test]
-fn reregistration_does_not_overwrite_a_stale_default_target() {
+fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
     let (server, root) = test_server();
     assert!(register(&server, "peer", "%peer").ok);
     {
@@ -8154,16 +8649,20 @@ fn reregistration_does_not_overwrite_a_stale_default_target() {
     }
     assert!(register(&server, "peer", "%peer").ok);
     let state = server.state.lock().unwrap();
-    assert_eq!(
-        state.notification_subscriptions["sub-default-direct-message-peer"].target,
-        "thread-stale"
-    );
+    let subscription = &state.notification_subscriptions["sub-default-direct-message-peer"];
+    let current_thread = state.workers["peer"]
+        .transport
+        .as_ref()
+        .and_then(|transport| transport.thread_id.as_deref())
+        .unwrap();
+    assert_eq!(subscription.target, current_thread);
+    assert_eq!(subscription.method, "tmux");
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn explicit_send_reports_when_subscription_transport_mismatches() {
+fn explicit_send_reports_when_subscription_tmux_endpoint_mismatches() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
@@ -8189,14 +8688,12 @@ fn explicit_send_reports_when_subscription_transport_mismatches() {
     assert!(!response.ok);
     assert_eq!(
         response.error.as_deref(),
-        Some(
-            "APPSERVER_NOTIFICATION_REJECTED: subscription does not match the selected App Server transport"
-        )
+        Some("TMUX_NOTIFICATION_REJECTED: subscription does not match the selected tmux transport")
     );
     assert_eq!(response.data["notification"], "subscribed-not-sent");
     assert_eq!(
         response.data["notification_error"],
-        "subscription does not match the selected App Server transport"
+        "subscription does not match the selected tmux transport"
     );
     let message_id = response.data["msg_id"].as_str().unwrap();
     {
@@ -8205,12 +8702,12 @@ fn explicit_send_reports_when_subscription_transport_mismatches() {
         assert_eq!(failure.operation, "notification.not_attempted");
         assert_eq!(
             failure.error,
-            "subscription does not match the selected App Server transport"
+            "subscription does not match the selected tmux transport"
         );
     }
     assert_eq!(
         replay(&root).unwrap().notification_delivery_failures[message_id].error,
-        "subscription does not match the selected App Server transport"
+        "subscription does not match the selected tmux transport"
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -9404,6 +9901,13 @@ fn context_is_read_only_and_does_not_consume_notifications() {
     let (server, root) = test_server();
     register(&server, "peer", "%peer");
     register(&server, "peer-two", "%peer-two");
+    let expected_tmux_endpoint = server.state.lock().unwrap().workers["peer"]
+        .transport
+        .as_ref()
+        .unwrap()
+        .tmux_endpoint
+        .clone()
+        .unwrap();
     std::fs::create_dir_all(root.join("playground")).unwrap();
     assert!(
         handle_task_register(
@@ -9469,8 +9973,12 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         "RESOURCE_RELEASED task=task"
     );
     assert_eq!(context.data["identity"]["role"], "worker");
-    assert_eq!(context.data["agent"]["thread_state"], "idle");
-    assert_eq!(context.data["agent"]["can_accept_direct_input"], true);
+    assert_eq!(
+        context.data["identity"]["transport"]["tmux_endpoint"],
+        serde_json::to_value(expected_tmux_endpoint).unwrap()
+    );
+    assert_eq!(context.data["agent"]["thread_state"], "unknown");
+    assert!(context.data["agent"]["can_accept_direct_input"].is_null());
     assert_eq!(context.data["tasks"][0]["id"], "task");
     assert_eq!(context.data["worktrees"].as_array().unwrap().len(), 1);
     assert_eq!(context.data["worktrees"][0]["task_id"], "task");
@@ -9527,7 +10035,7 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
 }
 
 #[test]
-fn context_projects_appserver_thread_and_turn_state_without_guessing() {
+fn context_does_not_project_retired_appserver_thread_or_turn_state() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "state-peer", "thread-state-peer");
     assert!(
@@ -9535,62 +10043,20 @@ fn context_projects_appserver_thread_and_turn_state_without_guessing() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    let mut server = Arc::new(server);
-
-    for (thread_state, active_flags, turn_status, expected) in [
-        ("idle", vec![], Some("completed"), "idle"),
-        ("active", vec![], Some("inProgress"), "working"),
-        (
-            "active",
-            vec!["waitingOnApproval"],
-            Some("inProgress"),
-            "waiting_approval",
-        ),
-        (
-            "active",
-            vec!["waitingOnUserInput"],
-            Some("inProgress"),
-            "waiting_input",
-        ),
-        ("systemError", vec![], Some("failed"), "system_error"),
-        ("notLoaded", vec![], None, "not_loaded"),
-    ] {
-        Arc::get_mut(&mut server).unwrap().appserver_thread_status =
-            Arc::new(move |_, thread_id| {
-                Ok(serde_json::json!({
-                    "thread": {
-                        "id": thread_id,
-                        "status": {"type": thread_state, "activeFlags": active_flags},
-                        "canAcceptDirectInput": thread_state == "idle",
-                        "turns": [
-                            {"status": turn_status},
-                            {"status": "older"}
-                        ]
-                    }
-                }))
-            });
-        let context = handle_context(&server, "state-peer".into(), "token-state-peer".into());
-        assert_eq!(context.data["agent"]["thread_state"], thread_state);
-        assert_eq!(
-            context.data["agent"]["latest_turn_status"].as_str(),
-            turn_status
-        );
-        let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-        assert_eq!(status.data["workers"][0]["agent_state"], expected);
-    }
-
-    Arc::get_mut(&mut server).unwrap().appserver_thread_status =
-        Arc::new(|_, _| Err("ADAPTER_UNKNOWN: thread/read unavailable".into()));
+    server.appserver_thread_status =
+        Arc::new(|_, _| panic!("context must not call retired AppServer status"));
+    let server = Arc::new(server);
     let context = handle_context(&server, "state-peer".into(), "token-state-peer".into());
-    assert!(context.data["agent"].is_null());
+    assert_eq!(context.data["agent"]["thread_state"], "unknown");
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
     assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
+    assert_eq!(status.data["workers"][0]["presence"], "present");
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn appserver_status_probe_timeout_is_durable_unknown() {
+fn retired_appserver_status_callback_does_not_override_live_tmux_presence() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "timeout-peer", "thread-timeout-peer");
     assert!(
@@ -9599,24 +10065,22 @@ fn appserver_status_probe_timeout_is_durable_unknown() {
         registration.error.unwrap_or_default()
     );
     server.appserver_thread_status =
-        Arc::new(|_, _| Err("ADAPTER_TIMEOUT: thread/read timed out".into()));
+        Arc::new(|_, _| panic!("status must come from the registered tmux pane"));
     let server = Arc::new(server);
 
     let context = handle_context(&server, "timeout-peer".into(), "token-timeout-peer".into());
-    assert!(context.data["agent"].is_null());
+    assert_eq!(context.data["agent"]["thread_state"], "unknown");
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["status"], "unknown");
-    assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
-    assert_eq!(status.data["workers"][0]["presence"], "unknown");
-    assert!(status.data["workers"][0]["endpoint_live"].is_null());
-    assert!(status.data["workers"][0]["identity_valid"].is_null());
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
+    assert_eq!(status.data["workers"][0]["identity_valid"], true);
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn appserver_status_route_unavailable_is_missing_not_unknown() {
+fn retired_appserver_route_error_does_not_mark_live_tmux_pane_missing() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "missing-peer", "thread-missing-peer");
     assert!(
@@ -9624,22 +10088,20 @@ fn appserver_status_route_unavailable_is_missing_not_unknown() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status = Arc::new(|_, _| {
-        Err("ADAPTER_ROUTE_UNAVAILABLE: thread is persisted but not loaded".into())
-    });
+    server.appserver_thread_status =
+        Arc::new(|_, _| panic!("status must come from the registered tmux pane"));
     let server = Arc::new(server);
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["status"], "lost");
-    assert_eq!(status.data["workers"][0]["agent_state"], "absent");
-    assert_eq!(status.data["workers"][0]["presence"], "missing");
-    assert_eq!(status.data["workers"][0]["endpoint_live"], false);
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
+    assert_eq!(status.data["workers"][0]["identity_valid"], true);
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn appserver_identity_timeout_cannot_be_overridden_by_successful_status_probe() {
+fn retired_appserver_candidate_check_does_not_override_live_tmux_presence() {
     let (mut server, root) = test_server();
     let registration =
         register_appserver(&mut server, "timeout-identity", "thread-timeout-identity");
@@ -9649,15 +10111,13 @@ fn appserver_identity_timeout_cannot_be_overridden_by_successful_status_probe() 
         registration.error.unwrap_or_default()
     );
     server.appserver_candidate_check =
-        Arc::new(|_| Err("ADAPTER_TIMEOUT: candidate verification timed out".into()));
+        Arc::new(|_| panic!("tmux presence must not call the retired AppServer candidate checker"));
     let server = Arc::new(server);
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["status"], "unknown");
-    assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
-    assert_eq!(status.data["workers"][0]["presence"], "unknown");
-    assert!(status.data["workers"][0]["endpoint_live"].is_null());
-    assert!(status.data["workers"][0]["identity_valid"].is_null());
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
+    assert_eq!(status.data["workers"][0]["identity_valid"], true);
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -9964,30 +10424,74 @@ fn codex_subagents_exchange_messages() {
 #[test]
 fn worker_status_query_exposes_liveness_identity_and_notification_pressure() {
     let (server, root) = test_server();
-    register(&server, "status-worker", "%test-status-worker");
+    let tmux = IsolatedTmux::start(&root);
+    register_tmux(&server, "status-worker", tmux.endpoints().remove(0));
     let resp = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
     assert!(resp.ok);
     let workers = resp.data["workers"].as_array().unwrap();
     assert_eq!(workers.len(), 1);
     let w = &workers[0];
     assert_eq!(w["id"], "status-worker");
-    assert_eq!(w["transport"]["kind"], "appserver");
-    assert_eq!(w["transport"]["thread_id"], "thread-test-status-worker");
+    assert_eq!(w["transport"]["kind"], "tmux");
     assert_eq!(w["endpoint_live"], true);
     assert_eq!(w["identity_valid"], true);
-    assert_eq!(w["agent_state"], "idle");
-    assert_eq!(w["status"], "idle");
+    assert_eq!(w["presence"], "present");
+    assert_eq!(w["agent_state"], "unknown");
+    assert_eq!(w["status"], "unknown");
+    assert_eq!(w["transport_view"]["transport"], "tmux");
     assert_eq!(w["unacked_notifications"], 0);
     assert_eq!(w["notifications_paused"], false);
+    drop(tmux);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn worker_status_query_exposes_appserver_liveness() {
-    let (mut server, root) = test_server();
-    assert!(
-        register_appserver(&mut server, "status-appserver", "thread-status-appserver").ok,
-        "appserver registration failed"
+fn worker_status_keeps_tmux_liveness_unknown_despite_offline_keepalive_hint() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_single(&root);
+    register_tmux(&server, "unresponsive-worker", tmux.endpoints().remove(0));
+    let worker = server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .get("unresponsive-worker")
+        .unwrap()
+        .clone();
+    let keepalives = std::collections::HashMap::from([(
+        worker.id.clone(),
+        crate::server::keepalive::Record {
+            suspected_offline: true,
+            ..Default::default()
+        },
+    )]);
+    let summary = worker_status_summary_with_maps(
+        &server,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &keepalives,
+        json!({"role": "peer"}),
+        &worker,
+    );
+    assert_eq!(summary["status"], "unknown");
+    assert_eq!(summary["agent_state"], "unknown");
+    assert_eq!(summary["diagnostic"], serde_json::Value::Null);
+    drop(tmux);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worker_status_does_not_probe_legacy_appserver_routes() {
+    let (server, root) = test_server();
+    server.state.lock().unwrap().workers.insert(
+        "status-appserver".into(),
+        crate::server::state::WorkerRec {
+            id: "status-appserver".into(),
+            token: "token-status-appserver".into(),
+            cwd: server.root.display().to_string(),
+            registered_ms: now_ms(),
+            transport: Some(test_appserver_transport("thread-status-appserver")),
+        },
     );
     let resp = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
     assert!(resp.ok);
@@ -9997,39 +10501,39 @@ fn worker_status_query_exposes_appserver_liveness() {
     assert_eq!(w["id"], "status-appserver");
     assert_eq!(w["transport"]["kind"], "appserver");
     assert_eq!(w["transport"]["thread_id"], "thread-status-appserver");
-    assert_eq!(w["endpoint_live"], true);
-    assert_eq!(w["identity_valid"], true);
-    assert_eq!(w["agent_state"], "idle");
-    assert_eq!(w["status"], "idle");
+    assert_eq!(w["endpoint_live"], serde_json::Value::Null);
+    assert_eq!(w["identity_valid"], serde_json::Value::Null);
+    assert_eq!(w["agent_state"], "unknown");
+    assert_eq!(w["presence"], "unknown");
+    assert_eq!(w["status"], "unknown");
+    assert_eq!(w["transport_view"]["error"], "TRANSPORT_UNSUPPORTED");
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn worker_status_query_reports_unverified_appserver_as_lost() {
+fn worker_status_never_uses_appserver_candidate_check_for_presence() {
     let (mut server, root) = test_server();
-    assert!(
-        register_appserver(&mut server, "lost-appserver", "thread-lost-appserver").ok,
-        "appserver registration failed"
+    server.state.lock().unwrap().workers.insert(
+        "lost-appserver".into(),
+        crate::server::state::WorkerRec {
+            id: "lost-appserver".into(),
+            token: "token-lost-appserver".into(),
+            cwd: server.root.display().to_string(),
+            registered_ms: now_ms(),
+            transport: Some(test_appserver_transport("thread-lost-appserver")),
+        },
     );
-    server.appserver_candidate_check = Arc::new(|_| {
-        Err(crate::client::adapters::AdapterError::RouteUnavailable {
-            detail: "test appserver verification failure".into(),
-        }
-        .to_string())
-    });
+    server.appserver_candidate_check =
+        Arc::new(|_| panic!("legacy AppServer presence must not probe the AppServer adapter"));
     let resp = dispatch(&Arc::new(server), Req::WorkerStatus { worker_id: None });
     assert!(resp.ok);
     let workers = resp.data["workers"].as_array().unwrap();
     assert_eq!(workers.len(), 1);
     let w = &workers[0];
     assert_eq!(w["transport"]["kind"], "appserver");
-    assert_eq!(w["endpoint_live"], false);
-    assert_eq!(w["agent_state"], "absent");
-    assert_eq!(w["status"], "lost");
-    assert_eq!(
-        w["diagnostic"],
-        "registered transport is not live; verify App Server route or thread"
-    );
+    assert_eq!(w["endpoint_live"], serde_json::Value::Null);
+    assert_eq!(w["agent_state"], "unknown");
+    assert_eq!(w["status"], "unknown");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -10508,22 +11012,10 @@ fn master_idle_requires_live_master_armed_subscription_and_empty_backlog() {
 }
 
 #[test]
-fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
-    let (mut server, root) = test_server();
+fn worker_unresponsive_notifies_live_master_to_check_durable_work() {
+    let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "stuck-worker", "thread-stuck");
-    let stuck_live = Arc::new(AtomicBool::new(true));
-    let stuck_live_for_probe = stuck_live.clone();
-    server.appserver_candidate_check = Arc::new(move |candidate| {
-        if candidate.thread_id == "thread-stuck" && !stuck_live_for_probe.load(Ordering::SeqCst) {
-            Err(crate::client::adapters::AdapterError::RouteUnavailable {
-                detail: "stuck worker route is not live".into(),
-            }
-            .to_string())
-        } else {
-            Ok(test_appserver_transport(&candidate.thread_id))
-        }
-    });
     let server_arc = std::sync::Arc::new(server);
     let promote_resp = dispatch(
         &server_arc,
@@ -10542,7 +11034,8 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
         },
     );
     assert!(baseline.ok, "{baseline:?}");
-    assert_eq!(baseline.data["workers"][0]["status"], "idle");
+    assert_eq!(baseline.data["workers"][0]["endpoint_live"], true);
+    assert_eq!(baseline.data["workers"][0]["agent_state"], "unknown");
     assert_eq!(
         server_arc.state.lock().unwrap().keepalives["stuck-worker"].notified_presence,
         "online"
@@ -10551,7 +11044,7 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
         !(m.to == "master-worker" && m.subject == Some("worker-unresponsive: stuck-worker".into()))
     }));
 
-    stuck_live.store(false, Ordering::SeqCst);
+    kill_registered_worker_pane(&server_arc, "stuck-worker");
     let status = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -10570,7 +11063,13 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
         })
         .collect();
     assert_eq!(offline_alerts.len(), 1);
-    assert!(offline_alerts[0].body.contains("run snapshot"));
+    assert!(offline_alerts[0]
+        .body
+        .contains("durable tasks with `collab task status`"));
+    assert!(offline_alerts[0]
+        .body
+        .contains("mailbox with `collab inbox`"));
+    assert!(!offline_alerts[0].body.contains("snapshot"));
     assert_eq!(
         state.keepalives["stuck-worker"].notified_presence,
         "offline"
@@ -10623,7 +11122,7 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
         "unchanged offline status, status-all, workers, and ack must not duplicate"
     );
 
-    stuck_live.store(true, Ordering::SeqCst);
+    assert!(register(&server_arc, "stuck-worker", "thread-stuck").ok);
     let recovered = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -10631,7 +11130,8 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
         },
     );
     assert!(recovered.ok, "{recovered:?}");
-    assert_eq!(recovered.data["workers"][0]["status"], "idle");
+    assert_eq!(recovered.data["workers"][0]["endpoint_live"], true);
+    assert_eq!(recovered.data["workers"][0]["agent_state"], "unknown");
     {
         let state = server_arc.state.lock().unwrap();
         let recovered_alerts: Vec<_> = state
@@ -10672,7 +11172,7 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
         "unchanged online status must not duplicate recovery"
     );
 
-    stuck_live.store(false, Ordering::SeqCst);
+    kill_registered_worker_pane(&server_arc, "stuck-worker");
     let rearmed = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -10700,21 +11200,10 @@ fn worker_unresponsive_notifies_live_master_with_snapshot_advice() {
 
 #[test]
 fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "cold-worker", "thread-cold");
-    let cold_live = Arc::new(AtomicBool::new(false));
-    let cold_live_for_probe = cold_live.clone();
-    server.appserver_candidate_check = Arc::new(move |candidate| {
-        if candidate.thread_id == "thread-cold" && !cold_live_for_probe.load(Ordering::SeqCst) {
-            Err(crate::client::adapters::AdapterError::RouteUnavailable {
-                detail: "cold worker route is not live".into(),
-            }
-            .to_string())
-        } else {
-            Ok(test_appserver_transport(&candidate.thread_id))
-        }
-    });
+    kill_registered_worker_pane(&server, "cold-worker");
     let server_arc = std::sync::Arc::new(server);
     let promote_resp = dispatch(
         &server_arc,
@@ -10743,7 +11232,7 @@ fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
         }));
     }
 
-    cold_live.store(true, Ordering::SeqCst);
+    assert!(register(&server_arc, "cold-worker", "thread-cold").ok);
     let online = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -10751,7 +11240,8 @@ fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
         },
     );
     assert!(online.ok, "{online:?}");
-    assert_eq!(online.data["workers"][0]["status"], "idle");
+    assert_eq!(online.data["workers"][0]["endpoint_live"], true);
+    assert_eq!(online.data["workers"][0]["agent_state"], "unknown");
     let repeated = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -10778,39 +11268,10 @@ fn first_offline_status_sets_baseline_then_online_transition_notifies_once() {
 
 #[test]
 fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() {
-    let (mut server, root) = test_server();
+    let (server, root) = test_server();
     register(&server, "master-worker", "thread-master");
     register(&server, "edge-worker", "thread-stale");
-    let root_cwd = root.display().to_string();
-    let server_for_probe: Arc<StdMutex<Option<Arc<Server>>>> = Arc::new(StdMutex::new(None));
-    let server_for_probe_closure = server_for_probe.clone();
-    let reregistered = Arc::new(AtomicBool::new(false));
-    let reregistered_closure = reregistered.clone();
-    server.appserver_candidate_check = Arc::new(move |candidate| {
-        if candidate.thread_id == "thread-stale"
-            && !reregistered_closure.swap(true, Ordering::SeqCst)
-        {
-            if let Some(server) = server_for_probe_closure.lock().unwrap().as_ref() {
-                server.commit(&[Event::Registered {
-                    worker: WorkerRec {
-                        id: "edge-worker".into(),
-                        token: "token-edge-worker-new".into(),
-                        cwd: root_cwd.clone(),
-                        registered_ms: now_ms() + 1,
-                        transport: Some(test_appserver_transport("thread-new")),
-                    },
-                }]);
-            }
-            Err(crate::client::adapters::AdapterError::RouteUnavailable {
-                detail: "old registration route is no longer live".into(),
-            }
-            .to_string())
-        } else {
-            Ok(test_appserver_transport(&candidate.thread_id))
-        }
-    });
     let server_arc = std::sync::Arc::new(server);
-    *server_for_probe.lock().unwrap() = Some(server_arc.clone());
     let promote_resp = dispatch(
         &server_arc,
         Req::MasterPromote {
@@ -10820,6 +11281,13 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
         },
     );
     assert!(promote_resp.ok);
+    let stale_worker = server_arc.state.lock().unwrap().workers["edge-worker"].clone();
+    kill_registered_worker_pane(&server_arc, "edge-worker");
+    assert!(register(&server_arc, "edge-worker", "thread-stale").ok);
+    assert_eq!(
+        worker_identity_presence(&server_arc, &stale_worker),
+        IdentityPresence::Missing
+    );
     server_arc.commit(&[Event::KeepaliveUpdated {
         worker_id: "edge-worker".into(),
         record: crate::server::keepalive::Record {
@@ -10835,13 +11303,10 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
         },
     );
     assert!(status.ok, "{status:?}");
-    assert_eq!(status.data["workers"][0]["status"], "idle");
-    assert_eq!(
-        status.data["workers"][0]["transport"]["thread_id"],
-        "thread-new"
-    );
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
     let state = server_arc.state.lock().unwrap();
-    assert_eq!(state.workers["edge-worker"].token, "token-edge-worker-new");
+    assert_eq!(state.workers["edge-worker"].token, "token-edge-worker");
     assert_eq!(state.keepalives["edge-worker"].notified_presence, "online");
     assert!(state.msgs.values().all(|m| {
         !(m.to == "master-worker" && m.subject == Some("worker-unresponsive: edge-worker".into()))
@@ -10855,10 +11320,12 @@ fn stale_presence_probe_after_reregister_does_not_notify_or_mutate_new_worker() 
 }
 
 #[test]
-fn presence_edge_probes_appserver_status_outside_state_mutex() {
+fn presence_edge_records_tmux_peer_presence() {
     let (server, root) = test_server();
-    register(&server, "master-worker", "thread-master");
-    register(&server, "edge-worker", "thread-edge");
+    let tmux = IsolatedTmux::start(&root);
+    let endpoints = tmux.endpoints();
+    assert!(register_tmux(&server, "master-worker", endpoints[0].clone()).ok);
+    assert!(register_tmux(&server, "edge-worker", endpoints[1].clone()).ok);
     let mut server_arc = std::sync::Arc::new(server);
     let promote_resp = dispatch(
         &server_arc,
@@ -10870,26 +11337,6 @@ fn presence_edge_probes_appserver_status_outside_state_mutex() {
     );
     assert!(promote_resp.ok);
 
-    let server_for_probe: Arc<StdMutex<Option<Arc<Server>>>> = Arc::new(StdMutex::new(None));
-    let server_for_probe_closure = server_for_probe.clone();
-    let server_mut = Arc::get_mut(&mut server_arc).unwrap();
-    server_mut.appserver_thread_status = Arc::new(move |_, thread_id| {
-        if let Some(server) = server_for_probe_closure.lock().unwrap().as_ref() {
-            assert!(
-                server.state.try_lock().is_ok(),
-                "App Server status probes must not run under server.state mutex"
-            );
-        }
-        Ok(serde_json::json!({
-            "thread": {
-                "id": thread_id,
-                "status": {"type": "idle"},
-                "canAcceptDirectInput": true
-            }
-        }))
-    });
-    *server_for_probe.lock().unwrap() = Some(server_arc.clone());
-
     let status = dispatch(
         &server_arc,
         Req::WorkerStatus {
@@ -10897,7 +11344,13 @@ fn presence_edge_probes_appserver_status_outside_state_mutex() {
         },
     );
     assert!(status.ok, "{status:?}");
-    assert_eq!(status.data["workers"][0]["status"], "idle");
+    assert_eq!(status.data["workers"][0]["presence"], "present");
+    assert_eq!(
+        server_arc.state.lock().unwrap().keepalives["edge-worker"].notified_presence,
+        "online"
+    );
+    drop(server_arc);
+    drop(tmux);
     std::fs::remove_dir_all(root).unwrap();
 }
 

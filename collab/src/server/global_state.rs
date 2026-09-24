@@ -8,6 +8,7 @@
 use crate::identity::{
     AgentId, AppServerId, BindingId, CommandId, NativeThreadId, OperationId, RuntimeId, SessionId,
 };
+use crate::proto::TmuxEndpoint;
 use crate::scope::{ProjectScopeId, RouteScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -220,6 +221,8 @@ pub struct RuntimeBinding {
     pub session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_thread_id: Option<NativeThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_endpoint: Option<TmuxEndpoint>,
 }
 
 impl RuntimeBinding {
@@ -271,6 +274,7 @@ impl RuntimeBinding {
             endpoint_generation,
             session_id,
             native_thread_id,
+            tmux_endpoint: None,
         };
         binding.validate()?;
         Ok(binding)
@@ -295,6 +299,33 @@ impl RuntimeBinding {
         if let Some(thread_id) = &self.native_thread_id {
             validate_native_thread_id(thread_id)?;
         }
+        if let Some(endpoint) = &self.tmux_endpoint {
+            validate_tmux_route_endpoint(endpoint)?;
+            let tmux_route_matches = self.session_id.as_ref().map(SessionId::as_str)
+                == Some(endpoint.tmux_session_id.as_str())
+                && self.native_thread_id.as_ref().map(NativeThreadId::as_str)
+                    == Some(endpoint.pane_id.as_str());
+            let codex_identity_matches = self.session_id.as_ref().map(SessionId::as_str)
+                == Some(
+                    endpoint
+                        .codex_session_id
+                        .as_deref()
+                        .unwrap_or(&endpoint.tmux_session_id),
+                )
+                && self.native_thread_id.as_ref().map(NativeThreadId::as_str)
+                    == Some(
+                        endpoint
+                            .codex_thread_id
+                            .as_deref()
+                            .unwrap_or(&endpoint.pane_id),
+                    );
+            if !tmux_route_matches && !codex_identity_matches {
+                return Err(StateError::invalid(
+                    "runtime binding tmux endpoint",
+                    "runtime identity must match Codex anchors or the tmux session/pane address",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -318,6 +349,8 @@ pub struct RuntimeBindingTombstone {
     pub endpoint_generation: u64,
     pub session_id: SessionId,
     pub native_thread_id: NativeThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_endpoint: Option<TmuxEndpoint>,
     #[serde(rename = "reboundTo")]
     pub rebound_to: RuntimeBinding,
 }
@@ -357,9 +390,15 @@ impl RuntimeBindingTombstone {
                     "replacement binding has no native thread id",
                 )
             })?;
-        if old_session_id == *replacement_session_id
-            && old_native_thread_id == *replacement_native_thread_id
-        {
+        if current_thread_route_address(
+            &old_session_id,
+            &old_native_thread_id,
+            old.tmux_endpoint.as_ref(),
+        ) == current_thread_route_address(
+            replacement_session_id,
+            replacement_native_thread_id,
+            rebound_to.tmux_endpoint.as_ref(),
+        ) {
             return Err(StateError::BindingConflict(
                 "session/thread rebind must change the address".to_owned(),
             ));
@@ -380,6 +419,7 @@ impl RuntimeBindingTombstone {
             endpoint_generation: old.endpoint_generation,
             session_id: old_session_id,
             native_thread_id: old_native_thread_id,
+            tmux_endpoint: old.tmux_endpoint.clone(),
             rebound_to: rebound_to.clone(),
         })
     }
@@ -409,9 +449,36 @@ impl RuntimeBindingTombstone {
             self.rebound_to.native_thread_id.as_ref().ok_or_else(|| {
                 StateError::Invariant("tombstone replacement has no native thread id".to_owned())
             })?;
-        if self.session_id == *replacement_session_id
-            && self.native_thread_id == *replacement_native_thread_id
-        {
+        if let Some(endpoint) = self.tmux_endpoint.as_ref() {
+            validate_tmux_route_endpoint(endpoint)?;
+            let tmux_route_matches = endpoint.tmux_session_id == self.session_id.as_str()
+                && endpoint.pane_id == self.native_thread_id.as_str();
+            let codex_identity_matches = endpoint
+                .codex_session_id
+                .as_deref()
+                .unwrap_or(&endpoint.tmux_session_id)
+                == self.session_id.as_str()
+                && endpoint
+                    .codex_thread_id
+                    .as_deref()
+                    .unwrap_or(&endpoint.pane_id)
+                    == self.native_thread_id.as_str();
+            if !tmux_route_matches && !codex_identity_matches {
+                return Err(StateError::Invariant(
+                    "tombstone runtime identity does not match its old tmux/Codex address"
+                        .to_owned(),
+                ));
+            }
+        }
+        if current_thread_route_address(
+            &self.session_id,
+            &self.native_thread_id,
+            self.tmux_endpoint.as_ref(),
+        ) == current_thread_route_address(
+            replacement_session_id,
+            replacement_native_thread_id,
+            self.rebound_to.tmux_endpoint.as_ref(),
+        ) {
             return Err(StateError::Invariant(
                 "tombstone replacement has the same address".to_owned(),
             ));
@@ -1293,21 +1360,30 @@ impl GlobalState {
             }
         }
 
-        for ((session_key, thread_key), binding) in &self.current_thread_routes {
+        for (key, binding) in &self.current_thread_routes {
             binding.validate()?;
             let Some(session_id) = binding.session_id.as_ref() else {
                 return Err(StateError::Invariant(format!(
-                    "current thread route {session_key}/{thread_key} has no session id"
+                    "current thread route {:?} has no session id",
+                    key
                 )));
             };
             let Some(native_thread_id) = binding.native_thread_id.as_ref() else {
                 return Err(StateError::Invariant(format!(
-                    "current thread route {session_key}/{thread_key} has no native thread id"
+                    "current thread route {:?} has no native thread id",
+                    key
                 )));
             };
-            if session_key != session_id.as_str() || thread_key != native_thread_id.as_str() {
+            if key
+                != &current_thread_route_address(
+                    session_id,
+                    native_thread_id,
+                    binding.tmux_endpoint.as_ref(),
+                )
+            {
                 return Err(StateError::Invariant(format!(
-                    "current thread route key {session_key}/{thread_key} does not match session {session_id} and native thread {native_thread_id}"
+                    "current thread route key {:?} does not match its session/thread/endpoint address",
+                    key
                 )));
             }
         }
@@ -1334,17 +1410,24 @@ impl GlobalState {
         }
         for (key, tombstone) in &self.current_thread_route_tombstones {
             tombstone.validate()?;
-            if key != &current_thread_route_key(&tombstone.session_id, &tombstone.native_thread_id)
+            if key
+                != &current_route_address_key(
+                    &tombstone.session_id,
+                    &tombstone.native_thread_id,
+                    tombstone.tmux_endpoint.as_ref(),
+                )
             {
                 return Err(StateError::Invariant(format!(
-                    "current thread route tombstone key {key} does not match old address {}/{}",
+                    "current thread route tombstone key {key} does not match old route address {}/{}",
                     tombstone.session_id, tombstone.native_thread_id
                 )));
             }
-            if self
-                .lookup_current_thread_route(&tombstone.session_id, &tombstone.native_thread_id)
-                .is_some()
-            {
+            let old_address = current_thread_route_address(
+                &tombstone.session_id,
+                &tombstone.native_thread_id,
+                tombstone.tmux_endpoint.as_ref(),
+            );
+            if self.current_thread_routes.contains_key(&old_address) {
                 return Err(StateError::Invariant(format!(
                     "current thread route tombstone {key} is also live"
                 )));
@@ -1712,10 +1795,32 @@ impl GlobalState {
         session_id: &SessionId,
         native_thread_id: &NativeThreadId,
     ) -> Option<&RuntimeBinding> {
-        self.current_thread_routes.get(&(
+        let route_key = (
             session_id.as_str().to_owned(),
             native_thread_id.as_str().to_owned(),
-        ))
+        );
+        if let Some(binding) = self.current_thread_routes.get(&route_key) {
+            return Some(binding);
+        }
+        let mut matches = self.current_thread_routes.values().filter(|binding| {
+            binding.session_id.as_ref() == Some(session_id)
+                && binding.native_thread_id.as_ref() == Some(native_thread_id)
+        });
+        let binding = matches.next()?;
+        matches.next().is_none().then_some(binding)
+    }
+
+    pub fn lookup_tmux_route(&self, endpoint: &TmuxEndpoint) -> Option<&RuntimeBinding> {
+        self.current_thread_routes
+            .get(&tmux_route_address(endpoint))
+    }
+
+    pub fn lookup_tmux_route_tombstone(
+        &self,
+        endpoint: &TmuxEndpoint,
+    ) -> Option<&RuntimeBindingTombstone> {
+        self.current_thread_route_tombstones
+            .get(&tmux_route_address_key(endpoint))
     }
 
     /// Read-only fallback candidates for a durable thread-only binding.
@@ -1753,6 +1858,7 @@ impl GlobalState {
             .flat_map(|project| project.runtime_bindings.values())
             .filter(|binding| {
                 binding.session_id.is_some()
+                    && binding.tmux_endpoint.is_none()
                     && binding
                         .native_thread_id
                         .as_ref()
@@ -1807,8 +1913,25 @@ impl GlobalState {
         session_id: &SessionId,
         native_thread_id: &NativeThreadId,
     ) -> Option<&RuntimeBindingTombstone> {
-        self.current_thread_route_tombstones
-            .get(&current_thread_route_key(session_id, native_thread_id))
+        if let Some(tombstone) =
+            self.current_thread_route_tombstones
+                .get(&current_route_address_key(
+                    session_id,
+                    native_thread_id,
+                    None,
+                ))
+        {
+            return Some(tombstone);
+        }
+        let mut matches = self
+            .current_thread_route_tombstones
+            .values()
+            .filter(|tombstone| {
+                tombstone.session_id == *session_id
+                    && tombstone.native_thread_id == *native_thread_id
+            });
+        let tombstone = matches.next()?;
+        matches.next().is_none().then_some(tombstone)
     }
 
     pub fn record_current_thread_route_tombstone(
@@ -1816,7 +1939,11 @@ impl GlobalState {
         tombstone: RuntimeBindingTombstone,
     ) -> Result<StateVersion, StateError> {
         tombstone.validate()?;
-        let key = current_thread_route_key(&tombstone.session_id, &tombstone.native_thread_id);
+        let key = current_route_address_key(
+            &tombstone.session_id,
+            &tombstone.native_thread_id,
+            tombstone.tmux_endpoint.as_ref(),
+        );
         if self
             .current_thread_route_tombstones
             .get(&key)
@@ -1846,6 +1973,11 @@ impl GlobalState {
             .session_id
             .clone()
             .ok_or_else(|| StateError::invalid("current thread route", "requires a session id"))?;
+        let route_address = current_thread_route_address(
+            &session_id,
+            &native_thread_id,
+            binding.tmux_endpoint.as_ref(),
+        );
         let app_scope_key = binding.app_scope_id.as_str().to_owned();
         let upgraded_binding_id = binding.binding_id.as_str().to_owned();
         let thread_key = binding
@@ -1855,14 +1987,7 @@ impl GlobalState {
             .ok_or_else(|| {
                 StateError::invalid("current thread route", "requires a native thread id")
             })?;
-        if self
-            .current_thread_routes
-            .get(&(
-                session_id.as_str().to_owned(),
-                native_thread_id.as_str().to_owned(),
-            ))
-            .is_some_and(|existing| existing == &binding)
-        {
+        if self.current_thread_routes.get(&route_address) == Some(&binding) {
             return Ok(self.version());
         }
         self.mutate(|next| {
@@ -1884,11 +2009,6 @@ impl GlobalState {
                 // A higher endpoint generation on the same session/thread is
                 // a transport refresh, not an address rebind. Keep the route
                 // current and do not create a tombstone for the same address.
-                if old.session_id == binding.session_id
-                    && old.native_thread_id == binding.native_thread_id
-                {
-                    continue;
-                }
                 let old_session_id = old.session_id.clone().ok_or_else(|| {
                     StateError::invalid(
                         "current thread route tombstone",
@@ -1901,17 +2021,23 @@ impl GlobalState {
                         "old binding has no native thread id",
                     )
                 })?;
-                let key = current_thread_route_key(&old_session_id, &old_native_thread_id);
+                if current_thread_route_address(
+                    &old_session_id,
+                    &old_native_thread_id,
+                    old.tmux_endpoint.as_ref(),
+                ) == route_address
+                {
+                    continue;
+                }
+                let key = current_route_address_key(
+                    &old_session_id,
+                    &old_native_thread_id,
+                    old.tmux_endpoint.as_ref(),
+                );
                 next.current_thread_route_tombstones
                     .insert(key, RuntimeBindingTombstone::new(&old, &binding)?);
             }
-            next.current_thread_routes.insert(
-                (
-                    session_id.as_str().to_owned(),
-                    native_thread_id.as_str().to_owned(),
-                ),
-                binding,
-            );
+            next.current_thread_routes.insert(route_address, binding);
             // Installing the strict dual-key route for a thread upgrades that
             // identity off the legacy compatibility index.  Only the upgraded
             // binding is retired: another binding id may still own the same
@@ -1944,19 +2070,14 @@ impl GlobalState {
                 "requires a session id",
             ));
         };
+        let route_address = current_thread_route_address(
+            session_id,
+            native_thread_id,
+            binding.tmux_endpoint.as_ref(),
+        );
         self.mutate(|next| {
-            if next
-                .current_thread_routes
-                .get(&(
-                    session_id.as_str().to_owned(),
-                    native_thread_id.as_str().to_owned(),
-                ))
-                .is_some_and(|current| current == &binding)
-            {
-                next.current_thread_routes.remove(&(
-                    session_id.as_str().to_owned(),
-                    native_thread_id.as_str().to_owned(),
-                ));
+            if next.current_thread_routes.get(&route_address) == Some(&binding) {
+                next.current_thread_routes.remove(&route_address);
             }
             Ok(())
         })
@@ -2586,8 +2707,86 @@ fn validate_project_scope(scope: &ProjectScopeId) -> Result<(), StateError> {
         .map(|_| ())
 }
 
-fn current_thread_route_key(session_id: &SessionId, native_thread_id: &NativeThreadId) -> String {
-    format!("{}\0{}", session_id, native_thread_id)
+fn current_thread_route_address(
+    session_id: &SessionId,
+    native_thread_id: &NativeThreadId,
+    tmux_endpoint: Option<&TmuxEndpoint>,
+) -> (String, String) {
+    tmux_endpoint.map_or_else(
+        || {
+            (
+                session_id.as_str().to_owned(),
+                native_thread_id.as_str().to_owned(),
+            )
+        },
+        tmux_route_address,
+    )
+}
+
+fn tmux_route_address(endpoint: &TmuxEndpoint) -> (String, String) {
+    let socket_path = &endpoint.socket_path;
+    let session_id = &endpoint.tmux_session_id;
+    let pane_id = &endpoint.pane_id;
+    (
+        format!(
+            "\0tmux\0{}:{}\0{}\0{}:{}\0{}:{}\0{}",
+            socket_path.len(),
+            socket_path,
+            endpoint.server_pid,
+            session_id.len(),
+            session_id,
+            pane_id.len(),
+            pane_id,
+            endpoint.pane_pid,
+        ),
+        pane_id.clone(),
+    )
+}
+
+fn current_route_address_key(
+    session_id: &SessionId,
+    native_thread_id: &NativeThreadId,
+    tmux_endpoint: Option<&TmuxEndpoint>,
+) -> String {
+    let address = current_thread_route_address(session_id, native_thread_id, tmux_endpoint);
+    format!("{}\0{}", address.0, address.1)
+}
+
+fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
+    let address = tmux_route_address(endpoint);
+    format!("{}\0{}", address.0, address.1)
+}
+
+fn validate_tmux_route_endpoint(endpoint: &TmuxEndpoint) -> Result<(), StateError> {
+    if endpoint.socket_path.is_empty()
+        || !Path::new(&endpoint.socket_path).is_absolute()
+        || endpoint.socket_path.chars().any(char::is_control)
+        || endpoint.server_pid == 0
+        || endpoint.pane_pid == 0
+    {
+        return Err(StateError::invalid(
+            "tmux route endpoint",
+            "requires an absolute socket path and non-zero server/pane process ids",
+        ));
+    }
+    SessionId::new(endpoint.tmux_session_id.clone())
+        .map_err(|error| StateError::invalid("tmux session id", error.to_string()))?;
+    NativeThreadId::new(endpoint.pane_id.clone())
+        .map_err(|error| StateError::invalid("tmux pane id", error.to_string()))?;
+    let pane_suffix = endpoint.pane_id.strip_prefix('%').unwrap_or_default();
+    if pane_suffix.is_empty() || !pane_suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(StateError::invalid("tmux pane id", "must use tmux %N form"));
+    }
+    for (field, value) in [
+        ("Codex session id", endpoint.codex_session_id.as_deref()),
+        ("Codex thread id", endpoint.codex_thread_id.as_deref()),
+    ] {
+        if let Some(value) = value {
+            crate::identity::validate_id_for_protocol(value)
+                .map_err(|error| StateError::invalid(field, error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_route_scope(scope: &RouteScope) -> Result<(), StateError> {

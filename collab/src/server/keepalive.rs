@@ -703,7 +703,7 @@ mod tests {
         let state = server.state.lock().unwrap();
         let worker = &state.workers["worker"];
         let transport = worker.transport.as_ref().unwrap();
-        assert_eq!(transport.kind, crate::proto::TransportKind::AppServer);
+        assert_eq!(transport.kind, crate::proto::TransportKind::Tmux);
         assert_eq!(transport.thread_id.as_deref(), Some("thread-worker"));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();

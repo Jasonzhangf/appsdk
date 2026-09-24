@@ -233,21 +233,13 @@ pub fn canonical_route_for_identity(
     }
 }
 
-/// Resolve a native App Server thread through the daemon-owned global binding.
-/// The request carries no project context: the daemon must select the unique
-/// route from its typed runtime state, never from this process cwd or a local
-/// route journal.
-pub fn route_for_native_thread(
-    host_paths: &HostPaths,
-    session_id: &str,
-    native_thread_id: &str,
-) -> anyhow::Result<CanonicalProjectRoute> {
-    let response =
-        crate::client::resolve_route(&host_paths.socket_path(), session_id, native_thread_id)?;
-    let root = PathBuf::from(&response.canonical_root);
+pub fn route_for_tmux_pane(host_paths: &HostPaths) -> anyhow::Result<CanonicalProjectRoute> {
+    let candidate =
+        crate::client::adapters::tmux::candidate_from_env().map_err(anyhow::Error::msg)?;
+    let route = crate::client::resolve_route(&host_paths.socket_path(), &candidate.endpoint)?;
     Ok(CanonicalProjectRoute {
-        root,
-        app_scope_id: response.app_scope_id,
+        root: PathBuf::from(route.canonical_root),
+        app_scope_id: route.app_scope_id,
     })
 }
 
@@ -995,24 +987,14 @@ impl Scope {
         host_paths: &HostPaths,
         worker_id: Option<String>,
     ) -> anyhow::Result<Self> {
-        if let Some(thread_id) = std::env::var_os("CODEX_THREAD_ID")
-            .and_then(|value| value.into_string().ok())
-            .filter(|value| !value.trim().is_empty())
-        {
-            // cwd is execution context only; the daemon selects the route from
-            // the App Server dual key. The host session is required for a
-            // thread-backed route; a legacy thread-only binding is recovered
-            // by the daemon through the unique thread, still under this session.
-            let session_id = std::env::var("CODEX_SESSION_ID")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "CODEX_SESSION_ID is required when CODEX_THREAD_ID selects an App Server route; recovery: read the host session from the live App Server environment and re-run with both keys; if the peer's durable record predates the dual key, the daemon still resolves it by the unique thread once this session is present; do not infer a session from the thread or edit route state by hand"
-                    )
-                })?;
-            let route = route_for_native_thread(host_paths, &session_id, &thread_id)?;
+        if std::env::var_os("TMUX_PANE").is_some() {
+            let route = route_for_tmux_pane(host_paths)?;
             return Ok(Scope { root: route.root });
+        }
+        if std::env::var_os("CODEX_THREAD_ID").is_some() {
+            anyhow::bail!(
+                "TMUX_ENDPOINT_MISSING: run this peer command from its registered tmux pane; only init, daemon lifecycle, and worker recover are pane-free"
+            );
         }
         Self::resolve_from_cwd_without_thread(cwd, host_paths, worker_id)
     }
@@ -1096,14 +1078,35 @@ mod tests {
     use serde_json::json;
 
     fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "collab-scope-{name}-{}-{}",
+        Path::new("/tmp").join(format!(
+            "cs-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn without(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            }
+        }
     }
 
     #[test]
@@ -1218,6 +1221,7 @@ mod tests {
     #[test]
     fn scope_resolve_reuses_identity_route_from_a_worktree() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _tmux_env_guard = EnvVarGuard::without("TMUX_PANE");
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         std::env::remove_var("CODEX_THREAD_ID");
         let root = test_root("scope-worktree-identity");
@@ -1344,6 +1348,7 @@ mod tests {
     #[test]
     fn recovery_scope_uses_canonical_route_without_a_native_thread_route() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _tmux_env_guard = EnvVarGuard::without("TMUX_PANE");
         let previous_cwd = std::env::current_dir().unwrap();
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         let previous_state = std::env::var_os(COLLAB_STATE_DIR_ENV);
@@ -1424,6 +1429,7 @@ mod tests {
     #[test]
     fn scope_resolve_prefers_a_fresh_local_baseline_over_a_stale_identity_route() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _tmux_env_guard = EnvVarGuard::without("TMUX_PANE");
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         std::env::remove_var("CODEX_THREAD_ID");
         let root = test_root("scope-fresh-reset");
@@ -1476,6 +1482,7 @@ mod tests {
     #[test]
     fn scope_resolve_preserves_a_nested_project_inside_a_linked_worktree() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _tmux_env_guard = EnvVarGuard::without("TMUX_PANE");
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         std::env::remove_var("CODEX_THREAD_ID");
         let root = test_root("scope-nested-worktree");

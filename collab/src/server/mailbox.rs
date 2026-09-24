@@ -62,7 +62,10 @@ pub fn visible_body(body: &str) -> String {
 
 pub fn notification_class(subject: &str, from: &str, mtype: &str) -> (&'static str, &'static str) {
     if subject.starts_with("worker-unresponsive") {
-        return ("P1", "snapshot the thread");
+        return (
+            "P1",
+            "inspect durable tasks and mailbox for this worker; resolve ownership with evidence",
+        );
     }
     if subject.starts_with("worker-idle") {
         return ("P1", "dispatch work to this idle capacity");
@@ -374,7 +377,7 @@ fn compose_notification_with_mtype(
 
     let head = format!("COLLAB_NOTIFY {} [{}] ", id, subject);
     let tail = format!(
-        " | {} ACTION: {}. Details: collab msg {}. | {}",
+        " | {} ACTION: {}. Details: run `collab recv` to consume this durable notification; inspect `collab msg {}` for details. | {}",
         priority, action, id, NOTIFY_PROTOCOL
     );
 

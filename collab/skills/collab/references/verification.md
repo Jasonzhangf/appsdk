@@ -22,9 +22,10 @@ Before review, prove the affected subset and every changed invariant:
 
 - architecture/resource/function/verification gates;
 - format, unit/state-machine tests, `scripts/build-collab.sh`;
-- isolated real two-peer App Server blackbox in a disposable project when an
-  App Server capability is available. Never inject a test notice into an existing
-  production project, transport, or Agent conversation;
+- isolated real two-peer tmux blackbox in a disposable project: sender persists
+  a message, tmux submits the wake with a separate Enter, receiver runs
+  `collab recv`, and sender observes the durable consumption receipt. Never
+  inject a test notice into an existing production project or Agent conversation;
 - migration down/up/replay with durable-state preservation;
 - duplicate-daemon rejection without PID/socket corruption;
 - no wake for shell/absent/unknown; working Agents receive a due batch;
@@ -33,9 +34,9 @@ Before review, prove the affected subset and every changed invariant:
 - all pending eligible messages coalesce after 60 seconds into one attempt;
 - failed wake and daemon restart never replay an attempted batch;
 - one ID/subject/original-body delivery preserves a reusable direct-message
-  lease and records one accepted delivery event; explicit `sendmessage` proves
-  native `turn/start` or `turn/steer` accepted the bounded preview, and daemon
-  wakeup plus long-horizon notifications use the same immediate path;
+  lease and records one accepted tmux submission; paste/Enter success proves
+  only input submission, while `collab recv` and its durable receipt prove
+  consumption;
 - successful resource/deadline/async-result delivery consumes exactly one
   matching one-shot subscription;
 - release clears obsolete wait state and does not wake an unsubscribed Agent;

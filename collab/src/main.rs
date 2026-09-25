@@ -16,6 +16,8 @@ use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::HashSet;
+use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const LIVE_CLOSURE_TIMEOUT_MS_ENV: &str = "COLLAB_LIVE_CLOSURE_TIMEOUT_MS";
@@ -595,14 +597,30 @@ fn me(scope: &Scope, worker: Option<String>) -> anyhow::Result<Identity> {
     Ok(ident)
 }
 
+/// How `collab context` changed an identity during automatic bootstrap.
+enum RegistrationOutcome {
+    Created,
+    Reused,
+    Recovered,
+}
+
 fn ensure_registration(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::Value> {
+    ensure_registration_with_outcome(scope, ident).map(|(value, _)| value)
+}
+
+fn ensure_registration_with_outcome(
+    scope: &Scope,
+    ident: &mut Identity,
+) -> anyhow::Result<(serde_json::Value, RegistrationOutcome)> {
     if ident.runtime.is_none() || ident.transport.is_none() {
-        register(scope, ident)
+        let value = register(scope, ident)?;
+        Ok((value, RegistrationOutcome::Created))
     } else if !persisted_runtime_matches_scope(scope, ident)? {
-        register_recovery(scope, ident)
+        let value = register_recovery(scope, ident)?;
+        Ok((value, RegistrationOutcome::Recovered))
     } else {
         runtime_for_request(ident)?;
-        Ok(json!({"reused": true}))
+        Ok((json!({"reused": true}), RegistrationOutcome::Reused))
     }
 }
 
@@ -1687,133 +1705,118 @@ fn cli_project_context(root: &std::path::Path) -> anyhow::Result<ProjectContext>
     )
 }
 
-/// Restore a persisted dead-address identity for context without minting a new
-/// peer when this thread genuinely has no registration. A successful restore
-/// re-registers the new App Server address through the normal owner path.
-fn context_identity_after_route_miss(
-    worker: Option<String>,
-) -> anyhow::Result<Option<(Scope, Identity)>> {
-    let scope = Scope {
-        root: std::env::current_dir()?,
-    };
-    let Some(mut identity) = identity::load_existing_with_scope_rebind(&scope, worker)? else {
-        return Ok(None);
-    };
-    ensure_registration(&scope, &mut identity)?;
-    Ok(Some((scope, identity)))
+struct ContextBootstrap {
+    scope: Scope,
+    project_root_resolution: &'static str,
+    baseline_created: bool,
+    daemon_started: bool,
 }
 
-fn unregistered_context(
-    scope: Option<&Scope>,
-    identity: Option<&Identity>,
-    route_error: Option<&str>,
-) -> anyhow::Result<serde_json::Value> {
-    let cwd = std::env::current_dir()?;
-    let canonical_cwd = std::fs::canonicalize(&cwd)?;
-    let project_root = match scope {
-        Some(scope) => scope.root.clone(),
-        None => canonical_cwd.clone(),
-    };
-    let route_recovery_required =
-        route_error.is_some_and(|error| error.starts_with("ROUTE_RESOLVE_NOT_FOUND:"));
-    let looks_like_worktree = canonical_cwd.ancestors().any(|ancestor| {
-        ancestor
-            .file_name()
-            .is_some_and(|name| name == "playground")
-    });
-    let next_action = if route_recovery_required {
-        "from the canonical project main checkout, if the running daemon predates the installed collab binary run `collab down`, then `collab up` once; then run `appsdk init .`"
-    } else if looks_like_worktree {
-        "return to the canonical project main checkout and run `appsdk init .`"
-    } else {
-        "appsdk init ."
-    };
-    let recovery = route_error.map(|error| {
-        let steps = if route_recovery_required {
-            json!([
-                "If the running daemon was started before the current `collab` binary was installed, it may predate resident-route replay. From the canonical project main checkout run `collab down`, then `collab up` once so the installed daemon binary is loaded.",
-                "From that same checkout run `appsdk init .` to restore the resident registration and route.",
-                "Verify with `collab context`, `collab route resolve --pane-id <pane-id>`, and `collab master status` before sending work.",
-                "Only then rerun the original command. If any step fails, preserve its exact output and stop; do not loop initialization or replace transport with mailbox state."
-            ])
-        } else {
-            json!([
-                "From the canonical project main checkout run `appsdk init .`.",
-                "Rerun the original command, then verify with `collab context` and `collab route resolve --pane-id <pane-id>`.",
-                "If the error persists, preserve the exact output and stop; do not re-register a worktree."
-            ])
-        };
-        json!({
-            "kind": if route_recovery_required {
-                "route_recovery_required"
-            } else {
-                "route_registration_required"
-            },
-            "reason": error,
-            "steps": steps,
-            "preserve": [
-                "~/.collab/ routes, journal, mailbox, identity, and bindings",
-                "the project .agent-collab/ journal and mailbox"
-            ],
-            "do_not": [
-                "edit routes.jsonl",
-                "copy or edit identity tokens",
-                "start a second daemon",
-                "treat mailbox persistence as transport delivery"
-            ]
+fn resolve_context_root(
+    host_paths: &scope::HostPaths,
+    cwd: &Path,
+) -> anyhow::Result<(Scope, &'static str)> {
+    if let Ok(scope) = Scope::resolve() {
+        return Ok((scope, "route"));
+    }
+    if let Ok(route) = scope::canonical_route_for_cwd(host_paths, cwd) {
+        return Ok((Scope { root: route.root }, "canonical-route"));
+    }
+    let canonical_cwd = std::fs::canonicalize(cwd)?;
+    let is_git_root = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&canonical_cwd)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            std::fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim()).ok()
         })
-    });
-    Ok(json!({
-        "schema_version": 1,
-        "registration": {
-            "status": "unregistered",
-            "project_root": project_root,
-            "action": next_action,
+        .is_some_and(|toplevel| toplevel == canonical_cwd)
+        && !canonical_cwd.ancestors().skip(1).any(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name == "playground")
+        });
+    if canonical_cwd.join(".agent-collab").is_dir() || is_git_root {
+        return Ok((
+            Scope {
+                root: canonical_cwd,
+            },
+            "cwd",
+        ));
+    }
+    anyhow::bail!(
+        "COLLAB_CONTEXT_UNRESOLVED: no registered Collab route and no local .agent-collab baseline for {}; run `collab context` from the canonical project main checkout",
+        canonical_cwd.display()
+    )
+}
+
+fn context_bootstrap(
+    host_paths: &scope::HostPaths,
+    cwd: &Path,
+) -> anyhow::Result<ContextBootstrap> {
+    let (scope, project_root_resolution) = resolve_context_root(host_paths, cwd)?;
+    let baseline_created = if scope.root.join(".agent-collab").is_dir() {
+        false
+    } else {
+        if scope.root.ancestors().skip(1).any(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name == "playground")
+        }) {
+            anyhow::bail!(
+                "collab context refuses to create a baseline inside a ./playground worktree"
+            );
+        }
+        scope::init(&scope.root)?;
+        true
+    };
+    let daemon_started = !client::alive(&scope.sock_path());
+    client::ensure_server(&scope.sock_path())?;
+    Ok(ContextBootstrap {
+        scope,
+        project_root_resolution,
+        baseline_created,
+        daemon_started,
+    })
+}
+
+fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_json::Value> {
+    let host_paths = scope::HostPaths::resolve()?;
+    let cwd = std::env::current_dir()?;
+    let bootstrap = context_bootstrap(&host_paths, &cwd)?;
+    let scope = bootstrap.scope;
+    let mut ident = identity::load_or_create(&scope, worker, None)?;
+    let (_, identity_state) = ensure_registration_with_outcome(&scope, &mut ident)?;
+    let identity_state = match identity_state {
+        RegistrationOutcome::Created => "created",
+        RegistrationOutcome::Reused => "reused",
+        RegistrationOutcome::Recovered => "recovered",
+    };
+    let mut v: serde_json::Value = call_project(
+        &scope,
+        &ident,
+        &Req::Context {
+            worker_id: ident.worker_id.clone(),
+            token: ident.token.clone(),
         },
-        "registered": false,
-        "project_root": project_root,
-        "cwd": canonical_cwd,
-        "identity": identity.map(|identity| json!({
-            "worker_id": identity.worker_id,
-            "kind": "peer",
-            "role": "unregistered",
-            "transport": serde_json::Value::Null,
-            "thread_id": identity.runtime.as_ref().and_then(|runtime| runtime.native_thread_id.as_ref()),
-        })),
-        "recovery": recovery,
-        "next_action": next_action,
-        "next_actions": [next_action],
-        "daemon": {
-            "pid": null,
-            "socket": null,
-            "live": false,
-            "reason": "project is not registered; daemon state is unavailable",
-        },
-        "liveness": {
-            "live": false,
-            "presence": "unregistered",
-            "transport_kind": serde_json::Value::Null,
-            "endpoint": serde_json::Value::Null,
-            "self_check": serde_json::Value::Null,
-        },
-        "agent": serde_json::Value::Null,
-        "master": {
-            "status": "unknown",
-            "reason": "peer_unregistered",
-        },
-        "recorded_unusable": serde_json::Value::Null,
-        "peers": [],
-        "tasks": [],
-        "worktrees": [],
-        "subscriptions": [],
-        "inbox": {"unread": 0, "messages": []},
-        "authority": {
-            "managed_subagent": false,
-            "must_obey_master": false,
-            "may_decline_master_invite": false,
-        },
-        "truth": "exact process cwd; context is read-only; no registration was created",
-    }))
+    )?;
+    if let Some(value) = v.as_object_mut() {
+        value.insert(
+            "bootstrap".to_string(),
+            json!({
+                "project_root_resolution": bootstrap.project_root_resolution,
+                "baseline_created": bootstrap.baseline_created,
+                "daemon_started": bootstrap.daemon_started,
+                "identity": identity_state,
+                "registered": true,
+            }),
+        );
+    }
+    Ok(v)
 }
 
 fn command_envelope(scope: &Scope, ident: &Identity) -> anyhow::Result<proto::CommandEnvelope> {
@@ -1901,8 +1904,8 @@ fn main() {
     }
 }
 
-const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
-const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: if the running daemon predates the installed collab binary, run `collab down`, then `collab up` once to load the installed binary; then verify `collab context`, `collab route resolve --pane-id <pane-id>`, and `collab master status` before sending work; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
+const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout to resolve the route and restore registration; do not re-register a worktree or edit routes.jsonl";
+const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: run `collab context` from the canonical project main checkout; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
 
 fn format_cli_error(error: &str) -> String {
     if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
@@ -2529,49 +2532,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Context { worker } => {
-            let host_paths = scope::HostPaths::resolve()?;
-            let route = match scope::route_for_tmux_pane(&host_paths) {
-                Ok(route) => route,
-                Err(error) if error.to_string().starts_with("ROUTE_RESOLVE_NOT_FOUND:") => {
-                    let route_error = error.to_string();
-                    if let Some((scope, ident)) = context_identity_after_route_miss(worker)? {
-                        if ident.transport.is_none() {
-                            out(&unregistered_context(Some(&scope), Some(&ident), None)?);
-                            return Ok(());
-                        }
-                        let v: serde_json::Value = call_project(
-                            &scope,
-                            &ident,
-                            &Req::Context {
-                                worker_id: ident.worker_id.clone(),
-                                token: ident.token.clone(),
-                            },
-                        )?;
-                        out(&v);
-                    } else {
-                        out(&unregistered_context(None, None, Some(&route_error))?);
-                    }
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
-            };
-            let scope = Scope { root: route.root };
-            let ident = identity::load_existing(&scope, worker)?.ok_or_else(|| {
-                anyhow::anyhow!("no persisted Collab identity for the current tmux pane")
-            })?;
-            if ident.transport.is_none() {
-                out(&unregistered_context(Some(&scope), Some(&ident), None)?);
-                return Ok(());
-            }
-            let v: serde_json::Value = call_project(
-                &scope,
-                &ident,
-                &Req::Context {
-                    worker_id: ident.worker_id.clone(),
-                    token: ident.token.clone(),
-                },
-            )?;
-            out(&v);
+            out(&context_snapshot(worker)?);
             Ok(())
         }
         Cmd::Ack { ids, worker, all } => {
@@ -3721,102 +3682,74 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_context_is_read_only_and_points_to_appsdk_init() {
+    fn context_root_resolution_fails_closed_without_route_or_baseline() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let root = test_root("unregistered-context");
+        let root = test_root("context-root-unresolved");
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let result = unregistered_context(None, None, None);
+        let host_paths = scope::HostPaths::resolve().unwrap();
+        let error = resolve_context_root(&host_paths, &root)
+            .err()
+            .expect("no route and no baseline must fail closed");
         std::env::set_current_dir(previous).unwrap();
-
-        let context = result.unwrap();
-        assert_eq!(context["registered"], false);
-        assert_eq!(
-            context["project_root"],
-            root.canonicalize().unwrap().to_string_lossy().as_ref()
+        assert!(
+            error.to_string().starts_with("COLLAB_CONTEXT_UNRESOLVED:"),
+            "{error:#}"
         );
-        assert_eq!(
-            context["cwd"],
-            root.canonicalize().unwrap().to_string_lossy().as_ref()
-        );
-        assert_eq!(context["next_action"], "appsdk init .");
+        assert!(error.to_string().contains("`collab context`"));
         assert!(!root.join(".agent-collab").exists());
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn context_route_error_points_to_controlled_legacy_daemon_recovery() {
+    fn context_root_resolution_prefers_cwd_baseline_for_local_project() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let root = test_root("legacy-route-recovery-context");
+        let root = test_root("context-root-cwd");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let error = "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon; recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl";
-        let result = unregistered_context(None, None, Some(error));
+        let host_paths = scope::HostPaths::resolve().unwrap();
+        let (scope, resolution) = resolve_context_root(&host_paths, &root).unwrap();
         std::env::set_current_dir(previous).unwrap();
-
-        let context = result.unwrap();
-        assert_eq!(context["recovery"]["kind"], "route_recovery_required");
-        assert_eq!(context["recovery"]["reason"], error);
-        let steps = context["recovery"]["steps"]
-            .as_array()
-            .expect("recovery steps");
-        for expected in [
-            "`collab down`",
-            "`collab up` once",
-            "`appsdk init .`",
-            "`collab context`",
-            "`collab route resolve --pane-id <pane-id>`",
-            "`collab master status`",
-        ] {
-            assert!(
-                steps
-                    .iter()
-                    .any(|step| step.as_str().is_some_and(|value| value.contains(expected))),
-                "missing recovery step {expected}: {steps:?}"
-            );
-        }
-        assert_eq!(
-            context["next_action"],
-            "from the canonical project main checkout, if the running daemon predates the installed collab binary run `collab down`, then `collab up` once; then run `appsdk init .`"
+        assert!(
+            matches!(resolution, "route" | "cwd"),
+            "expected route or cwd, got {resolution}"
         );
-        assert!(!root.join(".agent-collab").exists());
+        assert_eq!(scope.root, root.canonicalize().unwrap());
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn context_route_error_from_current_server_keeps_recovery_steps() {
+    fn context_daemon_down_marker_fails_closed_and_preserves_marker() {
         let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
-        let root = test_root("current-route-recovery-context");
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&root).unwrap();
-        let error = format!(
-            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-current-daemon; {}",
-            crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
-        );
-        let result = unregistered_context(None, None, Some(&error));
-        std::env::set_current_dir(previous).unwrap();
+        let root = test_root("context-down-marker");
+        let state_root = std::env::temp_dir().join(format!(
+            "cs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::fs::write(state_root.join("DOWN"), "explicit down\n").unwrap();
+        let previous_state = std::env::var_os(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
 
-        let context = result.unwrap();
-        assert_eq!(context["recovery"]["kind"], "route_recovery_required");
-        assert_eq!(context["recovery"]["reason"], error);
-        let steps = context["recovery"]["steps"]
-            .as_array()
-            .expect("recovery steps");
-        for expected in [
-            "`collab down`",
-            "`collab up` once",
-            "`appsdk init .`",
-            "`collab context`",
-            "`collab route resolve --pane-id <pane-id>`",
-            "`collab master status`",
-        ] {
-            assert!(
-                steps
-                    .iter()
-                    .any(|step| step.as_str().is_some_and(|value| value.contains(expected))),
-                "missing recovery step {expected}: {steps:?}"
-            );
+        let scope = Scope { root: root.clone() };
+        let error = client::ensure_server(&scope.sock_path()).unwrap_err();
+        assert!(
+            error.to_string().starts_with("DAEMON_UNAVAILABLE:"),
+            "{error:#}"
+        );
+        assert!(state_root.join("DOWN").is_file());
+
+        match previous_state {
+            Some(value) => std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, value),
+            None => std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV),
         }
+        std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3824,25 +3757,27 @@ mod tests {
     fn cli_error_decorates_route_resolve_not_found_from_current_and_legacy_daemons() {
         for error in [
             "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon",
-            "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread thread-old-daemon; recovery: from the canonical project main checkout run `appsdk init .`, then rerun this command; do not re-register a worktree or edit routes.jsonl",
         ] {
             let formatted = format_cli_error(error);
             assert!(formatted.starts_with(error), "{formatted}");
-            assert!(
-                formatted.contains("`collab down`"),
-                "{formatted}"
-            );
             for expected in [
-                "`collab down`",
-                "`collab up` once",
-                "`appsdk init .`",
                 "`collab context`",
-                "`collab route resolve --pane-id <pane-id>`",
-                "`collab master status`",
             ] {
                 assert!(
                     formatted.contains(expected),
                     "missing {expected}: {formatted}"
+                );
+            }
+            for forbidden in [
+                "`collab down`",
+                "`collab up` once",
+                "`appsdk init .`",
+                "`collab route resolve --pane-id <pane-id>`",
+                "`collab master status`",
+            ] {
+                assert!(
+                    !formatted.contains(forbidden),
+                    "forbidden recovery step {forbidden}: {formatted}"
                 );
             }
             assert_eq!(
@@ -4724,7 +4659,7 @@ mod tests {
         std::env::remove_var("TMUX_PANE");
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let recovery = context_identity_after_route_miss(None);
+        let recovery = identity::load_or_create(&Scope { root: root.clone() }, None, None);
         std::env::set_current_dir(previous).unwrap();
         if let Err(error) = recovery {
             assert!(
@@ -4743,43 +4678,8 @@ mod tests {
             std::fs::remove_dir_all(root).ok();
             return;
         }
-        let (scope, ident) = recovery.unwrap().unwrap();
         responder.join().unwrap();
-        clear_current_session_thread();
-        match previous_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
-        }
-        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
-
-        assert_eq!(scope.root, root.canonicalize().unwrap());
-        assert_eq!(ident.worker_id, "agent-peer");
-        assert_eq!(ident.token, "token-agent-peer");
-        let runtime = ident.runtime.as_ref().unwrap();
-        assert_eq!(
-            runtime
-                .native_thread_id
-                .as_ref()
-                .map(identity::NativeThreadId::as_str),
-            Some("thread-new")
-        );
-        assert_eq!(
-            runtime.session_id.as_ref().map(identity::SessionId::as_str),
-            Some("session-new")
-        );
-        assert_eq!(runtime.endpoint_generation, 2);
-        let stored: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&identity_path).unwrap()).unwrap();
-        assert_eq!(stored["runtime"]["native_thread_id"], "thread-new");
-        assert!(
-            !state_root
-                .join("identities")
-                .join("codex-thread-new")
-                .exists(),
-            "context route recovery must not mint a replacement identity"
-        );
-        std::fs::remove_dir_all(state_root).ok();
-        std::fs::remove_dir_all(root).ok();
+        panic!("unproven identity must fail closed, got successful identity load");
     }
 
     #[test]

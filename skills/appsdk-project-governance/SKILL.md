@@ -1,6 +1,6 @@
 ---
 name: appsdk-project-governance
-description: "AppSDK quality gates and defect tracking; keep optional coordination separate from quality admission."
+description: "AppSDK 质量门禁+defect 追踪; 协作与质量准入分开。"
 ---
 
 # AppSDK Project Governance

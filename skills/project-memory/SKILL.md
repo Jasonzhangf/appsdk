@@ -1,6 +1,6 @@
 ---
 name: project-memory
-description: "Local memory: curated L1 anchors plus fixed L2/L3 entry points with tags and relative detail paths; SQLite search over raw memory."
+description: "本地记忆: L1锚点+L2/L3入口+tag+相对路径; SQLite 搜 raw memory。"
 ---
 
 # Project memory

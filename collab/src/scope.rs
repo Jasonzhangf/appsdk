@@ -873,7 +873,7 @@ collab task status [task-id]      # durable task registry
 collab notify methods             # discover opt-in notification methods
 collab notify subscribe --event direct-message --ttl-seconds 600
 collab notify status
-collab context                    # read-only authoritative state snapshot
+collab context                    # single automatic state entry: baseline/daemon/identity/registration + role operations
 collab master status              # live master, or recorded-but-dead identity
 collab master promote --approval "<user text>"
 collab master delegate <peer>     # live master only
@@ -887,6 +887,26 @@ collab task integrated <id> --commit <main-sha> --evidence "main gates=pass"
 collab task close <id>            # owner; verifies merged/clean, releases claim
 collab task close <id> --force --reason "..."  # master/approved fallback close
 ```
+
+`collab context` is the single automatic agent state entry. It resolves the
+canonical project root (live route, registered route, or local baseline),
+creates a missing `.agent-collab` baseline, starts the daemon unless an explicit
+`DOWN` marker exists, restores/registers the peer identity, and returns the
+server snapshot plus `operations`. The default agent flow does not start with
+`collab master status`, `appsdk init .`, `collab down`/`up`, or
+`collab route resolve`; those remain explicit human diagnostics only.
+
+Live master dispatch uses `collab subagent dispatch --request-id <id>
+--subject <topic> "<body>"` with optional
+`--feature-id/--worktree-path/--branch/--base-commit/--priority/--next-step`.
+`--request-id` is ASCII `[A-Za-z0-9_-]`, max 80 bytes, and idempotent.
+`--worktree-path` must be `<project-main>/playground/<short-slug>` (leaf max 32
+ASCII bytes, no `..`). Only the live registered master can dispatch; the
+selected peer must be registered, present, non-managed, and inactive. Success
+returns `request_id`, `message_id`, `task_id`, `target`, `status: assigned`,
+`admission.*`, and `notification` (`sent` | `subscribed-not-sent` |
+`mailbox-only-no-subscription`). `sent` is not consumption; verify with
+`collab msg <id>` (`consumed_by_recv`) and `collab task status <task-id>`.
 
 Peers never share worktrees. Each task owner starts from latest main in one
 declared clean `./playground/` worktree, implements and tests, commits the exact

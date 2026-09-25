@@ -1807,7 +1807,7 @@ pub(crate) struct HostRouteRecord {
     pub(crate) registered_ms: i64,
 }
 
-pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: if the running daemon predates the installed collab binary, from the canonical project main checkout run `collab down`, then `collab up` once to load the installed binary; then run `appsdk init .` from that same checkout; verify `collab context`, `collab route resolve --pane-id <pane-id>`, and `collab master status` before sending work; preserve daemon state and do not re-register a worktree, edit routes.jsonl, copy identity tokens, start a second daemon, or use mailbox state as transport delivery";
+pub(crate) const ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout; it resolves the canonical root, restores identity and registration, starts the daemon when no explicit DOWN marker exists, and returns the current role's operations. Do not re-register a worktree, edit routes.jsonl, copy identity tokens, start a second daemon, or use mailbox state as transport delivery";
 
 struct RuntimeRoute {
     root: PathBuf,
@@ -10707,6 +10707,29 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
                 .push("no assigned task action; remain available for an explicit dispatch".into());
         }
     }
+    let operations: Vec<serde_json::Value> = {
+        let mut operations = Vec::new();
+        let mut push = |kind: &str, value: Option<&str>| {
+            if let Some(action) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                operations.push(json!({"kind": kind, "action": action}));
+            }
+        };
+        push("next_action", current_role_brief["next_action"].as_str());
+        if let Some(responsibilities) = current_role_brief["responsibilities"].as_array() {
+            for responsibility in responsibilities {
+                push("responsibility", responsibility.as_str());
+            }
+        }
+        push(
+            "completion_action",
+            current_role_brief["completion_action"].as_str(),
+        );
+        push(
+            "notification_rule",
+            current_role_brief["notification_rule"].as_str(),
+        );
+        operations
+    };
     Resp::data(json!({
         "schema_version": 1,
         "registration": registration,
@@ -10745,10 +10768,11 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         },
         "daemon": daemon_context_view(server),
         "next_actions": next_actions,
+        "operations": operations,
         "master": master,
         "recorded_unusable": recorded_unusable,
         "authority": authority,
-        "truth": "server journal, mailbox, and live transport probes; context is read-only",
+        "truth": "server journal, mailbox, and live transport probes; `collab context` performs an idempotent bootstrap (canonical root, baseline, daemon, identity, registration) before projecting this snapshot",
     }))
 }
 

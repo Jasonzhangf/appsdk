@@ -528,33 +528,6 @@ pub(crate) fn read_persisted(
     read_identity(&identity_path_at(host_paths, worker_id)?)
 }
 
-/// Resolve an existing identity for a pane-backed command whose anchor lookup
-/// missed. The caller is read-only: ordinary context/status surfaces must not
-/// mint a peer just because no current pane anchor matched.
-pub(crate) fn load_existing_with_scope_rebind(
-    scope: &Scope,
-    worker_id: Option<String>,
-) -> anyhow::Result<Option<Identity>> {
-    load_existing_with_scope_rebind_at(&HostPaths::resolve()?, scope, worker_id)
-}
-
-fn load_existing_with_scope_rebind_at(
-    host_paths: &HostPaths,
-    scope: &Scope,
-    worker_id: Option<String>,
-) -> anyhow::Result<Option<Identity>> {
-    if let Some(identity) = load_existing_at(host_paths, scope, worker_id)? {
-        return Ok(Some(identity));
-    }
-    match identity_for_scope_rebind_at(host_paths, scope)? {
-        ScopeRebindOutcome::Adopted(identity) => Ok(Some(identity)),
-        ScopeRebindOutcome::NoCandidate => Ok(None),
-        ScopeRebindOutcome::Unproven(detail) => anyhow::bail!(
-            "IDENTITY_REBIND_UNPROVEN: {detail}; recovery: run from a pane carrying one matching persisted pane/session/thread anchor, or explicitly select the intended worker; do not mint a new identity for a project that already has one, delete identities, or edit identity state by hand"
-        ),
-    }
-}
-
 fn identity_temp_path(path: &std::path::Path) -> PathBuf {
     path.parent().unwrap().join(format!(
         "identity.json.tmp.{}.{}",

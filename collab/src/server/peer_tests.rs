@@ -10106,6 +10106,16 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         "RESOURCE_RELEASED task=task"
     );
     assert_eq!(context.data["identity"]["role"], "worker");
+    let operations = context.data["operations"].as_array().expect("operations");
+    assert!(
+        !operations.is_empty(),
+        "worker context must expose operations"
+    );
+    assert!(operations
+        .iter()
+        .any(|operation| operation["kind"] == "next_action"
+            && operation["action"]
+                == "Resume the registered task or remain available for an explicit dispatch."));
     assert_eq!(
         context.data["identity"]["transport"]["tmux_endpoint"],
         serde_json::to_value(expected_tmux_endpoint).unwrap()
@@ -10151,6 +10161,18 @@ fn context_gives_an_idle_master_one_canonical_scheduling_action() {
     assert_eq!(
         context.data["next_actions"],
         serde_json::json!(["run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle"])
+    );
+    let operations = context.data["operations"].as_array().expect("operations");
+    assert!(
+        !operations.is_empty(),
+        "master context must expose operations"
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation["kind"] == "next_action"
+                && operation["action"]
+                    == "Run `appsdk longhorizon show`, saturate live peers first, then schedule managed subagents within the configured cap; do not end the scheduling turn while eligible capacity remains idle. Delivery or review triggers review/integration/cleanup/dispatch, not an endpoint.")
     );
     assert!(context.data["role_brief"]["responsibilities"]
         .as_array()

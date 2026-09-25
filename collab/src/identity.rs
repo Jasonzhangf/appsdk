@@ -964,8 +964,9 @@ fn load_or_create_resolved_at(
             .ok()
             .filter(|value| !value.trim().is_empty())
     });
+    let appserver_worker = current_appserver_worker_id()?;
     let candidate = tmux_candidate.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a current tmux pane or an explicit worker_id")
+        anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane, a valid App Server endpoint, or an explicit worker_id")
     });
     let anchored_identity =
         identity_by_current_anchors_at(host_paths, scope, candidate.as_ref().ok().copied())?;
@@ -992,7 +993,9 @@ fn load_or_create_resolved_at(
                 }
             }
         }
-        candidate?;
+        if tmux_candidate.is_none() && appserver_worker.is_none() {
+            candidate?;
+        }
     }
     let worker_id = explicit_worker
         .clone()
@@ -1001,6 +1004,7 @@ fn load_or_create_resolved_at(
                 .as_ref()
                 .map(|candidate| format!("codex-{}", candidate.endpoint.pane_id))
         })
+        .or(appserver_worker)
         .ok_or_else(|| {
             anyhow::anyhow!("collab identity requires TMUX_PANE or an explicit worker id")
         })?;
@@ -1016,6 +1020,32 @@ fn load_or_create_resolved_at(
     };
     write_identity(&identity_path_at(host_paths, &ident.worker_id)?, &ident)?;
     Ok(ident)
+}
+
+/// Stable, filesystem-safe peer identity for a new native App Server thread
+/// when the project has no persisted peer identity yet. In an existing
+/// project, callers must explicitly supply `worker_id` when no prior runtime
+/// anchor matches so identity recovery remains fail-closed.
+fn current_appserver_worker_id() -> anyhow::Result<Option<String>> {
+    if std::env::var_os("CODEX_THREAD_ID").is_none()
+        || std::env::var_os("CODEX_SESSION_ID").is_none()
+    {
+        return Ok(None);
+    }
+    let Some(candidate) =
+        crate::client::adapters::candidate_from_env().map_err(anyhow::Error::msg)?
+    else {
+        return Ok(None);
+    };
+    SessionId::new(candidate.session_id)?;
+    let mut encoded = String::with_capacity(candidate.thread_id.len() * 2);
+    for byte in candidate.thread_id.as_bytes() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    let worker_id = format!("codex-thread-{encoded}");
+    validate_id(&worker_id)?;
+    Ok(Some(worker_id))
 }
 
 #[cfg(test)]
@@ -1821,6 +1851,61 @@ mod tests {
         }
         assert!(result.is_err());
         assert!(!state_root.join("identities").exists());
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn first_appserver_peer_uses_thread_identity_without_a_tmux_pane() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("first-appserver-peer-without-pane");
+        std::fs::create_dir_all(root.join(".agent-collab/runs")).unwrap();
+        let state_root = root.join(".collab-state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        let previous_socket = std::env::var_os("COLLAB_APPSERVER_SOCKET");
+        std::env::set_var("CODEX_THREAD_ID", "desktop-first-thread");
+        std::env::set_var("CODEX_SESSION_ID", "desktop-first-session");
+        std::env::set_var(
+            "COLLAB_APPSERVER_SOCKET",
+            "/tmp/desktop-first-appserver.sock",
+        );
+        std::env::remove_var("TMUX_PANE");
+        std::env::remove_var("COLLAB_WORKER");
+
+        let result = load_or_create_for_init_at(&host_paths, &scope, None);
+
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+        match previous_socket {
+            Some(value) => std::env::set_var("COLLAB_APPSERVER_SOCKET", value),
+            None => std::env::remove_var("COLLAB_APPSERVER_SOCKET"),
+        }
+
+        let identity = result.unwrap();
+        assert_eq!(
+            identity.worker_id,
+            "codex-thread-6465736b746f702d66697273742d746872656164"
+        );
         std::fs::remove_dir_all(state_root).ok();
         std::fs::remove_dir_all(root).ok();
     }

@@ -375,7 +375,15 @@ turn records and audits the design only.
 
 Checklist entries below record the candidate result and evidence saved in the
 project run record. The RPC-first path has isolated live acceptance and restart
-replay evidence; remaining delivery gates are review and merge/push.
+replay evidence. Independent Codex and AGY architecture reviews both passed on
+the exact candidate; the remaining delivery gate is merge/push by a live
+Collab master.
+
+Review evidence: Codex final task `20260925T061700Z-review-45915-75af98-final`
+verdict `pass` (`controller_no_blocking_findings`); AGY final task
+`20260925T061700Z-review-77020-agy-final` verdict `pass`
+(`controller_no_blocking_findings`, one non-blocking P2 diagnostic wording
+advisory at `collab/src/server/mod.rs` line 4169).
 
 - [x] Remove the unproduced `async-result` event contract consistently from
       runtime, config, MCP schema, skills, docs, and tests.

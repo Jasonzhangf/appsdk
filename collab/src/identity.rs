@@ -128,8 +128,13 @@ fn validate_registration_transport(
             if !endpoint.starts_with("unix://") {
                 anyhow::bail!("selected App Server transport endpoint is not unix://");
             }
-            if transport.tmux_endpoint.is_some() {
-                anyhow::bail!("App Server transport cannot carry a tmux endpoint");
+            if let Some(recovery) = transport.tmux_endpoint.as_ref() {
+                if recovery.socket_path.is_empty()
+                    || recovery.tmux_session_id.is_empty()
+                    || recovery.pane_id.is_empty()
+                {
+                    anyhow::bail!("selected App Server recovery anchor is incomplete");
+                }
             }
         }
         TransportKind::Tmux => {
@@ -783,10 +788,19 @@ fn identity_by_current_anchors_at(
                     }
                     "tmux_pane_id" => persisted_endpoint.is_some_and(|persisted| {
                         candidate.is_some_and(|candidate| {
-                            crate::client::adapters::tmux::same_pane_route(
-                                persisted,
-                                &candidate.endpoint,
-                            )
+                            let runtime_ids_absent = candidate.endpoint.codex_session_id.is_none()
+                                && candidate.endpoint.codex_thread_id.is_none();
+                            let transport_kind_matches =
+                                identity.transport.as_ref().is_some_and(|transport| {
+                                    transport.kind == TransportKind::Tmux
+                                        || (transport.kind == TransportKind::AppServer
+                                            && runtime_ids_absent)
+                                });
+                            transport_kind_matches
+                                && crate::client::adapters::tmux::same_pane_route(
+                                    persisted,
+                                    &candidate.endpoint,
+                                )
                         })
                     }),
                     _ => false,
@@ -1233,6 +1247,74 @@ mod tests {
                 .is_none());
         }
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pane_only_candidate_adopts_appserver_identity_with_pane_recovery_anchor() {
+        let root = test_root("ci-pane-only-appserver-identity");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+
+        let endpoint = crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/appserver-pane.sock".into(),
+            server_pid: 77,
+            tmux_session_id: "$8".into(),
+            pane_id: "%44".into(),
+            pane_pid: 88,
+            codex_session_id: Some("session-appserver".into()),
+            codex_thread_id: Some("thread-appserver".into()),
+        };
+        let runtime = RuntimeIdentity {
+            agent_id: AgentId::new("appserver-peer").unwrap(),
+            runtime_id: RuntimeId::new("runtime-appserver-peer").unwrap(),
+            appserver_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
+            endpoint_generation: 1,
+            binding_id: BindingId::new("binding-appserver-peer").unwrap(),
+            session_id: Some(SessionId::new("session-appserver").unwrap()),
+            native_thread_id: Some(NativeThreadId::new("thread-appserver").unwrap()),
+        };
+        let project_scope = scope
+            .route_scope(runtime.appserver_id.clone())
+            .unwrap()
+            .project_scope_id;
+        let identity = Identity {
+            worker_id: "appserver-peer".into(),
+            token: "token-appserver-peer".into(),
+            project_scope: Some(project_scope),
+            runtime: Some(runtime),
+            transport: Some(SelectedTransport {
+                kind: TransportKind::AppServer,
+                endpoint: Some("unix:///tmp/appserver.sock".into()),
+                namespace: Some("codex_tui".into()),
+                session_id: Some("session-appserver".into()),
+                thread_id: Some("thread-appserver".into()),
+                tmux_endpoint: Some(endpoint.clone()),
+                capabilities: vec![],
+                self_check: "test transport".into(),
+            }),
+        };
+        write_identity(
+            &identity_path_at(&host_paths, "appserver-peer").unwrap(),
+            &identity,
+        )
+        .unwrap();
+        let found = identity_by_tmux_anchor_at(
+            &host_paths,
+            &scope,
+            &crate::proto::TmuxCandidate {
+                endpoint: crate::proto::TmuxEndpoint {
+                    codex_session_id: None,
+                    codex_thread_id: None,
+                    ..endpoint.clone()
+                },
+                cwd: "/tmp/project".into(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.worker_id, "appserver-peer");
         std::fs::remove_dir_all(root).ok();
     }
 

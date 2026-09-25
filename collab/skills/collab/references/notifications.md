@@ -15,8 +15,6 @@ collab notify subscribe --event resource-released --subject <resource-id> \
   --ttl-seconds <bounded>
 collab notify subscribe --event deadline --subject <timer-id> \
   --ttl-seconds <bounded>
-collab notify subscribe --event async-result --subject <operation-id> \
-  --ttl-seconds <bounded>
 collab notify status
 collab notify unsubscribe <subscription-id>
 ```
@@ -33,8 +31,8 @@ collab notify unsubscribe <subscription-id>
   task close lifecycle stops the owner's auto-notify. `collab init` or
   `collab notify subscribe --event direct-message` re-arms it for the next
   collaboration.
-- Direct-message leases are owner-scoped and reusable until expiry. Resource,
-  deadline, and async-result subscriptions are exact-subject and one-shot.
+- Direct-message leases are owner-scoped and reusable until expiry. Resource
+  and deadline subscriptions are exact-subject and one-shot.
 - Success consumes only a one-shot event subscription. Expiry or unsubscribe
   ends any subscription; one attempted batch exhausts only its messages on a
   reusable direct-message lease.

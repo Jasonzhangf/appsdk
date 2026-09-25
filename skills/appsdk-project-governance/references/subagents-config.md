@@ -48,7 +48,7 @@ ready_timeout_seconds = 90
 # mode = "immediate"
 ```
 
-Event keys: `direct_message`, `resource_released`, `async_result`, `deadline`;
+Event keys: `direct_message`, `resource_released`, `deadline`;
 each accepts `mode = "inherit" | "immediate" | "batch"`. A fixed batch window
 does not slide when new messages arrive. Disabled timers suppress deadline
 notification generation, not task timeout safety checks. New subworkers read

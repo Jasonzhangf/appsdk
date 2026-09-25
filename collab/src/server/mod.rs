@@ -148,22 +148,23 @@ const LEGACY_HOST_DAEMON_LOCK_PATH: &str = "/tmp/collab-host.lock";
 const DAEMON_LIVE_CLOSURE_MODE: &str = "daemon-live-closure";
 const RESTART_REPLAY_PENDING_MODE: &str = "restart-replay-pending";
 
-#[cfg(test)]
 type AppServerCandidateCheck =
     dyn Fn(&crate::proto::AppServerCandidate) -> Result<SelectedTransport, String> + Send + Sync;
-type TmuxNotificationSink = dyn Fn(&SelectedTransport, Option<&str>, &str, &str, bool) -> Result<serde_json::Value, String>
+type TmuxNotificationSink = dyn Fn(
+        &SelectedTransport,
+        Option<&str>,
+        &str,
+        &str,
+        bool,
+        &str,
+    ) -> Result<serde_json::Value, String>
     + Send
     + Sync;
-#[cfg(test)]
-type TestNotificationSink = TmuxNotificationSink;
-#[cfg(test)]
 type AppServerThreadStatus =
     dyn Fn(&SelectedTransport, &str) -> Result<serde_json::Value, String> + Send + Sync;
-#[cfg(test)]
 type AppServerThreadArchive =
     dyn Fn(&SelectedTransport, &str) -> Result<serde_json::Value, String> + Send + Sync;
 
-#[cfg(test)]
 fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
     Arc::new(|candidate| {
         crate::client::adapters::verify_candidate(candidate).map_err(|error| error.to_string())
@@ -171,35 +172,58 @@ fn default_appserver_candidate_check() -> Arc<AppServerCandidateCheck> {
 }
 
 fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
-    Arc::new(|transport, source_thread_id, body, message_id, explicit| {
-        if transport.kind != TransportKind::Tmux {
-            return Err("TRANSPORT_UNSUPPORTED: Collab notifications require tmux".into());
-        }
-        let _ = (source_thread_id, explicit);
-        let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
-            "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
-        })?;
-        crate::client::adapters::tmux::notify(endpoint, message_id, body)
-    })
+    Arc::new(
+        |transport, source_thread_id, body, message_id, explicit, _mode| {
+            if transport.kind != TransportKind::Tmux {
+                return Err("TRANSPORT_UNSUPPORTED: Collab notifications require tmux".into());
+            }
+            let _ = (source_thread_id, explicit);
+            let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
+                "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
+            })?;
+            crate::client::adapters::tmux::notify(endpoint, message_id, body)
+        },
+    )
 }
 
-#[cfg(test)]
-pub(crate) fn default_appserver_notification_sink() -> Arc<TestNotificationSink> {
-    default_tmux_notification_sink()
+pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink> {
+    let tmux = default_tmux_notification_sink();
+    Arc::new(
+        move |transport, source_thread_id, body, message_id, explicit, mode| {
+            if transport.kind != TransportKind::AppServer {
+                tmux(
+                    transport,
+                    source_thread_id,
+                    body,
+                    message_id,
+                    explicit,
+                    mode,
+                )
+            } else if mode == "queued" {
+                crate::client::adapters::codex_app_server::queued_notify(
+                    transport,
+                    source_thread_id,
+                    body,
+                    message_id,
+                )
+                .map_err(|error| error.to_string())
+            } else {
+                crate::client::adapters::codex_app_server::immediate_notify(
+                    transport,
+                    source_thread_id,
+                    body,
+                    message_id,
+                )
+                .map_err(|error| error.to_string())
+            }
+        },
+    )
 }
 
 fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
-    #[cfg(test)]
-    {
-        &server.appserver_notification_sink
-    }
-    #[cfg(not(test))]
-    {
-        &server.tmux_notification_sink
-    }
+    &server.appserver_notification_sink
 }
 
-#[cfg(test)]
 fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
     Arc::new(|transport, thread_id| {
         if transport.kind == TransportKind::Tmux {
@@ -214,12 +238,11 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
             }
             return crate::client::adapters::tmux::view(endpoint);
         }
-        let _ = thread_id;
-        Err("TRANSPORT_UNSUPPORTED: Collab status requires a registered tmux pane".into())
+        crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
+            .map_err(|error| error.to_string())
     })
 }
 
-#[cfg(test)]
 pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> {
     Arc::new(|_transport, _thread_id| {
         Err("TRANSPORT_UNSUPPORTED: tmux has no Codex thread archive operation".into())
@@ -539,15 +562,11 @@ pub struct Server {
     pub(crate) host_paths: HostPaths,
     pub state: Mutex<State>,
     pub journal: Mutex<std::fs::File>,
-    #[cfg(test)]
     pub appserver_candidate_check: Arc<AppServerCandidateCheck>,
     #[cfg(not(test))]
     pub tmux_notification_sink: Arc<TmuxNotificationSink>,
-    #[cfg(test)]
-    pub appserver_notification_sink: Arc<TestNotificationSink>,
-    #[cfg(test)]
+    pub appserver_notification_sink: Arc<TmuxNotificationSink>,
     pub appserver_thread_status: Arc<AppServerThreadStatus>,
-    #[cfg(test)]
     pub appserver_thread_archive: Arc<AppServerThreadArchive>,
     pub mailbox_notify: Notify,
 }
@@ -1668,25 +1687,62 @@ fn validate_transport_candidates(
     candidates: &TransportCandidates,
     registration_cwd: &str,
 ) -> Result<SelectedTransport, String> {
-    if candidates.appserver.is_some() {
-        return Err(if candidates.tmux.is_some() {
-            "TRANSPORT_AMBIGUOUS: multiple transport candidates were supplied".into()
-        } else {
-            "TRANSPORT_UNSUPPORTED: App Server registration is retired; register the current tmux pane".into()
-        });
+    let requested_root = std::fs::canonicalize(registration_cwd)
+        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
+    let candidate_root = std::fs::canonicalize(&server.root)
+        .map_err(|error| format!("RUNTIME_BINDING_REJECTED: project root: {error}"))?;
+    if candidate_root != requested_root {
+        return Err(format!(
+            "RUNTIME_BINDING_REJECTED: registration cwd {} does not match project root {}",
+            requested_root.display(),
+            candidate_root.display()
+        ));
     }
-    if let Some(candidate) = candidates.tmux.as_ref() {
-        let requested_root = std::fs::canonicalize(registration_cwd)
-            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: registration cwd: {error}"))?;
-        let candidate_root = std::fs::canonicalize(&server.root)
-            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: project root: {error}"))?;
-        if candidate_root != requested_root {
+    if let Some(appserver) = candidates.appserver.as_ref() {
+        let app_cwd = std::fs::canonicalize(&appserver.cwd).map_err(|error| {
+            format!("RUNTIME_BINDING_REJECTED: App Server candidate cwd: {error}")
+        })?;
+        if app_cwd != candidate_root {
             return Err(format!(
-                "RUNTIME_BINDING_REJECTED: registration cwd {} does not match project root {}",
-                requested_root.display(),
+                "RUNTIME_BINDING_REJECTED: App Server candidate cwd {} does not match project root {}",
+                app_cwd.display(),
                 candidate_root.display()
             ));
         }
+        let mut selected = crate::client::adapters::verify_candidate(appserver)
+            .map_err(|error| format!("APPSERVER_ENDPOINT_REJECTED: {error}"))?;
+        if let Some(tmux) = candidates.tmux.as_ref() {
+            if !tmux.cwd.starts_with('/') {
+                return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd must be absolute".into());
+            }
+            match crate::client::adapters::tmux::probe(&tmux.endpoint)? {
+                crate::client::adapters::tmux::PanePresence::Present => {}
+                crate::client::adapters::tmux::PanePresence::Missing => {
+                    return Err("TMUX_PANE_MISSING: recovery pane is not live".into())
+                }
+                crate::client::adapters::tmux::PanePresence::Unknown => {
+                    return Err("TMUX_PANE_UNKNOWN: recovery pane liveness is uncertain".into())
+                }
+            }
+            let mut recovery = tmux.endpoint.clone();
+            if recovery.codex_session_id.is_none() {
+                recovery.codex_session_id = Some(appserver.session_id.clone());
+            }
+            if recovery.codex_thread_id.is_none() {
+                recovery.codex_thread_id = Some(appserver.thread_id.clone());
+            }
+            selected.tmux_endpoint = Some(recovery);
+            if !selected
+                .capabilities
+                .iter()
+                .any(|cap| cap == "pane_recovery_anchor")
+            {
+                selected.capabilities.push("pane_recovery_anchor".into());
+            }
+        }
+        return Ok(selected);
+    }
+    if let Some(candidate) = candidates.tmux.as_ref() {
         if !candidate.cwd.starts_with('/') {
             return Err("RUNTIME_BINDING_REJECTED: tmux candidate cwd must be absolute".into());
         }
@@ -1731,7 +1787,7 @@ fn validate_transport_candidates(
             self_check: "tmux socket, session, pane and pane pid verified".into(),
         });
     }
-    Err("TRANSPORT_NONE: no tmux candidate was supplied".into())
+    Err("TRANSPORT_NONE: no reachable App Server or tmux candidate was supplied".into())
 }
 
 type RouteKey = (String, String);
@@ -2326,7 +2382,12 @@ impl ProjectRuntimeManager {
                         == Some(thread)
                 });
                 let same_tmux_pane = binding.tmux_endpoint.as_ref().is_some_and(|previous| {
-                    previous.socket_path == endpoint.socket_path
+                    // A live native thread is authoritative. The tmux pane is
+                    // only a recovery anchor when both Codex IDs are absent,
+                    // so a shared pane cannot block a second App Server peer.
+                    endpoint.codex_session_id.is_none()
+                        && endpoint.codex_thread_id.is_none()
+                        && previous.socket_path == endpoint.socket_path
                         && previous.server_pid == endpoint.server_pid
                         && previous.tmux_session_id == endpoint.tmux_session_id
                         && previous.pane_id == endpoint.pane_id
@@ -2387,7 +2448,6 @@ impl ProjectRuntimeManager {
         result
     }
 
-    #[cfg(test)]
     fn resolve_route_by_native_thread(
         &self,
         session_id: &str,
@@ -2578,7 +2638,6 @@ impl ProjectRuntimeManager {
                     }
                 }
             }
-            #[cfg(test)]
             TransportKind::AppServer => {
                 if requested_tmux_endpoint.is_some() {
                     return Err(format!(
@@ -2601,12 +2660,6 @@ impl ProjectRuntimeManager {
                         "ROUTE_RESOLVE_INVALID: App Server identity verification failed: {error}"
                     )
                 })?;
-            }
-            #[cfg(not(test))]
-            TransportKind::AppServer => {
-                return Err(format!(
-                    "TRANSPORT_UNSUPPORTED: App Server route for {native_thread_id} is retired"
-                ));
             }
         }
         let route = RouteResolution {
@@ -2670,13 +2723,18 @@ impl ProjectRuntimeManager {
         })?;
         let current = {
             let state = self.host.state.lock().unwrap();
-            match binding.tmux_endpoint.as_ref() {
-                Some(endpoint) => state.global.lookup_tmux_route(endpoint),
-                None => state
+            let current = match binding.tmux_endpoint.as_ref() {
+                Some(endpoint)
+                    if endpoint.codex_session_id.is_none()
+                        && endpoint.codex_thread_id.is_none() =>
+                {
+                    state.global.lookup_tmux_route(endpoint)
+                }
+                _ => state
                     .global
                     .lookup_current_thread_route(session_id, native_thread_id),
-            }
-            .cloned()
+            };
+            current.cloned()
         };
         if current.as_ref() == Some(&binding) {
             return Ok(());
@@ -2949,15 +3007,11 @@ impl ProjectRuntimeManager {
             host_paths: self.host.host_paths.clone(),
             state: Mutex::new(state),
             journal: Mutex::new(journal_file),
-            #[cfg(test)]
             appserver_candidate_check: self.host.appserver_candidate_check.clone(),
             #[cfg(not(test))]
             tmux_notification_sink: self.host.tmux_notification_sink.clone(),
-            #[cfg(test)]
             appserver_notification_sink: self.host.appserver_notification_sink.clone(),
-            #[cfg(test)]
             appserver_thread_status: self.host.appserver_thread_status.clone(),
-            #[cfg(test)]
             appserver_thread_archive: self.host.appserver_thread_archive.clone(),
             mailbox_notify: Notify::new(),
         });
@@ -4048,6 +4102,7 @@ fn attempt_tmux_notification_with_at(
         &str,
         &str,
         bool,
+        &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
     attempt_tmux_notification_with_retry(
@@ -4084,6 +4139,7 @@ fn attempt_tmux_notification_with_retry(
         &str,
         &str,
         bool,
+        &str,
     ) -> Result<serde_json::Value, String>,
 ) -> NotificationAttempt {
     let mut state = server.state.lock().unwrap();
@@ -4113,6 +4169,11 @@ fn attempt_tmux_notification_with_retry(
             "subscription does not match the selected tmux transport".into(),
         );
     }
+    let delivery_mode = state
+        .delivery_modes
+        .get(&seed_id)
+        .cloned()
+        .unwrap_or_else(|| "immediate".into());
     let mut batch = state
         .msgs
         .values()
@@ -4123,6 +4184,12 @@ fn attempt_tmux_notification_with_retry(
             (message.to == recipient
                 && state.scheduler_message_deliverable(&message.id)
                 && message_explicit == explicit
+                && state
+                    .delivery_modes
+                    .get(&message.id)
+                    .map(String::as_str)
+                    .unwrap_or("immediate")
+                    == delivery_mode.as_str()
                 && notification_delivery_delay_ms(
                     &state,
                     &message.id,
@@ -4170,6 +4237,12 @@ fn attempt_tmux_notification_with_retry(
             let message_explicit = is_explicit_notification(&state, message);
             (message.to == recipient
                 && message_explicit == explicit
+                && state
+                    .delivery_modes
+                    .get(&message.id)
+                    .map(String::as_str)
+                    .unwrap_or("immediate")
+                    == delivery_mode.as_str()
                 && notification_delivery_delay_ms(
                     &state,
                     &message.id,
@@ -4208,6 +4281,7 @@ fn attempt_tmux_notification_with_retry(
         &text,
         &format!("collab-notification-{}", first.1),
         explicit,
+        &delivery_mode,
     ) {
         Ok(receipt) => {
             append_log(
@@ -4252,25 +4326,12 @@ fn attempt_tmux_notification_with_retry(
                     },
                     error: error.clone(),
                     failed_ms: now,
-                    retryable: {
-                        #[cfg(test)]
-                        {
-                            matches!(
-                                crate::client::adapters::AdapterError::notification_class_from_display(
-                                    &error
-                                ),
-                                crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
-                            )
-                        }
-                        #[cfg(not(test))]
-                        {
-                            // Production wake transport is tmux. Its command
-                            // errors can be ambiguous after text submission, so
-                            // never classify them using retired AppServer error
-                            // prefixes or retry them automatically.
-                            false
-                        }
-                    },
+                    retryable: matches!(
+                        crate::client::adapters::AdapterError::notification_class_from_display(
+                            &error
+                        ),
+                        crate::client::adapters::NotificationDeliveryClass::KnownNotDelivered
+                    ),
                 }],
             );
             NotificationAttempt::Rejected(error)
@@ -4398,8 +4459,15 @@ fn attempt_notification_detailed_with_mode_at(
         explicit,
         now,
         explicit_retry,
-        &|transport, source_thread_id, text, message_id, explicit| {
-            (notification_sink(server))(transport, source_thread_id, text, message_id, explicit)
+        &|transport, source_thread_id, text, message_id, explicit, mode| {
+            (notification_sink(server))(
+                transport,
+                source_thread_id,
+                text,
+                message_id,
+                explicit,
+                mode,
+            )
         },
     );
     if let NotificationAttempt::NotAttempted(error) = &attempt {
@@ -4433,7 +4501,13 @@ fn notification_delivery_delay_ms(
     config: &crate::config::Notifications,
 ) -> i64 {
     match state.delivery_modes.get(message_id).map(String::as_str) {
-        Some("explicit-notification" | DAEMON_LIVE_CLOSURE_MODE | RESTART_REPLAY_PENDING_MODE) => 0,
+        Some(
+            "explicit-notification"
+            | "immediate"
+            | "queued"
+            | DAEMON_LIVE_CLOSURE_MODE
+            | RESTART_REPLAY_PENDING_MODE,
+        ) => 0,
         _ => config.delay_ms(event),
     }
 }
@@ -4469,6 +4543,7 @@ fn attempt_notification(server: &Server, message_id: &str, subscription_id: &str
 fn notification_send_response(
     mut data: serde_json::Value,
     subscription_present: bool,
+    notification_method: &str,
     notification: &NotificationAttempt,
 ) -> Resp {
     if !subscription_present {
@@ -4479,7 +4554,11 @@ fn notification_send_response(
     match notification {
         NotificationAttempt::Accepted => {
             data["durable"] = json!(true);
-            data["notification"] = json!("tmux-input-submitted");
+            data["notification"] = if notification_method == "appserver" {
+                json!("appserver-input-submitted")
+            } else {
+                json!("tmux-input-submitted")
+            };
             data["consumed"] = json!(false);
             Resp::data(data)
         }
@@ -4490,9 +4569,12 @@ fn notification_send_response(
             data["failure"] = json!("notification_delivery_failed");
             data["repair_required"] = json!(true);
             data["escalation"] = json!(
-                "the message is durable but this tmux wake has an ambiguous paste/Enter outcome; do not retry this wake, have the recipient run collab recv, and send a new message if another wake is needed"
+                "the message is durable but this wake has an ambiguous submission outcome; do not retry this wake, have the recipient run collab recv, and send a new message if another wake is needed"
             );
-            Resp::err_data(format!("TMUX_NOTIFICATION_REJECTED: {error}"), data)
+            Resp::err_data(
+                notification_rejected_label(notification_method, &format!("{error}")),
+                data,
+            )
         }
         NotificationAttempt::NotAttempted(error) => {
             data["durable"] = json!(true);
@@ -4501,10 +4583,21 @@ fn notification_send_response(
             data["failure"] = json!("notification_delivery_failed");
             data["repair_required"] = json!(true);
             data["escalation"] = json!(
-                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected tmux transport, then retry explicitly"
+                "report the exact notification_error and durable msg_id to the live master; repair or rebind the selected wake transport, then retry explicitly"
             );
-            Resp::err_data(format!("TMUX_NOTIFICATION_REJECTED: {error}"), data)
+            Resp::err_data(
+                notification_rejected_label(notification_method, &format!("{error}")),
+                data,
+            )
         }
+    }
+}
+
+fn notification_rejected_label(notification_method: &str, error: &str) -> String {
+    if notification_method == "appserver" {
+        format!("APPSERVER_NOTIFICATION_REJECTED: {error}")
+    } else {
+        format!("TMUX_NOTIFICATION_REJECTED: {error}")
     }
 }
 
@@ -4605,8 +4698,15 @@ fn attempt_scheduler_notification(
         now_ms(),
         allow_retry,
         false,
-        &|transport, source_thread_id, text, message_id, explicit| {
-            (notification_sink(server))(transport, source_thread_id, text, message_id, explicit)
+        &|transport, source_thread_id, text, message_id, explicit, mode| {
+            (notification_sink(server))(
+                transport,
+                source_thread_id,
+                text,
+                message_id,
+                explicit,
+                mode,
+            )
         },
     );
     if notified.accepted() {
@@ -4706,7 +4806,7 @@ mod notification_batch_tests {
                         self_check: "test appserver".into(),
                     })
                 }),
-                appserver_notification_sink: Arc::new(|_, _, _, _, _| {
+                appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
                     Ok(serde_json::json!({"accepted": true}))
                 }),
                 appserver_thread_status: Arc::new(|_, thread_id| {
@@ -4843,7 +4943,7 @@ mod notification_batch_tests {
             let observed = Arc::clone(&observed);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit| {
+                .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit, _mode| {
                 *observed.lock().unwrap() = Some((source.map(str::to_owned), explicit));
                 Ok(json!({"accepted": true}))
             });
@@ -4879,7 +4979,7 @@ mod notification_batch_tests {
             let observed = Arc::clone(&observed);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit| {
+                .appserver_notification_sink = Arc::new(move |_, source, _, _, explicit, _mode| {
                 *observed.lock().unwrap() = Some((source.map(str::to_owned), explicit));
                 Ok(json!({"accepted": true}))
             });
@@ -4896,7 +4996,103 @@ mod notification_batch_tests {
     }
 
     #[test]
-    fn default_notification_sink_rejects_retired_appserver_transport() {
+    fn queued_delivery_mode_reaches_notification_sink() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "queued-notice",
+            now - 120_001,
+        );
+        server.commit(&[Event::DeliveryMode {
+            msg_id: "queued-notice".into(),
+            mode: "queued".into(),
+            source_thread_id: None,
+        }]);
+        let observed = Arc::new(Mutex::new(None));
+        {
+            let observed = Arc::clone(&observed);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, _, _, _, _, mode| {
+                *observed.lock().unwrap() = Some(mode.to_string());
+                Ok(json!({"accepted": true}))
+            });
+        }
+
+        assert!(attempt_notification_with_at(
+            &server,
+            "queued-notice",
+            &subscription_id,
+            now,
+        ));
+        assert_eq!(observed.lock().unwrap().as_deref(), Some("queued"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn immediate_and_queued_messages_are_not_batched_into_one_mode() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "immediate-notice",
+            now - 120_001,
+        );
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "queued-notice",
+            now - 120_001,
+        );
+        server.commit(&[
+            Event::DeliveryMode {
+                msg_id: "immediate-notice".into(),
+                mode: "immediate".into(),
+                source_thread_id: None,
+            },
+            Event::DeliveryMode {
+                msg_id: "queued-notice".into(),
+                mode: "queued".into(),
+                source_thread_id: None,
+            },
+        ]);
+
+        let observed = Arc::new(Mutex::new(None));
+        {
+            let observed = Arc::clone(&observed);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, _, _, _, _, mode| {
+                *observed.lock().unwrap() = Some(mode.to_string());
+                Ok(json!({"accepted": true}))
+            });
+        }
+
+        assert!(attempt_notification_with_at(
+            &server,
+            "immediate-notice",
+            &subscription_id,
+            now,
+        ));
+        assert_eq!(observed.lock().unwrap().as_deref(), Some("immediate"));
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state.msgs["immediate-notice"].wake_attempt_count, 1);
+            assert_eq!(state.msgs["queued-notice"].wake_attempt_count, 0);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_appserver_sink_does_not_fallback_to_tmux() {
         let transport = SelectedTransport {
             kind: TransportKind::AppServer,
             endpoint: Some("unix:///tmp/collab-test-appserver.sock".into()),
@@ -4908,10 +5104,19 @@ mod notification_batch_tests {
             self_check: "test appserver".into(),
         };
         let sink = default_appserver_notification_sink();
-        let error = sink(&transport, None, "explicit", "message-explicit", true).unwrap_err();
-        assert_eq!(
-            error,
-            "TRANSPORT_UNSUPPORTED: Collab notifications require tmux"
+        let error = sink(
+            &transport,
+            None,
+            "explicit",
+            "message-explicit",
+            true,
+            "immediate",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("ADAPTER_ROUTE_UNAVAILABLE:")
+                || error.contains("APPSERVER_ENDPOINT_REJECTED:")
+                || error.contains("RPC")
         );
     }
 
@@ -4934,7 +5139,7 @@ mod notification_batch_tests {
             let delivered = Arc::clone(&delivered);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, _, text, _, _| {
+                .appserver_notification_sink = Arc::new(move |_, _, text, _, _, _mode| {
                 delivered.lock().unwrap().push(text.to_string());
                 Ok(serde_json::json!({"accepted": true}))
             });
@@ -4989,7 +5194,7 @@ mod notification_batch_tests {
             let delivered = Arc::clone(&delivered);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, _, text, _, _| {
+                .appserver_notification_sink = Arc::new(move |_, _, text, _, _, _mode| {
                 delivered.lock().unwrap().push(text.to_string());
                 Ok(serde_json::json!({"accepted": true}))
             });
@@ -5047,7 +5252,7 @@ mod notification_batch_tests {
             let delivered = Arc::clone(&delivered);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit| {
+                .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit, _mode| {
                 delivered.lock().unwrap().push((explicit, text.to_string()));
                 Ok(serde_json::json!({"accepted": true}))
             });
@@ -5140,7 +5345,7 @@ mod notification_batch_tests {
         Arc::get_mut(&mut server)
             .expect("unique test server")
             .appserver_notification_sink =
-            Arc::new(|_, _, _, _, _| Err("test sink rejected".into()));
+            Arc::new(|_, _, _, _, _, _| Err("test sink rejected".into()));
         assert!(!attempt_notification_with_at(
             &server,
             "reserved-once",
@@ -5233,7 +5438,7 @@ pub(crate) fn attempt_notification_with_default(
         explicit,
         now_ms(),
         false,
-        &|transport, source_thread_id, text, message_id, explicit| {
+        &|transport, source_thread_id, text, message_id, explicit, _mode| {
             let target = transport.thread_id.as_deref().unwrap_or("appserver");
             if !can_receive(target) {
                 return Err("test can_receive returned false".into());
@@ -6606,7 +6811,7 @@ fn role_brief(server: &Server, state: &State, worker_id: &str) -> serde_json::Va
     })
 }
 
-fn worker_identity_presence(_server: &Server, worker: &WorkerRec) -> IdentityPresence {
+fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPresence {
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
     };
@@ -6620,6 +6825,22 @@ fn worker_identity_presence(_server: &Server, worker: &WorkerRec) -> IdentityPre
             Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
                 IdentityPresence::Unknown
             }
+        };
+    }
+    if transport.kind == TransportKind::AppServer {
+        let Some(thread_id) = transport.thread_id.as_deref() else {
+            return IdentityPresence::Missing;
+        };
+        return match (server.appserver_thread_status)(&transport, thread_id) {
+            Ok(_) => IdentityPresence::Present,
+            Err(error)
+                if error.contains("not found")
+                    || error.contains("MISSING")
+                    || error.contains("GONE") =>
+            {
+                IdentityPresence::Missing
+            }
+            Err(_) => IdentityPresence::Unknown,
         };
     }
     IdentityPresence::Unknown
@@ -6669,7 +6890,7 @@ pub(crate) fn worker_presence(server: &Server, worker: &WorkerRec) -> IdentityPr
 }
 
 fn transport_agent_view(
-    _server: &Server,
+    server: &Server,
     worker: &WorkerRec,
 ) -> (IdentityPresence, serde_json::Value, serde_json::Value) {
     let Some(transport) = selected_transport_for_worker(worker) else {
@@ -6715,6 +6936,47 @@ fn transport_agent_view(
             Err(error) => (
                 IdentityPresence::Unknown,
                 serde_json::json!({"transport": "tmux", "thread_state": "unknown", "error": error}),
+                serde_json::Value::Null,
+            ),
+        };
+    }
+    if transport.kind == TransportKind::AppServer {
+        let Some(thread_id) = transport.thread_id.as_deref() else {
+            return (
+                IdentityPresence::Missing,
+                serde_json::json!({"transport": "appserver", "thread_state": "missing", "error": "APPSERVER_THREAD_ID_MISSING"}),
+                serde_json::Value::Null,
+            );
+        };
+        return match (server.appserver_thread_status)(&transport, thread_id) {
+            Ok(raw) => {
+                let thread_state = raw
+                    .pointer("/thread/status/type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let identity_presence = match thread_state.as_str() {
+                    "notLoaded" => IdentityPresence::Cold,
+                    "systemError" => IdentityPresence::Missing,
+                    _ => IdentityPresence::Present,
+                };
+                (
+                    identity_presence,
+                    serde_json::json!({
+                        "thread_state": thread_state,
+                        "active_flags": raw.pointer("/activeTurns").cloned().unwrap_or(serde_json::json!([])),
+                        "can_accept_direct_input": raw.pointer("/thread/canAcceptDirectInput").cloned().unwrap_or(serde_json::Value::Bool(false)),
+                        "latest_turn_status": raw.pointer("/thread/latestTurnStatus").cloned().unwrap_or(serde_json::Value::Null),
+                        "latest_turn_error": raw.pointer("/thread/latestTurnError").cloned().unwrap_or(serde_json::Value::Null),
+                        "transport": "appserver",
+                        "observed_at_ms": chrono::Utc::now().timestamp_millis(),
+                    }),
+                    raw,
+                )
+            }
+            Err(error) => (
+                IdentityPresence::Unknown,
+                serde_json::json!({"transport": "appserver", "thread_state": "unknown", "error": error}),
                 serde_json::Value::Null,
             ),
         };
@@ -8274,10 +8536,8 @@ pub(crate) fn handle_send_with_task(
     assign_task: bool,
     managed_subagent_id: Option<&str>,
 ) -> Resp {
-    if delivery_mode != "immediate" {
-        return Resp::err(
-            "implicit idle delivery is removed; use an explicit notification subscription",
-        );
+    if !matches!(delivery_mode.as_str(), "immediate" | "queued") {
+        return Resp::err("delivery mode must be immediate or queued");
     }
     let Some(subject) = subject.filter(|subject| !subject.trim().is_empty()) else {
         return Resp::err("MESSAGE_SUBJECT_REQUIRED: sendmessage requires --subject");
@@ -8327,11 +8587,31 @@ pub(crate) fn handle_send_with_task(
         let (error, data) = handoff_unresolved_recipient(&to);
         return Resp::err_data(error, data);
     }
-    let Some(recipient) = st.workers.get(&to) else {
+    let Some(recipient) = st.workers.get(&to).cloned() else {
         return Resp::err(format!("recipient {} not registered", to));
     };
-    if worker_presence(server, recipient) == IdentityPresence::Missing {
+    // Presence probes open an AppServer RPC connection, so run them outside
+    // the global state lock to avoid stalling unrelated daemon commands.
+    drop(st);
+    if worker_presence(server, &recipient) == IdentityPresence::Missing {
         return Resp::err("recipient has no live server-verified transport");
+    }
+    let mut st = server.state.lock().unwrap();
+    // The presence probe runs outside the lock, so a concurrent
+    // WorkerClosed/rebind can remove or replace the recipient while it is in
+    // flight.  Commit only against the exact recipient that was probed.
+    match st.workers.get(&to) {
+        Some(current) if current == &recipient => {}
+        Some(_) => {
+            return Resp::err(format!(
+                "recipient {} transport changed while verifying liveness; retry the send",
+                to
+            ));
+        }
+        None => {
+            let (error, data) = handoff_unresolved_recipient(&to);
+            return Resp::err_data(error, data);
+        }
     }
     if let Some(ref rid) = in_reply_to {
         if !st.msgs.contains_key(rid) {
@@ -8408,6 +8688,10 @@ pub(crate) fn handle_send_with_task(
                     "deduplicated": true,
                 }),
                 subscription.is_some(),
+                subscription
+                    .as_ref()
+                    .map(|subscription| subscription.method.as_str())
+                    .unwrap_or(""),
                 &notification,
             );
         }
@@ -8448,7 +8732,7 @@ pub(crate) fn handle_send_with_task(
     };
     events.push(Event::DeliveryMode {
         msg_id: mid.clone(),
-        mode: "explicit-notification".into(),
+        mode: delivery_mode,
         source_thread_id: None,
     });
     if let Some(subscription) = &subscription {
@@ -8480,6 +8764,10 @@ pub(crate) fn handle_send_with_task(
             "task_id": task_id,
         }),
         subscription.is_some(),
+        subscription
+            .as_ref()
+            .map(|subscription| subscription.method.as_str())
+            .unwrap_or(""),
         &notification,
     )
 }
@@ -8524,12 +8812,14 @@ fn handle_live_closure_daemon_send(
     {
         return Resp::err("COLLAB_LIVE_CLOSURE_PEER_ROUTE_MISMATCH");
     }
-    let Some(recipient) = st.workers.get(&to) else {
+    let Some(recipient) = st.workers.get(&to).cloned() else {
         return Resp::err(format!("recipient {} not registered", to));
     };
-    if worker_presence(server, recipient) != IdentityPresence::Present {
+    drop(st);
+    if worker_presence(server, &recipient) != IdentityPresence::Present {
         return Resp::err("COLLAB_LIVE_CLOSURE_TARGET_ROUTE_UNAVAILABLE");
     }
+    let mut st = server.state.lock().unwrap();
     let msg = Message {
         id: gen_msg_id(),
         from: "collab-server".into(),
@@ -8590,6 +8880,10 @@ fn handle_live_closure_daemon_send(
             "restart_replay_pending": restart_replay_pending,
         }),
         subscription.is_some(),
+        subscription
+            .as_ref()
+            .map(|subscription| subscription.method.as_str())
+            .unwrap_or(""),
         &notification,
     )
 }
@@ -8632,14 +8926,16 @@ fn handle_cross_project_send(
     if live_master.as_deref() != Some(to.as_str()) {
         return Resp::err("cross-project communication requires the target to be a live master");
     }
-    let Some(recipient) = st.workers.get(&to) else {
+    let Some(recipient) = st.workers.get(&to).cloned() else {
         return Resp::err(format!("recipient {} not registered", to));
     };
-    if worker_presence(server, recipient) != IdentityPresence::Present {
+    drop(st);
+    if worker_presence(server, &recipient) != IdentityPresence::Present {
         return Resp::err(
             "cross-project communication requires a live target identity on its server-selected transport",
         );
     }
+    let mut st = server.state.lock().unwrap();
     if subject.trim().is_empty() {
         return Resp::err("MESSAGE_SUBJECT_REQUIRED: cross-project send requires --subject");
     }
@@ -8693,6 +8989,10 @@ fn handle_cross_project_send(
             "target_master": to,
         }),
         subscription.is_some(),
+        subscription
+            .as_ref()
+            .map(|subscription| subscription.method.as_str())
+            .unwrap_or(""),
         &notification,
     )
 }
@@ -10864,6 +11164,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
         | Req::RouteResolve { .. }
+        | Req::RouteResolveNative { .. }
         | Req::NotificationMethods
         | Req::NotificationStatus { .. }
         | Req::Inbox { .. }
@@ -11619,8 +11920,8 @@ fn dispatch_with_route_context(
             Resp::data(json!({"unread": items.len(), "messages": items}))
         }
         Req::Context { worker_id, token } => handle_context(server, worker_id, token),
-        Req::RouteResolve { .. } => {
-            Resp::err("RouteResolve is only handled by the host daemon connection path")
+        Req::RouteResolve { .. } | Req::RouteResolveNative { .. } => {
+            Resp::err("RouteResolve/RouteResolveNative are only handled by the host daemon connection path")
         }
         Req::MsgStatus { msg_id } => {
             let st = server.state.lock().unwrap();
@@ -12084,7 +12385,10 @@ fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
 }
 
 fn request_requires_project_context(req: &Req) -> bool {
-    !matches!(req, Req::Ping | Req::RouteResolve { .. })
+    !matches!(
+        req,
+        Req::Ping | Req::RouteResolve { .. } | Req::RouteResolveNative { .. }
+    )
 }
 
 enum WireRoutePrincipal<'a> {
@@ -12429,7 +12733,7 @@ mod host_route_registry_tests {
             state: Mutex::new(State::default()),
             journal: Mutex::new(journal),
             appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
-            appserver_notification_sink: Arc::new(|_, _, _, _, _| {
+            appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
@@ -12463,6 +12767,7 @@ mod host_route_registry_tests {
                 &str,
                 &str,
                 bool,
+                &str,
             ) -> Result<serde_json::Value, String>
             + Send
             + Sync
@@ -12735,7 +13040,11 @@ mod host_route_registry_tests {
             root.to_str().unwrap(),
         )
         .unwrap_err();
-        assert!(error.starts_with("TRANSPORT_UNSUPPORTED:"), "{error}");
+        assert!(
+            error.starts_with("APPSERVER_ENDPOINT_REJECTED:")
+                || error.contains("ADAPTER_ROUTE_UNAVAILABLE"),
+            "{error}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -12760,7 +13069,11 @@ mod host_route_registry_tests {
             root.to_str().unwrap(),
         )
         .unwrap_err();
-        assert!(error.starts_with("TRANSPORT_UNSUPPORTED:"), "{error}");
+        assert!(
+            error.starts_with("APPSERVER_ENDPOINT_REJECTED:")
+                || error.contains("ADAPTER_ROUTE_UNAVAILABLE"),
+            "{error}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -13051,7 +13364,7 @@ mod host_route_registry_tests {
         ]);
         Arc::get_mut(&mut server)
             .unwrap()
-            .appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+            .appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
             Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into())
         });
 
@@ -13083,7 +13396,7 @@ mod host_route_registry_tests {
         let notification_calls_for_sink = notification_calls.clone();
         with_appserver_notification_sink(
             &mut server,
-            move |_, source_thread_id, text, message_id, explicit| {
+            move |_, source_thread_id, text, message_id, explicit, _mode| {
                 notification_calls_for_sink.lock().unwrap().push((
                     source_thread_id.map(str::to_owned),
                     text.to_owned(),
@@ -13231,11 +13544,14 @@ mod host_route_registry_tests {
     fn live_closure_restart_replay_records_pending_contract_mode() {
         let (mut server, root, _) = test_server();
         with_appserver_check(&mut server, |candidate| Ok(verified_appserver(candidate)));
-        with_appserver_notification_sink(&mut server, |_, source_thread_id, _, _, explicit| {
-            assert!(source_thread_id.is_none());
-            assert!(!explicit);
-            Ok(json!({"accepted": true}))
-        });
+        with_appserver_notification_sink(
+            &mut server,
+            |_, source_thread_id, _, _, explicit, _mode| {
+                assert!(source_thread_id.is_none());
+                assert!(!explicit);
+                Ok(json!({"accepted": true}))
+            },
+        );
         let app_scope = AppServerId::new("restart-replay-app").unwrap();
         for (worker_id, token, thread_id) in [
             ("requester", "token-requester", "thread-requester"),
@@ -14274,7 +14590,7 @@ mod host_route_registry_tests {
                     .unwrap(),
             ),
             appserver_candidate_check: Arc::new(|candidate| Ok(verified_appserver(candidate))),
-            appserver_notification_sink: Arc::new(|_, _, _, _, _| {
+            appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
@@ -19531,6 +19847,22 @@ async fn dispatch_wire_routed(
             };
             (manager.host.clone(), response)
         }
+        Req::RouteResolveNative {
+            session_id,
+            native_thread_id,
+        } => {
+            let response =
+                match manager.resolve_route_by_native_thread(&session_id, &native_thread_id) {
+                    Ok(route) => match serde_json::to_value(route) {
+                        Ok(value) => Resp::data(value),
+                        Err(error) => {
+                            Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}"))
+                        }
+                    },
+                    Err(error) => Resp::err(error),
+                };
+            (manager.host.clone(), response)
+        }
         Req::Poll {
             worker_id,
             token,
@@ -20266,13 +20598,9 @@ async fn run_with_host_paths(scope: Scope, host_paths: HostPaths) -> anyhow::Res
         host_paths: host_paths.clone(),
         state: Mutex::new(state),
         journal: Mutex::new(journal_file),
-        #[cfg(test)]
         appserver_candidate_check: default_appserver_candidate_check(),
-        #[cfg(test)]
         appserver_notification_sink: default_appserver_notification_sink(),
-        #[cfg(test)]
         appserver_thread_status: default_appserver_thread_status(),
-        #[cfg(test)]
         appserver_thread_archive: default_appserver_thread_archive(),
         #[cfg(not(test))]
         tmux_notification_sink: default_tmux_notification_sink(),
@@ -20423,7 +20751,7 @@ mod reducer_binding_tests {
                     self_check: "test appserver".into(),
                 })
             }),
-            appserver_notification_sink: Arc::new(|_, _, _, _, _| {
+            appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
@@ -21627,8 +21955,8 @@ mod scheduler_admission_tests {
         ]);
         assert_eq!(
             live_managed_subagent_count(&server, "master"),
-            0,
-            "retired AppServer child bindings do not count as live tmux peers"
+            1,
+            "live AppServer child bindings count as registered peers"
         );
         let unsupported =
             scheduler_admit_subagent_start(&server, "master", "token-master", None, Some("codex"))
@@ -21951,7 +22279,7 @@ mod scheduler_admission_tests {
         promote_master(&server);
         let reject_once = Arc::new(AtomicBool::new(true));
         let reject_once_for_sink = reject_once.clone();
-        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
             if reject_once_for_sink.swap(false, Ordering::SeqCst) {
                 Err(
                     "ADAPTER_ROUTE_UNAVAILABLE: recipient thread is not loaded by the App Server"
@@ -22056,7 +22384,7 @@ mod scheduler_admission_tests {
         promote_master(&server);
         let calls = Arc::new(AtomicU64::new(0));
         let calls_for_sink = calls.clone();
-        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
             calls_for_sink.fetch_add(1, Ordering::SeqCst);
             Err("ADAPTER_TIMEOUT: turn/start timed out".into())
         });
@@ -22656,7 +22984,7 @@ mod scheduler_admission_tests {
         let sink_calls_for_sink = Arc::clone(&sink_calls);
         let sink_gate = Arc::new((Mutex::new(0usize), Condvar::new()));
         let sink_gate_for_sink = Arc::clone(&sink_gate);
-        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
             let call = sink_calls_for_sink.fetch_add(1, Ordering::SeqCst) + 1;
             let (lock, ready) = &*sink_gate_for_sink;
             let mut entered = lock.lock().unwrap();
@@ -22862,7 +23190,7 @@ mod scheduler_admission_tests {
         promote_master(&server);
         let sink_calls = Arc::new(AtomicU64::new(0));
         let sink_calls_for_sink = Arc::clone(&sink_calls);
-        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+        server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
             sink_calls_for_sink.fetch_add(1, Ordering::SeqCst);
             Err("ADAPTER_TIMEOUT: turn/start timed out".into())
         });

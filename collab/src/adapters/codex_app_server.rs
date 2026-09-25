@@ -616,6 +616,130 @@ pub fn immediate_notify(
             validate_steer_receipt(&receipt, &expected_turn_id)?;
             Ok(receipt)
         }
+        NotificationAction::Queue => Err(AdapterError::CapabilityUnavailable {
+            endpoint: EndpointKind::Tui,
+            operation: "thread/queue/add",
+        }),
+    }
+}
+
+/// Queue one notification through a server-selected App Server transport.
+/// A successful result means the App Server accepted the queued submission;
+/// execution and reply are observed separately.
+pub fn queued_notify(
+    transport: &SelectedTransport,
+    source_thread_id: Option<&str>,
+    body: &str,
+    client_user_message_id: &str,
+) -> Result<Value, AdapterError> {
+    if transport.kind != TransportKind::AppServer {
+        return Err(AdapterError::CapabilityUnavailable {
+            endpoint: EndpointKind::Tui,
+            operation: "thread/queue/add",
+        });
+    }
+    let endpoint = transport
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| AdapterError::InvalidBinding {
+            detail: "selected App Server transport has no endpoint".into(),
+        })?;
+    let thread_id = transport
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| AdapterError::InvalidBinding {
+            detail: "selected App Server transport has no thread_id".into(),
+        })?;
+    let socket_path = endpoint_path(endpoint)?;
+    let thread_id = NativeThreadId::new(thread_id.to_owned()).map_err(|error| {
+        AdapterError::InvalidBinding {
+            detail: format!("selected App Server thread_id is invalid: {error}"),
+        }
+    })?;
+    let mut client = Client::connect(&socket_path, Duration::from_millis(DEFAULT_TIMEOUT_MS))?;
+    client.initialize()?;
+    let resumed_here = match client.call("thread/resume", json!({"threadId": thread_id.as_str()})) {
+        Ok(_) => true,
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            return Err(AdapterError::RouteUnavailable { detail })
+        }
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            false
+        }
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_rollout_missing_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            false
+        }
+        Err(AdapterError::CapabilityUnavailable { .. }) => false,
+        Err(error) => return Err(error),
+    };
+    let status = match thread_metadata(&mut client, thread_id.as_str()) {
+        Ok(thread) => thread_status_from_metadata(&thread)?,
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_loaded_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            if resumed_here {
+                return Err(AdapterError::Unknown {
+                    operation: "thread/read",
+                    detail: format!(
+                        "thread {thread_id} was resumed on this connection but still reports not loaded"
+                    ),
+                });
+            }
+            "notLoaded".to_string()
+        }
+        Err(AdapterError::Unknown { operation, detail })
+            if is_thread_not_found_error(&operation, &detail, thread_id.as_str()) =>
+        {
+            return Err(AdapterError::RouteUnavailable { detail });
+        }
+        Err(error) => return Err(error),
+    };
+    let active_turn_id = match status.as_str() {
+        "active" => active_turn_id(&mut client, thread_id.as_str())?,
+        _ => None,
+    };
+    let action = queued_notification_action(&status, active_turn_id)?;
+    match action {
+        NotificationAction::Start => {
+            let receipt = client.call(
+                "turn/start",
+                json!({
+                    "threadId": thread_id.as_str(),
+                    "input": [],
+                    "toolOutput": {
+                        "name": "send_message_to_thread",
+                        "namespace": "codex_tui",
+                        "output": delegated_prompt(
+                            source_thread_id,
+                            client_user_message_id,
+                            body,
+                        ),
+                    },
+                    "clientUserMessageId": client_user_message_id,
+                }),
+            )?;
+            validate_immediate_receipt(&receipt)?;
+            Ok(receipt)
+        }
+        NotificationAction::Queue => {
+            let receipt = client.call(
+                "thread/queue/add",
+                json!({
+                    "threadId": thread_id.as_str(),
+                    "input": [{"type": "text", "text": body, "text_elements": []}],
+                    "clientUserMessageId": client_user_message_id,
+                }),
+            )?;
+            validate_queue_receipt(&receipt)?;
+            Ok(receipt)
+        }
+        NotificationAction::Steer(_) => unreachable!("queued notify never steers"),
     }
 }
 
@@ -937,6 +1061,7 @@ fn active_turn_id_from_page(page: &Value) -> Result<Option<String>, AdapterError
 enum NotificationAction {
     Start,
     Steer(String),
+    Queue,
 }
 
 fn notification_action(
@@ -960,6 +1085,44 @@ fn notification_action(
             ),
         }),
     }
+}
+
+fn queued_notification_action(
+    thread_status: &str,
+    active_turn_id: Option<String>,
+) -> Result<NotificationAction, AdapterError> {
+    match thread_status {
+        "active" => Ok(match active_turn_id {
+            Some(_) => NotificationAction::Queue,
+            None => NotificationAction::Start,
+        }),
+        "idle" => Ok(NotificationAction::Start),
+        "notLoaded" => Ok(NotificationAction::Start),
+        status => Err(AdapterError::Unknown {
+            operation: "thread/read",
+            detail: format!(
+                "AUTO_NOTIFY_UNSUPPORTED_THREAD_STATUS: cannot queue to thread status {status}"
+            ),
+        }),
+    }
+}
+
+fn validate_queue_receipt(receipt: &Value) -> Result<(), AdapterError> {
+    let id = receipt
+        .pointer("/queuedSubmission/id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AdapterError::Unknown {
+            operation: "thread/queue/add",
+            detail: "response is missing queuedSubmission.id".into(),
+        })?;
+    if id.chars().any(char::is_whitespace) {
+        return Err(AdapterError::Unknown {
+            operation: "thread/queue/add",
+            detail: "response returned an invalid queuedSubmission.id".into(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_steer_receipt(receipt: &Value, expected_turn_id: &str) -> Result<(), AdapterError> {
@@ -1032,15 +1195,7 @@ fn socket_candidate() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(value));
     }
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".codex"))
-        })?;
-    Some(codex_home.join("app-server-control/app-server-control.sock"))
+    None
 }
 
 struct Client {
@@ -2977,6 +3132,126 @@ mod tests {
             "message-queued"
         )
         .is_err());
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn queued_notify_routes_active_thread_to_queue_add() {
+        let socket = temp_socket("queued-notify-active");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "active"}
+                        }
+                    }
+                }),
+            );
+            let turns_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": turns_id,
+                    "result": {
+                        "data": [{"id": "turn-active", "status": "inProgress"}]
+                    }
+                }),
+            );
+            let queue = next_request(&mut stream);
+            assert_eq!(queue["method"], "thread/queue/add");
+            assert_eq!(queue["params"]["threadId"], "thread-1");
+            assert_eq!(
+                queue["params"]["clientUserMessageId"],
+                "message-queued-active"
+            );
+            respond(
+                &mut stream,
+                json!({
+                    "id": queue["id"],
+                    "result": {
+                        "queuedSubmission": {"id": "queue-queued-active"}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let receipt = queued_notify(
+            &selected_transport(&socket),
+            Some("sender-thread"),
+            "notify body",
+            "message-queued-active",
+        )
+        .unwrap();
+        assert_eq!(receipt["queuedSubmission"]["id"], "queue-queued-active");
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn queued_notify_starts_idle_thread_with_turn_start() {
+        let socket = temp_socket("queued-notify-idle");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
+            let start = next_request(&mut stream);
+            assert_eq!(start["method"], "turn/start");
+            assert_eq!(start["params"]["threadId"], "thread-1");
+            assert_eq!(
+                start["params"]["clientUserMessageId"],
+                "message-queued-idle"
+            );
+            respond(
+                &mut stream,
+                json!({
+                    "id": start["id"],
+                    "result": {
+                        "turn": {"id": "turn-queued-idle", "status": "inProgress", "items": []}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let receipt = queued_notify(
+            &selected_transport(&socket),
+            None,
+            "notify body",
+            "message-queued-idle",
+        )
+        .unwrap();
+        assert_eq!(receipt["turn"]["id"], "turn-queued-idle");
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
     }

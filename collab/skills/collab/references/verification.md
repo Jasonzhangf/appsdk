@@ -37,7 +37,7 @@ Before review, prove the affected subset and every changed invariant:
   lease and records one accepted tmux submission; paste/Enter success proves
   only input submission, while `collab recv` and its durable receipt prove
   consumption;
-- successful resource/deadline/async-result delivery consumes exactly one
+- successful resource/deadline delivery consumes exactly one
   matching one-shot subscription;
 - release clears obsolete wait state and does not wake an unsubscribed Agent;
 - no daemon-generated periodic continuation, inferred waiting, progress/ACK

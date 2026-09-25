@@ -908,7 +908,7 @@ or asynchronous-result notices. Never type peer messages into a terminal. After 
 receiving Agent registers a finite subscription, the daemon may send one id,
 abbreviated subject, safe one-line original body preview, and final submit as
 one App Server immediate turn submission. The direct-message lease is reusable
-until expiry; resource, deadline, and async-result subscriptions remain one-shot.
+until expiry; resource and deadline subscriptions remain one-shot.
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a
 registered App Server thread becomes unavailable; mailbox state remains
@@ -987,14 +987,16 @@ impl Scope {
         host_paths: &HostPaths,
         worker_id: Option<String>,
     ) -> anyhow::Result<Self> {
+        // A live Codex session/thread is the authoritative route key. The
+        // tmux pane is only a last-resort recovery anchor when both Codex
+        // runtime IDs are absent, so a tmux-hosted TUI must not prefer the
+        // pane route over its native thread.
+        if std::env::var_os("CODEX_THREAD_ID").is_some() {
+            return Self::resolve_from_cwd_without_thread(cwd, host_paths, worker_id);
+        }
         if std::env::var_os("TMUX_PANE").is_some() {
             let route = route_for_tmux_pane(host_paths)?;
             return Ok(Scope { root: route.root });
-        }
-        if std::env::var_os("CODEX_THREAD_ID").is_some() {
-            anyhow::bail!(
-                "TMUX_ENDPOINT_MISSING: run this peer command from its registered tmux pane; only init, daemon lifecycle, and worker recover are pane-free"
-            );
         }
         Self::resolve_from_cwd_without_thread(cwd, host_paths, worker_id)
     }

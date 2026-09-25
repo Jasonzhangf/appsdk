@@ -1,8 +1,11 @@
 # AppSDK Collab tmux 通信闭环实施计划
 
-状态：执行中（候选实现尚未验收）
+状态：历史方案，已被 2026-09-24 Codex TUI 原生 AppServer 实验修正
+当前架构与后续实施计划：[`Codex TUI native communication and sensing`](../codex-tui-collab-architecture.md)
 基线：`origin/main` / `2792ff58c0f387727996b5ebbaabded83a231e1f`
 实现 worktree：`playground/collab-tmux-goal-20260923`
+
+本文件记录当时的 tmux-only 方案、验证与实现历史，不再是当前目标架构。实验已证明共享 AppServer owner 下两个独立 Codex TUI 可以通过原生 RPC 通信与读取 thread/turn/queue 状态；AppSDK 后续改造应采用新架构文档列出的 RPC-first DAG。tmux 可承载 TUI 并提供辅助 pane 锚点，但本实验未证明跨 AppServer owner 路由，也未证明 TUI 输出等价于 Collab mailbox 消费 ACK。
 
 ## 目标与边界
 

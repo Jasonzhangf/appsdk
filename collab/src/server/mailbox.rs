@@ -17,11 +17,10 @@ pub const MAX_ACTIVE_SUBSCRIPTIONS_PER_WORKER: usize = 3;
 // Keepalive uses this as its idle-episode cadence. Automatic notification
 // retry eligibility is event-policy-driven below and must not use this value.
 pub(super) const AUTOMATIC_BATCH_WINDOW_MS: i64 = 120_000;
-pub const NOTIFICATION_EVENTS: [&str; 5] = [
+pub const NOTIFICATION_EVENTS: [&str; 4] = [
     "direct-message",
     "resource-released",
     "deadline",
-    "async-result",
     "master-idle",
 ];
 pub const DEFAULT_DIRECT_MESSAGE_TTL_SECONDS: u64 = MAX_NOTIFICATION_TTL_SECONDS;
@@ -138,10 +137,12 @@ pub fn notification_text(message: &Message) -> Option<String> {
 }
 
 pub fn is_explicit_delivery_mode(state: &State, message: &Message) -> bool {
-    state
-        .delivery_modes
-        .get(&message.id)
-        .is_some_and(|mode| mode == "explicit-notification")
+    state.delivery_modes.get(&message.id).is_some_and(|mode| {
+        matches!(
+            mode.as_str(),
+            "explicit-notification" | "immediate" | "queued"
+        )
+    })
 }
 
 pub fn is_explicit_notification(state: &State, message: &Message) -> bool {

@@ -44,7 +44,7 @@ fn tools() -> Value {
         tool(
             "collab_sendmessage",
             "Persist an explicit peer notification with a required short subject and original body preview; the recipient is woken only through its own active direct-message subscription.",
-            json!({"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}}),
+            json!({"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"},"delivery":{"type":"string","enum":["immediate","queued"],"default":"immediate"}}),
             &["to", "subject", "body"]
         ),
         tool(
@@ -56,7 +56,7 @@ fn tools() -> Value {
         tool(
             "collab_notify_subscribe",
             "Register one owner-scoped finite subscription; deadline uses either absolute at_ms values or a periodic interval, master-idle uses a recurring 15- or 60-minute interval for the live master, and at most three active subscriptions are allowed per Agent.",
-            json!({"event":{"type":"string","enum":["direct-message","resource-released","deadline","async-result","master-idle"]},"subject":{"type":"string"},"at_ms":{"type":"array","items":{"type":"integer"}},"every_ms":{"type":"integer","minimum":1},"trigger_ms":{"type":"integer"},"repeat_count":{"type":"integer","minimum":1,"maximum":100},"ttl_seconds":{"type":"integer","minimum":1}}),
+            json!({"event":{"type":"string","enum":["direct-message","resource-released","deadline","master-idle"]},"subject":{"type":"string"},"at_ms":{"type":"array","items":{"type":"integer"}},"every_ms":{"type":"integer","minimum":1},"trigger_ms":{"type":"integer"},"repeat_count":{"type":"integer","minimum":1,"maximum":100},"ttl_seconds":{"type":"integer","minimum":1}}),
             &["event", "ttl_seconds"]
         ),
         tool(
@@ -259,6 +259,9 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 required(args, "subject")?,
                 required(args, "body")?,
             ]);
+            if let Some(delivery) = args.get("delivery").and_then(Value::as_str) {
+                argv.extend(["--delivery".into(), delivery.to_string()]);
+            }
         }
         "collab_notify_methods" => argv.extend(["notify".into(), "methods".into()]),
         "collab_notify_subscribe" => {
@@ -693,10 +696,14 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "collab_notify_subscribe")
             .unwrap();
-        assert!(subscribe["inputSchema"]["properties"]["event"]["enum"]
+        let events = subscribe["inputSchema"]["properties"]["event"]["enum"]
             .as_array()
-            .unwrap()
-            .contains(&json!("master-idle")));
+            .unwrap();
+        assert!(events.contains(&json!("master-idle")));
+        assert!(events.contains(&json!("direct-message")));
+        assert!(events.contains(&json!("resource-released")));
+        assert!(events.contains(&json!("deadline")));
+        assert!(!events.contains(&json!("async-result")));
     }
 
     #[test]

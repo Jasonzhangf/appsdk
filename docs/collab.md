@@ -21,31 +21,42 @@ tokens, mixed runtime writes, and guessing thread identity are deprecated.
 
 ## Runtime boundary
 
-- Every peer registration is admitted by the server after transport
-  self-check. App Server is the only supported transport; a registration that
-  cannot verify a live native route fails explicitly.
+- Current-source status (2026-09-24, in-progress candidate): production Collab
+  now prefers a verified AppServer RPC registration and routes notification
+  through the owning AppServer; tmux remains only a last-resort recovery anchor.
+  The remaining implementation and live acceptance record lives in
+  [Codex TUI native communication and sensing](codex-tui-collab-architecture.md).
+- Target contract: peer registration is admitted by the daemon after checking
+  one composite runtime candidate. Codex AppServer RPC is the only communication
+  and state-sensing transport. tmux is only a last-resort identity recovery
+  anchor when both runtime IDs are absent; it never carries messages or proves
+  presence. Private in-process AppServers are not externally reachable, so a
+  native RPC registration requires an explicit shared endpoint and fails closed
+  when the endpoint owner cannot prove the peer thread.
 - Registration creates or refreshes one reusable default `direct-message`
-  lease with a bounded 600-second TTL; inspect its current status and expiry
-  with `collab notify status`.
-- App Server delivery means the native thread accepted a bounded `turn/start`
-  or `turn/steer`; it is not execution, read, or reply.
+  lease with the daemon's finite default TTL; inspect its current status and
+  expiry with `collab notify status`.
+- AppServer acceptance means the native thread accepted a bounded RPC; it is
+  not target consumption. Target ACK/completion evidence is a separate state.
 - Server state, journal, and mailbox are durable truth; a failed wake cannot
   roll back state or fabricate success.
 - The runtime is part of the worker identity boundary, not a task preference.
 
-## Closed DAG
+## Target DAG (wiring in progress)
 
-The runtime is a directed acyclic graph. A peer identity is bound to the
-canonical project root, the host sessionID, and the App Server threadID. A
-Git worktree is only a task execution directory; it is not an identity context
-and cannot select or reuse the main route. Terminal, model name, and mailbox
-are not identity keys.
+This diagram describes the intended flow. Production AppServer RPC registration
+and notification are wired in the current candidate; see the architecture audit
+linked above for the still-open dual-TUI live acceptance. The target identity can be restored from a unique verified
+session ID, thread ID, or (only when both runtime IDs are unavailable) the full
+validated pane tuple, always within the same project and persisted AppServer
+owner. A Git worktree is only a task execution directory; terminal, model name,
+and mailbox are not identity keys.
 
 ```mermaid
 flowchart TB
-  host["identity facts<br/>sessionId + threadId + canonical cwd"] --> candidate["registration candidate<br/>endpoint + namespace"]
+  host["runtime identity observations<br/>sessionId / threadId / validated pane anchor + canonical cwd"] --> candidate["registration candidate<br/>AppServer owner/endpoint + available anchors"]
   candidate --> selfcheck["server transport self-check<br/>loaded + identity match"]
-  selfcheck --> binding["durable runtime binding<br/>identity + runtimeId + generation + triple key"]
+  selfcheck --> binding["durable runtime binding<br/>identity + runtimeId + generation + runtime binding key"]
   binding --> route["durable current thread route"]
   route --> live["live peer route"]
   live --> peer["peer identity<br/>role=peer by default"]
@@ -71,10 +82,12 @@ flowchart TB
 The graph is closed only when every edge has a durable fact and an explicit
 failure state:
 
-- **Identity and route:** `(sessionId, threadId, canonical project root)` is
-  verified by the host and App Server, persisted in the runtime binding, and
-  required for route resolution. A worktree path, process memory, and the
-  current model name never select or rewrite identity.
+- **Identity and route (target):** the preferred native route key is the
+  verified `(sessionId, threadId, AppServer owner, canonical project root)`.
+  Recovery first uses current runtime IDs and the owning AppServer. If both
+  runtime IDs are unavailable, it may use the complete live pane tuple as the
+  last recovery anchor. A worktree path, process memory, or current model name
+  never selects or rewrites identity; no ID is inferred from another.
 - **Rebind:** replacing a binding's `(sessionId, threadId)` writes a durable
   tombstone for the old pair before the new route becomes current. The
   canonical project root remains part of the identity contract; a different
@@ -95,7 +108,7 @@ failure state:
   authority.
 - **Notification:** the durable mailbox is the loss-recovery record, not the
   timely transport. A notification edge closes only after a live subscription,
-  one durable attempt, selected-transport acceptance, and `recv` consumption
+  one durable attempt, AppServer RPC acceptance, and `recv` consumption
   (or an explicit receipt where the contract allows one). `subscribed-not-sent`,
   `unknown`, `absent`, `thread-lost`, and `identity-mismatch` are explicit
   failures, never mailbox-only success.
@@ -113,25 +126,28 @@ route, binding, task, or mailbox JSON by hand.
 
 | Failure | Required recovery |
 | --- | --- |
-| Missing `sessionId`, `threadId`, or canonical cwd | Obtain and verify all three host facts, then explicitly rebind the same identity and persisted `runtimeId`; never synthesize one key from another. A first registration may derive `runtimeId` once, but a rebind must reuse the registered value. |
-| Triple-key mismatch | Preserve the old binding and return `SESSION_THREAD_BINDING_MISMATCH` or `ROUTE_RESOLVE_INVALID`; fix the host binding and re-register from the canonical project root without creating a replacement identity. |
+| Missing `sessionId` or `threadId` | Use the runtime ID evidence that is present only if it uniquely resolves the same persisted peer and AppServer owner; when both runtime IDs are unavailable, try the complete validated pane tuple. Canonical project scope must still match. Never synthesize one key from another. |
+| Runtime binding key mismatch | Preserve the old binding and return `SESSION_THREAD_BINDING_MISMATCH` or `ROUTE_RESOLVE_INVALID`; fix the host binding and re-register from the canonical project root without creating a replacement identity. |
 | Old address is tombstoned | Read `reboundTo`, use the current `(sessionId, threadId)`, and never revive the old route. |
 | Host route commit outcome is uncertain | Preserve both journals, restart the affected daemon from the reviewed AppSDK main binary, and replay. Do not guess which journal won. |
 | Registration publishes worker/route facts but the host route fails | When the failure is definite, restore the exact previous `WorkerRec.transport`, all notification subscriptions owned by that worker, runtime binding, and master grant. For a first registration, remove the failed worker and its subscriptions. Keep the new state only when publication is ambiguous and replay resolves it. The old thread must remain resolvable or the operation must fail with an explicit recovery instruction. |
-| A legacy binding has only `threadId` | Replay fails closed with `SESSION_THREAD_BINDING_MIGRATION_REQUIRED` and the affected identity/thread. Obtain the host `sessionId`, then perform an explicit rebind of the same identity and persisted `runtimeId`; never infer the session from the thread or edit the journal. |
+| A legacy binding has only `threadId` | The owning AppServer may recover it only when `threadId` uniquely resolves the same persisted peer in the same project and `thread/read` verifies the owner/thread. If owner or uniqueness cannot be proven, fail closed with `SESSION_THREAD_BINDING_MIGRATION_REQUIRED`, obtain the live session ID, then explicitly rebind the same identity and persisted `runtimeId`; never infer session ID from thread ID or edit the journal. |
 | A worktree-local `.agent-collab/` is missing | This is normal. Run `collab context` and `collab master status` from the canonical project main tree; do not initialize, register, or resolve identity from the worktree. |
-| A legacy master record has no live route | Treat it as non-live. Do not transfer or infer master authority; require the explicit promotion/delegation path. |
+| A legacy master record has no live route | Treat it as non-live unless one verified runtime or last-resort pane anchor recovers the exact same persisted principal and no other live master exists; then restore only that existing grant. Without such an anchor, do not infer or restore authority; require the explicit user-approved promotion/delegation path. |
 | Only a mailbox copy exists | Keep it as durable recovery data, but do not claim transport delivery or consumption. Restore a live route and replay one bounded notification. |
 | Task worktree was already removed | Inspect the durable cleanup receipt and branch ancestry. If cleanup is unproven, keep the task in the explicit cleanup/force-close path; never mark it closed by assertion. |
 
 ## Session and thread recovery
 
-An App Server registration carries three distinct verified facts: the
-host-provided `sessionId`, the native App Server `threadId`, and the canonical
-project cwd. They are persisted together in the runtime binding and must all
-match during route resolution. Missing, empty, or mismatched values fail
-closed; no key may be inferred from another, from a model name, or from
-historical routes.
+The target AppServer registration carries the host-provided `sessionId`, the
+native AppServer `threadId`, the AppServer owner/endpoint, and canonical
+project cwd, with an optional verified tmux recovery tuple. Persist them in one
+binding/receipt. Normal RPC route resolution requires the exact endpoint,
+thread, session, and project match. Context recovery may resolve by one
+available runtime ID only when it uniquely identifies that same binding; use
+the fully validated pane tuple only when neither runtime ID is available. Any
+conflicting evidence fails closed; no key may be inferred from another, a
+model name, or historical routes.
 
 When a session or thread changes, the peer performs an explicit rebind with the
 same stable identity, `bindingId`, and persisted `runtimeId`; only the
@@ -146,8 +162,9 @@ matched, not inferred from a worktree.
 
 Recovery errors are actionable and must not be repaired by hand:
 
-- missing `sessionId` or `threadId`: obtain and verify both from the host, then
-  rebind the same identity;
+- missing one or both runtime IDs: use the remaining ID only if it uniquely
+  resolves the registered owner; if neither is available, use the validated
+  pane tuple as the final recovery anchor; otherwise fail closed;
 - mismatched pair: preserve the old binding, fix the host binding, and
   re-register; never overwrite the old binding or create a replacement
   identity;
@@ -179,6 +196,11 @@ Recovery errors are actionable and must not be repaired by hand:
   peer's task. Independent peers may temporarily decline a master
   collaboration invite to protect their own task; managed subagents must obey
   the master.
+- If a previously granted master has no live route, identity recovery may
+  restore the same persisted grant only after one of the verified runtime or
+  last-resort pane anchors resolves that exact principal, and only while no
+  other live master exists. Recovery never creates a new grant or supersedes a
+  live master.
 - Each peer self-registers one task and owns its full worktree, test,
   integration, main verification, push, cleanup, and resource lifecycle.
 - Task owner, resource holder, integration lease, and daemon operator are
@@ -239,15 +261,20 @@ delegation and interactive task recognition are intentionally deferred.
 
 On a notification, use its id and abbreviated subject to weigh urgency against
 the current task. Query durable state before acting when the notice is relevant.
-`collab sendmessage` requires `--subject` and accepts only explicit coordination
-or asynchronous-result notices. Never type peer messages directly; the daemon
-sends through the selected transport. After the receiving Agent registers a
-finite subscription, the daemon may send one id,
-abbreviated subject, safe one-line original body preview, and final submit key
-as one submit through the server-selected transport. App Server uses
-`turn/start`, or `turn/steer` when exactly one `inProgress` turn is active. The
-direct-message lease is reusable until expiry; resource, deadline, and
-async-result subscriptions remain one-shot.
+`collab sendmessage` requires `--subject` and accepts explicit coordination
+messages. Target only; not wired at baseline `7908aab`: the delivery request
+will have a typed `delivery` mode: `immediate`
+starts an idle thread or steers exactly one active turn; `queued` queues behind
+one active turn and starts when idle. Subscription-produced notices use
+`immediate`. The native RPC response means accepted, not consumed. A target
+`collab recv` receipt is required to mark the durable mailbox message consumed;
+cancelled/failed turns leave it unread. The direct-message lease is reusable
+until expiry; resource-release and deadline subscriptions remain one-shot.
+At baseline `7908aab`, `async-result` was accepted without an executable
+producer; its removal is verified in companion candidate
+`codex/collab-dag-close-20260924` and is a prerequisite for the RPC-first
+integration. Full source audit and implementation plan:
+[Codex TUI native communication and sensing](codex-tui-collab-architecture.md).
 
 `collab inbox` and `collab msg <id>` query the durable local mailbox after a
 transport is unavailable; mailbox state remains authoritative.

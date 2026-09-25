@@ -412,13 +412,7 @@ impl Config {
             bail!("notifications.submit_enter must remain true for App Server delivery");
         }
         for (event, policy) in &n.events {
-            if ![
-                "direct_message",
-                "resource_released",
-                "async_result",
-                "deadline",
-            ]
-            .contains(&event.as_str())
+            if !["direct_message", "resource_released", "deadline"].contains(&event.as_str())
                 || !["inherit", "immediate", "batch"].contains(&policy.mode.as_str())
             {
                 bail!("invalid notification event policy: {event}");
@@ -544,6 +538,16 @@ mod tests {
             assert!(parse(s, Path::new("/project")).is_err());
         }
     }
+
+    #[test]
+    fn rejects_unproduced_async_result_notification_policy() {
+        assert!(parse(
+            "[notifications.events.async_result]\nmode = 'immediate'",
+            Path::new("/project")
+        )
+        .is_err());
+    }
+
     #[test]
     fn writes_default_runtime_into_subagent_table() {
         let added = insert_subagent_runtime("[subagent]\npersistent = true\n").unwrap();

@@ -672,8 +672,6 @@ Use subscriptions only when this Agent wants a later event to wake it:
 ```sh
 collab notify subscribe --event resource-released --subject <resource-id> \
   --ttl-seconds <bounded>
-collab notify subscribe --event async-result --subject <operation-id> \
-  --ttl-seconds <bounded>
 collab notify subscribe --event deadline --subject <timer-id> \
   --ttl-seconds <bounded>
 ```

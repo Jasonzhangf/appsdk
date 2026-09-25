@@ -113,6 +113,26 @@ pub fn resolve_route(
     validate_route_resolution(route, session_id, native_thread_id)
 }
 
+/// Round-trip a native App Server route resolution with the live daemon.
+///
+/// Unlike a persisted `routes.jsonl` entry, this proves the currently running
+/// daemon still owns the requested session/thread pair before a persisted
+/// identity is reused.
+pub fn resolve_native_route(
+    sock: &Path,
+    session_id: &str,
+    native_thread_id: &str,
+) -> anyhow::Result<RouteResolution> {
+    let route: RouteResolution = call(
+        sock,
+        &Req::RouteResolveNative {
+            session_id: session_id.to_owned(),
+            native_thread_id: native_thread_id.to_owned(),
+        },
+    )?;
+    validate_route_resolution(route, session_id, native_thread_id)
+}
+
 fn validate_route_resolution(
     route: RouteResolution,
     session_id: &str,
@@ -815,6 +835,45 @@ mod tests {
 
         let endpoint = route_test_endpoint("$1", "%1");
         let error = resolve_route(&fixture.socket(), &endpoint).unwrap_err();
+        assert!(
+            error.to_string().contains("ROUTE_RESOLVE_INVALID"),
+            "{error}"
+        );
+        responder.join().expect("route responder");
+    }
+
+    #[test]
+    fn resolve_native_route_rejects_thread_mismatch() {
+        let fixture = TempServerDir::new("native-route-thread-mismatch");
+        let listener = UnixListener::bind(fixture.socket()).expect("bind route response");
+        let responder = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept route request");
+            let mut line = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .expect("read route request");
+            assert!(line.contains("\"op\":\"RouteResolveNative\""));
+            assert!(line.contains("\"session_id\":\"session-1\""));
+            assert!(line.contains("\"native_thread_id\":\"thread-1\""));
+            let root = env!("CARGO_MANIFEST_DIR");
+            let response = json!({
+                "ok": true,
+                "app_scope_id": "appserver-1",
+                "project_scope": root,
+                "canonical_root": root,
+                "storage_root": root,
+                "agent_id": "agent-1",
+                "binding_id": "binding-1",
+                "endpoint_generation": 7,
+                "session_id": "session-1",
+                "native_thread_id": "thread-other"
+            });
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write route response");
+        });
+
+        let error = resolve_native_route(&fixture.socket(), "session-1", "thread-1").unwrap_err();
         assert!(
             error.to_string().contains("ROUTE_RESOLVE_INVALID"),
             "{error}"

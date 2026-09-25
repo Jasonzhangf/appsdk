@@ -182,7 +182,7 @@ enum Cmd {
         r#type: String,
         #[arg(long)]
         in_reply_to: Option<String>,
-        #[arg(long, default_value = "immediate", hide = true)]
+        #[arg(long, default_value = "immediate")]
         delivery: String,
         #[arg(trailing_var_arg = true)]
         body: Vec<String>,
@@ -557,11 +557,9 @@ fn register_with_runtime(
             token: ident.token.clone(),
             cwd,
             candidates: Some(proto::TransportCandidates {
-                appserver: None,
-                tmux: Some(
-                    crate::client::adapters::tmux::candidate_from_env()
-                        .map_err(anyhow::Error::msg)?,
-                ),
+                appserver: crate::client::adapters::candidate_from_env()
+                    .map_err(anyhow::Error::msg)?,
+                tmux: crate::client::adapters::tmux::candidate_from_env().ok(),
             }),
         },
         &scope.root,
@@ -668,16 +666,39 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
         // restart or re-registration the running daemon may hold no route for
         // this address even though the file still lists one.  Reuse is only
         // valid when the live daemon resolves the same session/thread.
-        let Some(endpoint) = ident
-            .transport
-            .as_ref()
-            .filter(|transport| transport.kind == crate::proto::TransportKind::Tmux)
-            .and_then(|transport| transport.tmux_endpoint.as_ref())
-        else {
-            return Ok(false);
-        };
-        let resolved = client::resolve_route(&scope.sock_path(), endpoint);
-        Ok(resolved.is_ok())
+        match ident.transport.as_ref() {
+            Some(transport) if transport.kind == crate::proto::TransportKind::Tmux => {
+                let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+                    return Ok(false);
+                };
+                Ok(client::resolve_route(&scope.sock_path(), endpoint).is_ok())
+            }
+            Some(transport) if transport.kind == crate::proto::TransportKind::AppServer => {
+                let (Some(session), Some(thread)) = (
+                    runtime
+                        .session_id
+                        .as_ref()
+                        .map(crate::identity::SessionId::as_str),
+                    runtime
+                        .native_thread_id
+                        .as_ref()
+                        .map(crate::identity::NativeThreadId::as_str),
+                ) else {
+                    return Ok(false);
+                };
+                if transport.thread_id.as_deref() != Some(thread)
+                    || transport.session_id.as_deref() != Some(session)
+                {
+                    return Ok(false);
+                }
+                // The persisted route file is not live truth: after a daemon
+                // restart or re-registration the running daemon may hold no
+                // route for this address. Reuse is only valid when the live
+                // daemon resolves the same session/thread.
+                Ok(client::resolve_native_route(&scope.sock_path(), session, thread).is_ok())
+            }
+            _ => Ok(false),
+        }
     })
 }
 
@@ -715,45 +736,80 @@ fn registered_runtime_projection(
         anyhow::bail!("registered daemon PID is zero");
     }
     let project_root = std::fs::canonicalize(&scope.root)?;
-    if transport.kind != crate::proto::TransportKind::Tmux {
-        anyhow::bail!("TRANSPORT_UNSUPPORTED: registered runtime requires tmux");
+    match transport.kind {
+        crate::proto::TransportKind::Tmux => {
+            let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("registered tmux transport is missing its endpoint")
+            })?;
+            let expected_session = endpoint
+                .codex_session_id
+                .as_deref()
+                .unwrap_or(&endpoint.tmux_session_id);
+            let expected_thread = endpoint
+                .codex_thread_id
+                .as_deref()
+                .unwrap_or(&endpoint.pane_id);
+            if runtime
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref()
+                != Some(expected_session)
+                || runtime
+                    .native_thread_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    != Some(expected_thread)
+            {
+                anyhow::bail!("registered tmux endpoint does not match its runtime route");
+            }
+            Ok(json!({
+                "runtimeId": runtime.runtime_id,
+                "appserverId": runtime.appserver_id,
+                "transport": "tmux",
+                "tmuxEndpoint": endpoint,
+                "projectRoot": project_root,
+                "capabilities": transport.capabilities,
+                "processId": daemon_pid,
+            }))
+        }
+        crate::proto::TransportKind::AppServer => {
+            let session = transport.session_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("registered App Server transport is missing its session id")
+            })?;
+            let thread = transport.thread_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("registered App Server transport is missing its thread id")
+            })?;
+            if runtime
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref()
+                != Some(session)
+                || runtime
+                    .native_thread_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    != Some(thread)
+            {
+                anyhow::bail!("registered App Server transport does not match its runtime route");
+            }
+            Ok(json!({
+                "runtimeId": runtime.runtime_id,
+                "appserverId": runtime.appserver_id,
+                "transport": "appserver",
+                "endpoint": transport.endpoint,
+                "namespace": transport.namespace,
+                "sessionId": session,
+                "threadId": thread,
+                "projectRoot": project_root,
+                "capabilities": transport.capabilities,
+                "processId": daemon_pid,
+            }))
+        }
     }
-    let endpoint = transport
-        .tmux_endpoint
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("registered tmux transport is missing its endpoint"))?;
-    let expected_session = endpoint
-        .codex_session_id
-        .as_deref()
-        .unwrap_or(&endpoint.tmux_session_id);
-    let expected_thread = endpoint
-        .codex_thread_id
-        .as_deref()
-        .unwrap_or(&endpoint.pane_id);
-    if runtime
-        .session_id
-        .as_ref()
-        .map(ToString::to_string)
-        .as_deref()
-        != Some(expected_session)
-        || runtime
-            .native_thread_id
-            .as_ref()
-            .map(ToString::to_string)
-            .as_deref()
-            != Some(expected_thread)
-    {
-        anyhow::bail!("registered tmux endpoint does not match its runtime route");
-    }
-    Ok(json!({
-        "runtimeId": runtime.runtime_id,
-        "appserverId": runtime.appserver_id,
-        "transport": "tmux",
-        "tmuxEndpoint": endpoint,
-        "projectRoot": project_root,
-        "capabilities": transport.capabilities,
-        "processId": daemon_pid,
-    }))
 }
 
 fn call_project<T: DeserializeOwned>(
@@ -4727,7 +4783,7 @@ mod tests {
     }
 
     #[test]
-    fn init_runtime_projection_requires_tmux_and_matches_host_registry_contract() {
+    fn init_runtime_projection_accepts_appserver_and_tmux_hosts() {
         let root = test_root("runtime-projection");
         let runtime = RuntimeIdentity {
             agent_id: identity::AgentId::new("worker-1").unwrap(),
@@ -4749,10 +4805,13 @@ mod tests {
             capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
             self_check: "test appserver".into(),
         });
-        let error = registered_runtime_projection(&Scope { root: root.clone() }, &identity, 4242)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("TRANSPORT_UNSUPPORTED"), "{error}");
+        let projection =
+            registered_runtime_projection(&Scope { root: root.clone() }, &identity, 4242).unwrap();
+        assert_eq!(projection["transport"], "appserver");
+        assert_eq!(projection["threadId"], "thread-1");
+        assert_eq!(projection["sessionId"], "session-1");
+        assert_eq!(projection["endpoint"], "unix:///tmp/codex.sock");
+        assert_eq!(projection["processId"], 4242);
         identity.transport = Some(SelectedTransport {
             kind: TransportKind::Tmux,
             endpoint: Some("/tmp/tmux-test.sock".into()),
@@ -4828,6 +4887,100 @@ mod tests {
             lines: 40,
         })
         .is_none());
+    }
+
+    #[test]
+    fn persisted_appserver_binding_requires_live_native_route_resolution() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+        let root = test_root("registration-appserver-live");
+        // The daemon socket lives in the state root, so keep that path short
+        // enough for `sockaddr_un`.
+        let state_root = std::env::temp_dir().join(format!(
+            "cs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+        set_current_session_thread("thread-1", "session-1");
+        let route = json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": identity::CLI_APP_SERVER_ID,
+            "project_scope": root.canonicalize().unwrap(),
+            "canonical_root": root.canonicalize().unwrap(),
+            "storage_root": root.canonicalize().unwrap(),
+            "registered_ms": 1
+        });
+        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+        let runtime = RuntimeIdentity {
+            agent_id: identity::AgentId::new("worker-1").unwrap(),
+            runtime_id: identity::RuntimeId::new("runtime-live-1").unwrap(),
+            appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+            endpoint_generation: 1,
+            binding_id: identity::BindingId::new("binding-live-1").unwrap(),
+            session_id: Some(identity::SessionId::new("session-1").unwrap()),
+            native_thread_id: Some(identity::NativeThreadId::new("thread-1").unwrap()),
+        };
+        let mut identity = identity_with_runtime(Some(runtime));
+        identity.project_scope = Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        );
+        identity.transport = Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("session-1".into()),
+            thread_id: Some("thread-1".into()),
+            tmux_endpoint: None,
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        });
+
+        let socket = Scope { root: root.clone() }.sock_path();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let responder = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], "RouteResolveNative");
+            assert_eq!(request["session_id"], "session-1");
+            assert_eq!(request["native_thread_id"], "thread-1");
+            let response = json!({
+                "ok": true,
+                "app_scope_id": identity::CLI_APP_SERVER_ID,
+                "project_scope": root_string,
+                "canonical_root": root_string,
+                "storage_root": root_string,
+                "agent_id": "worker-1",
+                "binding_id": "binding-live-1",
+                "endpoint_generation": 1,
+                "session_id": "session-1",
+                "native_thread_id": "thread-1"
+            });
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+        });
+
+        assert!(persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap());
+        responder.join().unwrap();
+        clear_current_session_thread();
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

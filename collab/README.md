@@ -217,7 +217,6 @@ collab notify subscribe --event direct-message --ttl-seconds 600
 collab notify subscribe --event resource-released --subject <task-id> --ttl-seconds 3600
 collab notify subscribe --event deadline --subject <timer-id> --at-ms <epoch-ms> --ttl-seconds 3600
 collab notify subscribe --event deadline --subject <timer-id> --every-ms 900000 --repeat-count 3 --ttl-seconds 3600
-collab notify subscribe --event async-result --subject <operation-id> --ttl-seconds 3600
 collab notify status
 collab notify unsubscribe <subscription-id>
 collab context
@@ -231,7 +230,7 @@ finite `--repeat-count` from 1 through 100. These modes are mutually exclusive.
 The final delivery says it is the last reminder and instructs the Agent to
 explicitly subscribe again; no automatic rearm exists. The default
 `direct-message` lease accepts later peer messages until expiry; resource,
-deadline, and async-result event matching remains owner-scoped and finite.
+deadline event matching remains owner-scoped and finite.
 App Server receives `COLLAB_NOTIFY <message-id> [<subject>]
 <original-body-preview>` through the registered native thread. The Agent first
 weighs the id and subject against current work. When it selects the notice, it runs

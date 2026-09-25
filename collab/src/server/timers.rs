@@ -439,7 +439,7 @@ mod tests {
                         self_check: "test appserver".into(),
                     })
                 }),
-                appserver_notification_sink: Arc::new(|_, _, _, _, _| {
+                appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
                     Ok(serde_json::json!({"accepted": true}))
                 }),
                 appserver_thread_status: Arc::new(|_, thread_id| {
@@ -1372,7 +1372,7 @@ mod tests {
         Arc::get_mut(&mut server)
             .unwrap()
             .appserver_notification_sink =
-            Arc::new(|_, _, _, _, _| Err("test sink rejected".into()));
+            Arc::new(|_, _, _, _, _, _| Err("test sink rejected".into()));
         register(&server, "owner");
         let subscription_id = subscribe(&server, "owner", "direct-message", None, None);
         let message_id = bind_message_with_type(
@@ -1709,7 +1709,7 @@ mod tests {
             let delivered = Arc::clone(&delivered);
             Arc::get_mut(&mut server)
                 .expect("unique test server")
-                .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit| {
+                .appserver_notification_sink = Arc::new(move |_, _, text, _, explicit, _mode| {
                 delivered.lock().unwrap().push((explicit, text.to_string()));
                 Ok(serde_json::json!({"accepted": true}))
             });
@@ -1749,7 +1749,7 @@ mod tests {
         Arc::get_mut(&mut server).unwrap().config.notifications.mode = "immediate".into();
         Arc::get_mut(&mut server)
             .unwrap()
-            .appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+            .appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
             Err("ADAPTER_UNKNOWN: native frame exceeds maximum size".into())
         });
         register_master(&server);

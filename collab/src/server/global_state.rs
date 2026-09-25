@@ -1811,8 +1811,27 @@ impl GlobalState {
     }
 
     pub fn lookup_tmux_route(&self, endpoint: &TmuxEndpoint) -> Option<&RuntimeBinding> {
-        self.current_thread_routes
-            .get(&tmux_route_address(endpoint))
+        if let Some(binding) = self
+            .current_thread_routes
+            .get(&tmux_route_address_for_lookup(endpoint))
+        {
+            return Some(binding);
+        }
+        // Pane-only recovery may carry no Codex session/thread IDs.  An App
+        // Server route stores those native IDs on the binding while keeping
+        // the full pane tuple as the last-resort recovery anchor, so a direct
+        // native-key lookup misses it.  Only scan when the caller is pane-only
+        // and there is exactly one matching pane, otherwise fail closed.
+        if endpoint.codex_session_id.is_none() && endpoint.codex_thread_id.is_none() {
+            let mut matches = self.current_thread_routes.values().filter(|binding| {
+                binding.tmux_endpoint.as_ref().is_some_and(|persisted| {
+                    crate::client::adapters::tmux::same_pane_route(persisted, endpoint)
+                })
+            });
+            let binding = matches.next()?;
+            return matches.next().is_none().then_some(binding);
+        }
+        None
     }
 
     pub fn lookup_tmux_route_tombstone(
@@ -1820,7 +1839,7 @@ impl GlobalState {
         endpoint: &TmuxEndpoint,
     ) -> Option<&RuntimeBindingTombstone> {
         self.current_thread_route_tombstones
-            .get(&tmux_route_address_key(endpoint))
+            .get(&tmux_route_address_key_for_lookup(endpoint))
     }
 
     /// Read-only fallback candidates for a durable thread-only binding.
@@ -2712,15 +2731,17 @@ fn current_thread_route_address(
     native_thread_id: &NativeThreadId,
     tmux_endpoint: Option<&TmuxEndpoint>,
 ) -> (String, String) {
-    tmux_endpoint.map_or_else(
-        || {
-            (
-                session_id.as_str().to_owned(),
-                native_thread_id.as_str().to_owned(),
-            )
-        },
-        tmux_route_address,
-    )
+    match tmux_endpoint {
+        Some(endpoint)
+            if endpoint.codex_session_id.is_none() && endpoint.codex_thread_id.is_none() =>
+        {
+            tmux_route_address(endpoint)
+        }
+        _ => (
+            session_id.as_str().to_owned(),
+            native_thread_id.as_str().to_owned(),
+        ),
+    }
 }
 
 fn tmux_route_address(endpoint: &TmuxEndpoint) -> (String, String) {
@@ -2743,6 +2764,13 @@ fn tmux_route_address(endpoint: &TmuxEndpoint) -> (String, String) {
     )
 }
 
+fn tmux_route_address_for_lookup(endpoint: &TmuxEndpoint) -> (String, String) {
+    match (&endpoint.codex_session_id, &endpoint.codex_thread_id) {
+        (Some(session), Some(thread)) => (session.clone(), thread.clone()),
+        _ => tmux_route_address(endpoint),
+    }
+}
+
 fn current_route_address_key(
     session_id: &SessionId,
     native_thread_id: &NativeThreadId,
@@ -2754,6 +2782,11 @@ fn current_route_address_key(
 
 fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
     let address = tmux_route_address(endpoint);
+    format!("{}\0{}", address.0, address.1)
+}
+
+fn tmux_route_address_key_for_lookup(endpoint: &TmuxEndpoint) -> String {
+    let address = tmux_route_address_for_lookup(endpoint);
     format!("{}\0{}", address.0, address.1)
 }
 
@@ -3950,6 +3983,54 @@ mod tests {
         let matches = state.legacy_thread_route_matches(&thread_id);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].endpoint_generation, 5);
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn pane_only_lookup_finds_appserver_binding_by_pane_recovery_anchor() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let thread_id = NativeThreadId::new("thread-pane-only-appserver").unwrap();
+        let mut strict = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-pane-appserver").unwrap(),
+            RuntimeId::new("runtime-pane-appserver").unwrap(),
+            BindingId::new("binding-pane-appserver").unwrap(),
+            1,
+            Some(SessionId::new("session-pane-appserver").unwrap()),
+            Some(thread_id.clone()),
+        )
+        .unwrap();
+        strict.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/collab-pane-appserver.sock".into(),
+            server_pid: 11,
+            tmux_session_id: "$9".into(),
+            pane_id: "%33".into(),
+            pane_pid: 55,
+            codex_session_id: Some("session-pane-appserver".into()),
+            codex_thread_id: Some("thread-pane-only-appserver".into()),
+        });
+        state.bind_runtime(strict.clone()).unwrap();
+        state.set_current_thread_route(strict.clone()).unwrap();
+
+        let pane_only = crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/collab-pane-appserver.sock".into(),
+            server_pid: 11,
+            tmux_session_id: "$9".into(),
+            pane_id: "%33".into(),
+            pane_pid: 55,
+            codex_session_id: None,
+            codex_thread_id: None,
+        };
+        assert_eq!(
+            state.lookup_tmux_route(&pane_only),
+            Some(&strict),
+            "pane-only lookup must find the App Server route's persisted pane recovery anchor"
+        );
         state.validate().unwrap();
     }
 

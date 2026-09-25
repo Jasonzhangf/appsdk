@@ -8,15 +8,11 @@
 //! `RequestEnvelope`; this module never keeps a mutable peer map or derives
 //! scope/role from business payloads.
 
+pub mod codex_app_server;
 pub mod tmux;
 
-#[cfg(test)]
-pub mod codex_app_server;
-
-#[cfg(test)]
 pub use codex_app_server::{candidate_from_env, immediate_notify, verify_candidate};
 
-#[cfg(test)]
 mod legacy {
     use crate::identity::{BindingId, RuntimeIdentity, TurnId};
     use crate::proto::{CommandEnvelope, Req, RequestEnvelope};
@@ -1262,5 +1258,4 @@ mod legacy {
     }
 }
 
-#[cfg(test)]
 pub use legacy::*;

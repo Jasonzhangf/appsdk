@@ -597,7 +597,7 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
             appserver_candidate_check: Arc::new(|candidate| {
                 Ok(test_appserver_transport(&candidate.thread_id))
             }),
-            appserver_notification_sink: Arc::new(|_, _, _, _, _| {
+            appserver_notification_sink: Arc::new(|_, _, _, _, _, _| {
                 Ok(serde_json::json!({"accepted": true}))
             }),
             appserver_thread_status: Arc::new(|_, thread_id| {
@@ -1140,6 +1140,36 @@ fn deadline_subscription_requires_live_master_authority() {
     );
     assert!(accepted.ok, "master should be allowed: {accepted:?}");
     std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn async_result_subscription_is_rejected_without_a_producer() {
+    let (server, root) = test_server();
+    let response = handle_notification_subscribe(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "async-result".into(),
+        Some("operation-1".into()),
+        None,
+        Vec::new(),
+        None,
+        1,
+        3600,
+    );
+
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_deref(),
+        Some("unsupported notification event async-result; expected one of [\"direct-message\", \"resource-released\", \"deadline\", \"master-idle\"]")
+    );
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions
+        .is_empty());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -5088,7 +5118,7 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
     assert_eq!(lease.target, "thread-recipient");
     assert_eq!(lease.status, "armed");
 
-    server.appserver_notification_sink = Arc::new(|transport, _, _, _, _| {
+    server.appserver_notification_sink = Arc::new(|transport, _, _, _, _, _mode| {
         if transport.kind != TransportKind::Tmux {
             return Err("expected tmux wake transport".into());
         }
@@ -8344,8 +8374,9 @@ fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
-    server.appserver_notification_sink =
-        Arc::new(|_, _, _, _, _| Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into()));
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Err("TMUX_ENTER_SUBMIT_FAILED: forced send-keys failure".into())
+    });
 
     let response = handle_send(
         &server,
@@ -8419,7 +8450,7 @@ fn explicit_send_duplicate_after_rejection_retries_the_same_message_once() {
     register(&server, "recipient", "%recipient");
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_for_sink = Arc::clone(&attempts);
-    server.appserver_notification_sink = Arc::new(move |_, _, _, _, _| {
+    server.appserver_notification_sink = Arc::new(move |_, _, _, _, _, _| {
         let attempt = attempts_for_sink.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
             Err(
@@ -8548,7 +8579,7 @@ fn explicit_retry_is_refused_for_an_unknown_original_attempt() {
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
     server.appserver_notification_sink =
-        Arc::new(|_, _, _, _, _| Err("ADAPTER_TIMEOUT: turn/start timed out".into()));
+        Arc::new(|_, _, _, _, _, _| Err("ADAPTER_TIMEOUT: turn/start timed out".into()));
     let first = handle_send(
         &server,
         "sender".into(),
@@ -8593,7 +8624,7 @@ fn explicit_retry_is_refused_for_a_decode_failure() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
-    server.appserver_notification_sink = Arc::new(|_, _, _, _, _| {
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
         Err("ADAPTER_UNKNOWN: decode response: missing result payload".into())
     });
     let first = handle_send(
@@ -8709,6 +8740,108 @@ fn explicit_send_reports_when_subscription_tmux_endpoint_mismatches() {
         replay(&root).unwrap().notification_delivery_failures[message_id].error,
         "subscription does not match the selected tmux transport"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn explicit_send_reports_appserver_wake_rejection_after_durable_commit() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    {
+        let mut state = server.state.lock().unwrap();
+        let transport = test_appserver_transport("thread-recipient-appserver");
+        let thread = transport.thread_id.clone().unwrap();
+        state.workers.get_mut("recipient").unwrap().transport = Some(transport);
+        let subscription = state
+            .notification_subscriptions
+            .get_mut("sub-default-direct-message-recipient")
+            .unwrap();
+        subscription.method = "appserver".into();
+        subscription.target = thread;
+    }
+    server.appserver_notification_sink = Arc::new(|_, _, _, _, _, _| {
+        Err("ADAPTER_ROUTE_UNAVAILABLE: turn/start forced failure".into())
+    });
+
+    let response = handle_send(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready for your review.".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_deref(),
+        Some(
+            "APPSERVER_NOTIFICATION_REJECTED: ADAPTER_ROUTE_UNAVAILABLE: turn/start forced failure"
+        )
+    );
+    assert_eq!(response.data["durable"], true);
+    assert_eq!(response.data["notification"], "subscribed-not-sent");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn send_fails_closed_when_recipient_rebound_during_presence_probe() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    {
+        let mut state = server.state.lock().unwrap();
+        state.workers.get_mut("recipient").unwrap().transport =
+            Some(test_appserver_transport("thread-recipient"));
+    }
+    let slot: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::server::Server>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let probe_slot = slot.clone();
+    server.appserver_thread_status = std::sync::Arc::new(move |_, thread_id| {
+        if let Some(server) = probe_slot.lock().unwrap().as_ref() {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .workers
+                .get_mut("recipient")
+                .unwrap()
+                .transport = Some(test_appserver_transport("thread-recipient-other"));
+        }
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "idle"},
+                "canAcceptDirectInput": true
+            }
+        }))
+    });
+    let server = std::sync::Arc::new(server);
+    *slot.lock().unwrap() = Some(server.clone());
+
+    let response = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("review".into()),
+        "The candidate is ready.".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+    assert!(!response.ok, "{response:?}");
+    assert!(
+        response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("transport changed")),
+        "{response:?}"
+    );
+    assert!(server.state.lock().unwrap().msgs.is_empty());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -10481,7 +10614,7 @@ fn worker_status_keeps_tmux_liveness_unknown_despite_offline_keepalive_hint() {
 }
 
 #[test]
-fn worker_status_does_not_probe_legacy_appserver_routes() {
+fn worker_status_senses_registered_appserver_routes() {
     let (server, root) = test_server();
     server.state.lock().unwrap().workers.insert(
         "status-appserver".into(),
@@ -10501,17 +10634,17 @@ fn worker_status_does_not_probe_legacy_appserver_routes() {
     assert_eq!(w["id"], "status-appserver");
     assert_eq!(w["transport"]["kind"], "appserver");
     assert_eq!(w["transport"]["thread_id"], "thread-status-appserver");
-    assert_eq!(w["endpoint_live"], serde_json::Value::Null);
-    assert_eq!(w["identity_valid"], serde_json::Value::Null);
-    assert_eq!(w["agent_state"], "unknown");
-    assert_eq!(w["presence"], "unknown");
-    assert_eq!(w["status"], "unknown");
-    assert_eq!(w["transport_view"]["error"], "TRANSPORT_UNSUPPORTED");
+    assert_eq!(w["endpoint_live"], serde_json::Value::Bool(true));
+    assert_eq!(w["identity_valid"], serde_json::Value::Bool(true));
+    assert_eq!(w["agent_state"], "idle");
+    assert_eq!(w["presence"], "present");
+    assert_eq!(w["status"], "idle");
+    assert_eq!(w["transport_view"]["thread_state"], "idle");
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn worker_status_never_uses_appserver_candidate_check_for_presence() {
+fn worker_status_uses_appserver_status_not_candidate_check_for_presence() {
     let (mut server, root) = test_server();
     server.state.lock().unwrap().workers.insert(
         "lost-appserver".into(),
@@ -10531,9 +10664,10 @@ fn worker_status_never_uses_appserver_candidate_check_for_presence() {
     assert_eq!(workers.len(), 1);
     let w = &workers[0];
     assert_eq!(w["transport"]["kind"], "appserver");
-    assert_eq!(w["endpoint_live"], serde_json::Value::Null);
-    assert_eq!(w["agent_state"], "unknown");
-    assert_eq!(w["status"], "unknown");
+    assert_eq!(w["endpoint_live"], serde_json::Value::Bool(true));
+    assert_eq!(w["agent_state"], "idle");
+    assert_eq!(w["status"], "idle");
+    assert_eq!(w["presence"], "present");
     std::fs::remove_dir_all(root).unwrap();
 }
 

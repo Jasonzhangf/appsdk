@@ -417,6 +417,13 @@ pub enum Req {
     RouteResolve {
         tmux_endpoint: TmuxEndpoint,
     },
+    /// Resolve the unique registered project route for one native App Server
+    /// session/thread pair. This is the live counterpart to `RouteResolve` for
+    /// native TUI peers that do not carry a tmux pane anchor.
+    RouteResolveNative {
+        session_id: String,
+        native_thread_id: String,
+    },
     MsgStatus {
         msg_id: String,
     },

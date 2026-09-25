@@ -97,7 +97,12 @@ enum Cmd {
     /// Show the effective policy from ~/.appsdk/config.toml
     Config,
     /// Create .agent-collab skeleton in the current directory
-    Init,
+    Init {
+        /// Explicitly select or create this peer identity when the current
+        /// runtime cannot be recovered from its existing session/thread anchors.
+        #[arg(long)]
+        worker_id: Option<String>,
+    },
     /// Hidden: daemon entrypoint (spawned by `up`)
     #[command(hide = true)]
     Serve,
@@ -1972,7 +1977,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&value);
             Ok(())
         }
-        Cmd::Init => {
+        Cmd::Init { worker_id } => {
             let project_root = scope::project_root_for_init()?;
             if project_root.ancestors().skip(1).any(|ancestor| {
                 ancestor
@@ -1987,7 +1992,7 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             let scope = Scope { root: project_root };
             let started = !client::alive(&scope.sock_path());
             client::ensure_server(&scope.sock_path())?;
-            let mut ident = identity::load_or_create_for_init(&scope)?;
+            let mut ident = identity::load_or_create_for_init(&scope, worker_id)?;
             let registration = ensure_registration(&scope, &mut ident)?;
             let daemon_pid = std::fs::read_to_string(scope.host_paths()?.pid_path())
                 .map_err(|error| anyhow::anyhow!("registered daemon PID is unavailable: {error}"))?
@@ -2795,6 +2800,22 @@ mod tests {
             runtime,
             transport: None,
         }
+    }
+
+    #[test]
+    fn init_accepts_explicit_worker_id_for_pane_free_registration() {
+        let cli = Cli::try_parse_from([
+            "collab",
+            "init",
+            "--worker-id",
+            "codex-thread-6465736b746f702d746872656164",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Init { worker_id: Some(worker_id) }
+                if worker_id == "codex-thread-6465736b746f702d746872656164"
+        ));
     }
 
     #[test]
@@ -4181,7 +4202,7 @@ mod tests {
         });
 
         set_current_session_thread("thread-new", "session-new");
-        let result = identity::load_or_create_for_init(&Scope { root: root.clone() });
+        let result = identity::load_or_create_for_init(&Scope { root: root.clone() }, None);
         responder.join().unwrap();
         let error = result.unwrap_err();
         assert!(

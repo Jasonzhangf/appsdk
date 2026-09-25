@@ -869,12 +869,19 @@ pub(crate) fn load_existing_at(
 /// channel assignment, so `ensure_registration` decides whether a persisted
 /// binding must be replaced; identity loading itself never clears a binding
 /// before the replacement is durably accepted.
-pub fn load_or_create_for_init(scope: &Scope) -> anyhow::Result<Identity> {
-    load_or_create_for_init_at(&HostPaths::resolve()?, scope)
+pub fn load_or_create_for_init(
+    scope: &Scope,
+    worker_id: Option<String>,
+) -> anyhow::Result<Identity> {
+    load_or_create_for_init_at(&HostPaths::resolve()?, scope, worker_id)
 }
 
-fn load_or_create_for_init_at(host_paths: &HostPaths, scope: &Scope) -> anyhow::Result<Identity> {
-    load_or_create_resolved_at(host_paths, scope, None, true)
+fn load_or_create_for_init_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    worker_id: Option<String>,
+) -> anyhow::Result<Identity> {
+    load_or_create_resolved_at(host_paths, scope, worker_id, true)
 }
 
 fn load_or_create_resolved(
@@ -958,7 +965,7 @@ fn load_or_create_resolved_at(
             .filter(|value| !value.trim().is_empty())
     });
     let candidate = tmux_candidate.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("TMUX_ENDPOINT_MISSING: collab identity requires a current tmux pane or an explicit worker id")
+        anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a current tmux pane or an explicit worker_id")
     });
     let anchored_identity =
         identity_by_current_anchors_at(host_paths, scope, candidate.as_ref().ok().copied())?;
@@ -1818,6 +1825,82 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[test]
+    fn desktop_peer_requires_explicit_worker_when_no_persisted_anchor_matches() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("desktop-thread-without-pane");
+        std::fs::create_dir_all(root.join(".agent-collab/runs")).unwrap();
+        let state_root = root.join(".collab-state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+        let project_scope = scope
+            .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id;
+        let unrelated = Identity {
+            worker_id: "prior-peer".into(),
+            token: "prior-token".into(),
+            project_scope: Some(project_scope),
+            runtime: None,
+            transport: None,
+        };
+        write_identity(
+            &identity_path_at(&host_paths, &unrelated.worker_id).unwrap(),
+            &unrelated,
+        )
+        .unwrap();
+        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+        let previous_session = std::env::var_os("CODEX_SESSION_ID");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        let previous_worker = std::env::var_os("COLLAB_WORKER");
+        std::env::set_var("CODEX_THREAD_ID", "desktop-thread");
+        std::env::set_var("CODEX_SESSION_ID", "desktop-session");
+        std::env::remove_var("TMUX_PANE");
+        std::env::remove_var("COLLAB_WORKER");
+
+        let read_error = load_existing_with_scope_rebind_at(&host_paths, &scope, None)
+            .unwrap_err()
+            .to_string();
+        assert!(read_error.contains("IDENTITY_REBIND_UNPROVEN"));
+        let init_error = load_or_create_for_init_at(&host_paths, &scope, None)
+            .unwrap_err()
+            .to_string();
+        assert!(init_error.contains("IDENTITY_REBIND_UNPROVEN"));
+        let result = load_or_create_for_init_at(
+            &host_paths,
+            &scope,
+            Some("codex-thread-6465736b746f702d746872656164".into()),
+        );
+
+        match previous_thread {
+            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+            None => std::env::remove_var("CODEX_THREAD_ID"),
+        }
+        match previous_session {
+            Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+            None => std::env::remove_var("CODEX_SESSION_ID"),
+        }
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        match previous_worker {
+            Some(value) => std::env::set_var("COLLAB_WORKER", value),
+            None => std::env::remove_var("COLLAB_WORKER"),
+        }
+        let identity = result.unwrap();
+        assert_eq!(
+            identity.worker_id,
+            "codex-thread-6465736b746f702d746872656164"
+        );
+        assert!(identity_path_at(&host_paths, &identity.worker_id)
+            .unwrap()
+            .is_file());
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn runtime_identity(generation: u64, binding: &str) -> RuntimeIdentity {
         RuntimeIdentity {
             agent_id: AgentId::new("agent-1").unwrap(),
@@ -2070,7 +2153,7 @@ mod tests {
         let previous_thread = std::env::var_os("CODEX_THREAD_ID");
         std::env::remove_var("CODEX_THREAD_ID");
         std::env::set_var("COLLAB_WORKER", "codex-thread-1");
-        let resolved = load_or_create_for_init_at(&host_paths, &scope).unwrap();
+        let resolved = load_or_create_for_init_at(&host_paths, &scope, None).unwrap();
         assert_eq!(resolved.worker_id, "codex-thread-1");
         assert_eq!(resolved.token, ident.token);
         assert_eq!(resolved.runtime, ident.runtime);

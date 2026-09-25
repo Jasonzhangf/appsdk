@@ -1859,10 +1859,10 @@ mod tests {
         std::env::remove_var("TMUX_PANE");
         std::env::remove_var("COLLAB_WORKER");
 
-        let read_error = load_existing_with_scope_rebind_at(&host_paths, &scope, None)
-            .unwrap_err()
-            .to_string();
-        assert!(read_error.contains("IDENTITY_REBIND_UNPROVEN"));
+        assert!(matches!(
+            identity_for_scope_rebind_at(&host_paths, &scope),
+            Ok(ScopeRebindOutcome::Unproven(_))
+        ));
         let init_error = load_or_create_for_init_at(&host_paths, &scope, None)
             .unwrap_err()
             .to_string();

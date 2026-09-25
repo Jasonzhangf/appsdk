@@ -18,9 +18,13 @@ description: >
 
 # Collab
 
-Durable truth lives in the global Collab state root. Tmux is the registered
-transport for AppSDK peers and is selected by the server. Production projects
-use the globally installed Collab v1.
+Durable identity, role, mailbox, task, and subscription truth lives in the
+Collab daemon. Codex AppServer RPC is the preferred communication and thread
+state transport. A tmux-only peer may be selected when it has no AppServer
+candidate; once an AppServer binding is selected, tmux is never a message,
+wake, presence, or status fallback. A verified tmux endpoint may also be stored
+as a last-resort identity recovery anchor when both runtime IDs are unavailable.
+Production projects use the globally installed Collab v1.
 
 ## Current-version baseline
 
@@ -101,23 +105,24 @@ affected project.
 
 ### 1. Recovery
 
-Start with the one-step bootstrap. For an AppSDK project, a missing or
-unresolvable tmux pane route after a Collab daemon restart is normally fixed
-by running `appsdk init .` once from the canonical root; do not open a forensic
-chain unless that bootstrap fails. Run `collab down`/`up` only when the running
-daemon predates the installed binary.
+Start with the one-step bootstrap. For an AppSDK project, a missing native
+session/thread route after a Collab daemon restart is normally fixed by running
+`appsdk init .` once from the canonical root; do not open a forensic chain
+unless that bootstrap fails. Run `collab down`/`up` only when the running
+daemon predates the installed binary and the maintenance scope is authorized.
 
 ```sh
 collab master status        # canonical root, before anything else
 appsdk init .               # only if the current thread has no route
 collab context
-collab route resolve --pane-id "$TMUX_PANE"
+collab route resolve
 ```
 
-`appsdk init .` owns identity and the host route bound to the current tmux
-socket/server/session/pane. Codex session and thread IDs can restore the same
-peer when they uniquely identify it in the project, but tmux pane liveness
-owns current route presence.
+`appsdk init .` owns identity and the host route selected by the daemon. When an
+AppServer candidate is available, the route binds its owner, session ID, and
+native thread ID; a verified tmux tuple may also be stored as a recovery anchor.
+AppServer-bound peers use native `thread/read` for presence and status. Tmux is
+considered for identity recovery only when both runtime IDs are absent.
 
 Use the wider recovery path below only when that bootstrap fails:
 
@@ -127,10 +132,11 @@ collab worker status <peer>
 collab context
 ```
 
-Verify the recorded tmux pane is live and belongs to the same peer. If the
-binding is stale, recover only through `appsdk init .` with a unique pane,
-session, or thread anchor; do not edit route state, guess among peers, or replay
-an old message batch.
+Verify the bound AppServer owner and exact session/thread route. If runtime
+IDs are unavailable, the daemon may recover the same identity from one exact,
+live tmux anchor. If endpoint ownership or liveness is unknown, preserve the
+error; do not use pane injection, edit route state, guess among peers, or
+replay an old message batch.
 
 ### 2. Failure
 
@@ -138,7 +144,7 @@ Treat each claim separately:
 
 ```text
 durable=true -> mailbox journal accepted
-notification=accepted -> tmux accepted paste and separate Enter
+notification=accepted -> selected transport accepted the operation; it is not consumption
 recv receipt -> peer consumed the message
 task close receipt -> lifecycle ended
 ```
@@ -280,10 +286,13 @@ With a matching live subscription, the first pending message opens a fixed
 120-second window by default. `~/.appsdk/config.toml` can select immediate or
 batched delivery globally or per project; `appsdk config` shows effective
 policy. All eligible unsent messages for that recipient are combined
-into the selected transport's bounded delivery (up to 3 previews per knock,
-with overflow retained in the inbox). The tmux adapter pastes the wake text
-and sends Enter as a separate command. This only submits input; it does not
-prove the peer read or consumed the message. Explicit `collab sendmessage` is
+into the selected transport (up to 3 previews per notification, with overflow
+retained in the inbox). On an AppServer binding, the daemon uses
+`turn/start`, `turn/steer`, or `thread/queue/add`; on a tmux-only binding it
+submits a bounded wake to that pane. Neither transport acceptance proves that
+the peer consumed the durable message, and neither binding falls back to the
+other transport after selection.
+Explicit `collab sendmessage` is
 immediate and follows the explicit-message adapter gate, including while the
 recipient is working.
 If delivered-but-unconsumed notifications reach the throttle threshold (default
@@ -302,8 +311,9 @@ selection and sends only through the selected adapter.
 
 ## Common command card
 
-Managed subagent thread creation is unsupported by the tmux transport and
-fails explicitly. Use registered peers for concurrent work. Existing subagent
+Managed subagent thread creation is unsupported in the production path and
+fails explicitly. Registered peer status and thread state use the owning
+AppServer RPC. Use registered peers for concurrent work. Existing subagent
 records may be inspected with `status`, `send <id> --subject <topic> "<task>"`,
 and explicit `close <id>`.
 `collab-mcp` is the shared Collab MCP for every agent. Use `collab_*`
@@ -369,10 +379,10 @@ one durable `subagent-status` fact to the live master. The master, not the
 child, owns the outcome and decides whether to re-dispatch, force-close, or
 leave the child idle. A subagent with an unfinished task is not repeatedly
 woken just because its task is not closed. `subagent status` reports durable
-task state and pane presence. Managed subagent creation and Codex thread
-history snapshots are unsupported in the tmux transport; commands fail
-explicitly and never fabricate thread history. Pane output is only an
-observation and is not a durable snapshot receipt.
+task state and native thread state. Managed subagent creation remains
+unsupported; commands fail explicitly. Codex thread history is read only from
+the owning AppServer when supported and is never fabricated. A tmux pane is a
+last-resort identity anchor, not a status observation or snapshot receipt.
 
 ## Cross-project master communication
 
@@ -542,14 +552,17 @@ Execute diagnostic closure immediately:
 ```sh
 collab worker status <id>
 ```
-Use durable Collab state and pane presence to choose the next action. A screen
-observation cannot establish task completion, peer consumption, or Codex turn
-state. Do not infer those facts or restart a shared runtime from a pane probe.
+Use durable Collab state and the selected binding's liveness/status source to
+choose the next action. For an AppServer binding, query native thread state.
+Transport status cannot establish message consumption without the receive
+receipt. A tmux screen cannot establish task completion, peer consumption, or
+Codex turn state. Do not infer those facts or restart a shared runtime from a
+pane probe.
 
 Master keeps architecture, dispatch, integration, critical repair, and
-final acceptance. Use registered tmux peers and `collab sendmessage` for
-assignments. Managed Codex subagent thread creation is unsupported by the
-tmux transport and fails explicitly. Give each peer its own worktree and file
+final acceptance. Use registered peers and `collab sendmessage` for
+assignments. Managed Codex subagent thread creation is unsupported and fails
+explicitly. Give each peer its own worktree and file
 scope. Independent peers may decline an invite to protect their current task.
 Wait for evidence summaries, then integrate. Chat tone is not completion.
 
@@ -579,9 +592,12 @@ independent review path when review is required; a milestone may use Astra when
 required. Missing AGY is not a blocker because it is excluded; missing a
 declared review gate is a failure.
 
-Without an available registered tmux pane, initialization fails explicitly.
-Read-only journal/mailbox queries remain available where their command permits
-unregistered access. Pane output is an observation, never task or control truth.
+Without an available, verified selected transport, initialization fails
+explicitly. AppServer is preferred when its candidate passes the owner
+self-check; a tmux-only binding remains a separate selected transport and is
+never substituted for an AppServer binding. Read-only journal/mailbox queries
+remain available where their command permits unregistered access. Pane output
+is an observation, never task or control truth.
 
 | Intent | Command |
 |---|---|
@@ -616,7 +632,8 @@ appsdk init .
 ```
 
 In an AppSDK project this runs official `collab init`, registers the current
-tmux pane with the already managed daemon, and creates/refreshes the finite
+AppServer owner/session/thread with the already managed daemon, optionally
+records a verified tmux recovery anchor, and creates/refreshes the finite
 reusable default `direct-message` lease. Do not run a second `collab init`,
 `collab whoami`, or manual ordinary-message subscription.
 
@@ -625,9 +642,10 @@ Only a standalone non-AppSDK project uses explicit `collab init`.
 ## Worktree identity
 
 A Git worktree is a task execution directory, not a second identity or a
-substitute for the canonical project root. Identity recovery requires a unique
-matching tmux pane, Codex session, or Codex thread anchor within the project
-scope. A worktree cwd therefore cannot resolve the main identity; run
+substitute for the canonical project root. Identity recovery first uses the
+exact current AppServer session/thread within the project scope. A tmux pane is
+a last-resort anchor only when both runtime IDs are unavailable. A worktree cwd
+therefore cannot resolve the main identity; run
 `collab context` from the canonical project main tree. Registration,
 recovery, rebind, and master promotion must also run from that canonical root,
 not from a `playground/` worktree.
@@ -646,22 +664,22 @@ state, or reset the project. Only `master status` returning `master: null`
 with no `recorded_unusable` entry means no live master; then follow the
 explicit user-approved promotion protocol.
 
-### Tmux route resolution
+### Native thread route resolution
 
-The daemon is the sole route selector. The current tmux endpoint identifies a
-route by socket, server process, tmux session, pane, and pane process. Historical
-routes and tombstones are not candidates. Codex session and thread IDs can
-restore peer identity when unique, but cannot substitute for a live route
-endpoint.
+The daemon is the sole route selector. The current AppServer owner plus exact
+session/thread binding identifies a route. Historical routes and tombstones
+are not candidates. The daemon verifies the selected owner with native
+`thread/read`; a tmux tuple can recover identity only when both runtime IDs are
+missing and never substitutes for communication or presence.
 
-`collab route resolve` exposes this read-only lookup for the current tmux pane;
-optional `--tmux-session-id <id>` and `--pane-id <id>` values must match that
-pane. The route key is the complete tmux socket/server/session/pane/process
-endpoint. Codex session and thread IDs assist identity recovery and do not
-replace endpoint matching. The daemon returns exactly one route,
+`collab route resolve` exposes this read-only lookup for the current native
+thread; `--native-thread-id <id>` and `--session-id <id>` must match the live
+runtime binding. The daemon returns exactly one route,
 `ROUTE_RESOLVE_NOT_FOUND` for zero matches, and `ROUTE_RESOLVE_AMBIGUOUS` when
-multiple current bindings match. Missing, unknown, mismatched, or malformed
-endpoints fail explicitly. The resolver is read-only and returns no token;
+multiple current bindings match. A pane-only recovery lookup requires an exact
+verified tmux server/session/pane/process tuple after both runtime IDs are
+absent. Missing, unknown, mismatched, or malformed endpoints fail explicitly.
+The resolver is read-only and returns no token;
 identity/token loading remains a separate authentication step after the route
 is selected.
 
@@ -714,9 +732,10 @@ register it.
   results—not routine progress, heartbeat, ACK, review, or completion reports.
 - A wake is only a signal. It cannot change task/resource truth, fabricate
   success, authorize maintenance, or create an ACK loop.
-- `absent` or `unknown` pane state produces no transport input. If the selected
-  tmux pane is dead, reassigned, unowned, or mismatched, the
-  subscription enters its explicit unavailable state to prevent storms.
+- `absent` or `unknown` liveness for the selected binding produces no transport
+  input. If its endpoint is unreachable, unowned, or mismatched, the
+  subscription enters its explicit unavailable state to prevent storms. There
+  is no cross-transport fallback after binding selection.
   Each due batch is reserved durably once; failed or uncertain attempts are
   never automatically replayed, including after restart. Details remain
   readable in the inbox.

@@ -77,16 +77,16 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 ## Identity and role
 
-- The current client is Codex only. The current route is bound to the exact
-  tmux socket/server/session/pane/process endpoint. Codex sessionID and threadID
-  are optional identity-recovery anchors within the canonical project scope.
-  `TMUX_ENDPOINT_MISSING` means the command did not inherit the registered pane
-  environment; run it from that pane and retry. Do not reconstruct an endpoint
-  from a stale route or manually edit route state.
+- The current client is Codex only. The current route is bound to the verified
+  AppServer owner and exact sessionID/threadID pair. A verified tmux
+  socket/server/session/pane/process tuple is only a recovery anchor when both
+  runtime IDs are unavailable. Do not reconstruct an endpoint from a stale
+  route or manually edit route state.
 - A Git worktree does not inherit `.agent-collab/` and is not an identity
   context. Resolve `collab context`, `collab master status`, registration, and
-  recovery from the canonical project main tree. The daemon requires
-  one unique pane, sessionID, or threadID anchor to recover the same identity;
+  recovery from the canonical project main tree. The daemon first resolves
+  sessionID/threadID against the current AppServer binding; it may use one
+  exact tmux anchor only when both runtime IDs are absent;
   historical routes are not candidates and `routes.jsonl` must not be read to
   guess one. Never register the worktree as a second peer or create a second
   route.
@@ -106,8 +106,10 @@ unless the operator explicitly chooses the owner's migration or reset route.
 
 - Workers never choose transport themselves. The server validates the candidate
   and selects the channel.
-- Tmux is the supported transport. A selected transport must include its
-  server self-check and a current endpoint whose liveness is present.
+- AppServer RPC is preferred when its owner passes native thread/session/cwd
+  self-checks. A tmux-only candidate can be selected as its own transport when
+  no AppServer candidate is available. Once an AppServer binding is selected,
+  tmux is never a communication, wake, presence, or status fallback.
 - Do not treat pane presence as evidence of Codex turn state or message
   consumption.
 
@@ -133,30 +135,33 @@ separately, report the exact context error to the live master, and use the
 migration/reset owner only when that owner explicitly decides the project-local
 control plane is unrecoverable.
 
-## Tmux route and identity recovery
+## Native route and identity recovery
 
-A registered route is live only when the saved tmux socket/server/session/pane
-endpoint resolves to the same pane. A missing pane is absent; a failed probe is
-unknown and cannot authorize master recovery. Pane presence does not establish
-Codex turn state or message consumption.
+A registered AppServer route is live only when the verified owner resolves the
+exact saved session/thread and project cwd through native `thread/read`. A
+tmux-only binding uses its verified pane probe as that transport's liveness.
+A missing endpoint is absent; a failed probe is unknown and cannot authorize
+master recovery. Neither presence signal establishes message consumption.
+Tmux may be queried as an identity recovery anchor only when both runtime IDs
+are absent on an AppServer binding.
 
 Diagnose read-only from the canonical project main checkout:
 
 ```sh
 collab context
-collab route resolve --tmux-session-id <tmux-session-id> --pane-id <pane-id>
+collab route resolve --native-thread-id <thread-id> --session-id <session-id>
 collab worker status <peer-id>
 ```
 
-Route resolution compares optional supplied IDs with the current pane and
-returns the current registered binding; it does not use them to select another
-pane. If a persisted peer must recover on a new pane, `appsdk init .` may reuse
-the original identity only when a current pane, Codex session ID, or Codex
-thread ID uniquely matches that peer in the same project scope. Conflicting,
-ambiguous, cross-project, missing, or unknown evidence fails closed. Master
-identity recovery preserves the original grant and is permitted only when no
-live master exists. Never edit `routes.jsonl`, identity files, journal, or
-mailbox to force recovery, and never start a second daemon.
+Route resolution compares supplied runtime IDs with the current registered
+binding and never selects another thread by history. For an AppServer binding,
+if both IDs are missing, `appsdk init .` may reuse the original identity only
+when one verified tmux server/session/pane/process anchor uniquely matches it
+in the same project scope. Conflicting, ambiguous, cross-project, missing, or
+unknown evidence fails closed. Master identity recovery preserves the original
+grant and is permitted only when no live master exists. Never edit
+`routes.jsonl`, identity files, journal, or mailbox to force recovery, and
+never start a second daemon.
 
 The canonical project main checkout owns identity lookup, registration, and
 recovery. Never create a worktree-local peer to make the route appear live.

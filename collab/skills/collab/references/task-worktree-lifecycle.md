@@ -117,7 +117,7 @@ Route escalation by worker type:
   task. If no live master exists, report to the collaborator that initiated
   the task.
 - A peer becomes master only after explicit user approval for that peer and
-  project, with a live registered tmux identity verified. If a live master
+  project, with a live registered transport verified. If a live master
   exists, only that master may `collab master delegate`; if none exists, the
   peer may `collab master promote --approval` itself. `appsdk init` proves
   initialization of the current peer, not master ownership. A dead recorded

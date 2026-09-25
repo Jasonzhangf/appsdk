@@ -190,14 +190,16 @@ collab up
 - After restart prove one PID/socket, preserved durable state, identity rebind,
   migration verify, and one real subscribed notice.
 
-### Tmux endpoint recovery
+### Native endpoint recovery
 
-When `collab context` reports a missing pane, recover the same identity only
-through a unique current pane, Codex session, or Codex thread anchor in the
-same project. An unknown/error pane probe does not authorize master recovery.
-The route must bind to the current tmux socket/server/session/pane/process
-endpoint before notifications resume. See
-[`state-paths.md`](state-paths.md#tmux-route-and-identity-recovery).
+When `collab context` reports a missing native route, recover the same identity
+through a unique current sessionID/threadID pair bound to the verified
+AppServer owner. If both runtime IDs are unavailable, one exact tmux
+server/session/pane/process anchor may recover identity. An unknown/error
+probe does not authorize master recovery. Notifications require the native
+AppServer route to pass self-check; do not switch that binding to tmux on
+failure. See
+[`state-paths.md`](state-paths.md#native-route-and-identity-recovery).
 
 ## Deprecated commands
 

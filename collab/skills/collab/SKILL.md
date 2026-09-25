@@ -1,19 +1,6 @@
 ---
 name: collab
-description: >
-  Coordinate registered peers only with reusable finite direct-message leases,
-  one-shot event subscriptions, task/worktree ownership, resource waits,
-  controlled daemon maintenance, and explicit user-approved master promotion
-  when no live master exists. Guidance: (1) recovery: inspect durable status,
-  verify the real live registered route, re-register/rebind only the named peer,
-  then send one recovery report request; (2) failure: preserve the exact error,
-  keep journal/mailbox truth, do not retry or claim delivery, and escalate with
-  root cause and evidence; (3) reset: never delete journal/mailbox, copy tokens,
-  reset bindings, or start a second daemon; use explicit down/up or migration
-  only; (4) regression recognition: distinguish durable send, transport delivery,
-  agent response, ACK/consume, task close, and cleanup evidence. Ordinary peer
-  notices use one direct command with no discovery or retry step. Codex root
-  is not Collab master.
+description: "Collab: 只跑 collab context, 自动查身份/恢复/注册/补齐上下文+角色操作。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
 ---
 
 # Collab
@@ -105,21 +92,20 @@ affected project.
 
 ### 1. Recovery
 
-Start with the one-step bootstrap. For an AppSDK project, a missing native
-session/thread route after a Collab daemon restart is normally fixed by running
-`appsdk init .` once from the canonical root; do not open a forensic chain
-unless that bootstrap fails. Run `collab down`/`up` only when the running
-daemon predates the installed binary and the maintenance scope is authorized.
+Start with the one-step bootstrap. `collab context` is the single automatic
+state entry: it resolves the canonical project root (from a live route, a
+registered route, or the local baseline), creates a missing local baseline,
+starts the daemon unless an explicit `DOWN` marker exists, restores identity and
+registration, and returns the server snapshot plus the current role's
+`operations`. It is idempotent and fails closed on unproven identity or an
+explicit `DOWN` marker.
 
 ```sh
-collab master status        # canonical root, before anything else
-appsdk init .               # only if the current thread has no route
 collab context
-collab route resolve
 ```
 
-`appsdk init .` owns identity and the host route selected by the daemon. When an
-AppServer candidate is available, the route binds its owner, session ID, and
+`collab context` owns identity and the host route selected by the daemon. When
+an AppServer candidate is available, the route binds its owner, session ID, and
 native thread ID; a verified tmux tuple may also be stored as a recovery anchor.
 AppServer-bound peers use native `thread/read` for presence and status. Tmux is
 considered for identity recovery only when both runtime IDs are absent.
@@ -137,6 +123,31 @@ IDs are unavailable, the daemon may recover the same identity from one exact,
 live tmux anchor. If endpoint ownership or liveness is unknown, preserve the
 error; do not use pane injection, edit route state, guess among peers, or
 replay an old message batch.
+
+Do not start the default agent flow with `collab master status`,
+`appsdk init .`, `collab down`/`up`, or `collab route resolve`. Those commands
+remain available only as explicit human diagnostics and are not required for
+recovery. `collab context` performs the minimal bootstrap write automatically.
+
+Daemon restart is never part of identity or binary-version recovery. After
+the daemon binary is replaced, or after the current Codex session/thread
+changes, the persisted worker token stays valid and `collab context` rebinds
+the runtime in place automatically and idempotently. If in-place recovery
+cannot be verified, a peer is re-registered fresh with the same worker token
+(the previous binding is superseded as the active peer) without a daemon
+restart. Only a true failure of that fresh re-register is preserved and
+reported to the live master; an agent does not run `collab down`/`collab up`,
+`collab worker recover`, or a status hunt, and does not edit
+identity/token/route state. Daemon restart drops in-flight mailbox, leases,
+and bound tasks for every peer in the global daemon and is a separate,
+explicitly authorized maintenance operation, not recovery.
+
+Master recovery is the same one-step shape: when `collab context` shows no
+live master, it also lists `promote_master` with `requires_approval`, and
+promotion completes automatically once the user supplies an explicit
+approval. Never promote without that approval or from a stale-view status
+hunt; `collab master promote --approval "<user authorization>"` is the single
+action that records and completes the handoff.
 
 ### 2. Failure
 
@@ -225,7 +236,7 @@ does not close the bug.
 
 ## Automatic multi-worker collaboration
 
-Keep Collab enabled. At multi-worker startup, run official `collab init` once
+Keep Collab enabled. At multi-worker startup, run `collab context` once
 in the inherited live peer environment unless AppSDK already initialized it.
 This registers the peer and default finite direct-message subscription.
 Registration also returns `role_brief`. Read it as the active operating
@@ -334,8 +345,61 @@ The live master is the sole scheduler assignment owner. Dispatch through the
 durable scheduler path with a stable request ID:
 
 ```sh
-collab subagent dispatch --request-id <id> --subject <topic> "<assignment>"
+collab subagent dispatch --request-id <id> --subject <topic> "<assignment>" \
+  [--feature-id <feature>] [--worktree-path <path>] [--branch <branch>] \
+  [--base-commit <sha>] [--priority p0|p1|p2|p3|p4] [--next-step "<step>"]
 ```
+
+Flag and body rules:
+
+- `--request-id` is required. ASCII letters/digits, `-`, or `_`, at most 80
+  bytes. Stable and idempotent: after an audit interruption, retrying the same
+  ID recovers the existing reservation and never creates a second task or
+  message.
+- `--subject` is required and non-empty.
+- The body is required and must contain Goal, Scope (allowed/forbidden paths),
+  Delivery iff, Tests (commands + expected + evidence path), Deliverables,
+  Forbidden, and Flow. Ordinary peers receive only this body.
+- `--feature-id` is optional: stable feature slug.
+- `--worktree-path` is optional and must be `<project-main>/playground/<short-slug>`.
+  The leaf is at most 32 ASCII letters/digits/`.`/`-`/`_`, the whole path is at
+  most 80 bytes, and `..` is forbidden. The persisted field is `worktree`, not
+  `worktree_path`.
+- `--branch` is optional; prefer `codex/<short-slug>`.
+- `--base-commit` is optional; prefer the current `origin/main` SHA.
+- `--priority` defaults to `p2`; legal values are `p0|p1|p2|p3|p4`.
+- `--next-step` is optional and tells the peer the first concrete action.
+
+Only the live registered master with `presence: present` may dispatch. The
+scheduler selects an eligible peer automatically: registered, non-requester,
+non-managed-subagent, presence present, and no active task. A peer holds only
+one active task. If no eligible peer is available the exact error is:
+
+```text
+MANAGED_SUBAGENT_UNSUPPORTED: no live registered tmux peer is available for dispatch
+```
+
+Do not create a fake peer or mark an ordinary peer as managed to bypass that
+error.
+
+Successful dispatch response fields:
+
+- `request_id`, `message_id`, `task_id`, `target`, `status: assigned`.
+- `admission.{request_id,message_id,task_id,worker_id,decision,status,reason}`:
+  scheduler admission audit.
+- `notification`: `sent` (transport accepted submission), `subscribed-not-sent`
+  (subscription exists but notification was not accepted), or
+  `mailbox-only-no-subscription` (no subscription; durable mailbox only).
+
+`notification: sent` proves the sending side accepted the operation, not that
+the peer consumed it. Check consumption on disk:
+
+- `collab msg <message-id>`: `consumed_by_recv` false means not consumed.
+- `collab task status <task-id>`: read `status`, `worktree`, `branch`,
+  `base_commit`.
+- A normal peer must run `collab task accept <task-id>` to change
+  `assigned -> working`; `collab task update --status working` is rejected for
+  an assigned task.
 
 The scheduler reserves one message/task pair for an eligible peer, binds the
 peer's active direct-message lease, records the admission audit, persists its
@@ -349,13 +413,73 @@ request ID after an audit interruption recovers the existing reservation and
 must never create a second task or message. The legacy `collab task dispatch`
 and `collab task claim` commands remain deprecated and fail explicitly.
 
+## Dispatch template
+
+Copy and fill this template for a normal scoped assignment:
+
+```text
+Goal:
+  Make <feature> work in the project.
+
+Scope:
+  Allowed: <paths/modules you may touch>
+  Forbidden: <shared/control paths; daemon lifecycle; ~/.collab and
+  .agent-collab state; routes, journal, mailbox, tokens>
+
+Delivery iff:
+  Complete only when <observable behavior> passes <specific checks>.
+  Non-goals: <things not required; unrelated refactors>
+
+Tests:
+  Commands: <exact commands>
+  Expected: <exact pass output/exit code>
+  Evidence path: <file/JSON/log to attach in delivery>
+
+Deliverables:
+  <commit SHA>, <diff files>, <test output>, <real entry replay>
+
+Forbidden:
+  Do not merge/push, restart the shared daemon, install a global binary,
+  edit control state, or touch files outside Scope.
+
+Flow:
+  Resolve root with collab context.
+  Create/verify the assigned worktree <--worktree-path> on branch
+  <--branch> at <--base-commit>.
+  Implement scoped change, run tests, commit.
+  Deliver evidence to master; report root cause + proposed fix if blocked.
+```
+
+Dispatch example:
+
+```sh
+collab subagent dispatch \
+  --request-id fix-notify-lost-recv \
+  --subject "recover lost recv delivery" \
+  --feature-id notify-recovery \
+  --worktree-path /path/to/appsdk/playground/notify-lost-recv \
+  --branch codex/notify-lost-recv \
+  --base-commit <origin/main sha> \
+  --priority p1 \
+  --next-step "collab context; reproduce lost recv; patch and test" \
+  "Goal: ...
+  Scope: ...
+  Delivery iff: ...
+  Tests: ...
+  Deliverables: ...
+  Forbidden: ...
+  Flow: ..."
+```
+
 Consume notifications promptly with `collab recv`. A successful receive delivers
 and acknowledges the batch atomically. After 3 delivered-but-unconsumed
 notifications, push knocks pause automatically to prevent notification storms
 and prompt pollution; `collab inbox` is read-only and does not resume delivery.
 Use explicit `collab ack` only for legacy clients or recovery of an already
 delivered message. Inspect peer/worker health, identity validity, and throttle
-status at any time with `collab worker status [id]` or `collab who`.
+status via the `collab context` snapshot. The human diagnostic
+`collab worker status [id]` and `collab who` print the same fields when an
+operator audits them; neither is part of the default agent flow.
 
 Worker wake model: only master has long-horizon wake; workers are not
 long-horizon wake targets and are not automatically woken from idle. A worker
@@ -607,7 +731,7 @@ is an observation, never task or control truth.
 | List unread messages | `collab inbox` |
 | Recover an already-delivered notification | `collab ack <id>` or `collab ack --all` |
 | Inspect worker health and notification status | `collab worker status [id]` |
-| Read own authoritative context | `collab context` |
+| Automatic bootstrap + authoritative context + role operations | `collab context` |
 | List peers | `collab who` |
 | Check own subscriptions | `collab notify status` |
 | Inspect live master | `collab master status` |
@@ -625,30 +749,32 @@ persists.
 
 ## Initialize once
 
-For an AppSDK-governed project, the only bootstrap command is:
+The automatic state entry is always:
 
 ```sh
-appsdk init .
+collab context
 ```
 
-In an AppSDK project this runs official `collab init`, registers the current
-AppServer owner/session/thread with the already managed daemon, optionally
-records a verified tmux recovery anchor, and creates/refreshes the finite
-reusable default `direct-message` lease. Do not run a second `collab init`,
-`collab whoami`, or manual ordinary-message subscription.
+`collab context` runs official `collab init` logic for the missing parts,
+registers the current AppServer owner/session/thread with the already managed
+daemon, optionally records a verified tmux recovery anchor, and returns the
+current `role_brief` plus `operations`. Do not run a second `collab init`,
+`collab whoami`, or manual ordinary-message subscription as part of an agent
+bootstrap.
 
-Only a standalone non-AppSDK project uses explicit `collab init`.
+`collab init` remains the explicit AppSDK-side command for operator-driven
+project initialization; agents do not need to run it before `collab context`.
 
 ## Worktree identity
 
 A Git worktree is a task execution directory, not a second identity or a
 substitute for the canonical project root. Identity recovery first uses the
 exact current AppServer session/thread within the project scope. A tmux pane is
-a last-resort anchor only when both runtime IDs are unavailable. A worktree cwd
-therefore cannot resolve the main identity; run
-`collab context` from the canonical project main tree. Registration,
-recovery, rebind, and master promotion must also run from that canonical root,
-not from a `playground/` worktree.
+a last-resort anchor only when both runtime IDs are unavailable.
+`collab context` resolves the canonical root automatically: it prefers the live
+route, then the registered route on disk, then the local `.agent-collab`
+baseline. Registration, recovery, and rebind run against that canonical root,
+not against a `playground/` worktree.
 
 Use `collab master status` for the authoritative live-master answer; `collab
 who` only lists registered peers. This query resolves the canonical route from

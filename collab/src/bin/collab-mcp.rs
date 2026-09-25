@@ -25,8 +25,8 @@ fn tools() -> Value {
         tool("collab_subagent", "Parent manages children; child uses ready/working and sends results via collab_sendmessage. status includes mailbox, keepalive and notification history. snapshot is explicit screen-tail read only, not a health probe. Observers without an App Server push channel must check status/mailbox themselves. rearm requires an explicit operator request after exhaustion. start accepts optional runtime=codex to override ~/.appsdk/config.toml. dispatch assigns a real task through the live master scheduler and is idempotent by request_id.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close"]},"id":{"type":"string"},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
         tool(
             "collab_init",
-            "Initialize/register this live project identity.",
-            json!({}),
+            "Initialize/register this live project identity. Supply worker_id only when intentionally creating/selecting a peer because no persisted session/thread anchor matches this runtime.",
+            json!({"worker_id":{"type":"string","minLength":1}}),
             &[]
         ),
         tool(
@@ -247,7 +247,10 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 optional_integer_flag(&mut argv, args, "lines", "--lines")?;
             }
         }
-        "collab_init" => argv.push("init".into()),
+        "collab_init" => {
+            argv.push("init".into());
+            optional_flag(&mut argv, args, "worker_id", "--worker-id")?;
+        }
         "collab_whoami" => argv.push("whoami".into()),
         "collab_who" => argv.push("who".into()),
         "collab_sendmessage" => {
@@ -598,6 +601,22 @@ mod tests {
             json!(["to", "subject", "body"])
         );
         assert!(send["inputSchema"]["properties"]["subject"].is_object());
+    }
+
+    #[test]
+    fn init_schema_allows_explicit_peer_identity_for_new_runtime() {
+        let definitions = tools();
+        let init = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "collab_init")
+            .unwrap();
+        assert_eq!(init["inputSchema"]["required"], json!([]));
+        assert_eq!(
+            init["inputSchema"]["properties"]["worker_id"]["type"],
+            "string"
+        );
     }
 
     #[test]

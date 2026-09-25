@@ -10728,6 +10728,18 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             "notification_rule",
             current_role_brief["notification_rule"].as_str(),
         );
+        let live_master = master
+            .get("worker_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some();
+        if !live_master {
+            operations.push(json!({
+                "kind": "promote_master",
+                "action": "collab master promote --approval \"<user authorization>\"",
+                "requires_approval": true,
+                "trigger": "no live master is bound; promotion requires explicit user approval and then auto-completes"
+            }));
+        }
         operations
     };
     Resp::data(json!({

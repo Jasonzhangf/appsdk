@@ -821,13 +821,6 @@ pub fn load_or_create(
     load_or_create_resolved(scope, worker_id, true)
 }
 
-/// Load the identity selected by the current worker/thread without creating or
-/// mutating any identity state. Read-only commands use this before deciding
-/// whether the caller is registered.
-pub fn load_existing(scope: &Scope, worker_id: Option<String>) -> anyhow::Result<Option<Identity>> {
-    load_existing_at(&HostPaths::resolve()?, scope, worker_id)
-}
-
 pub(crate) fn load_existing_at(
     host_paths: &HostPaths,
     scope: &Scope,

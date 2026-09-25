@@ -602,6 +602,7 @@ enum RegistrationOutcome {
     Created,
     Reused,
     Recovered,
+    Recreated,
 }
 
 fn ensure_registration(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::Value> {
@@ -616,8 +617,19 @@ fn ensure_registration_with_outcome(
         let value = register(scope, ident)?;
         Ok((value, RegistrationOutcome::Created))
     } else if !persisted_runtime_matches_scope(scope, ident)? {
-        let value = register_recovery(scope, ident)?;
-        Ok((value, RegistrationOutcome::Recovered))
+        match register_recovery(scope, ident) {
+            Ok(value) => Ok((value, RegistrationOutcome::Recovered)),
+            Err(_error) => {
+                // A stale binding that can no longer be recovered in place.
+                // Re-register fresh with the same worker token so the server
+                // supersedes the old transport; the previous identity is
+                // dropped as the active peer without a daemon restart.
+                ident.runtime = None;
+                ident.transport = None;
+                let value = register(scope, ident)?;
+                Ok((value, RegistrationOutcome::Recreated))
+            }
+        }
     } else {
         runtime_for_request(ident)?;
         Ok((json!({"reused": true}), RegistrationOutcome::Reused))
@@ -1795,6 +1807,7 @@ fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_json::Value>
         RegistrationOutcome::Created => "created",
         RegistrationOutcome::Reused => "reused",
         RegistrationOutcome::Recovered => "recovered",
+        RegistrationOutcome::Recreated => "recreated",
     };
     let mut v: serde_json::Value = call_project(
         &scope,

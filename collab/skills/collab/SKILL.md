@@ -129,6 +129,26 @@ Do not start the default agent flow with `collab master status`,
 remain available only as explicit human diagnostics and are not required for
 recovery. `collab context` performs the minimal bootstrap write automatically.
 
+Daemon restart is never part of identity or binary-version recovery. After
+the daemon binary is replaced, or after the current Codex session/thread
+changes, the persisted worker token stays valid and `collab context` rebinds
+the runtime in place automatically and idempotently. If in-place recovery
+cannot be verified, a peer is re-registered fresh with the same worker token
+(the previous binding is superseded as the active peer) without a daemon
+restart. Only a true failure of that fresh re-register is preserved and
+reported to the live master; an agent does not run `collab down`/`collab up`,
+`collab worker recover`, or a status hunt, and does not edit
+identity/token/route state. Daemon restart drops in-flight mailbox, leases,
+and bound tasks for every peer in the global daemon and is a separate,
+explicitly authorized maintenance operation, not recovery.
+
+Master recovery is the same one-step shape: when `collab context` shows no
+live master, it also lists `promote_master` with `requires_approval`, and
+promotion completes automatically once the user supplies an explicit
+approval. Never promote without that approval or from a stale-view status
+hunt; `collab master promote --approval "<user authorization>"` is the single
+action that records and completes the handoff.
+
 ### 2. Failure
 
 Treat each claim separately:
@@ -457,7 +477,9 @@ notifications, push knocks pause automatically to prevent notification storms
 and prompt pollution; `collab inbox` is read-only and does not resume delivery.
 Use explicit `collab ack` only for legacy clients or recovery of an already
 delivered message. Inspect peer/worker health, identity validity, and throttle
-status at any time with `collab worker status [id]` or `collab who`.
+status via the `collab context` snapshot. The human diagnostic
+`collab worker status [id]` and `collab who` print the same fields when an
+operator audits them; neither is part of the default agent flow.
 
 Worker wake model: only master has long-horizon wake; workers are not
 long-horizon wake targets and are not automatically woken from idle. A worker

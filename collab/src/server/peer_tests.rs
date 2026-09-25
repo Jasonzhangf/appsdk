@@ -10111,6 +10111,16 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         !operations.is_empty(),
         "worker context must expose operations"
     );
+    assert!(
+        operations.iter().any(|operation| {
+            operation["kind"] == "promote_master"
+                && operation["requires_approval"] == true
+                && operation["action"]
+                    .as_str()
+                    .is_some_and(|action| action.contains("collab master promote --approval"))
+        }),
+        "no-live-master context must expose the user-approved promote operation"
+    );
     assert!(operations
         .iter()
         .any(|operation| operation["kind"] == "next_action"

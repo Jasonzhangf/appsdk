@@ -20753,14 +20753,14 @@ fn longhorizon_show_requires_authoritative_master_identity() {
 case "$1 $2" in
   "status --all")
     case "${ROLE_CASE:-master}" in
-      worker) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
+      worker|tmux-master) printf '%s\n' '{"workers":[{"id":"current-peer","role":"peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
       subagent) printf '%s\n' '{"workers":[],"tasks":[],"subagents":[{"peer":"current-peer","status":"working"}]}' ;;
       *) printf '%s\n' '{"workers":[{"id":"current-peer","endpoint_live":true,"identity_valid":true,"suspected_offline":false}],"tasks":[],"subagents":[]}' ;;
     esac
     ;;
   "master status")
     case "${ROLE_CASE:-master}" in
-      master) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
+      master|tmux-master) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
       mismatch) printf '%s\n' '{"master":{"worker_id":"other-peer","endpoint_live":true}}' ;;
       transport-missing) printf '%s\n' '{"master":{"worker_id":"current-peer","endpoint_live":true}}' ;;
       *) exit 44 ;;
@@ -20768,6 +20768,7 @@ case "$1 $2" in
     ;;
   "context ")
     case "${ROLE_CASE:-master}" in
+      tmux-master) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"tmux","tmux_endpoint":{"pane_id":"%1"}}},"liveness":{"live":true,"transport_kind":"tmux"}}' ;;
       transport-missing) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
       *) printf '%s\n' '{"identity":{"worker_id":"current-peer","kind":"peer","transport":{"kind":"appserver","thread_id":"thread-current-peer"}},"liveness":{"live":true,"transport_kind":"appserver"}}' ;;
     esac
@@ -20791,6 +20792,7 @@ esac
     };
     for (case_name, expected_role) in [
         ("master", "master"),
+        ("tmux-master", "master"),
         ("worker", "unknown"),
         ("subagent", "managed-subagent"),
         ("missing", "unknown"),

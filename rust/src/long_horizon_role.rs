@@ -106,12 +106,16 @@ fn collab_master_matches_context(
         return Ok(Some(false));
     }
     let context_transport = &context["identity"]["transport"];
-    if context_transport["kind"].as_str() != Some("appserver")
-        || context_transport["thread_id"]
-            .as_str()
-            .map_or(true, |thread| thread.trim().is_empty())
+    let Some(transport_kind) = context_transport["kind"].as_str() else {
+        return Ok(None);
+    };
+    if !matches!(transport_kind, "appserver" | "tmux")
         || context["liveness"]["live"].as_bool() != Some(true)
-        || context["liveness"]["transport_kind"].as_str() != Some("appserver")
+        || context["liveness"]["transport_kind"].as_str() != Some(transport_kind)
+        || (transport_kind == "appserver"
+            && context_transport["thread_id"]
+                .as_str()
+                .map_or(true, |thread| thread.trim().is_empty()))
     {
         return Ok(None);
     }

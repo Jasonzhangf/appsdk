@@ -23149,6 +23149,81 @@ fn dagpipe_fix_lifecycle_fails_closed_on_invalid_record_chain() {
 }
 
 #[test]
+fn dagpipe_fix_rejects_worktree_record_module_mismatch() {
+    let root = temp_root("dagpipe-fix-worktree-module-mismatch");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let worktree_path = root.join(".appsdk/records/worktree-record-app-core.json");
+    let mut worktree: Value = serde_json::from_slice(&fs::read(&worktree_path).unwrap()).unwrap();
+    worktree["module_id"] = Value::String("other-module".into());
+    fs::write(
+        &worktree_path,
+        serde_json::to_string_pretty(&worktree).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "app-core"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DAGPIPE_EXECUTION_FAILED")
+            && stderr.contains("FIX_WORKTREE_MODULE_MISMATCH"),
+        "stderr={stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_fix_rejects_candidate_record_module_mismatch() {
+    let root = temp_root("dagpipe-fix-candidate-module-mismatch");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let candidate_path = root.join(".appsdk/records/fix-candidate-record-app-core.json");
+    let mut candidate: Value = serde_json::from_slice(&fs::read(&candidate_path).unwrap()).unwrap();
+    candidate["module_id"] = Value::String("other-module".into());
+    fs::write(
+        &candidate_path,
+        serde_json::to_string_pretty(&candidate).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "app-core"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DAGPIPE_EXECUTION_FAILED")
+            && stderr.contains("FIX_CANDIDATE_MODULE_MISMATCH"),
+        "stderr={stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_fix_rejects_promotion_gate_result_not_pass() {
+    let root = temp_root("dagpipe-fix-promotion-gate-fail");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let promotion_path = root.join(".appsdk/records/promotion-record-app-core.json");
+    let mut promotion: Value = serde_json::from_slice(&fs::read(&promotion_path).unwrap()).unwrap();
+    promotion["required_gate_results"][0]["result"] = Value::String("fail".into());
+    fs::write(
+        &promotion_path,
+        serde_json::to_string_pretty(&promotion).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "app-core"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DAGPIPE_EXECUTION_FAILED")
+            && stderr.contains("PROMOTION_GATE_RESULT_NOT_PASS"),
+        "stderr={stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn dagpipe_fix_rejects_path_traversal_module_identifier() {
     let root = temp_root("dagpipe-fix-lifecycle-module-id");
     let root_text = root.to_str().unwrap();
@@ -23738,6 +23813,97 @@ fn dagpipe_validate_notifications_closes_batch_objects() {
                         "items": [summary1, summary2]
                     },
                     "notificationKeys": ["notification-1", "notification-2"],
+                    "at": "2026-01-01T00:02:01Z"
+                }
+            }),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["objects"].as_array().unwrap().len(), 2);
+    for object in result["objects"].as_array().unwrap() {
+        assert_eq!(object["terminal"]["kind"], "notification.batch_emitted");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_batch_terminal_accepts_union_of_keys_and_ids() {
+    let root = temp_root("dagpipe-notification-batch-keys-ids-union");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    let summary1 = dagpipe_notification_summary("notification-id-1", "message-1", 0);
+    let summary2 = dagpipe_notification_summary("notification-id-2", "message-2", 0);
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            dagpipe_message_created_event("event-created-1", "2026-01-01T00:00:00Z", "message-1"),
+            dagpipe_message_state_event(
+                "event-accepted-1",
+                "2026-01-01T00:00:01Z",
+                "message-1",
+                "accepted",
+            ),
+            dagpipe_notification_queued(
+                "event-queued-1",
+                "2026-01-01T00:00:02Z",
+                "notification-1",
+                "notification-id-1",
+                "message-1",
+                0,
+            ),
+            dagpipe_message_created_event("event-created-2", "2026-01-01T00:01:00Z", "message-2"),
+            dagpipe_message_state_event(
+                "event-accepted-2",
+                "2026-01-01T00:01:01Z",
+                "message-2",
+                "accepted",
+            ),
+            dagpipe_notification_queued(
+                "event-queued-2",
+                "2026-01-01T00:01:02Z",
+                "notification-2",
+                "notification-id-2",
+                "message-2",
+                0,
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt",
+                "2026-01-01T00:02:00Z",
+                "attempt-batch-union",
+                &["notification-1", "notification-2"],
+                "notification.batch_emitted",
+            ),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-batch-emitted-union",
+                "at": "2026-01-01T00:02:01Z",
+                "kind": "notification.batch_emitted",
+                "data": {
+                    "attemptId": "attempt-batch-union",
+                    "batch": {
+                        "batchId": "batch-attempt-batch-union",
+                        "recipient": dagpipe_address("recipient"),
+                        "createdAt": "2026-01-01T00:02:00Z",
+                        "adapterId": "adapter-1",
+                        "items": [summary1, summary2]
+                    },
+                    "notificationKeys": ["notification-2"],
+                    "notificationIds": ["notification-id-1", "notification-id-2"],
                     "at": "2026-01-01T00:02:01Z"
                 }
             }),

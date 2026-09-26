@@ -1013,15 +1013,22 @@ fn validate_terminal_event(
                 .and_then(|batch| batch.get("items"))
                 .and_then(Value::as_array)
                 .is_some_and(|items| !items.is_empty());
-            let id_matches = data
+            let notification_keys = data
                 .get("notificationKeys")
-                .or_else(|| data.get("notificationIds"))
                 .and_then(Value::as_array)
-                .is_some_and(|values| {
-                    values.iter().any(|candidate| {
-                        candidate == &json!(key)
-                            || (!notification_id.is_empty() && candidate == &json!(notification_id))
-                    })
+                .cloned()
+                .unwrap_or_default();
+            let notification_ids = data
+                .get("notificationIds")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let id_matches = notification_keys
+                .iter()
+                .chain(&notification_ids)
+                .any(|candidate| {
+                    candidate == &json!(key)
+                        || (!notification_id.is_empty() && candidate == &json!(notification_id))
                 });
             if !batch_matches || !id_matches {
                 return Err(format!(
@@ -1363,6 +1370,9 @@ fn validate_claim(root: &Path, module_id: &str, output: &mut Value) -> Result<()
     require_str(&record, "/branch", &name)?;
     require_str(&record, "/head_commit", &name)?;
     require_str(&record, "/scope_hash", &name)?;
+    if record.get("module_id").and_then(Value::as_str) != Some(module_id) {
+        return Err("FIX_WORKTREE_MODULE_MISMATCH".to_owned());
+    }
     if record.get("initial_clean") != Some(&Value::Bool(true))
         || record.get("final_clean") != Some(&Value::Bool(true))
         || record.get("isolation_mode").and_then(Value::as_str) != Some("isolated_worktree")
@@ -1399,6 +1409,9 @@ fn validate_candidate(root: &Path, module_id: &str, output: &mut Value) -> Resul
     }
     require_array_or_empty(&candidate, "/changed_paths", &candidate_name)?;
     require_array(&candidate, "/verification_evidence_ids", &candidate_name)?;
+    if candidate.get("module_id").and_then(Value::as_str) != Some(module_id) {
+        return Err("FIX_CANDIDATE_MODULE_MISMATCH".to_owned());
+    }
     if candidate.get("worktree_id") != worktree.get("worktree_id")
         || candidate.get("issue_id") != worktree.get("issue_id")
         || candidate.get("base_commit") != worktree.get("base_commit")
@@ -1628,6 +1641,17 @@ fn validate_promotion(root: &Path, module_id: &str, output: &mut Value) -> Resul
     }
     require_array(&promotion, "/evidence_ids", &promotion_name)?;
     require_array(&promotion, "/required_gate_results", &promotion_name)?;
+    if promotion
+        .get("required_gate_results")
+        .and_then(Value::as_array)
+        .is_none_or(|gates| {
+            gates
+                .iter()
+                .any(|gate| gate.get("result").and_then(Value::as_str) != Some("pass"))
+        })
+    {
+        return Err("PROMOTION_GATE_RESULT_NOT_PASS".to_owned());
+    }
     if promotion.get("bug_closure_verified") != Some(&Value::Bool(true))
         || promotion.get("worktree_record_id") != worktree.get("worktree_id")
         || promotion.get("fix_candidate_id") != candidate.get("fix_candidate_id")

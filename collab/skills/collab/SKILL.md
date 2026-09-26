@@ -777,6 +777,7 @@ authoritative snapshot plus the current role's `operations`.
 | First time in a project | `collab context` | `collab init`, `collab whoami` |
 | Thread/session changed, or after daemon restart | `collab context` (rebinds in place) | `collab worker recover`, `collab down`/`up` |
 | Token mismatch, `PROJECT_SCOPE_UNKNOWN`, or route loss | preserve the exact error, run `collab context` from the canonical main tree | edit token/route state, copy identity, reset the project |
+| `collab context` fails with `IDENTITY_REBIND_UNPROVEN` / cross-project route | run `collab context` from the canonical main tree; if it still fails, preserve the exact error and worker_id and report it to the live master | edit routes/token state, copy identity, run `collab worker recover` from a worktree, start a second daemon |
 | Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
 | Unsure whether a live master exists | `collab master status` from the canonical root | infer "no master" from a failed context or a missing `who.master` |
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |

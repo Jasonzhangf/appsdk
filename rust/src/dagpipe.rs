@@ -378,10 +378,7 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 .to_owned();
             let generation = notification.get("generation").and_then(Value::as_u64);
             if let Some(existing) = objects.iter_mut().rev().find(|object| {
-                object.key == key
-                    && object.message_id == message_id
-                    && object.generation == generation
-                    && object.terminal_count == 0
+                object.key == key && object.generation == generation && object.terminal_count == 0
             }) {
                 existing.events.push(event.clone());
                 continue;

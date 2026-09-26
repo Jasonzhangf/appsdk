@@ -279,6 +279,8 @@ fn validate_notification_objects(root: &Path) -> Result<Value, String> {
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
     let schema: Value = serde_json::from_str(COMMUNICATION_EVENT_SCHEMA)
         .map_err(|error| format!("COMMUNICATION_EVENT_SCHEMA_INVALID:{error}"))?;
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|error| format!("COMMUNICATION_EVENT_SCHEMA_INVALID:{error}"))?;
     let valid_kinds = schema
         .pointer("/properties/kind/enum")
         .and_then(Value::as_array)
@@ -297,6 +299,13 @@ fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
         }
         let event: Value = serde_json::from_str(line)
             .map_err(|error| format!("COMMUNICATION_MAILBOX_EVENT_INVALID:{error}"))?;
+        if !valid_kinds.contains(event["kind"].as_str().unwrap_or("")) {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_KIND_INVALID:{}:{}",
+                index + 1,
+                event["kind"].as_str().unwrap_or("")
+            ));
+        }
         let event_id = event
             .get("eventId")
             .and_then(Value::as_str)
@@ -323,16 +332,10 @@ fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
                 index + 1
             ));
         }
-        if !valid_kinds.contains(event["kind"].as_str().unwrap_or("")) {
+        if let Err(error) = validator.validate(&event) {
+            let kind = event["kind"].as_str().unwrap_or("");
             return Err(format!(
-                "COMMUNICATION_MAILBOX_EVENT_KIND_INVALID:{}:{}",
-                index + 1,
-                event["kind"].as_str().unwrap_or("")
-            ));
-        }
-        if !event["data"].is_object() {
-            return Err(format!(
-                "COMMUNICATION_MAILBOX_EVENT_DATA_INVALID:{}",
+                "COMMUNICATION_MAILBOX_EVENT_INVALID:{}:{kind}:{error}",
                 index + 1
             ));
         }
@@ -476,7 +479,10 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 .iter()
                 .any(|id| id == &object.notification_id);
             let message_matches = message_ids.iter().any(|id| id == &object.message_id);
-            let generation_matches = generation.is_none()
+            // notification.superseded carries the master-wake generation, not
+            // the notification object generation, so it must match by key/id.
+            let generation_matches = kind == "notification.superseded"
+                || generation.is_none()
                 || object.generation.is_none()
                 || generation == object.generation;
             if (key_matches || id_matches || message_matches) && generation_matches {
@@ -488,31 +494,48 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
             kind,
             "notification.emitted" | "notification.batch_emitted" | "notification.superseded"
         );
-        let choose = match (&attempt_id, kind, candidates.as_slice()) {
-            (Some(event_attempt), _, candidates) if !candidates.is_empty() => candidates
-                .iter()
-                .copied()
-                .find(|object_index| {
-                    objects[*object_index].attempt_id.as_deref() == Some(event_attempt)
-                })
-                .or_else(|| {
-                    candidates.iter().rev().copied().find(|object_index| {
+        let select =
+            |candidates: &[usize]| -> Option<usize> {
+                match (&attempt_id, kind) {
+                    (Some(event_attempt), _) => candidates
+                        .iter()
+                        .copied()
+                        .find(|object_index| {
+                            objects[*object_index].attempt_id.as_deref() == Some(event_attempt)
+                        })
+                        .or_else(|| {
+                            candidates.iter().rev().copied().find(|object_index| {
+                                !terminal || objects[*object_index].terminal_count == 0
+                            })
+                        }),
+                    (_, "notification.delivery_attempt") => candidates
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|object_index| objects[*object_index].attempt_id.is_none()),
+                    (_, _) => candidates.iter().rev().copied().find(|object_index| {
                         !terminal || objects[*object_index].terminal_count == 0
-                    })
-                }),
-            (_, "notification.delivery_attempt", candidates) => candidates
-                .iter()
-                .rev()
-                .copied()
-                .find(|object_index| objects[*object_index].attempt_id.is_none()),
-            (_, _, candidates) => candidates
-                .iter()
-                .rev()
-                .copied()
-                .find(|object_index| !terminal || objects[*object_index].terminal_count == 0),
-        };
+                    }),
+                }
+            };
+        // A batch event names several notification keys; fan out one target per
+        // distinct object key while still choosing the right generation.
+        let mut targets = Vec::new();
+        let mut seen_keys = BTreeSet::new();
+        for candidate in &candidates {
+            if seen_keys.insert(objects[*candidate].key.clone()) {
+                let same_key = candidates
+                    .iter()
+                    .copied()
+                    .filter(|object_index| objects[*object_index].key == objects[*candidate].key)
+                    .collect::<Vec<_>>();
+                if let Some(object_index) = select(&same_key) {
+                    targets.push(object_index);
+                }
+            }
+        }
 
-        let Some(object_index) = choose else {
+        if targets.is_empty() {
             if kind.starts_with("notification.") {
                 let event_id = event
                     .get("eventId")
@@ -523,16 +546,18 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 ));
             }
             continue;
-        };
-        let object = &mut objects[object_index];
-        object.events.push(event.clone());
-        if kind == "notification.delivery_attempt" {
-            if let Some(attempt_id) = attempt_id.as_ref() {
-                object.attempt_id = Some(attempt_id.clone());
-            }
         }
-        if terminal {
-            object.terminal_count += 1;
+        for object_index in targets {
+            let object = &mut objects[object_index];
+            object.events.push(event.clone());
+            if kind == "notification.delivery_attempt" {
+                if let Some(attempt_id) = attempt_id.as_ref() {
+                    object.attempt_id = Some(attempt_id.clone());
+                }
+            }
+            if terminal {
+                object.terminal_count += 1;
+            }
         }
     }
 

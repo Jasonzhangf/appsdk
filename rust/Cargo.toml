@@ -12,7 +12,7 @@ sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 libc = "0.2"
+jsonschema = { version = "0.56", default-features = false }
 pipeline_runtime = { git = "https://github.com/Jasonzhangf/DAGpipe", rev = "d88070c9a2ebaaf06d19ebc00ae313bd5f44fd8b" }
 
 [dev-dependencies]
-jsonschema = { version = "0.56", default-features = false }

@@ -4,8 +4,8 @@
 //! AppSDK record chain before the lifecycle state machine advances.
 
 use pipeline_runtime::{
-    compile, parse_graph_json, Cancellation, EffectReplay, Identity, Operator, OperatorContext,
-    Registry, Runtime, StateMachine, Transition, ValueType,
+    compile, graph_topology, parse_graph_json, Cancellation, EffectReplay, Identity, Operator,
+    OperatorContext, Registry, Runtime, StateMachine, Transition, ValueType,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -781,6 +781,10 @@ fn validate_terminal_event(
         .ok_or_else(|| format!("NOTIFICATION_TERMINAL_DATA_MISSING:{kind}"))?;
     match kind {
         "notification.emitted" => {
+            let terminal_index = events
+                .iter()
+                .position(|event| event == terminal)
+                .unwrap_or(0);
             let attempt_id = data
                 .get("attemptId")
                 .and_then(Value::as_str)
@@ -801,13 +805,23 @@ fn validate_terminal_event(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:keys_missing"
                 ));
             }
-            if !delivery_attempt_matches(events, attempt_id, key) {
+            if !delivery_attempt_matches_before(
+                events,
+                terminal_index,
+                attempt_id,
+                key,
+                "notification.emitted",
+            ) {
                 return Err(format!(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:attempt_missing:{attempt_id}"
                 ));
             }
         }
         "notification.batch_emitted" => {
+            let terminal_index = events
+                .iter()
+                .position(|event| event == terminal)
+                .unwrap_or(0);
             let attempt_id = data
                 .get("attemptId")
                 .and_then(Value::as_str)
@@ -840,7 +854,13 @@ fn validate_terminal_event(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batch_or_ids_missing"
                 ));
             }
-            if !delivery_attempt_matches(events, attempt_id, key) {
+            if !delivery_attempt_matches_before(
+                events,
+                terminal_index,
+                attempt_id,
+                key,
+                "notification.batch_emitted",
+            ) {
                 return Err(format!(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:attempt_missing:{attempt_id}"
                 ));
@@ -872,13 +892,22 @@ fn validate_terminal_event(
     Ok(())
 }
 
-fn delivery_attempt_matches(events: &[Value], attempt_id: &str, key: &str) -> bool {
-    events.iter().any(|event| {
+fn delivery_attempt_matches_before(
+    events: &[Value],
+    terminal_index: usize,
+    attempt_id: &str,
+    key: &str,
+    operation: &str,
+) -> bool {
+    events[..terminal_index].iter().any(|event| {
         event["kind"] == "notification.delivery_attempt"
             && event["data"]["attemptId"].as_str() == Some(attempt_id)
             && event["data"]["keys"]
                 .as_array()
                 .is_some_and(|keys| keys.iter().any(|candidate| candidate == &json!(key)))
+            && event["data"]["attempt"]["operation"].as_str() == Some(operation)
+            && event["data"]["attempt"].get("batchId").is_some()
+                == (operation == "notification.batch_emitted")
     })
 }
 
@@ -971,6 +1000,10 @@ fn ensure_single_source_single_sink(graph: &pipeline_runtime::Graph) -> Result<(
             return Err(format!("DAGPIPE_ARC_MUST_HAVE_SINGLE_SINK:{}", edge.arc_id));
         }
     }
+    // Single-input/single-output per node is necessary but not sufficient for
+    // SESE: only the shared topology validator rejects cycles, edge endpoint
+    // mismatches, dead nodes, and undeclared input arcs.
+    graph_topology(graph).map_err(|error| format!("DAGPIPE_GRAPH_TOPOLOGY_INVALID:{error}"))?;
     Ok(())
 }
 
@@ -1524,5 +1557,82 @@ mod tests {
         graph.nodes.last_mut().unwrap().inputs[0] = "orphan_state".to_owned();
         let error = ensure_single_source_single_sink(&graph).unwrap_err();
         assert!(error.starts_with("DAGPIPE_ARC_UNCONSUMED"));
+    }
+
+    #[test]
+    fn single_source_single_sink_rejects_cycle_that_passes_local_shape_checks() {
+        let graph = parse_graph_json(
+            r#"{
+              "id": "cycle",
+              "version": "0.1.0",
+              "inputs": [{"id": "source_arc", "schema": "Any"}],
+              "nodes": [
+                {"id": "a", "operator": "x", "operator_version": "1", "inputs": ["arc_b"],
+                 "output": {"id": "arc_a", "schema": "Any"},
+                 "input_selector": {"include": [], "exclude": [], "predicate": null},
+                 "output_selector": {"include": [], "exclude": [], "predicate": null},
+                 "iterator": "Whole"},
+                {"id": "b", "operator": "y", "operator_version": "1", "inputs": ["arc_a"],
+                 "output": {"id": "arc_b", "schema": "Any"},
+                 "input_selector": {"include": [], "exclude": [], "predicate": null},
+                 "output_selector": {"include": [], "exclude": [], "predicate": null},
+                 "iterator": "Whole"}
+              ],
+              "edges": [
+                {"from": "a", "to": "b", "arc_id": "arc_a"},
+                {"from": "b", "to": "a", "arc_id": "arc_b"}
+              ],
+              "outputs": ["arc_a"]
+            }"#,
+        )
+        .unwrap();
+        let error = ensure_single_source_single_sink(&graph).unwrap_err();
+        assert!(
+            error.starts_with("DAGPIPE_GRAPH_TOPOLOGY_INVALID"),
+            "{error}"
+        );
+        assert!(error.contains("cycle"), "{error}");
+    }
+
+    #[test]
+    fn single_source_single_sink_rejects_edge_arc_endpoint_mismatch() {
+        // Passes the local per-node/per-ARC shape checks: every node has one
+        // input, every produced ARC is consumed, and the declared output is
+        // bound. Only the shared topology validator rejects the edge whose
+        // `arc_id` is not the source node's output.
+        let graph = parse_graph_json(
+            r#"{
+              "id": "endpoint_mismatch",
+              "version": "0.1.0",
+              "inputs": [{"id": "source_arc", "schema": "Any"}],
+              "nodes": [
+                {"id": "a", "operator": "x", "operator_version": "1", "inputs": ["source_arc"],
+                 "output": {"id": "arc_a", "schema": "Any"},
+                 "input_selector": {"include": [], "exclude": [], "predicate": null},
+                 "output_selector": {"include": [], "exclude": [], "predicate": null},
+                 "iterator": "Whole"},
+                {"id": "b", "operator": "y", "operator_version": "1", "inputs": ["arc_a"],
+                 "output": {"id": "arc_b", "schema": "Any"},
+                 "input_selector": {"include": [], "exclude": [], "predicate": null},
+                 "output_selector": {"include": [], "exclude": [], "predicate": null},
+                 "iterator": "Whole"},
+                {"id": "c", "operator": "z", "operator_version": "1", "inputs": ["arc_b"],
+                 "output": {"id": "arc_c", "schema": "Any"},
+                 "input_selector": {"include": [], "exclude": [], "predicate": null},
+                 "output_selector": {"include": [], "exclude": [], "predicate": null},
+                 "iterator": "Whole"}
+              ],
+              "edges": [
+                {"from": "a", "to": "b", "arc_id": "arc_b"}
+              ],
+              "outputs": ["arc_c"]
+            }"#,
+        )
+        .unwrap();
+        let error = ensure_single_source_single_sink(&graph).unwrap_err();
+        assert!(
+            error.starts_with("DAGPIPE_GRAPH_TOPOLOGY_INVALID"),
+            "{error}"
+        );
     }
 }

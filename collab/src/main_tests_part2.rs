@@ -1,0 +1,1130 @@
+use super::*;
+#[test]
+fn ensure_registration_rejects_a_retired_appserver_runtime() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-reuse");
+    let state_root = root.join("global");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let runtime = RuntimeIdentity::cli_adapter("worker-1").unwrap();
+    let mut identity = identity_with_runtime(Some(runtime));
+    identity.project_scope = Some(
+        Scope { root: root.clone() }
+            .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id,
+    );
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-worker-1".into()),
+        thread_id: Some("thread-worker-1".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    });
+    assert!(!persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap());
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_identity_without_project_scope_requires_registration() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-legacy-scope");
+    let state_root = root.join("global");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let runtime = RuntimeIdentity::cli_adapter("worker-1").unwrap();
+    let identity = identity_with_runtime(Some(runtime));
+
+    assert!(!persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap());
+
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn ensure_registration_rebinds_a_thread_bound_to_another_project() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-rebind");
+    let old_root = root.join("old-project");
+    let new_root = root.join("new-project");
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&old_root).unwrap();
+    std::fs::create_dir_all(&new_root).unwrap();
+    std::fs::create_dir_all(old_root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(new_root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": old_root.canonicalize().unwrap(),
+        "canonical_root": old_root.canonicalize().unwrap(),
+        "storage_root": old_root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let runtime = RuntimeIdentity::cli_adapter("worker-1").unwrap();
+    let mut identity = identity_with_runtime(Some(runtime));
+    identity.project_scope = Some(
+        Scope {
+            root: old_root.clone(),
+        }
+        .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+        .unwrap()
+        .project_scope_id,
+    );
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-worker-1".into()),
+        thread_id: Some("thread-worker-1".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    });
+
+    assert!(!persisted_runtime_matches_scope(
+        &Scope {
+            root: new_root.clone()
+        },
+        &identity
+    )
+    .unwrap());
+    // A retired AppServer transport is not reusable even in its original
+    // project; the next mutating command must bind the current tmux pane.
+    assert!(!persisted_runtime_matches_scope(
+        &Scope {
+            root: old_root.clone()
+        },
+        &identity
+    )
+    .unwrap());
+
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_thread_only_identity_is_not_reusable_and_must_re_register() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-legacy-thread-only");
+    let state_root = root.join("global");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    // The pre-dual-key durable shape: a native thread with no session on
+    // either the runtime or the selected transport.
+    let runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("worker-1").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-legacy").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: identity::BindingId::new("binding-legacy").unwrap(),
+        session_id: None,
+        native_thread_id: Some(identity::NativeThreadId::new("thread-legacy").unwrap()),
+    };
+    let mut identity = identity_with_runtime(Some(runtime));
+    identity.project_scope = Some(
+        Scope { root: root.clone() }
+            .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id,
+    );
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: None,
+        thread_id: Some("thread-legacy".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    });
+
+    // A recovered legacy identity must not be reported as reusable: it
+    // cannot resolve its own route until it re-registers with the host
+    // session and upgrades to the strict dual-key binding.
+    assert!(!persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap());
+
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// `collab init` must not claim a persisted peer without a stable identity
+/// anchor, even when that peer is the only identity in the project.
+#[test]
+fn init_refuses_to_rebind_a_legacy_identity_without_a_matching_anchor() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("init-scope-rebind");
+    // The daemon socket lives in the state root, so keep that path short
+    // enough for `sockaddr_un`.
+    let state_root = std::env::temp_dir().join(format!(
+        "cs-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let tmux_fixture = crate::server::peer_tests::IsolatedTmux::start_single(&root);
+    let current_endpoint = tmux_fixture.endpoints().remove(0);
+    let previous_tmux = std::env::var_os("TMUX");
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    std::env::set_var(
+        "TMUX",
+        format!(
+            "{},{},0",
+            current_endpoint.socket_path, current_endpoint.server_pid
+        ),
+    );
+    std::env::set_var("TMUX_PANE", &current_endpoint.pane_id);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let old_runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("agent-peer").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-agent-peer").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: identity::BindingId::new("binding-agent-peer").unwrap(),
+        session_id: Some(identity::SessionId::new("session-old").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
+    };
+    let transport = SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-old".into()),
+        thread_id: Some("thread-old".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    };
+    let persisted = Identity {
+        worker_id: "agent-peer".into(),
+        token: "token-agent-peer".into(),
+        project_scope: Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        ),
+        runtime: Some(old_runtime),
+        transport: Some(transport.clone()),
+    };
+    let identity_path = state_root
+        .join("identities")
+        .join("agent-peer")
+        .join("identity.json");
+    std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &identity_path,
+        serde_json::to_string_pretty(&persisted).unwrap(),
+    )
+    .unwrap();
+
+    // The route listener proves that init refuses before asking the daemon
+    // to resolve or re-register an unanchored legacy peer.
+    let socket = state_root.join("server.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let request_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let request_observed_by_server = request_observed.clone();
+    let responder = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+
+        let (mut route_stream, _) = match listener.accept() {
+            Ok(connection) => {
+                request_observed_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                connection
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+            Err(error) => panic!("route test listener failed: {error}"),
+        };
+        let mut route_line = String::new();
+        std::io::BufReader::new(&route_stream)
+            .read_line(&mut route_line)
+            .unwrap();
+        let route_request: serde_json::Value = serde_json::from_str(&route_line).unwrap();
+        assert_eq!(route_request["op"], "RouteResolve");
+        assert_eq!(route_request["session_id"], "session-old");
+        assert_eq!(route_request["native_thread_id"], "thread-old");
+        route_stream
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({
+                            "ok": false,
+                            "error": "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread"
+                        })
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+
+        // 2. Registration must now arrive as the restored identity.
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        // The restored identity must register as itself, with its own token
+        // and its own derived binding id.
+        assert_eq!(request["worker_id"], "agent-peer");
+        assert_eq!(request["token"], "token-agent-peer");
+        let response = json!({
+            "ok": true,
+            "worker_id": "agent-peer",
+            "identity_kind": "peer",
+            "transport_selected": {
+                "kind": "appserver",
+                "endpoint": "unix:///tmp/codex.sock",
+                "namespace": "codex_tui",
+                "session_id": "session-new",
+                "thread_id": "thread-new",
+                "capabilities": ["send_message_to_thread"],
+                "self_check": "test appserver"
+            },
+            "typed": true,
+            "command_id": "command-register",
+            "operation_id": "operation-register",
+            "sequence": 2,
+            "revision": 2,
+            "replayed": false,
+            "command": {
+                "binding": {
+                    "project_scope": root_string,
+                    "app_scope_id": identity::CLI_APP_SERVER_ID,
+                    "agent_id": "agent-peer",
+                    "runtime_id": "runtime-agent-peer",
+                    "binding_id": "binding-agent-peer",
+                    "endpoint_generation": 2,
+                    "session_id": "session-new",
+                    "native_thread_id": "thread-new"
+                }
+            }
+        });
+        std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+    });
+
+    set_current_session_thread("thread-new", "session-new");
+    let result = identity::load_or_create_for_init(&Scope { root: root.clone() }, None);
+    responder.join().unwrap();
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
+        "unexpected init result: {error:#}"
+    );
+    assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
+    clear_current_session_thread();
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    match previous_tmux {
+        Some(value) => std::env::set_var("TMUX", value),
+        None => std::env::remove_var("TMUX"),
+    }
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn ensure_registration_uses_provisional_runtime_for_scope_mismatch() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-recovery");
+    let old_root = root.join("old-project");
+    let new_root = root.join("new-project");
+    let state_root = std::env::temp_dir().join(format!(
+        "collab-state-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&old_root).unwrap();
+    std::fs::create_dir_all(new_root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": "appserver-old",
+        "project_scope": old_root.canonicalize().unwrap(),
+        "canonical_root": old_root.canonicalize().unwrap(),
+        "storage_root": old_root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let old_runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("worker-1").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-old").unwrap(),
+        appserver_id: identity::AppServerId::new("appserver-old").unwrap(),
+        endpoint_generation: 3,
+        binding_id: identity::BindingId::new("binding-old").unwrap(),
+        session_id: Some(identity::SessionId::new("session-thread-old").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
+    };
+    let mut identity = identity_with_runtime(Some(old_runtime));
+    identity.project_scope = Some(
+        Scope {
+            root: old_root.clone(),
+        }
+        .route_scope(identity::AppServerId::new("appserver-old").unwrap())
+        .unwrap()
+        .project_scope_id,
+    );
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-thread-old".into()),
+        thread_id: Some("thread-old".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    });
+
+    let socket = state_root.join("server.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let new_root_string = new_root
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let responder = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            request["project_context"]["app_scope_id"],
+            identity::CLI_APP_SERVER_ID
+        );
+        let response = json!({
+            "ok": true,
+            "worker_id": "worker-1",
+            "identity_kind": "peer",
+            "transport_selected": {
+                "kind": "appserver",
+                "endpoint": "unix:///tmp/codex.sock",
+                "namespace": "codex_tui",
+                "session_id": "session-thread-new",
+                "thread_id": "thread-new",
+                "capabilities": ["send_message_to_thread"],
+                "self_check": "test appserver"
+            },
+            "typed": true,
+            "command_id": "command-register",
+            "operation_id": "operation-register",
+            "sequence": 1,
+            "revision": 1,
+            "replayed": false,
+            "command": {
+                "binding": {
+                    "project_scope": new_root_string,
+                    "app_scope_id": identity::CLI_APP_SERVER_ID,
+                    "agent_id": "worker-1",
+                    "runtime_id": "runtime-new",
+                    "binding_id": "binding-new",
+                    "endpoint_generation": 1,
+                    "session_id": "session-thread-new",
+                    "native_thread_id": "thread-new"
+                }
+            }
+        });
+        std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+    });
+
+    let response = ensure_registration(
+        &Scope {
+            root: new_root.clone(),
+        },
+        &mut identity,
+    )
+    .unwrap();
+    responder.join().unwrap();
+    assert_eq!(response["typed"], true);
+    assert_eq!(
+        identity.runtime.unwrap().appserver_id.as_str(),
+        identity::CLI_APP_SERVER_ID
+    );
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// An ordinary command cannot adopt a persisted peer without a matching
+/// pane, session, or thread anchor.
+#[test]
+fn ordinary_command_refuses_an_unanchored_legacy_identity() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("ordinary-registration-rebind");
+    let state_root = std::env::temp_dir().join(format!(
+        "cs-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let tmux_fixture = crate::server::peer_tests::IsolatedTmux::start_single(&root);
+    let current_endpoint = tmux_fixture.endpoints().remove(0);
+    let previous_tmux = std::env::var_os("TMUX");
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    std::env::set_var(
+        "TMUX",
+        format!(
+            "{},{},0",
+            current_endpoint.socket_path, current_endpoint.server_pid
+        ),
+    );
+    std::env::set_var("TMUX_PANE", &current_endpoint.pane_id);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let old_runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("agent-peer").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-agent-peer").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: identity::BindingId::new("binding-agent-peer").unwrap(),
+        session_id: Some(identity::SessionId::new("session-old").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
+    };
+    let persisted = Identity {
+        worker_id: "agent-peer".into(),
+        token: "token-agent-peer".into(),
+        project_scope: Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        ),
+        runtime: Some(old_runtime),
+        transport: Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("session-old".into()),
+            thread_id: Some("thread-old".into()),
+            tmux_endpoint: None,
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        }),
+    };
+    let identity_path = state_root
+        .join("identities")
+        .join("agent-peer")
+        .join("identity.json");
+    std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &identity_path,
+        serde_json::to_string_pretty(&persisted).unwrap(),
+    )
+    .unwrap();
+
+    let socket = state_root.join("server.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let request_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let request_observed_by_server = request_observed.clone();
+    let responder = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+
+        let (mut route_stream, _) = match listener.accept() {
+            Ok(connection) => {
+                request_observed_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                connection
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+            Err(error) => panic!("route test listener failed: {error}"),
+        };
+        let mut route_line = String::new();
+        std::io::BufReader::new(&route_stream)
+            .read_line(&mut route_line)
+            .unwrap();
+        let route_request: serde_json::Value = serde_json::from_str(&route_line).unwrap();
+        assert_eq!(route_request["op"], "RouteResolve");
+        assert_eq!(route_request["session_id"], "session-old");
+        assert_eq!(route_request["native_thread_id"], "thread-old");
+        route_stream
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({
+                            "ok": false,
+                            "error": "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread"
+                        })
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["worker_id"], "agent-peer");
+        assert_eq!(request["token"], "token-agent-peer");
+        let response = json!({
+            "ok": true,
+            "worker_id": "agent-peer",
+            "identity_kind": "peer",
+            "transport_selected": {
+                "kind": "appserver",
+                "endpoint": "unix:///tmp/codex.sock",
+                "namespace": "codex_tui",
+                "session_id": "session-new",
+                "thread_id": "thread-new",
+                "capabilities": ["send_message_to_thread"],
+                "self_check": "test appserver"
+            },
+            "typed": true,
+            "command_id": "command-register",
+            "operation_id": "operation-register",
+            "sequence": 2,
+            "revision": 2,
+            "replayed": false,
+            "command": {
+                "binding": {
+                    "project_scope": root_string,
+                    "app_scope_id": identity::CLI_APP_SERVER_ID,
+                    "agent_id": "agent-peer",
+                    "runtime_id": "runtime-agent-peer",
+                    "binding_id": "binding-agent-peer",
+                    "endpoint_generation": 2,
+                    "session_id": "session-new",
+                    "native_thread_id": "thread-new"
+                }
+            }
+        });
+        std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+    });
+
+    set_current_session_thread("thread-new", "session-new");
+    let result = me(&Scope { root: root.clone() }, None);
+    responder.join().unwrap();
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
+        "unexpected ordinary-command result: {error:#}"
+    );
+    assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
+    clear_current_session_thread();
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    match previous_tmux {
+        Some(value) => std::env::set_var("TMUX", value),
+        None => std::env::remove_var("TMUX"),
+    }
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Context may not restore an identity when the current invocation has no
+/// matching tmux pane, Codex session, or Codex thread anchor.
+#[test]
+fn context_route_miss_refuses_an_unproven_identity_restore() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("context-route-miss-rebind");
+    let state_root = std::env::temp_dir().join(format!(
+        "cs-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let old_runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("agent-peer").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-agent-peer").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: identity::BindingId::new("binding-agent-peer").unwrap(),
+        session_id: Some(identity::SessionId::new("session-old").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-old").unwrap()),
+    };
+    let persisted = Identity {
+        worker_id: "agent-peer".into(),
+        token: "token-agent-peer".into(),
+        project_scope: Some(
+            Scope { root: root.clone() }
+                .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id,
+        ),
+        runtime: Some(old_runtime),
+        transport: Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("session-old".into()),
+            thread_id: Some("thread-old".into()),
+            tmux_endpoint: None,
+            capabilities: vec!["send_message_to_thread".into()],
+            self_check: "test appserver".into(),
+        }),
+    };
+    let identity_path = state_root
+        .join("identities")
+        .join("agent-peer")
+        .join("identity.json");
+    std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &identity_path,
+        serde_json::to_string_pretty(&persisted).unwrap(),
+    )
+    .unwrap();
+
+    let socket = state_root.join("server.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let request_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let request_observed_by_server = request_observed.clone();
+    let responder = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+
+        let (mut route_stream, _) = match listener.accept() {
+            Ok(connection) => {
+                request_observed_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                connection
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+            Err(error) => panic!("route test listener failed: {error}"),
+        };
+        let mut route_line = String::new();
+        std::io::BufReader::new(&route_stream)
+            .read_line(&mut route_line)
+            .unwrap();
+        let route_request: serde_json::Value = serde_json::from_str(&route_line).unwrap();
+        assert_eq!(route_request["op"], "RouteResolve");
+        assert_eq!(route_request["session_id"], "session-old");
+        assert_eq!(route_request["native_thread_id"], "thread-old");
+        route_stream
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({
+                            "ok": false,
+                            "error": "ROUTE_RESOLVE_NOT_FOUND: no registered Collab route is bound to App Server thread"
+                        })
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["worker_id"], "agent-peer");
+        assert_eq!(request["token"], "token-agent-peer");
+        let response = json!({
+            "ok": true,
+            "worker_id": "agent-peer",
+            "identity_kind": "peer",
+            "transport_selected": {
+                "kind": "appserver",
+                "endpoint": "unix:///tmp/codex.sock",
+                "namespace": "codex_tui",
+                "session_id": "session-new",
+                "thread_id": "thread-new",
+                "capabilities": ["send_message_to_thread"],
+                "self_check": "test appserver"
+            },
+            "typed": true,
+            "command_id": "command-register",
+            "operation_id": "operation-register",
+            "sequence": 2,
+            "revision": 2,
+            "replayed": false,
+            "command": {
+                "binding": {
+                    "project_scope": root_string,
+                    "app_scope_id": identity::CLI_APP_SERVER_ID,
+                    "agent_id": "agent-peer",
+                    "runtime_id": "runtime-agent-peer",
+                    "binding_id": "binding-agent-peer",
+                    "endpoint_generation": 2,
+                    "session_id": "session-new",
+                    "native_thread_id": "thread-new"
+                }
+            }
+        });
+        std::io::Write::write_all(&mut stream, format!("{response}\n").as_bytes()).unwrap();
+    });
+
+    set_current_session_thread("thread-new", "session-new");
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    std::env::remove_var("TMUX_PANE");
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let recovery = identity::load_or_create(&Scope { root: root.clone() }, None, None);
+    std::env::set_current_dir(previous).unwrap();
+    if let Err(error) = recovery {
+        assert!(
+            error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
+            "unexpected recovery error: {error:#}"
+        );
+        responder.join().unwrap();
+        assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
+        clear_current_session_thread();
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+        std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+        return;
+    }
+    responder.join().unwrap();
+    panic!("unproven identity must fail closed, got successful identity load");
+}
+
+#[test]
+fn init_runtime_projection_accepts_appserver_and_tmux_hosts() {
+    let root = test_root("runtime-projection");
+    let runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("worker-1").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-thread-1").unwrap(),
+        appserver_id: identity::AppServerId::new("tui-default").unwrap(),
+        endpoint_generation: 2,
+        binding_id: identity::BindingId::new("binding-thread-1").unwrap(),
+        session_id: Some(identity::SessionId::new("session-1").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-1").unwrap()),
+    };
+    let mut identity = identity_with_runtime(Some(runtime));
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-1".into()),
+        thread_id: Some("thread-1".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into(), "read_thread".into()],
+        self_check: "test appserver".into(),
+    });
+    let projection =
+        registered_runtime_projection(&Scope { root: root.clone() }, &identity, 4242).unwrap();
+    assert_eq!(projection["transport"], "appserver");
+    assert_eq!(projection["threadId"], "thread-1");
+    assert_eq!(projection["sessionId"], "session-1");
+    assert_eq!(projection["endpoint"], "unix:///tmp/codex.sock");
+    assert_eq!(projection["processId"], 4242);
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::Tmux,
+        endpoint: Some("/tmp/tmux-test.sock".into()),
+        namespace: Some("$1".into()),
+        session_id: Some("session-1".into()),
+        thread_id: Some("thread-1".into()),
+        tmux_endpoint: Some(proto::TmuxEndpoint {
+            socket_path: "/tmp/tmux-test.sock".into(),
+            server_pid: 42,
+            tmux_session_id: "$1".into(),
+            pane_id: "%1".into(),
+            pane_pid: 43,
+            codex_session_id: Some("session-1".into()),
+            codex_thread_id: Some("thread-1".into()),
+        }),
+        capabilities: vec!["send_message_to_pane".into(), "probe_pane".into()],
+        self_check: "test tmux".into(),
+    });
+    let projection =
+        registered_runtime_projection(&Scope { root: root.clone() }, &identity, 4242).unwrap();
+    assert_eq!(projection["runtimeId"], "runtime-thread-1");
+    assert_eq!(projection["appserverId"], "tui-default");
+    assert_eq!(projection["transport"], "tmux");
+    assert_eq!(projection["tmuxEndpoint"]["pane_id"], "%1");
+    assert_eq!(
+        projection["projectRoot"],
+        root.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert_eq!(projection["capabilities"][0], "send_message_to_pane");
+    assert_eq!(projection["processId"], 4242);
+    assert!(
+        registered_runtime_projection(&Scope { root: root.clone() }, &identity, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("PID is zero")
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn command_envelope_uses_the_registered_binding_and_generation() {
+    let root = test_root("command-envelope");
+    let runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("worker-1").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-live").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 9,
+        binding_id: identity::BindingId::new("binding-live").unwrap(),
+        session_id: None,
+        native_thread_id: None,
+    };
+    let identity = identity_with_runtime(Some(runtime));
+    let envelope = command_envelope(&Scope { root: root.clone() }, &identity).unwrap();
+    assert_eq!(envelope.actor_binding_id.as_str(), "binding-live");
+    assert_eq!(envelope.endpoint_generation, 9);
+    assert_eq!(
+        envelope.scope.app_scope_id.as_str(),
+        identity::CLI_APP_SERVER_ID
+    );
+    assert_eq!(
+        envelope.scope.project_scope_id.as_str(),
+        root.canonicalize().unwrap().to_string_lossy()
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn subagent_snapshot_uses_the_authenticated_mutation_route() {
+    assert!(subagent_observe_query(&subagent::Action::List).is_some());
+    assert!(subagent_observe_query(&subagent::Action::Status { id: "child".into() }).is_some());
+    assert!(subagent_observe_query(&subagent::Action::Snapshot {
+        id: "child".into(),
+        lines: 40,
+    })
+    .is_none());
+}
+
+#[test]
+fn persisted_appserver_binding_requires_live_native_route_resolution() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-appserver-live");
+    // The daemon socket lives in the state root, so keep that path short
+    // enough for `sockaddr_un`.
+    let state_root = std::env::temp_dir().join(format!(
+        "cs-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    set_current_session_thread("thread-1", "session-1");
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+
+    let runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("worker-1").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-live-1").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: identity::BindingId::new("binding-live-1").unwrap(),
+        session_id: Some(identity::SessionId::new("session-1").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-1").unwrap()),
+    };
+    let mut identity = identity_with_runtime(Some(runtime));
+    identity.project_scope = Some(
+        Scope { root: root.clone() }
+            .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id,
+    );
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-1".into()),
+        thread_id: Some("thread-1".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    });
+
+    let socket = Scope { root: root.clone() }.sock_path();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let root_string = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let responder = std::thread::spawn(move || {
+        use std::io::Write;
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["op"], "RouteResolveNative");
+        assert_eq!(request["session_id"], "session-1");
+        assert_eq!(request["native_thread_id"], "thread-1");
+        let response = json!({
+            "ok": true,
+            "app_scope_id": identity::CLI_APP_SERVER_ID,
+            "project_scope": root_string,
+            "canonical_root": root_string,
+            "storage_root": root_string,
+            "agent_id": "worker-1",
+            "binding_id": "binding-live-1",
+            "endpoint_generation": 1,
+            "session_id": "session-1",
+            "native_thread_id": "thread-1"
+        });
+        stream
+            .write_all(format!("{response}\n").as_bytes())
+            .unwrap();
+    });
+
+    assert!(persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap());
+    responder.join().unwrap();
+    clear_current_session_thread();
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn persisted_binding_for_another_session_or_thread_is_not_reusable() {
+    let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
+    let root = test_root("registration-foreign-address");
+    let state_root = root.join("global");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    std::fs::create_dir_all(&state_root).unwrap();
+    std::env::set_var(crate::scope::COLLAB_STATE_DIR_ENV, &state_root);
+    set_current_session_thread("thread-current", "session-current");
+    let route = json!({
+        "version": 1,
+        "op": "register",
+        "app_scope_id": identity::CLI_APP_SERVER_ID,
+        "project_scope": root.canonicalize().unwrap(),
+        "canonical_root": root.canonicalize().unwrap(),
+        "storage_root": root.canonicalize().unwrap(),
+        "registered_ms": 1
+    });
+    std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
+    let runtime = RuntimeIdentity {
+        agent_id: identity::AgentId::new("worker-1").unwrap(),
+        runtime_id: identity::RuntimeId::new("runtime-worker-1").unwrap(),
+        appserver_id: identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap(),
+        endpoint_generation: 1,
+        binding_id: identity::BindingId::new("binding-worker-1").unwrap(),
+        session_id: Some(identity::SessionId::new("session-other").unwrap()),
+        native_thread_id: Some(identity::NativeThreadId::new("thread-other").unwrap()),
+    };
+    let mut identity = identity_with_runtime(Some(runtime));
+    identity.project_scope = Some(
+        Scope { root: root.clone() }
+            .route_scope(identity::AppServerId::new(identity::CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id,
+    );
+    identity.transport = Some(SelectedTransport {
+        kind: TransportKind::AppServer,
+        endpoint: Some("unix:///tmp/codex.sock".into()),
+        namespace: Some("codex_tui".into()),
+        session_id: Some("session-other".into()),
+        thread_id: Some("thread-other".into()),
+        tmux_endpoint: None,
+        capabilities: vec!["send_message_to_thread".into()],
+        self_check: "test appserver".into(),
+    });
+    assert!(
+        !persisted_runtime_matches_scope(&Scope { root: root.clone() }, &identity).unwrap(),
+        "a binding for another session/thread must not be reused"
+    );
+    clear_current_session_thread();
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(root).ok();
+}

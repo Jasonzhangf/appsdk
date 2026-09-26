@@ -964,7 +964,6 @@ fn classify_thread_status(raw: &serde_json::Value) -> PeerLiveness {
 fn classify_probe_error(detail: &str) -> PeerLiveness {
     let lowered = detail.to_ascii_lowercase();
     if lowered.contains("not found")
-        || lowered.contains("not loaded")
         || lowered.contains("no rollout")
         || lowered.contains("missing")
         || lowered.contains("gone")
@@ -2133,7 +2132,7 @@ mod tests {
         ));
         assert!(matches!(
             classify_probe_error("thread not loaded: deadbeef"),
-            PeerLiveness::Dead
+            PeerLiveness::Unknown
         ));
         assert!(matches!(
             classify_probe_error("no rollout found for thread id deadbeef"),

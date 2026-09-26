@@ -2056,6 +2056,15 @@ fn read_json_file(root: &Path, path: &Path, error: &str) -> Result<Value, String
     serde_json::from_slice(&bytes).map_err(|_| error.to_string())
 }
 
+fn validate_record_schema(schema_relative: &str, record: &Value) -> Result<(), String> {
+    let schema = canonical_record_contract(schema_relative);
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|_| format!("INVALID_RECORD_SCHEMA:{}", schema_relative))?;
+    validator
+        .validate(record)
+        .map_err(|_| format!("INVALID_RECORD:{}", schema_relative))
+}
+
 fn test_governance_string<'a>(
     value: &'a Value,
     pointer: &str,
@@ -2118,6 +2127,30 @@ fn test_governance_identifier(value: &Value, pointer: &str, error: &str) -> Resu
         return Err(error.to_string());
     }
     Ok(())
+}
+
+fn test_governance_safe_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters.next().is_some_and(|c| c.is_ascii_lowercase())
+        && characters.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn test_governance_evidence_path(
+    root: &Path,
+    object_id: &str,
+    evidence_id: &str,
+) -> Option<PathBuf> {
+    if !test_governance_safe_identifier(object_id) || !test_governance_safe_identifier(evidence_id)
+    {
+        return None;
+    }
+    Some(
+        root.join(".appsdk")
+            .join("records")
+            .join("evidence")
+            .join(object_id)
+            .join(format!("{}.json", evidence_id)),
+    )
 }
 
 fn test_governance_datetime(value: &str, error: &str) -> Result<DateTime<Utc>, String> {
@@ -2464,6 +2497,20 @@ fn test_governance_object_status(
                 continue;
             }
         };
+        if validate_record_schema(
+            "contracts/records/test-scenario-result-record.schema.json",
+            &result,
+        )
+        .is_err()
+        {
+            object_blocked = true;
+            scenario_reports.push(serde_json::json!({
+                "scenario_id": scenario_id,
+                "status": "blocked",
+                "reason": "result_schema_invalid"
+            }));
+            continue;
+        }
         let mut reason = None;
         let status = result
             .get("status")
@@ -2602,12 +2649,18 @@ fn test_governance_object_status(
             if evidence_id.is_none() {
                 reason = Some("evidence_missing");
             } else if let Some(evidence_id) = evidence_id {
-                let evidence_path = root
-                    .join(".appsdk")
-                    .join("records")
-                    .join("evidence")
-                    .join(object_id)
-                    .join(format!("{}.json", evidence_id));
+                let Some(evidence_path) =
+                    test_governance_evidence_path(root, object_id, evidence_id)
+                else {
+                    reason = Some("evidence_mismatch");
+                    object_blocked = true;
+                    scenario_reports.push(serde_json::json!({
+                        "scenario_id": scenario_id,
+                        "status": "blocked",
+                        "reason": reason
+                    }));
+                    continue;
+                };
                 let evidence = match read_json_file(
                     root,
                     &evidence_path,
@@ -2625,7 +2678,14 @@ fn test_governance_object_status(
                         continue;
                     }
                 };
-                if evidence.get("evidence_id").and_then(Value::as_str) != Some(evidence_id)
+                if validate_record_schema(
+                    "contracts/records/evidence-record.schema.json",
+                    &evidence,
+                )
+                .is_err()
+                {
+                    reason = Some("evidence_schema_invalid");
+                } else if evidence.get("evidence_id").and_then(Value::as_str) != Some(evidence_id)
                     || evidence.get("source_commit").and_then(Value::as_str)
                         != Some(candidate_commit)
                     || evidence.get("result").and_then(Value::as_str) != Some("pass")
@@ -2644,6 +2704,7 @@ fn test_governance_object_status(
                         evidence.get("kind").and_then(Value::as_str),
                         Some("runtime" | "sample_replay")
                     )
+                    || result.get("producer") != evidence.get("producer")
                     || evidence.pointer("/scope/module_id").and_then(Value::as_str)
                         != Some(object_id)
                 {

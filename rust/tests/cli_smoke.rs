@@ -23482,9 +23482,86 @@ fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() 
     let rejected_missing_artifact = run(&["verify", "--test-admission", root_text]);
     assert!(!rejected_missing_artifact.status.success());
     assert!(
-        String::from_utf8_lossy(&rejected_missing_artifact.stdout).contains("evidence_mismatch"),
+        String::from_utf8_lossy(&rejected_missing_artifact.stdout)
+            .contains("evidence_schema_invalid"),
         "missing artifact_hash must block deployed_blackbox evidence: {}",
         String::from_utf8_lossy(&rejected_missing_artifact.stdout)
+    );
+    fs::write(&evidence_path, &original_evidence).unwrap();
+
+    let mut traversal_result: Value =
+        serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    traversal_result["evidence_id"] = Value::String("../../outside".into());
+    fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&traversal_result).unwrap() + "\n",
+    )
+    .unwrap();
+    let outside_evidence = root.join(".appsdk/records/outside.json");
+    let mut outside_evidence_value: Value = serde_json::from_str(&original_evidence).unwrap();
+    outside_evidence_value["evidence_id"] = Value::String("../../outside".into());
+    fs::write(
+        &outside_evidence,
+        serde_json::to_string_pretty(&outside_evidence_value).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_traversal = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_traversal.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_traversal.stdout).contains("result_schema_invalid"),
+        "path traversal evidence_id must block before any evidence read: {}",
+        String::from_utf8_lossy(&rejected_traversal.stdout)
+    );
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let mut missing_producer: Value =
+        serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    missing_producer.as_object_mut().unwrap().remove("producer");
+    fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&missing_producer).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_missing_producer = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_missing_producer.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_missing_producer.stdout)
+            .contains("result_schema_invalid"),
+        "result without required producer fields must block: {}",
+        String::from_utf8_lossy(&rejected_missing_producer.stdout)
+    );
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let mut mismatched_producer: Value = serde_json::from_str(&original_evidence).unwrap();
+    mismatched_producer["producer"]["identity"] = Value::String("other-worker".into());
+    fs::write(
+        &evidence_path,
+        serde_json::to_string_pretty(&mismatched_producer).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_mismatched_producer = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_mismatched_producer.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_mismatched_producer.stdout).contains("evidence_mismatch"),
+        "evidence producer mismatch must block: {}",
+        String::from_utf8_lossy(&rejected_mismatched_producer.stdout)
+    );
+    fs::write(&evidence_path, &original_evidence).unwrap();
+
+    let mut invalid_artifact_hash: Value = serde_json::from_str(&original_evidence).unwrap();
+    invalid_artifact_hash["artifact_hash"] = Value::String("sha256:not-a-digest".into());
+    fs::write(
+        &evidence_path,
+        serde_json::to_string_pretty(&invalid_artifact_hash).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_invalid_artifact_hash = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_invalid_artifact_hash.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_invalid_artifact_hash.stdout)
+            .contains("evidence_schema_invalid"),
+        "invalid artifact_hash must block deployed_blackbox evidence: {}",
+        String::from_utf8_lossy(&rejected_invalid_artifact_hash.stdout)
     );
     fs::write(&evidence_path, &original_evidence).unwrap();
 

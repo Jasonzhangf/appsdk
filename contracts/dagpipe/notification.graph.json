@@ -1,0 +1,24 @@
+{
+  "id": "appsdk-notification-object",
+  "version": "0.1.0",
+  "inputs": [
+    {
+      "id": "notification_object",
+      "schema": "Any"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "notification_object_validate",
+      "operator": "appsdk.communication.notification_object_validate",
+      "operator_version": "1",
+      "inputs": ["notification_object"],
+      "output": {"id": "notification_terminal", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [],
+  "outputs": ["notification_terminal"]
+}

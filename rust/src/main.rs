@@ -25,6 +25,7 @@ use long_horizon_policy::{generate_long_horizon_master_prompt, ExecutionRole, PO
 use long_horizon_role::execution_role;
 
 mod communication;
+mod dagpipe;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
 const SDK_VERSION: &str = env!("APPSDK_VERSION");
@@ -89,6 +90,21 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/communication/communication-capabilities.schema.json",
         "contracts",
         include_str!("../../contracts/communication/communication-capabilities.schema.json"),
+    ),
+    (
+        "contracts/dagpipe/manifest.json",
+        "contracts",
+        include_str!("../../contracts/dagpipe/manifest.json"),
+    ),
+    (
+        "contracts/dagpipe/fix-lifecycle.graph.json",
+        "contracts",
+        include_str!("../../contracts/dagpipe/fix-lifecycle.graph.json"),
+    ),
+    (
+        "contracts/dagpipe/notification.graph.json",
+        "contracts",
+        include_str!("../../contracts/dagpipe/notification.graph.json"),
     ),
     (
         "contracts/development-scenarios.manifest.json",
@@ -23022,6 +23038,9 @@ fn main() {
             if let Err(error) = communication::run_cli(args.collect()) {
                 fail(error.to_string());
             }
+        }
+        Some("dagpipe") => {
+            dagpipe::run_cli(&mut args);
         }
         _ => fail(CLI_USAGE),
     }

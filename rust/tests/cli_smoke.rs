@@ -23039,3 +23039,556 @@ fn canonical_zone_transition_and_promotion_schema_require_parallel_live_closure(
         );
     }
 }
+
+#[test]
+fn dagpipe_fix_lifecycle_runs_the_declared_graph_and_state_machine() {
+    let root = temp_root("dagpipe-fix-lifecycle");
+    let root_text = root.to_str().unwrap();
+    let artifact_hash = prepare_lifecycle_chain_fixture(&root);
+    assert!(!artifact_hash.is_empty());
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "app-core"]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["graph"]["id"], "appsdk-fix-lifecycle");
+    assert_eq!(result["graph"]["version"], "0.1.0");
+    assert_eq!(result["authority"], "advisory_projection");
+    assert_eq!(result["state"], "promoted");
+    assert_eq!(
+        result["single_source_single_sink"],
+        serde_json::json!({"inputs": 1, "outputs": 1})
+    );
+    assert_eq!(
+        result["node_order"],
+        serde_json::json!([
+            "admission_claim",
+            "admission_candidate",
+            "admission_review",
+            "admission_effectiveness",
+            "admission_remote",
+            "emit_promotion",
+        ])
+    );
+    let transitions = result["state_journal"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "state_changed")
+        .map(|event| {
+            (
+                event["from"].as_str().unwrap().to_owned(),
+                event["event"].as_str().unwrap().to_owned(),
+                event["to"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitions,
+        vec![
+            ("open".to_owned(), "claim".to_owned(), "claimed".to_owned()),
+            (
+                "claimed".to_owned(),
+                "candidate".to_owned(),
+                "candidate_verified".to_owned()
+            ),
+            (
+                "candidate_verified".to_owned(),
+                "review_pass".to_owned(),
+                "architecture_reviewed".to_owned()
+            ),
+            (
+                "architecture_reviewed".to_owned(),
+                "effectiveness_replay".to_owned(),
+                "effectiveness_verified".to_owned()
+            ),
+            (
+                "effectiveness_verified".to_owned(),
+                "remote_receipt".to_owned(),
+                "remote_verified".to_owned()
+            ),
+            (
+                "remote_verified".to_owned(),
+                "promote".to_owned(),
+                "promoted".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(result["result"]["state"], "promoted");
+    assert_eq!(result["result"]["promotion"]["promotion_id"], "promotion-1");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_fix_lifecycle_fails_closed_on_invalid_record_chain() {
+    let root = temp_root("dagpipe-fix-lifecycle-invalid");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let review_path = root.join(".appsdk/records/review-record-app-core.json");
+    let mut review: Value = serde_json::from_slice(&fs::read(&review_path).unwrap()).unwrap();
+    review["verdict"] = Value::String("fail".into());
+    fs::write(
+        &review_path,
+        serde_json::to_string_pretty(&review).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "app-core"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DAGPIPE_EXECUTION_FAILED")
+            && stderr.contains("ARCHITECTURE_REVIEW_INPUT_MISMATCH"),
+        "stderr={stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_fix_rejects_path_traversal_module_identifier() {
+    let root = temp_root("dagpipe-fix-lifecycle-module-id");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "../escape"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DAGPIPE_MODULE_IDENTIFIER_INVALID"),
+        "stderr={stderr}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_fix_is_advisory_and_authoritative_verify_still_fails_on_missing_evidence() {
+    let root = temp_root("dagpipe-fix-lifecycle-advisory");
+    let root_text = root.to_str().unwrap();
+    prepare_lifecycle_chain_fixture(&root);
+    let missing_evidence = root.join(".appsdk/records/evidence/app-core/baseline-1.json");
+    fs::remove_file(&missing_evidence).unwrap();
+
+    let output = run(&["dagpipe", "fix", root_text, "--module", "app-core"]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["authority"], "advisory_projection");
+    assert_eq!(result["authoritative_gate"], "appsdk verify <project>");
+
+    let promote = run(&["promote", root_text, "--to", "architecture_stable"]);
+    assert!(
+        !promote.status.success(),
+        "dagpipe advisory output must not be treated as authoritative lifecycle acceptance; stdout={} stderr={}",
+        String::from_utf8_lossy(&promote.stdout),
+        String::from_utf8_lossy(&promote.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&promote.stderr).contains("MISSING_RECORD"),
+        "promote to architecture_stable must fail on missing evidence; stderr={}",
+        String::from_utf8_lossy(&promote.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_reports_every_embedded_graph_as_single_source_single_sink() {
+    let output = run(&["dagpipe", "validate"]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["single_source_single_sink"], Value::Bool(true));
+    let ids = result["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|graph| graph["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"appsdk-fix-lifecycle"));
+    assert!(ids.contains(&"appsdk-notification-object"));
+}
+
+#[test]
+fn dagpipe_validate_notifications_reads_real_mailbox_objects() {
+    let root = temp_root("dagpipe-notification-objects");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-created",
+                "at": "2026-01-01T00:00:00Z",
+                "kind": "message.created",
+                "data": {"messageId": "message-1"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-accepted",
+                "at": "2026-01-01T00:00:01Z",
+                "kind": "message.state",
+                "data": {"messageId": "message-1", "state": "accepted"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued",
+                "at": "2026-01-01T00:00:02Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {"messageId": "message-1"}
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-attempt",
+                "at": "2026-01-01T00:00:02.5Z",
+                "kind": "notification.delivery_attempt",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "keys": ["notification-1"],
+                    "attempt": {
+                        "attemptId": "attempt-1",
+                        "operation": "notification.emitted",
+                        "adapterId": "adapter-1",
+                        "startedAt": "2026-01-01T00:00:02.5Z"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-emitted",
+                "at": "2026-01-01T00:00:03Z",
+                "kind": "notification.emitted",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "keys": ["notification-1"],
+                    "at": "2026-01-01T00:00:03Z"
+                }
+            }),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["single_source_single_sink"], Value::Bool(true));
+    assert_eq!(result["objects"].as_array().unwrap().len(), 1);
+    assert_eq!(result["objects"][0]["key"], "notification-1");
+    assert_eq!(
+        result["objects"][0]["terminal"]["kind"],
+        "notification.emitted"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_rejects_mailbox_only_objects() {
+    let root = temp_root("dagpipe-notification-mailbox-only");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-created",
+                "at": "2026-01-01T00:00:00Z",
+                "kind": "message.created",
+                "data": {"messageId": "message-1"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-accepted",
+                "at": "2026-01-01T00:00:01Z",
+                "kind": "message.state",
+                "data": {"messageId": "message-1", "state": "accepted"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued",
+                "at": "2026-01-01T00:00:02Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {"messageId": "message-1"}
+                }
+            }),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("NOTIFICATION_OBJECT_TERMINAL_MISSING"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_splits_queued_generations_into_objects() {
+    let root = temp_root("dagpipe-notification-generations");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-created-1",
+                "at": "2026-01-01T00:00:00Z",
+                "kind": "message.created",
+                "data": {"messageId": "message-1"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-accepted-1",
+                "at": "2026-01-01T00:00:01Z",
+                "kind": "message.state",
+                "data": {"messageId": "message-1", "state": "accepted"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued-1",
+                "at": "2026-01-01T00:00:02Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {
+                        "notificationId": "notification-id-1",
+                        "messageId": "message-1",
+                        "generation": 0
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-attempt-1",
+                "at": "2026-01-01T00:00:02.5Z",
+                "kind": "notification.delivery_attempt",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "keys": ["notification-1"],
+                    "attempt": {
+                        "attemptId": "attempt-1",
+                        "operation": "notification.emitted",
+                        "adapterId": "adapter-1",
+                        "startedAt": "2026-01-01T00:00:02.5Z"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-emitted-1",
+                "at": "2026-01-01T00:00:03Z",
+                "kind": "notification.emitted",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "keys": ["notification-1"],
+                    "at": "2026-01-01T00:00:03Z"
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-created-2",
+                "at": "2026-01-01T00:01:00Z",
+                "kind": "message.created",
+                "data": {"messageId": "message-2"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-accepted-2",
+                "at": "2026-01-01T00:01:01Z",
+                "kind": "message.state",
+                "data": {"messageId": "message-2", "state": "accepted"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued-2",
+                "at": "2026-01-01T00:01:02Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {
+                        "notificationId": "notification-id-2",
+                        "messageId": "message-2",
+                        "generation": 1
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-attempt-2",
+                "at": "2026-01-01T00:01:02.5Z",
+                "kind": "notification.delivery_attempt",
+                "data": {
+                    "attemptId": "attempt-2",
+                    "keys": ["notification-1"],
+                    "attempt": {
+                        "attemptId": "attempt-2",
+                        "operation": "notification.emitted",
+                        "adapterId": "adapter-1",
+                        "startedAt": "2026-01-01T00:01:02.5Z"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-emitted-2",
+                "at": "2026-01-01T00:01:03Z",
+                "kind": "notification.emitted",
+                "data": {
+                    "attemptId": "attempt-2",
+                    "keys": ["notification-1"],
+                    "at": "2026-01-01T00:01:03Z"
+                }
+            }),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["objects"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        result["objects"][0]["terminal"]["kind"],
+        "notification.emitted"
+    );
+    assert_eq!(
+        result["objects"][1]["terminal"]["kind"],
+        "notification.emitted"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_rejects_terminal_without_delivery_attempt() {
+    let root = temp_root("dagpipe-notification-terminal-without-attempt");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-created",
+                "at": "2026-01-01T00:00:00Z",
+                "kind": "message.created",
+                "data": {"messageId": "message-1"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-accepted",
+                "at": "2026-01-01T00:00:01Z",
+                "kind": "message.state",
+                "data": {"messageId": "message-1", "state": "accepted"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued",
+                "at": "2026-01-01T00:00:02Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {"messageId": "message-1"}
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-emitted",
+                "at": "2026-01-01T00:00:03Z",
+                "kind": "notification.emitted",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "keys": ["notification-1"],
+                    "at": "2026-01-01T00:00:03Z"
+                }
+            }),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("attempt_missing:attempt-1"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_rejects_symlinked_mailbox() {
+    let root = temp_root("dagpipe-notification-symlink-root");
+    let external = temp_root("dagpipe-notification-symlink-external");
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    let external_mailbox = external.join("mailbox.jsonl");
+    fs::write(&external_mailbox, "").unwrap();
+    std::os::unix::fs::symlink(&external_mailbox, communication.join("mailbox.jsonl")).unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("GOVERNANCE_PATH_SYMLINK"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_file(communication.join("mailbox.jsonl")).unwrap();
+    fs::remove_file(&external_mailbox).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(external).unwrap();
+}

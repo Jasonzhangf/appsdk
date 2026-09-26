@@ -1,0 +1,80 @@
+{
+  "id": "appsdk-fix-lifecycle",
+  "version": "0.1.0",
+  "inputs": [
+    {
+      "id": "lifecycle_state",
+      "schema": "Any"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "admission_claim",
+      "operator": "appsdk.lifecycle.claim",
+      "operator_version": "1",
+      "inputs": ["lifecycle_state"],
+      "output": {"id": "claim_state", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "admission_candidate",
+      "operator": "appsdk.lifecycle.candidate",
+      "operator_version": "1",
+      "inputs": ["claim_state"],
+      "output": {"id": "candidate_state", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "admission_review",
+      "operator": "appsdk.lifecycle.review",
+      "operator_version": "1",
+      "inputs": ["candidate_state"],
+      "output": {"id": "review_state", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "admission_effectiveness",
+      "operator": "appsdk.lifecycle.effectiveness",
+      "operator_version": "1",
+      "inputs": ["review_state"],
+      "output": {"id": "effectiveness_state", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "admission_remote",
+      "operator": "appsdk.lifecycle.remote",
+      "operator_version": "1",
+      "inputs": ["effectiveness_state"],
+      "output": {"id": "remote_state", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_promotion",
+      "operator": "appsdk.lifecycle.promotion",
+      "operator_version": "1",
+      "inputs": ["remote_state"],
+      "output": {"id": "promotion_state", "schema": "Any"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "admission_claim", "to": "admission_candidate", "arc_id": "claim_state"},
+    {"from": "admission_candidate", "to": "admission_review", "arc_id": "candidate_state"},
+    {"from": "admission_review", "to": "admission_effectiveness", "arc_id": "review_state"},
+    {"from": "admission_effectiveness", "to": "admission_remote", "arc_id": "effectiveness_state"},
+    {"from": "admission_remote", "to": "emit_promotion", "arc_id": "remote_state"}
+  ],
+  "outputs": ["promotion_state"]
+}

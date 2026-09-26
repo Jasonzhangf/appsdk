@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "graphs": [
+    {
+      "id": "appsdk-fix-lifecycle",
+      "path": "contracts/dagpipe/fix-lifecycle.graph.json"
+    },
+    {
+      "id": "appsdk-notification-object",
+      "path": "contracts/dagpipe/notification.graph.json"
+    }
+  ]
+}

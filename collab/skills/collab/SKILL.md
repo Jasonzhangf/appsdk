@@ -145,12 +145,13 @@ explicitly authorized maintenance operation, not recovery.
 When `collab context` cannot match a current pane/session/thread to any
 persisted peer, it probes the project's persisted identities before failing.
 Records that are provably dead (tmux pane missing, AppServer thread reported
-`notLoaded`/`systemError`, thread/read returns not-found/no-rollout) are
-archived under `~/.collab/archives/identities-retired-<ms>/` automatically;
-only then is a fresh peer registration allowed. A reachable or unverifiable
-peer still blocks with `IDENTITY_REBIND_UNPROVEN` so a live agent is never
-silently displaced. This archival is automatic and reversible: nothing is
-deleted, and the retired bytes stay on disk for audit.
+`systemError`, thread/read returns not-found/no-rollout) are archived under
+`~/.collab/archives/identities-retired-<ms>/` automatically; only then is a
+fresh peer registration allowed. A cold (`notLoaded`) AppServer thread is
+*not* dead: the endpoint can resume it through `turn/start`, so it keeps
+blocking with `IDENTITY_REBIND_UNPROVEN` and a live agent is never silently
+displaced. This archival is automatic and reversible: nothing is deleted, and
+the retired bytes stay on disk for audit.
 
 Master recovery is the same one-step shape: when `collab context` shows no
 live master, it also lists `promote_master` with `requires_approval`, and
@@ -798,7 +799,7 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根 | 保留错误，改在 canonical main 再跑 `collab context` |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导 | 回到项目 main 根执行，不删旧身份 |
 | `TOKEN_MISMATCH` | 身份无法验真 | 保留错误并报告 live master，不复制 token、不 mint 新身份 |
-| `IDENTITY_REBIND_UNPROVEN` | 存在无法匹配但可能存活的对端 | 保留错误并报告 live master；`collab context` 已自动归档可证已死的旧 peer，只有仍可达/不可验的对端才保持 fail-closed |
+| `IDENTITY_REBIND_UNPROVEN` | 存在无法匹配但可能存活的对端 | 保留错误并报告 live master；`collab context` 会自动归档可证已死的旧 peer，只有仍可达/不可验的对端才保持 fail-closed |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；

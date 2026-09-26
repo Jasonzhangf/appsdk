@@ -946,16 +946,16 @@ fn persisted_peer_liveness(identity: &Identity) -> PeerLiveness {
     }
 }
 
-/// A persisted thread whose rollout exists but is not loaded cannot anchor an
-/// identity to a live process; it would otherwise block fresh pane/thread
-/// registration forever. Only an explicitly dead signal retires the record;
-/// every other state keeps it protected.
+/// Only an explicitly dead signal retires the record. A `notLoaded` thread is
+/// cold, not gone: the AppServer contract can resume it through `turn/start`,
+/// so it must keep blocking rebind instead of being archived.
 fn classify_thread_status(raw: &serde_json::Value) -> PeerLiveness {
     match raw
         .pointer("/thread/status/type")
         .and_then(serde_json::Value::as_str)
     {
-        Some("notLoaded") | Some("systemError") => PeerLiveness::Dead,
+        Some("systemError") => PeerLiveness::Dead,
+        Some("notLoaded") => PeerLiveness::Unknown,
         Some(_) => PeerLiveness::Live,
         None => PeerLiveness::Unknown,
     }
@@ -2107,11 +2107,13 @@ mod tests {
 
     #[test]
     fn appserver_thread_status_retires_only_proven_dead() {
+        // A cold thread can still be resumed through turn/start, so it must
+        // keep blocking rebind rather than being archived.
         assert!(matches!(
             classify_thread_status(&serde_json::json!({
                 "thread": {"status": {"type": "notLoaded"}}
             })),
-            PeerLiveness::Dead
+            PeerLiveness::Unknown
         ));
         assert!(matches!(
             classify_thread_status(&serde_json::json!({

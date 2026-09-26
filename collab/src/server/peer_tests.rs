@@ -2119,6 +2119,7 @@ fn accept_task(server: &Server, owner: &str, id: &str) {
         .ok
     );
     assert_eq!(server.state.lock().unwrap().tasks[id].status, "accepted");
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
 }
 
 /// A daemon pending merge binds the obligation to the exact delivered commit,

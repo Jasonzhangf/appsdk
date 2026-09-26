@@ -275,13 +275,46 @@ fn validate_notification_objects(root: &Path) -> Result<Value, String> {
 }
 
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
-    raw.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .map_err(|error| format!("COMMUNICATION_MAILBOX_EVENT_INVALID:{error}"))
-        })
-        .collect()
+    let mut event_ids = BTreeSet::new();
+    let mut events = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_INVALID:empty_line:{}",
+                index + 1
+            ));
+        }
+        let event: Value = serde_json::from_str(line)
+            .map_err(|error| format!("COMMUNICATION_MAILBOX_EVENT_INVALID:{error}"))?;
+        let event_id = event
+            .get("eventId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("COMMUNICATION_MAILBOX_EVENT_INVALID:eventId:{}", index + 1))?;
+        if !event_ids.insert(event_id.to_owned()) {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_DUPLICATE:eventId:{event_id}"
+            ));
+        }
+        if event.get("protocol").and_then(Value::as_str) != Some("appsdk-comm/v1") {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_PROTOCOL_INVALID:{}",
+                index + 1
+            ));
+        }
+        if event
+            .get("at")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_INVALID:at:{}",
+                index + 1
+            ));
+        }
+        events.push(event);
+    }
+    Ok(events)
 }
 
 fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value>)>, String> {
@@ -446,17 +479,27 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 .find(|object_index| !terminal || objects[*object_index].terminal_count == 0),
         };
 
-        if let Some(object_index) = choose {
-            let object = &mut objects[object_index];
-            object.events.push(event.clone());
-            if kind == "notification.delivery_attempt" {
-                if let Some(attempt_id) = attempt_id.as_ref() {
-                    object.attempt_id = Some(attempt_id.clone());
-                }
+        let Some(object_index) = choose else {
+            if kind.starts_with("notification.") {
+                let event_id = event
+                    .get("eventId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>");
+                return Err(format!(
+                    "NOTIFICATION_OBJECT_EVENT_UNATTACHED:{kind}:{event_id}"
+                ));
             }
-            if terminal {
-                object.terminal_count += 1;
+            continue;
+        };
+        let object = &mut objects[object_index];
+        object.events.push(event.clone());
+        if kind == "notification.delivery_attempt" {
+            if let Some(attempt_id) = attempt_id.as_ref() {
+                object.attempt_id = Some(attempt_id.clone());
             }
+        }
+        if terminal {
+            object.terminal_count += 1;
         }
     }
 
@@ -755,8 +798,12 @@ fn validate_terminal_event(
             }
         }
         "notification.superseded" => {
+            let reason = data.get("reason").and_then(Value::as_str);
             if data.get("generation").and_then(Value::as_u64).is_none()
-                || data.get("reason").and_then(Value::as_str) != Some("master_wake_briefing")
+                || !matches!(
+                    reason,
+                    Some("master_wake_briefing" | "master_wake_decision")
+                )
                 || !data
                     .get("keys")
                     .and_then(Value::as_array)

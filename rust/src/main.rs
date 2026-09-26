@@ -27,12 +27,12 @@ use long_horizon_role::execution_role;
 mod communication;
 
 const SDK_BUNDLE_MANIFEST: &str = include_str!("../../contracts/sdk-bundle.manifest.json");
-const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SDK_VERSION: &str = env!("APPSDK_VERSION");
 const SDK_MAP_MIGRATION_0_1_5_TO_0_1_6: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
-const SDK_MAP_MIGRATION_0_1_6_TO_0_1_7: &str =
-    include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.7.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 2] = ["0.1.5-to-0.1.6", "0.1.6-to-0.1.7"];
+const SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json");
+const SDK_MAP_MIGRATION_STEPS: [&str; 2] = ["0.1.5-to-0.1.6", "0.1.6-to-0.1.0007"];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
     include_str!("../../contracts/transitions/zone-transition.manifest.json");
@@ -136,9 +136,9 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
     ),
     (
-        "contracts/migrations/sdk-0.1.6-to-0.1.7.json",
+        "contracts/migrations/sdk-0.1.6-to-0.1.0007.json",
         "contracts",
-        include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.7.json"),
+        include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"),
     ),
     (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
@@ -482,7 +482,7 @@ fn historical_governance_map(version: &str, name: &str) -> &'static str {
 fn sdk_map_migration_manifest(step: &str) -> Value {
     let (manifest_text, source_version, target_version) = match step {
         "0.1.5-to-0.1.6" => (SDK_MAP_MIGRATION_0_1_5_TO_0_1_6, "0.1.5", "0.1.6"),
-        "0.1.6-to-0.1.7" => (SDK_MAP_MIGRATION_0_1_6_TO_0_1_7, "0.1.6", "0.1.7"),
+        "0.1.6-to-0.1.0007" => (SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007, "0.1.6", "0.1.0007"),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };
     let manifest: Value = serde_json::from_str(manifest_text)
@@ -13730,7 +13730,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.7", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.0007", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
@@ -18010,7 +18010,7 @@ fn pin_lock(root: &Path, binary: &Path) {
         required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT").to_string();
     if !matches!(
         project_version.as_str(),
-        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
+        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007"
     ) {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:{}",
@@ -18046,7 +18046,7 @@ fn pin_lock(root: &Path, binary: &Path) {
         migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6");
     }
     let migrated_project = read_project(root);
-    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.7");
+    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.0007");
     install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());

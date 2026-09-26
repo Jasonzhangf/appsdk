@@ -2015,7 +2015,7 @@ mod tests {
         let second = register_project_at(&project, &home, "0.1.6").unwrap();
         assert!(!first.idempotent);
         assert!(second.idempotent);
-        let newer = register_project_at(&project, &home, "0.1.7").unwrap();
+        let newer = register_project_at(&project, &home, "0.1.0007").unwrap();
         assert!(!newer.idempotent);
         let older_again = register_project_at(&project, &home, "0.1.6").unwrap();
         assert!(older_again.idempotent);
@@ -2114,7 +2114,7 @@ mod tests {
             same_version,
             "GLOBAL_REGISTRY_INVALID_LINE:missing final newline"
         );
-        let next_version = register_project_at(&project, &registry, "0.1.7").unwrap_err();
+        let next_version = register_project_at(&project, &registry, "0.1.0007").unwrap_err();
         assert_eq!(
             next_version,
             "GLOBAL_REGISTRY_INVALID_LINE:missing final newline"

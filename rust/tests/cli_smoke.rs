@@ -25178,6 +25178,82 @@ fn dagpipe_validate_notifications_folds_same_generation_retry_queue() {
 }
 
 #[test]
+fn dagpipe_validate_notifications_retries_failed_attempt_without_new_queue() {
+    let root = temp_root("dagpipe-notification-retry-attempt-no-queue");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            dagpipe_message_created_event("event-created", "2026-01-01T00:00:00Z", "message-1"),
+            dagpipe_message_state_event(
+                "event-accepted",
+                "2026-01-01T00:00:01Z",
+                "message-1",
+                "accepted",
+            ),
+            dagpipe_notification_queued(
+                "event-queued",
+                "2026-01-01T00:00:02Z",
+                "notification-1",
+                "notification-id-1",
+                "message-1",
+                0,
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt-1",
+                "2026-01-01T00:00:02.5Z",
+                "attempt-1",
+                &["notification-1"],
+                "notification.emitted",
+            ),
+            dagpipe_notification_failed_event(
+                "event-failed-1",
+                "2026-01-01T00:00:03Z",
+                &["notification-1"],
+                "notification.emitted",
+                "attempt-1",
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt-2",
+                "2026-01-01T00:00:04Z",
+                "attempt-2",
+                &["notification-1"],
+                "notification.emitted",
+            ),
+            dagpipe_notification_emitted_event(
+                "event-emitted",
+                "2026-01-01T00:00:05Z",
+                "attempt-2",
+                &["notification-1"],
+            ),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["objects"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["objects"][0]["terminal"]["kind"],
+        "notification.emitted"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn dagpipe_validate_notifications_rejects_schema_invalid_failed_event() {
     let root = temp_root("dagpipe-notification-invalid-failure");
     let root_text = root.to_str().unwrap();

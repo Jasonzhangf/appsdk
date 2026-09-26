@@ -606,6 +606,14 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                     object.attempt_id = Some(attempt_id.clone());
                 }
             }
+            if kind == "notification.delivery_failed"
+                && event["data"]["attemptId"]
+                    .as_str()
+                    .zip(object.attempt_id.as_deref())
+                    .is_some_and(|(failed_id, pending_id)| failed_id == pending_id)
+            {
+                object.attempt_id = None;
+            }
             if terminal {
                 object.terminal_count += 1;
             }

@@ -552,6 +552,43 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
             }
             continue;
         }
+        if kind.starts_with("notification.") {
+            let mut claimed = keys
+                .iter()
+                .cloned()
+                .map(|key| ("key".to_owned(), key))
+                .collect::<Vec<_>>();
+            if let Some(key) = data.get("notificationKey").and_then(Value::as_str) {
+                claimed.push(("key".to_owned(), key.to_owned()));
+            }
+            claimed.extend(
+                notification_ids
+                    .iter()
+                    .cloned()
+                    .map(|id| ("notificationId".to_owned(), id)),
+            );
+            claimed.extend(
+                message_ids
+                    .iter()
+                    .cloned()
+                    .map(|id| ("messageId".to_owned(), id)),
+            );
+            for (claim_kind, claim) in claimed {
+                let matched = targets.iter().any(|object_index| {
+                    let object = &objects[*object_index];
+                    match claim_kind.as_str() {
+                        "key" => object.key == claim,
+                        "notificationId" => object.notification_id == claim,
+                        _ => object.message_id == claim,
+                    }
+                });
+                if !matched {
+                    return Err(format!(
+                        "NOTIFICATION_OBJECT_EVENT_UNATTACHED:{kind}:{claim_kind}:{claim}"
+                    ));
+                }
+            }
+        }
         for object_index in targets {
             let object = &mut objects[object_index];
             object.events.push(event.clone());

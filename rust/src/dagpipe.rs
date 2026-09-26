@@ -1499,7 +1499,7 @@ mod tests {
         assert!(error.starts_with("DAGPIPE_GRAPH_OUTPUT_UNBOUND"));
 
         let mut graph = parse_graph_json(FIX_LIFECYCLE_GRAPH).unwrap();
-        graph.edges.pop();
+        graph.nodes.last_mut().unwrap().inputs[0] = "orphan_state".to_owned();
         let error = ensure_single_source_single_sink(&graph).unwrap_err();
         assert!(error.starts_with("DAGPIPE_ARC_UNCONSUMED"));
     }

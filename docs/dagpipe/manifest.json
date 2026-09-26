@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "graphs": [
+    {
+      "id": "appsdk-collab-context",
+      "path": "docs/dagpipe/collab-context.graph.json"
+    }
+  ]
+}

@@ -768,6 +768,25 @@ Only these are operator-facing diagnostics and are not part of the agent flow:
 `collab init`, `collab whoami`, `collab worker recover`, `collab route resolve`,
 `collab down`/`up`, and any direct transport or socket call.
 
+### Context 状态与终点（DAGpipe：单源单汇）
+
+`context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
+DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动守护 → 装载/创建身份
+→ 校验令牌 → 注册/重建对端 → 恢复默认订阅 → 查找主控 → 输出快照。失败终点显式
+报错，不允许把失败当作成功快照：
+
+| 状态/终态 | 含义 | Agent 动作 |
+| --- | --- | --- |
+| `state_snapshot` | 引导成功；含 role/operations/master/peers/inbox/worktrees/tasks | 读快照执行当前角色的 `operations` |
+| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根 | 保留错误，改在 canonical main 再跑 `collab context` |
+| 拒绝在 playground 创建基线 | 在 worktree 内引导 | 回到项目 main 根执行，不删旧身份 |
+| `TOKEN_MISMATCH` / `IDENTITY_REBIND_UNPROVEN` | 身份无法验真 | 保留错误并报告 live master，不复制 token、不 mint 新身份 |
+| 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
+
+完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
+机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
+（`dagpipe graph validate`）。
+
 ## Initialize once
 
 The automatic state entry is always:

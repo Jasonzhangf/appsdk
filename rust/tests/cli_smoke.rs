@@ -23807,3 +23807,163 @@ fn dagpipe_validate_notifications_rejects_duplicate_event_ids() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn dagpipe_validate_notifications_folds_same_generation_retry_queue() {
+    let root = temp_root("dagpipe-notification-retry-queue");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-created",
+                "at": "2026-01-01T00:00:00Z",
+                "kind": "message.created",
+                "data": {"messageId": "message-1"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-accepted",
+                "at": "2026-01-01T00:00:01Z",
+                "kind": "message.state",
+                "data": {"messageId": "message-1", "state": "accepted"}
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued-first",
+                "at": "2026-01-01T00:00:02Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {
+                        "notificationId": "notification-id-1",
+                        "messageId": "message-1",
+                        "generation": 0
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-attempt-1",
+                "at": "2026-01-01T00:00:02.5Z",
+                "kind": "notification.delivery_attempt",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "keys": ["notification-1"],
+                    "attempt": {
+                        "attemptId": "attempt-1",
+                        "operation": "notification.emitted",
+                        "adapterId": "adapter-1",
+                        "startedAt": "2026-01-01T00:00:02.5Z"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-failed-1",
+                "at": "2026-01-01T00:00:03Z",
+                "kind": "notification.delivery_failed",
+                "data": {
+                    "keys": ["notification-1"],
+                    "error": {"code": "transport_unavailable", "message": "retry later"}
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-queued-retry",
+                "at": "2026-01-01T00:00:04Z",
+                "kind": "notification.queued",
+                "data": {
+                    "key": "notification-1",
+                    "notification": {
+                        "notificationId": "notification-id-1",
+                        "messageId": "message-1",
+                        "generation": 0
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-attempt-2",
+                "at": "2026-01-01T00:00:04.5Z",
+                "kind": "notification.delivery_attempt",
+                "data": {
+                    "attemptId": "attempt-2",
+                    "keys": ["notification-1"],
+                    "attempt": {
+                        "attemptId": "attempt-2",
+                        "operation": "notification.emitted",
+                        "adapterId": "adapter-1",
+                        "startedAt": "2026-01-01T00:00:04.5Z"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-emitted-retry",
+                "at": "2026-01-01T00:00:05Z",
+                "kind": "notification.emitted",
+                "data": {
+                    "attemptId": "attempt-2",
+                    "keys": ["notification-1"],
+                    "at": "2026-01-01T00:00:05Z"
+                }
+            }),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["objects"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["objects"][0]["terminal"]["kind"],
+        "notification.emitted"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_rejects_unknown_event_kinds() {
+    let root = temp_root("dagpipe-notification-unknown-kind");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        serde_json::json!({
+            "protocol": "appsdk-comm/v1",
+            "eventId": "event-garbage",
+            "at": "2026-01-01T00:00:00Z",
+            "kind": "garbage",
+            "data": {"foo": 1}
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("COMMUNICATION_MAILBOX_EVENT_KIND_INVALID"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}

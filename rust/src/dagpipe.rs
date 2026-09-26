@@ -21,6 +21,8 @@ const FIX_LIFECYCLE_GRAPH: &str = include_str!("../../contracts/dagpipe/fix-life
 const NOTIFICATION_LIFECYCLE_GRAPH: &str =
     include_str!("../../contracts/dagpipe/notification.graph.json");
 const DAGPIPE_GRAPH_MANIFEST: &str = include_str!("../../contracts/dagpipe/manifest.json");
+const COMMUNICATION_EVENT_SCHEMA: &str =
+    include_str!("../../contracts/communication/communication-event.schema.json");
 
 pub(crate) fn run_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>) {
     let subcommand = args
@@ -275,6 +277,15 @@ fn validate_notification_objects(root: &Path) -> Result<Value, String> {
 }
 
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
+    let schema: Value = serde_json::from_str(COMMUNICATION_EVENT_SCHEMA)
+        .map_err(|error| format!("COMMUNICATION_EVENT_SCHEMA_INVALID:{error}"))?;
+    let valid_kinds = schema
+        .pointer("/properties/kind/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "COMMUNICATION_EVENT_SCHEMA_INVALID:kind_enum".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
     let mut event_ids = BTreeSet::new();
     let mut events = Vec::new();
     for (index, line) in raw.lines().enumerate() {
@@ -309,6 +320,19 @@ fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
         {
             return Err(format!(
                 "COMMUNICATION_MAILBOX_EVENT_INVALID:at:{}",
+                index + 1
+            ));
+        }
+        if !valid_kinds.contains(event["kind"].as_str().unwrap_or("")) {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_KIND_INVALID:{}:{}",
+                index + 1,
+                event["kind"].as_str().unwrap_or("")
+            ));
+        }
+        if !event["data"].is_object() {
+            return Err(format!(
+                "COMMUNICATION_MAILBOX_EVENT_DATA_INVALID:{}",
                 index + 1
             ));
         }
@@ -350,6 +374,15 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 .unwrap_or("")
                 .to_owned();
             let generation = notification.get("generation").and_then(Value::as_u64);
+            if let Some(existing) = objects.iter_mut().rev().find(|object| {
+                object.key == key
+                    && object.message_id == message_id
+                    && object.generation == generation
+                    && object.terminal_count == 0
+            }) {
+                existing.events.push(event.clone());
+                continue;
+            }
             objects.push(NotificationObject {
                 key,
                 message_id,
@@ -530,11 +563,8 @@ fn notification_input(key: &str, events: &[Value]) -> Result<Value, String> {
         .filter(|event| event["kind"] == "notification.queued")
         .filter(|event| event["data"]["key"] == key)
         .collect::<Vec<_>>();
-    if queues.len() != 1 {
-        return Err(format!(
-            "NOTIFICATION_OBJECT_SOURCE_MISMATCH:{key}:queues={}",
-            queues.len()
-        ));
+    if queues.is_empty() {
+        return Err(format!("NOTIFICATION_OBJECT_SOURCE_MISSING:{key}"));
     }
     let message_id = queues[0]["data"]["notification"]["messageId"]
         .as_str()
@@ -568,7 +598,7 @@ impl Operator for NotificationObjectValidateOperator {
     }
 
     fn replay(&self) -> EffectReplay {
-        EffectReplay::Replayable
+        EffectReplay::NonReplayable
     }
 
     fn execute(&self, input: Value, _: &OperatorContext) -> Result<Value, String> {
@@ -593,11 +623,8 @@ impl Operator for NotificationObjectValidateOperator {
             .filter(|event| event["kind"] == "notification.queued")
             .filter(|event| event["data"]["key"] == key)
             .collect::<Vec<_>>();
-        if queues.len() != 1 {
-            return Err(format!(
-                "NOTIFICATION_OBJECT_SOURCE_MISMATCH:{key}:queues={}",
-                queues.len()
-            ));
+        if queues.is_empty() {
+            return Err(format!("NOTIFICATION_OBJECT_SOURCE_MISSING:{key}"));
         }
         let created = events
             .iter()
@@ -901,6 +928,15 @@ fn ensure_single_source_single_sink(graph: &pipeline_runtime::Graph) -> Result<(
             ));
         }
     }
+    if !producers.contains_key(graph.outputs[0].as_str()) {
+        return Err(format!("DAGPIPE_GRAPH_OUTPUT_UNBOUND:{}", graph.outputs[0]));
+    }
+    let declared_output = graph.outputs[0].as_str();
+    for (arc, _) in &producers {
+        if !consumers.contains_key(arc) && declared_output != *arc {
+            return Err(format!("DAGPIPE_ARC_UNCONSUMED:{arc}"));
+        }
+    }
     let mut edge_arcs = std::collections::HashSet::new();
     for edge in &graph.edges {
         if !edge_arcs.insert(edge.arc_id.as_str()) {
@@ -974,7 +1010,7 @@ impl Operator for FixOperator {
     }
 
     fn replay(&self) -> EffectReplay {
-        EffectReplay::Replayable
+        EffectReplay::NonReplayable
     }
 
     fn execute(&self, input: Value, context: &OperatorContext) -> Result<Value, String> {
@@ -1453,5 +1489,18 @@ mod tests {
         graph.outputs.push("candidate_state".to_owned());
         let error = ensure_single_source_single_sink(&graph).unwrap_err();
         assert!(error.starts_with("DAGPIPE_GRAPH_MUST_BE_SINGLE_SOURCE_SINGLE_SINK"));
+    }
+
+    #[test]
+    fn single_source_single_sink_rejects_unbound_or_unconsumed_outputs() {
+        let mut graph = parse_graph_json(FIX_LIFECYCLE_GRAPH).unwrap();
+        graph.outputs = vec!["missing_state".to_owned()];
+        let error = ensure_single_source_single_sink(&graph).unwrap_err();
+        assert!(error.starts_with("DAGPIPE_GRAPH_OUTPUT_UNBOUND"));
+
+        let mut graph = parse_graph_json(FIX_LIFECYCLE_GRAPH).unwrap();
+        graph.edges.pop();
+        let error = ensure_single_source_single_sink(&graph).unwrap_err();
+        assert!(error.starts_with("DAGPIPE_ARC_UNCONSUMED"));
     }
 }

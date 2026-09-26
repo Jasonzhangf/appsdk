@@ -4825,6 +4825,13 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
             .iter()
             .any(|line| line.as_str().unwrap().contains("COLLAB_WORKER=<worker_id>"))
     );
+    assert!(
+        promoted.data["role_brief"]["communication_recovery"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("--subject blocker \"<exact error;"))
+    );
     let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a");
     assert_eq!(context.data["role_brief"]["role"], "master");

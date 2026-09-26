@@ -1925,8 +1925,8 @@ fn main() {
 
 const LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout to resolve the route and restore registration; do not re-register a worktree or edit routes.jsonl";
 const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: run `collab context` from the canonical project main checkout; preserve daemon state and do not start a second daemon or use mailbox state as transport delivery";
-const IDENTITY_REBIND_UNPROVEN_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout; if the same identity error persists, report the exact error and worker_id to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker`; if that also fails, report out-of-band through a healthy peer or the human; do not edit routes, copy tokens, or start a second daemon";
-const IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout for the current project; if it persists, report the exact error and worker_id to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker`; if that also fails, report out-of-band through a healthy peer or the human; do not edit routes, copy tokens, or start a second daemon";
+const IDENTITY_REBIND_UNPROVEN_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout; if the same identity error persists, report the exact error and worker_id to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker \"<exact error; worker_id=<worker_id>; cause; decision needed>\"`; if that also fails, report out-of-band through a healthy peer or the human; do not edit routes, copy tokens, or start a second daemon";
+const IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout for the current project; if it persists, report the exact error and worker_id to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker \"<exact error; worker_id=<worker_id>; cause; decision needed>\"`; if that also fails, report out-of-band through a healthy peer or the human; do not edit routes, copy tokens, or start a second daemon";
 
 fn format_cli_error(error: &str) -> String {
     let decorated = if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
@@ -3864,6 +3864,7 @@ mod tests {
                 "canonical project main checkout",
                 "live master",
                 "COLLAB_WORKER=",
+                "--subject blocker \"<exact error;",
                 "out-of-band",
             ] {
                 assert!(

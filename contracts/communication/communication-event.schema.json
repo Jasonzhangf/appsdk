@@ -898,7 +898,7 @@
           "items": {"type": "string", "minLength": 1}
         },
         "generation": {"type": "integer", "minimum": 0},
-        "reason": {"const": "master_wake_briefing"}
+        "reason": {"enum": ["master_wake_briefing", "master_wake_decision"]}
       },
       "additionalProperties": false
     },

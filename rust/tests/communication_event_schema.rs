@@ -319,3 +319,21 @@ fn schema_accepts_discovery_reconciled_and_rejects_unknown_fields() {
     );
     assert!(!validator.is_valid(&unknown));
 }
+
+#[test]
+fn schema_accepts_both_notification_supersede_reasons() {
+    let validator = validator();
+    for reason in ["master_wake_briefing", "master_wake_decision"] {
+        assert!(
+            validator.is_valid(&event(
+                "notification.superseded",
+                json!({"keys": ["notification-1"], "generation": 0, "reason": reason})
+            )),
+            "notification.superseded rejected {reason}"
+        );
+    }
+    assert!(!validator.is_valid(&event(
+        "notification.superseded",
+        json!({"keys": ["notification-1"], "generation": 0, "reason": "other"})
+    )));
+}

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "functions": [
+    {"function_id":"dagpipe_graph_validation","owner":"appsdk::dagpipe","entry_symbols":["dagpipe::run_cli","dagpipe::validate_graph_contracts","dagpipe::validate_notification_objects"],"required_gates":["dagpipe_graph_single_source_single_sink","dagpipe_notification_object_closure"]},
     {"function_id":"communication_control","owner":"appsdk::communication","entry_symbols":["communication::run_cli","communication::capabilities"],"required_gates":["communication_contract","communication_replay","communication_route","communication_runtime_identity"]},
     {"function_id":"runtime_identity_registration","owner":"appsdk::runtime","entry_symbols":["global_registry::register_runtime","global_registry::runtime","global_registry::runtime_for_replay"],"required_gates":["communication_runtime_identity"]},
     {"function_id":"runtime_registry_reset","owner":"appsdk::runtime","entry_symbols":["global_registry::reset_runtime_registry","communication::run_cli"],"required_gates":["runtime_registry_reset"]},

@@ -9388,12 +9388,16 @@ fn handle_task_update(
     // merge of an accepted candidate. Any other transition (rework, cancel,
     // legacy merge) ends that obligation in the same transaction.
     if task.status != "accepted" && st.pending_merges.contains_key(&task_id) {
+        let stale_notices = pending_merge_notice_ids(&st, &task_id);
         events.push(Event::MergeResolved {
             task_id: task_id.clone(),
             resolved_by: worker_id.clone(),
             reason: Some(format!("task no longer awaits merge (status={})", task.status)),
             at_ms: task.updated_ms,
         });
+        if !stale_notices.is_empty() {
+            events.push(Event::Superseded { ids: stale_notices });
+        }
     }
     server.commit_locked(&mut st, &events);
     Resp::data(json!({
@@ -9779,6 +9783,7 @@ fn handle_task_review(
         },
     ];
     let mut pending_notification = None;
+    let mut notification_missing = false;
     if accept {
         let request = state::PendingMerge {
             task_id: task_id.clone(),
@@ -9826,6 +9831,11 @@ fn handle_task_review(
                         subscription_id: subscription.id.clone(),
                     });
                     pending_notification = Some((message_id, subscription.id.clone()));
+                } else {
+                    // The obligation is durable, but a missing direct-message
+                    // subscription leaves the master mailbox-only with no wake.
+                    // Surface the explicit repair terminal instead of success.
+                    notification_missing = true;
                 }
             }
         }
@@ -9835,14 +9845,19 @@ fn handle_task_review(
     if let Some((message_id, subscription_id)) = pending_notification {
         attempt_notification(server, &message_id, &subscription_id);
     }
-    Resp::data(json!({
+    let mut review_data = json!({
         "task": task_id,
         "status": reviewed.status,
         "reviewer": worker_id,
         "evidence": evidence,
         "merge_pending": accept,
         "next_action": reviewed.next_step,
-    }))
+    });
+    if notification_missing {
+        apply_mailbox_only_repair_fields(&mut review_data);
+        review_data["notification"] = json!("mailbox-only-no-subscription");
+    }
+    Resp::data(review_data)
 }
 
 fn handle_task_integrated(
@@ -9913,12 +9928,16 @@ fn handle_task_integrated(
         },
     ];
     if st.pending_merges.contains_key(&task_id) {
+        let stale_notices = pending_merge_notice_ids(&st, &task_id);
         events.push(Event::MergeResolved {
             task_id: task_id.clone(),
             resolved_by: worker_id.clone(),
             reason: Some("integrated into main".into()),
             at_ms: now,
         });
+        if !stale_notices.is_empty() {
+            events.push(Event::Superseded { ids: stale_notices });
+        }
     }
     server.commit_locked(&mut st, &events);
     Resp::data(json!({
@@ -10046,12 +10065,16 @@ fn handle_task_close(
         },
     ];
     if st.pending_merges.contains_key(&closed.id) {
+        let stale_notices = pending_merge_notice_ids(&st, &closed.id);
         events.push(Event::MergeResolved {
             task_id: closed.id.clone(),
             resolved_by: worker_id.clone(),
             reason: Some(format!("force close: {reason}")),
             at_ms: closed.updated_ms,
         });
+        if !stale_notices.is_empty() {
+            events.push(Event::Superseded { ids: stale_notices });
+        }
     }
     if !superseded.is_empty() {
         events.push(Event::Superseded {
@@ -10605,6 +10628,22 @@ fn pending_merge_views(state: &State) -> Vec<serde_json::Value> {
         .collect();
     views.sort_by(|a, b| a["task_id"].as_str().cmp(&b["task_id"].as_str()));
     views
+}
+
+/// Durable merge-pending notices for a task that may still be readable after a
+/// resolution (integrated/rework/cancel). Superseding them prevents a stale P0
+/// obligation from surviving in the mailbox once pending_merges is gone.
+fn pending_merge_notice_ids(state: &State, task_id: &str) -> Vec<String> {
+    let subject = format!("merge-pending:{task_id}");
+    state
+        .msgs
+        .values()
+        .filter(|message| {
+            message.subject.as_deref() == Some(subject.as_str())
+                && matches!(message.state.as_str(), "pending" | "delivered")
+        })
+        .map(|message| message.id.clone())
+        .collect()
 }
 
 fn daemon_context_view(server: &Server) -> serde_json::Value {

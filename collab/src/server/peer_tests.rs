@@ -825,6 +825,83 @@ fn review_accept_registers_daemon_owned_pending_merge_with_master_notification()
 }
 
 #[test]
+fn review_accept_without_master_direct_message_subscription_surfaces_repair() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master merge registration test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    // Simulate the master losing its default direct-message lease: the pending
+    // merge must stay durable and the review response must carry the explicit
+    // mailbox-only repair terminal, never a silent success.
+    let drop_ids: Vec<String> = server
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions
+        .values()
+        .filter(|sub| sub.worker_id == "master" && sub.event == "direct-message")
+        .map(|sub| sub.id.clone())
+        .collect();
+    {
+        let mut state = server.state.lock().unwrap();
+        for id in drop_ids {
+            state.notification_subscriptions.remove(&id);
+        }
+    }
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate".into()),
+        )
+        .ok
+    );
+    let response = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(response.ok, "{}", response.error.unwrap_or_default());
+    assert_eq!(
+        response.data["notification"],
+        serde_json::json!("mailbox-only-no-subscription")
+    );
+    assert_eq!(response.data["repair_required"], serde_json::json!(true));
+    assert!(
+        response.data["failure"]
+            .as_str()
+            .is_some_and(|f| f == "notification_subscription_missing")
+    );
+    assert!(
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation must remain durable even without a wake subscription"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
     let (server, root) = test_server();
     register(&server, "owner", "%owner");
@@ -875,6 +952,54 @@ fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
         None,
     );
     assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn integrated_supersedes_stale_merge_pending_notice() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master merge notice test");
+    initialize_main(&root);
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    accept_task(&server, "owner", "task");
+
+    let notice_id = {
+        let state = server.state.lock().unwrap();
+        state
+            .msgs
+            .values()
+            .find(|message| {
+                message.to == "master"
+                    && message.subject.as_deref() == Some("merge-pending:task")
+                    && matches!(message.state.as_str(), "pending" | "delivered")
+            })
+            .expect("merge-pending notice must exist")
+            .id
+            .clone()
+    };
+
+    let head = current_head(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            head,
+            "merged onto main".into(),
+        )
+        .ok
+    );
+
+    let state = server.state.lock().unwrap();
+    assert!(!state.pending_merges.contains_key("task"));
+    assert_eq!(
+        state.msgs[&notice_id].state, "superseded",
+        "a resolved obligation must not remain readable as an actionable P0 notice"
+    );
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 

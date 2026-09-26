@@ -3703,7 +3703,7 @@ fn worker_close_refuses_every_unfinished_task_status() {
 }
 
 #[test]
-fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() {
+fn last_task_close_keeps_default_lease_armed_and_preserves_pending_unread_payload() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "owner", "%owner");
@@ -3789,8 +3789,8 @@ fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() 
         let state = server.state.lock().unwrap();
         assert_eq!(
             state.notification_subscriptions["sub-default-direct-message-owner"].status,
-            "cancelled",
-            "the last task close must end the default direct-message lease"
+            "armed",
+            "the last task close must not cancel the default direct-message lease"
         );
         assert_eq!(
             state.msgs[&msg_id].state, "pending",
@@ -3799,11 +3799,11 @@ fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() 
         assert!(state.inbox_of("owner").iter().any(|m| m.id == msg_id));
     }
 
-    // Durable replay must keep both facts: lease cancelled, payload still owed.
+    // Durable replay must keep both facts: lease armed, payload still owed.
     let replayed = super::replay(&root).unwrap();
     assert_eq!(
         replayed.notification_subscriptions["sub-default-direct-message-owner"].status,
-        "cancelled"
+        "armed"
     );
     assert_eq!(replayed.msgs[&msg_id].state, "pending");
 
@@ -3824,21 +3824,24 @@ fn last_task_close_cancels_default_lease_and_preserves_pending_unread_payload() 
         "payload that must survive the close"
     );
 
-    // Explicit rearm after the automatic cancellation still works.
-    let rearmed = handle_notification_subscribe(
+    // After the last close the default lease is still armed, so a fresh send
+    // is a real notification attempt, never a silent mailbox-only degradation.
+    let after_close = handle_send(
         &server,
+        "sender".into(),
         "owner".into(),
-        "token-owner".into(),
-        "direct-message".into(),
+        "notify".into(),
+        Some("reachable after last close".into()),
+        "this must reach a notification sink, not only mailbox".into(),
         None,
-        None,
-        Vec::new(),
-        None,
-        1,
-        3_600,
+        "immediate".into(),
     );
-    assert!(rearmed.ok, "{}", rearmed.error.unwrap_or_default());
-    assert_eq!(rearmed.data["subscription"]["status"], "armed");
+    assert!(after_close.ok, "{}", after_close.error.clone().unwrap_or_default());
+    assert_ne!(
+        after_close.data["notification"],
+        "mailbox-only-no-subscription",
+        "armed default direct-message lease must not degrade to mailbox only"
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -5189,6 +5192,65 @@ fn cancelled_default_lease_stays_suppressed_until_explicit_subscribe() {
         serde_json::Value::String("armed".into())
     );
 
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_cancelled_default_lease_is_rearmed_but_explicit_unsubscribe_stays_suppressed() {
+    let (server, root) = test_server();
+    assert!(register(&server, "peer", "%peer").ok);
+
+    // Simulate a lease cancelled by the removed automatic close path: no
+    // explicit-unsubscribe reason was recorded.
+    server.commit(&[Event::NotificationStatus {
+        subscription_id: "sub-default-direct-message-peer".into(),
+        status: "cancelled".into(),
+        updated_ms: now_ms(),
+    }]);
+    {
+        let state = server.state.lock().unwrap();
+        let events = default_direct_message_events(
+            &state,
+            "peer",
+            &test_tmux_transport("thread-peer"),
+            now_ms(),
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::NotificationSubscribed { subscription }
+                    if subscription.id == "sub-default-direct-message-peer"
+                        && subscription.status == "armed"
+            )),
+            "a reason-less legacy cancellation must be recoverable: {events:?}"
+        );
+    }
+
+    // An explicit owner unsubscribe is a durable stop and must not be re-armed
+    // by registration or daemon replay.
+    let cancelled = handle_notification_unsubscribe(
+        &server,
+        "peer".into(),
+        "token-peer".into(),
+        "sub-default-direct-message-peer".into(),
+    );
+    assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
+    assert!(register(&server, "peer", "%peer").ok);
+    let state = server.state.lock().unwrap();
+    assert_eq!(
+        state.notification_subscriptions["sub-default-direct-message-peer"]
+            .status_reason
+            .as_deref(),
+        Some("explicit-unsubscribe")
+    );
+    assert!(default_direct_message_events(
+        &state,
+        "peer",
+        &test_tmux_transport("thread-peer"),
+        now_ms()
+    )
+    .is_empty());
+    drop(state);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -6545,7 +6607,7 @@ fn finalize_removes_the_worktree_when_the_closed_task_still_owns_it() {
 }
 
 #[test]
-fn finalize_stops_the_owner_default_lease_on_last_responsibility() {
+fn finalize_keeps_the_owner_default_lease_armed_on_last_responsibility() {
     let (server, root) = test_server();
     let (_, lease_armed) = force_closed_real_worktree_holder(&server, &root);
     assert_eq!(
@@ -6563,8 +6625,8 @@ fn finalize_stops_the_owner_default_lease_on_last_responsibility() {
     let lease = &state.notification_subscriptions
         [&crate::server::mailbox::default_direct_message_id("holder")];
     assert_eq!(
-        lease.status, "cancelled",
-        "finalize must stop the owner's automatic lease once its last responsibility is verified"
+        lease.status, "armed",
+        "finalize must keep the owner's default direct-message lease armed"
     );
     drop(state);
     std::fs::remove_dir_all(root).ok();
@@ -8316,6 +8378,8 @@ fn send_without_subscription_is_mailbox_only_and_deduplicated() {
         "RESOURCE_OCCUPIED feature=shared"
     );
     assert_eq!(first.data["notification"], "mailbox-only-no-subscription");
+    assert_eq!(first.data["repair_required"], true);
+    assert_eq!(first.data["failure"], "notification_subscription_missing");
     assert_eq!(
         server.state.lock().unwrap().msgs[&message_id].wake_attempt_count,
         0

@@ -7,6 +7,12 @@ pub mod presence;
 pub mod state;
 pub mod timers;
 
+pub const EXPLICIT_UNSUBSCRIBE_REASON: &str = "explicit-unsubscribe";
+
+const NOTIFICATION_SUBSCRIPTION_MISSING_ERROR: &str =
+    "no armed direct-message subscription matches this recipient's registered transport";
+const MAILBOX_ONLY_ESCALATION: &str = "the message is durable but this wake has no subscription; have the recipient run collab context to recover or re-register its default direct-message lease, then send a new message if another wake is needed";
+
 pub use global_state::{GlobalState, ProjectRegistration, RuntimeBinding};
 
 use crate::identity::{
@@ -3882,10 +3888,18 @@ fn default_direct_message_events(
 ) -> Vec<Event> {
     let mut events = Vec::new();
     let default_id = default_direct_message_id(worker_id);
+    // Only an explicit owner unsubscribe is a durable stop for the
+    // system-owned default lease. Any other `cancelled` state (for example a
+    // legacy automatic cancel, or an untyped status write) is recoverable and
+    // is re-armed below, so a retired default lease can never leave a
+    // registered peer permanently wake-less.
     if state
         .notification_subscriptions
         .get(&default_id)
-        .is_some_and(|subscription| subscription.status == "cancelled")
+        .is_some_and(|subscription| {
+            subscription.status == "cancelled"
+                && subscription.status_reason.as_deref() == Some(EXPLICIT_UNSUBSCRIBE_REASON)
+        })
     {
         return events;
     }
@@ -4011,35 +4025,6 @@ fn registered_peer_default_events(state: &State, now: i64) -> Vec<Event> {
             default_direct_message_events(state, worker_id, &transport, now)
         })
         .collect()
-}
-
-/// The closing owner's last unfinished task cancels its default direct-message
-/// lease so a retired peer stops receiving automatic wakes. Cancellation is
-/// control-plane only: it must not supersede already-delivered mailbox
-/// messages, because an explicit `recv` still owes the unread payload. A
-/// later explicit `notify subscribe --event direct-message` rearms delivery.
-fn default_lease_cancel_on_last_close(
-    state: &State,
-    owner: &str,
-    closed_task_id: &str,
-    now: i64,
-) -> Option<Event> {
-    let other_unfinished = state.tasks.values().any(|task| {
-        task.id != closed_task_id && task.owner == owner && keepalive::unfinished(&task.status)
-    });
-    if other_unfinished {
-        return None;
-    }
-    let subscription_id = default_direct_message_id(owner);
-    let subscription = state.notification_subscriptions.get(&subscription_id)?;
-    if subscription.status != "armed" {
-        return None;
-    }
-    Some(Event::NotificationStatus {
-        subscription_id,
-        status: "cancelled".into(),
-        updated_ms: now,
-    })
 }
 
 fn restore_registered_peer_default_leases(server: &Server) {
@@ -4549,6 +4534,10 @@ fn notification_send_response(
     if !subscription_present {
         data["durable"] = json!(true);
         data["notification"] = json!("mailbox-only-no-subscription");
+        data["notification_error"] = json!(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR);
+        data["failure"] = json!("notification_subscription_missing");
+        data["repair_required"] = json!(true);
+        data["escalation"] = json!(MAILBOX_ONLY_ESCALATION);
         return Resp::data(data);
     }
     match notification {
@@ -4599,6 +4588,15 @@ fn notification_rejected_label(notification_method: &str, error: &str) -> String
     } else {
         format!("TMUX_NOTIFICATION_REJECTED: {error}")
     }
+}
+
+/// `mailbox-only` is never a silent success: it is an explicit repair terminal
+/// carrying the same reason and repair fields as `notification_send_response`.
+fn apply_mailbox_only_repair_fields(data: &mut serde_json::Value) {
+    data["notification_error"] = json!(NOTIFICATION_SUBSCRIPTION_MISSING_ERROR);
+    data["failure"] = json!("notification_subscription_missing");
+    data["repair_required"] = json!(true);
+    data["escalation"] = json!(MAILBOX_ONLY_ESCALATION);
 }
 
 fn attempt_scheduler_notification(
@@ -5706,9 +5704,10 @@ fn handle_notification_unsubscribe(
     if subscription.worker_id != worker_id {
         return Resp::err("only the subscription owner may unsubscribe");
     }
-    let mut events = vec![Event::NotificationStatus {
+    let mut events = vec![Event::NotificationSuppressed {
         subscription_id: subscription_id.clone(),
         status: "cancelled".into(),
+        reason: EXPLICIT_UNSUBSCRIBE_REASON.into(),
         updated_ms: now_ms(),
     }];
     let pending = state
@@ -7571,7 +7570,7 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             "scheduler dispatch notification was not accepted by the selected App Server route";
         return Some(scheduler_notification_failed_response(&admission, error));
     }
-    Some(Resp::data(json!({
+    let mut data = json!({
         "request_id": admission.request_id,
         "decision": admission.decision,
         "admission": {
@@ -7601,7 +7600,11 @@ fn scheduler_dispatch_recover_pending(server: &Server, request_id: &str) -> Opti
             "subscribed-not-sent"
         },
         "recovered": true,
-    })))
+    });
+    if subscription.is_none() {
+        apply_mailbox_only_repair_fields(&mut data);
+    }
+    Some(Resp::data(data))
 }
 
 fn scheduler_notification_failed_response(
@@ -7968,7 +7971,7 @@ pub(crate) fn handle_scheduler_dispatch(
             );
         }
         admission["status"] = json!("succeeded");
-        return Resp::data(json!({
+        let mut data = json!({
             "request_id": request_id,
             "decision": decision,
             "admission": admission,
@@ -7988,7 +7991,11 @@ pub(crate) fn handle_scheduler_dispatch(
             } else {
                 "subscribed-not-sent"
             },
-        }));
+        });
+        if subscription.is_none() {
+            apply_mailbox_only_repair_fields(&mut data);
+        }
+        return Resp::data(data);
     }
     Resp::err(
         "scheduler dispatch capacity changed during admission; retry with the same request_id",
@@ -10124,11 +10131,6 @@ fn handle_task_close(
             }
         }
     }
-    if let Some(cancel) =
-        default_lease_cancel_on_last_close(&st, &closed.owner, &closed.id, closed.updated_ms)
-    {
-        close_events.push(cancel);
-    }
     server.commit_locked(&mut st, &close_events);
 
     let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
@@ -10333,14 +10335,6 @@ fn handle_task_finalize_cleanup(
             .map(|waiter| waiter.id)
             .collect::<Vec<_>>();
         let notifications = resume_cleanup_release(server, &mut st, &task.id);
-        // The lease stop is part of the same obligation, so a resumed attempt
-        // completes it too instead of reporting lifecycle complete over an
-        // armed lease.
-        if let Some(cancel) =
-            default_lease_cancel_on_last_close(&st, &task.owner, &task.id, now_ms())
-        {
-            server.commit_locked(&mut st, &[cancel]);
-        }
         drop(st);
         for (message_id, subscription_id) in notifications {
             attempt_notification(server, &message_id, &subscription_id);
@@ -10416,12 +10410,6 @@ fn handle_task_finalize_cleanup(
             receipt: receipt.clone(),
         }],
     );
-    // Verification is durable now, so the owner's responsibility really is
-    // finished. Stop its automatic lease exactly as a normal close does, unless
-    // the owner still holds another unfinished task.
-    if let Some(cancel) = default_lease_cancel_on_last_close(&st, &task.owner, &task.id, now) {
-        server.commit_locked(&mut st, &[cancel]);
-    }
     let released = waiting_dependents_of(&st, &task.id)
         .into_iter()
         .map(|waiter| waiter.id)
@@ -23144,6 +23132,67 @@ mod scheduler_admission_tests {
             "pending"
         );
         drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatch_without_subscription_reports_repair_terminal() {
+        let (mut server, root) = test_server();
+        register(&server, "master", "%master");
+        register(&server, "peer", "%peer");
+        server.config.notifications.enabled = true;
+        promote_master(&server);
+        let server = Arc::new(server);
+        // Remove the recipient's default lease so dispatch cannot select a sink.
+        let subscription_id = server
+            .state
+            .lock()
+            .unwrap()
+            .notification_subscriptions
+            .values()
+            .find(|subscription| subscription.worker_id == "peer")
+            .unwrap()
+            .id
+            .clone();
+        server.commit(&[Event::NotificationSuppressed {
+            subscription_id,
+            status: "cancelled".into(),
+            reason: EXPLICIT_UNSUBSCRIBE_REASON.into(),
+            updated_ms: now_ms(),
+        }]);
+        let response = dispatch(
+            &server,
+            Req::Subagent {
+                worker_id: "master".into(),
+                token: "token-master".into(),
+                command: crate::subagent::Action::Dispatch {
+                    request_id: "req-no-subscription".into(),
+                    subject: "No subscription".into(),
+                    body: "must surface repair".into(),
+                    feature_id: None,
+                    worktree_path: None,
+                    branch: None,
+                    base_commit: None,
+                    priority: "p1".into(),
+                    next_step: None,
+                },
+                launch_env: Default::default(),
+            },
+        );
+        assert_eq!(
+            response.data["notification"], "mailbox-only-no-subscription",
+            "{response:?}"
+        );
+        assert_eq!(response.data["failure"], "notification_subscription_missing");
+        assert_eq!(response.data["repair_required"], true);
+        assert!(
+            response.data["notification_error"].as_str().is_some(),
+            "mailbox-only must carry a machine-readable reason: {response:?}"
+        );
+        assert!(
+            response.data["escalation"].as_str().is_some(),
+            "mailbox-only must carry the repair escalation: {response:?}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

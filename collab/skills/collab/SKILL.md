@@ -704,12 +704,12 @@ On a blocker: find a concrete solution first, then report it to the live
 master immediately. Do not wait. Do not lazy-think (symptoms without a
 fix, or idle hoping master will design it). Copy parent if parent is not
 master. If delivery or test conditions are unclear, propose the missing
-conditions instead of guessing. Last owned `collab task close` cancels this
-peer's direct-message auto-notify. To cancel a specific owner-scoped lease,
-use `collab notify unsubscribe <subscription-id>`. After the task is done,
-the task close lifecycle stops the owner's auto-notify; there is no separate
-`collab notify close` command. Do not unsubscribe another peer's lease. Next collaboration re-arms with
-`collab init` or `collab notify subscribe --event direct-message`.
+conditions instead of guessing. Only an explicit `collab notify unsubscribe
+<subscription-id>` stops a default direct-message lease; finishing or closing
+the last task never cancels it, so a registered peer stays wakeable. There is
+no separate `collab notify close` command. Do not unsubscribe another peer's
+lease. After an explicit unsubscribe, re-arm with `collab notify subscribe
+--event direct-message`.
 
 AGY review is not used for Collab v1 lifecycle gates. Ordinary review uses an
 independent review path when review is required; a milestone may use Astra when
@@ -846,9 +846,9 @@ register it.
   architecture/integration/acceptance; it does not take another peer's
   task. Workers and subagents find a solution first, then report blockers
   to master immediately; they do not wait or dump symptoms. Last owned
-  task close cancels that owner's auto-notify; use
+  task close keeps that owner's auto-notify armed; use
   `collab notify unsubscribe <subscription-id>` for a specific leftover
-  lease. AGY review is not a Collab v1 gate; ordinary review is independent,
+  lease. Only an explicit unsubscribe stops it. AGY review is not a Collab v1 gate; ordinary review is independent,
   and a milestone may use Astra when required. Explicit managed subagent tasks
   use the task-bound inspect obligation above; it is not a free-form task queue
   and does not create worker transport input.

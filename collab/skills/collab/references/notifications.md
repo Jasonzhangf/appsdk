@@ -24,13 +24,14 @@ collab notify unsubscribe <subscription-id>
   follows its currently selected transport binding and replaces a persisted
   default lease whose transport or target belongs to a retired route. An explicit owner
   unsubscribe of that lease stays cancelled; later `register` / `context` /
-  `ack` must not silently re-arm it. Last owned `collab task close` cancels
-  the owner's direct-message auto-notify. There is no `collab notify close`
-  command; cancel a specific owner-scoped lease with
-  `collab notify unsubscribe <subscription-id>`. After a finished task, the
-  task close lifecycle stops the owner's auto-notify. `collab init` or
-  `collab notify subscribe --event direct-message` re-arms it for the next
-  collaboration.
+  `ack` must not silently re-arm it. Only an explicit unsubscribe stops the
+  default lease. Finishing or closing the last task never cancels it, so a
+  registered peer stays wakeable across task lifecycles and `mailbox-only`
+  cannot appear silently. There is no `collab notify close` command; cancel a
+  specific owner-scoped lease with
+  `collab notify unsubscribe <subscription-id>`. After an explicit
+  unsubscribe, `collab notify subscribe --event direct-message` re-arms it for
+  the next collaboration.
 - Direct-message leases are owner-scoped and reusable until expiry. Resource
   and deadline subscriptions are exact-subject and one-shot.
 - Success consumes only a one-shot event subscription. Expiry or unsubscribe

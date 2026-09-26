@@ -2440,6 +2440,7 @@ fn assert_sdk_source_registry(root: &Path) {
     if !output.status.success() {
         fail("SDK_SOURCE_REGISTRY_GIT_FAILED");
     }
+    const MAX_SOURCE_LINES: u64 = 1500;
     for bytes in output
         .stdout
         .split(|byte| *byte == 0)
@@ -2486,6 +2487,17 @@ fn assert_sdk_source_registry(root: &Path) {
                 path,
                 owners.join(",")
             ));
+        }
+        if path.ends_with(".rs") {
+            let line_count = fs::read_to_string(root.join(path))
+                .map(|text| text.lines().count() as u64)
+                .unwrap_or_else(|_| fail(format!("SDK_SOURCE_READ_FAILED:{}", path)));
+            if line_count > MAX_SOURCE_LINES {
+                fail(format!(
+                    "SDK_SOURCE_LINE_LIMIT:{}:{}>{}",
+                    path, line_count, MAX_SOURCE_LINES
+                ));
+            }
         }
     }
     println!("{}", r#"{"ok":true,"gate":"sdk_source_registry"}"#);

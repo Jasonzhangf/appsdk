@@ -977,12 +977,14 @@ fn validate_terminal_event(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:keys_missing"
                 ));
             }
-            if !delivery_attempt_matches_before(
+            if !terminal_attempt_matches_before(
                 events,
                 terminal_index,
                 attempt_id,
                 key,
                 "notification.emitted",
+                notification_id,
+                message_id,
             ) {
                 return Err(format!(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:attempt_missing:{attempt_id}"
@@ -1052,17 +1054,28 @@ fn validate_terminal_event(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batch_item_missing"
                 ));
             }
-            let Some(attempt) = delivery_attempt_event_before(
+            if !terminal_attempt_matches_before(
                 events,
                 terminal_index,
                 attempt_id,
                 key,
                 "notification.batch_emitted",
-            ) else {
+                notification_id,
+                message_id,
+            ) {
                 return Err(format!(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:attempt_missing:{attempt_id}"
                 ));
-            };
+            }
+            let (_, attempt) = latest_delivery_attempt_before(
+                events,
+                terminal_index,
+                key,
+                "notification.batch_emitted",
+                notification_id,
+                message_id,
+            )
+            .expect("terminal_attempt_matches_before checked");
             if attempt["data"]["attempt"]["batchId"].as_str() != Some(batch_id) {
                 return Err(format!(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batch_id_mismatch"
@@ -1095,33 +1108,56 @@ fn validate_terminal_event(
     Ok(())
 }
 
-fn delivery_attempt_event_before<'a>(
+fn latest_delivery_attempt_before<'a>(
     events: &'a [Value],
     terminal_index: usize,
-    attempt_id: &str,
     key: &str,
     operation: &str,
-) -> Option<&'a Value> {
-    events[..terminal_index].iter().find(|event| {
-        event["kind"] == "notification.delivery_attempt"
-            && event["data"]["attemptId"].as_str() == Some(attempt_id)
-            && event["data"]["keys"]
-                .as_array()
-                .is_some_and(|keys| keys.iter().any(|candidate| candidate == &json!(key)))
-            && event["data"]["attempt"]["operation"].as_str() == Some(operation)
-            && event["data"]["attempt"].get("batchId").is_some()
-                == (operation == "notification.batch_emitted")
-    })
+    notification_id: &str,
+    message_id: &str,
+) -> Option<(usize, &'a Value)> {
+    events[..terminal_index]
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, event)| {
+            event["kind"] == "notification.delivery_attempt"
+                && event["data"]["attempt"]["operation"].as_str() == Some(operation)
+                && event["data"]["attempt"].get("batchId").is_some()
+                    == (operation == "notification.batch_emitted")
+                && notification_event_matches_object(event, key, notification_id, message_id)
+        })
 }
 
-fn delivery_attempt_matches_before(
+fn terminal_attempt_matches_before(
     events: &[Value],
     terminal_index: usize,
     attempt_id: &str,
     key: &str,
     operation: &str,
+    notification_id: &str,
+    message_id: &str,
 ) -> bool {
-    delivery_attempt_event_before(events, terminal_index, attempt_id, key, operation).is_some()
+    let Some((latest_index, latest_attempt)) = latest_delivery_attempt_before(
+        events,
+        terminal_index,
+        key,
+        operation,
+        notification_id,
+        message_id,
+    ) else {
+        return false;
+    };
+    if latest_attempt["data"]["attemptId"].as_str() != Some(attempt_id) {
+        return false;
+    }
+    !events[latest_index + 1..terminal_index]
+        .iter()
+        .any(|event| {
+            event["kind"] == "notification.delivery_failed"
+                && event["data"]["attemptId"].as_str() == Some(attempt_id)
+                && notification_event_matches_object(event, key, notification_id, message_id)
+        })
 }
 
 fn embedded_graph_sources() -> [(&'static str, &'static str); 2] {

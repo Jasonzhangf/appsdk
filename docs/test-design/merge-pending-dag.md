@@ -48,3 +48,15 @@
 | --- | --- | --- |
 | 全量测试仅 socket/tmux 竞态失败 | 环境既有 flaky | 单跑复现通过即记录，不掩盖 |
 | live 无法建隔离 daemon | 环境限制 | 报告 UNVERIFIED，不用源码测试冒充 |
+
+## 执行证据
+
+| 项 | 证据 |
+| --- | --- |
+| T1-T6 | `cargo test --manifest-path collab/Cargo.toml --bin collab`：816 passed / 2 known-flaky（`call_stale_socket`、`notify_pastes_text_then_sends_enter`，单跑各 1 passed）/ 1 ignored |
+| T8 | `cargo test --manifest-path collab/Cargo.toml --bin collab-mcp`：12 passed；`--test cli_smoke`：280 passed |
+| T9 | 隔离项目 `/tmp/ac24-mp2-1790400836-38252`，tmux socket `/tmp/ac24-mp-tmux2.sock`，peer-a/peer-b；`live-merge-task` 走完 deliver→accept→`TASK_MERGE_PENDING`→integrated→closed |
+| T9 投影 | `collab status --all.pending_merges` 含 task；master `collab context.operations` 含 `merge_pending` |
+| T10 | `kill -TERM <server.pid>` 后 `collab up` 重启隔离 daemon；`live-merge-task2` 仍出现在 `pending_merges`，close 仍返回 `TASK_MERGE_PENDING` |
+| T11 | `scripts/install-global-collab.sh` → `collab 0.2.0120` sha256 `d4dc180e…`；`scripts/install-global-appsdk.sh` → `appsdk 0.1.7`；真实 daemon PID 50856 加载新 binary，`collab status --all` 含 `pending_merges`，`appsdk longhorizon show` 渲染 `待合并 (0)` |
+| T12 | Codex review r1 PASS；AGY review r1 PASS；r2 针对 immediate-wake 与 DAG 说明修订重跑 |

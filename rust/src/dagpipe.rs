@@ -722,6 +722,7 @@ impl Operator for NotificationObjectValidateOperator {
         if !accepted {
             return Err(format!("NOTIFICATION_OBJECT_MESSAGE_ACCEPT_MISSING:{key}"));
         }
+        validate_delivery_failures(&events, key)?;
         let terminal = events
             .iter()
             .filter(|event| {
@@ -821,6 +822,67 @@ impl Operator for NotificationObjectValidateOperator {
 fn terminal_requires_repair(terminal: &Value) -> bool {
     terminal.get("repair_required").and_then(Value::as_bool) == Some(true)
         || terminal.get("mailbox_only").and_then(Value::as_bool) == Some(true)
+}
+
+fn notification_event_has_key(event: &Value, key: &str) -> bool {
+    event["data"]["keys"]
+        .as_array()
+        .or_else(|| event["data"]["notificationKeys"].as_array())
+        .is_some_and(|keys| keys.iter().any(|candidate| candidate == &json!(key)))
+}
+
+fn validate_delivery_failures(events: &[Value], key: &str) -> Result<(), String> {
+    let mut pending: Option<(String, String)> = None;
+    for event in events {
+        let kind = event["kind"].as_str();
+        if !matches!(
+            kind,
+            Some("notification.delivery_attempt")
+                | Some("notification.emitted")
+                | Some("notification.batch_emitted")
+                | Some("notification.superseded")
+                | Some("notification.delivery_failed")
+        ) || !notification_event_has_key(event, key)
+        {
+            continue;
+        }
+        match kind {
+            Some("notification.delivery_attempt") => {
+                let attempt_id = event["data"]["attemptId"]
+                    .as_str()
+                    .ok_or_else(|| format!("NOTIFICATION_OBJECT_ATTEMPT_ID_MISSING:{key}"))?
+                    .to_owned();
+                let operation = event["data"]["attempt"]["operation"]
+                    .as_str()
+                    .ok_or_else(|| format!("NOTIFICATION_OBJECT_ATTEMPT_OPERATION_MISSING:{key}"))?
+                    .to_owned();
+                pending = Some((attempt_id, operation));
+            }
+            Some("notification.emitted")
+            | Some("notification.batch_emitted")
+            | Some("notification.superseded") => {
+                pending = None;
+            }
+            Some("notification.delivery_failed") => {
+                let operation = event["data"]["operation"]
+                    .as_str()
+                    .ok_or_else(|| format!("NOTIFICATION_OBJECT_FAILURE_OPERATION_MISSING:{key}"))?
+                    .to_owned();
+                // Adapter-selection failures legitimately have no attemptId;
+                // only an attempt-bearing failure must match the pending attempt.
+                if let Some(attempt_id) = event["data"]["attemptId"].as_str() {
+                    if pending.as_ref() != Some(&(attempt_id.to_owned(), operation.clone())) {
+                        return Err(format!(
+                            "NOTIFICATION_OBJECT_DELIVERY_FAILURE_MISMATCH:{key}:{attempt_id}"
+                        ));
+                    }
+                    pending = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_terminal_event(

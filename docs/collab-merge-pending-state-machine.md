@@ -16,8 +16,8 @@
 | 角色 | 唯一 owner | 说明 |
 | --- | --- | --- |
 | merge obligation 真源 | daemon journal (`Event::MergeRequested` / `MergeResolved`) | 不是聊天消息，不是 master 记忆 |
-| 登记触发 | `handle_task_review` 的 accept 分支 | 与 `accepted` 状态同一事务提交 |
-| 解除触发 | `handle_task_integrated` / rework / cancel / authorized force close | 与对应状态转移同一事务提交 |
+| 登记触发 | `handle_task_review` 的 accept 分支，且存在 live master | 与 `accepted` 状态同一事务提交；无 live master 的项目保持 owner 自集成生命周期，不登记 |
+| 解除触发 | live master 的 `task integrated` / rework / cancel / authorized force close | 与对应状态转移同一事务提交；pending 未解除时 owner 的 integrated/close 返回 `TASK_MERGE_PENDING` |
 | 关闭门禁 | `handle_task_close` | pending 未解除时返回 `TASK_MERGE_PENDING` |
 | 提醒投影 | `collab context` / `collab status --all` / `appsdk longhorizon show` / master idle wake | 只读投影，不写第二份真源 |
 
@@ -25,10 +25,10 @@
 
 | 事件 | 生产者 | 消费者 | 何时发生 | 状态效果 | payload 边界 |
 | --- | --- | --- | --- | --- | --- |
-| `review_accept` | task owner 或 live master | daemon | `task review --accept` | `accepted` + `MergeRequested` | task id、evidence |
+| `review_accept` | task owner 或 live master | daemon | `task review --accept`（需存在 live master） | `accepted` + `MergeRequested` | task id、evidence |
 | `merge_pending_notice` | daemon | live master | 登记同一事务 | durable direct-message `merge-pending:<task>` | task id、owner |
 | `idle_wake` | keepalive/timer | live master | master idle 且有 pending | body 含 `pending_merges=` | 只读 |
-| `integration_recorded` | task owner 或 live master | daemon | `task integrated --commit` 且 commit 可达 main | `merged` + `MergeResolved` | commit、evidence |
+| `integration_recorded` | live master | daemon | `task integrated --commit` 且 commit 可达 main | `merged` + `MergeResolved` | commit、evidence |
 | `rework` | task owner 或 live master | daemon | `review --rework` 或 accepted→rework | `rework` + `MergeResolved` | evidence |
 | `force_close` | 授权方 | daemon | 授权 force close | `closed` + `MergeResolved` | reason |
 | `close_blocked` | daemon | caller | pending 未解除时 close | 失败 `TASK_MERGE_PENDING` | task id、rule |
@@ -67,5 +67,6 @@ stateDiagram-v2
 | --- | --- | --- |
 | commit 不在 main | `TASK_INTEGRATION_COMMIT_MISMATCH` | 先真正 merge，再记录 |
 | pending 期间 close | `TASK_MERGE_PENDING` | 由 master 完成 merge 与 integrated |
+| pending 期间 owner 自 integrated | `TASK_MERGE_PENDING` | 不能绕过 master 义务；必须先由 master merge 并记录 integrated |
 | review rework | obligation 显式解除 | 回到 `rework`，不残留 pending |
 | 授权 force close | obligation 显式解除并留 reason | 审计可查 |

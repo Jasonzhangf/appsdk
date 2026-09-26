@@ -116,6 +116,11 @@ also resolves it. `collab task close` on a still-pending merge fails with
 `TASK_MERGE_PENDING`; the master cannot lose the merge by staying busy, and the
 task cannot close before the merge is recorded.
 
+While the pending merge exists, only the live master may record `task
+integrated`; an owner that tries to self-integrate gets `TASK_MERGE_PENDING`.
+The obligation is registered only when a live master exists, so a master-less
+project keeps the plain owner self-integration lifecycle.
+
 ## Task liveness and escalation
 
 An assigned task remains live until its actual cleanup receipt and `closed`

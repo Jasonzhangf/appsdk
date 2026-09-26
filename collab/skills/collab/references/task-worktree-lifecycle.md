@@ -96,6 +96,31 @@ lifecycle records. A persisted pre-review `accepted` task with no lifecycle
 evidence retains an owner-local `accepted→merged` compatibility path; it
 records task state only and does not create review or integration evidence.
 
+`task review --accept` also registers a daemon-owned pending merge keyed by
+task id and notifies the live master. That registration, not a chat message,
+is the single source for the merge obligation: the master stays busy, changes
+session, or restarts, and the obligation survives. While it exists:
+
+- `collab status --all` exposes `pending_merges`; each task view carries
+  `merge.pending`.
+- `collab context` for the live master lists a `merge_pending` operation.
+- `appsdk longhorizon show` prints a `待合并` section and includes
+  `pending_merges` in `--json`.
+- master idle wake text and the idle batch body include `pending_merges`.
+
+The master resolves it only by moving the accepted candidate onto
+`refs/heads/main` and recording `collab task integrated --commit <sha>
+--evidence "<main gates>"`. That resolves the pending merge in the same
+transaction. `accepted -> rework`, cancellation, or an authorized force close
+also resolves it. `collab task close` on a still-pending merge fails with
+`TASK_MERGE_PENDING`; the master cannot lose the merge by staying busy, and the
+task cannot close before the merge is recorded.
+
+While the pending merge exists, only the live master may record `task
+integrated`; an owner that tries to self-integrate gets `TASK_MERGE_PENDING`.
+The obligation is registered only when a live master exists, so a master-less
+project keeps the plain owner self-integration lifecycle.
+
 ## Task liveness and escalation
 
 An assigned task remains live until its actual cleanup receipt and `closed`

@@ -780,6 +780,749 @@ fn master_idle_subscription_is_restricted_to_the_live_master_and_supported_inter
 }
 
 #[test]
+fn review_accept_registers_daemon_owned_pending_merge_with_master_notification() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master merge registration test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    accept_task(&server, "owner", "task");
+
+    let state = server.state.lock().unwrap();
+    assert!(
+        state.pending_merges.contains_key("task"),
+        "review --accept must register a durable daemon-owned pending merge"
+    );
+    let request = state.pending_merges["task"].clone();
+    assert_eq!(request.owner, "owner");
+    assert_eq!(request.task_id, "task");
+    let notified = state.msgs.values().any(|message| {
+        message.to == "master"
+            && message
+                .subject
+                .as_deref()
+                .is_some_and(|subject| subject == "merge-pending:task")
+    });
+    assert!(
+        notified,
+        "review --accept must create a durable merge-pending notice for the live master"
+    );
+    let notice_id = state
+        .msgs
+        .values()
+        .find(|message| message.subject.as_deref() == Some("merge-pending:task"))
+        .expect("merge-pending notice")
+        .id
+        .clone();
+    assert_eq!(
+        state.delivery_modes.get(&notice_id).map(String::as_str),
+        Some("immediate"),
+        "the master's merge obligation must wake immediately, not wait for the batch window"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn review_accept_without_master_direct_message_subscription_surfaces_repair() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master merge registration test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    // Simulate the master losing its default direct-message lease: the pending
+    // merge must stay durable and the review response must carry the explicit
+    // mailbox-only repair terminal, never a silent success.
+    let drop_ids: Vec<String> = server
+        .state
+        .lock()
+        .unwrap()
+        .notification_subscriptions
+        .values()
+        .filter(|sub| sub.worker_id == "master" && sub.event == "direct-message")
+        .map(|sub| sub.id.clone())
+        .collect();
+    {
+        let mut state = server.state.lock().unwrap();
+        for id in drop_ids {
+            state.notification_subscriptions.remove(&id);
+        }
+    }
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate".into()),
+        )
+        .ok
+    );
+    let response = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(response.ok, "{}", response.error.unwrap_or_default());
+    assert_eq!(
+        response.data["notification"],
+        serde_json::json!("mailbox-only-no-subscription")
+    );
+    assert_eq!(response.data["repair_required"], serde_json::json!(true));
+    assert!(
+        response.data["failure"]
+            .as_str()
+            .is_some_and(|f| f == "notification_subscription_missing")
+    );
+    assert!(
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation must remain durable even without a wake subscription"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_merge_with_unbound_candidate_fails_closed_on_integrated() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved unbound candidate test");
+    initialize_main(&root);
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    // Deliver with a worktree that does not resolve to a git commit, so the
+    // accepted candidate is unbound (None) while the pending merge exists.
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate-nonexistent".into()),
+        )
+        .ok
+    );
+    let response = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(response.ok, "{}", response.error.unwrap_or_default());
+    assert_eq!(
+        response.data["merge_pending"],
+        serde_json::json!(true),
+        "a live-master accept that registers a pending merge must report it"
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state.pending_merges.contains_key("task"));
+        assert!(
+            state.pending_merges["task"].candidate_commit.is_none(),
+            "this test deliberately leaves the delivered candidate unbound"
+        );
+        assert_eq!(state.tasks["task"].status, "accepted");
+    }
+
+    // An unrelated main-reachable SHA must not satisfy an unbound obligation.
+    let head = current_head(&root);
+    let integrated = handle_task_integrated(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "task".into(),
+        head,
+        "unrelated main sha".into(),
+    );
+    assert!(!integrated.ok, "{integrated:?}");
+    assert_eq!(integrated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert!(
+        integrated.data["candidate_commit"].is_null(),
+        "the fail-closed response must expose the unbound candidate"
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state.pending_merges.contains_key("task"));
+        assert_eq!(state.tasks["task"].status, "accepted");
+    }
+
+    // Rework is the explicit recovery path: it resolves the unprovable
+    // obligation so the owner can re-deliver with a resolvable candidate.
+    assert!(
+        handle_task_update(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("rework".into()),
+            Some("candidate must be bound before re-accept".into()),
+        )
+        .ok
+    );
+    assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn review_accept_merge_pending_field_reflects_registered_obligation() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate-nonexistent".into()),
+        )
+        .ok
+    );
+    // Masterless accept leaves the owner-local lifecycle intact: no daemon
+    // pending merge exists, so merge_pending must be false even though accept
+    // succeeded.
+    let response = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(response.ok, "{}", response.error.unwrap_or_default());
+    assert_eq!(response.data["merge_pending"], serde_json::json!(false));
+    assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master close gate test");
+    initialize_main(&root);
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    accept_task(&server, "owner", "task");
+
+    let refused = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
+    );
+    assert!(!refused.ok, "{refused:?}");
+    assert_eq!(refused.error.as_deref(), Some("TASK_MERGE_PENDING"));
+
+    let owner_integrated = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        current_head(&root),
+        "owner bypass attempt".into(),
+    );
+    assert!(!owner_integrated.ok, "owner could not bypass the master merge obligation");
+    assert_eq!(owner_integrated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+
+    let head = current_head(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "task".into(),
+            head,
+            "main merged".into(),
+        )
+        .ok
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(
+            !state.pending_merges.contains_key("task"),
+            "task integrated must resolve the pending merge"
+        );
+        assert_eq!(state.tasks["task"].status, "merged");
+    }
+    let closed = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn integrated_supersedes_stale_merge_pending_notice() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master merge notice test");
+    initialize_main(&root);
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    accept_task(&server, "owner", "task");
+
+    let notice_id = {
+        let state = server.state.lock().unwrap();
+        state
+            .msgs
+            .values()
+            .find(|message| {
+                message.to == "master"
+                    && message.subject.as_deref() == Some("merge-pending:task")
+                    && matches!(message.state.as_str(), "pending" | "delivered")
+            })
+            .expect("merge-pending notice must exist")
+            .id
+            .clone()
+    };
+
+    let head = current_head(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "task".into(),
+            head,
+            "merged onto main".into(),
+        )
+        .ok
+    );
+
+    let state = server.state.lock().unwrap();
+    assert!(!state.pending_merges.contains_key("task"));
+    assert_eq!(
+        state.msgs[&notice_id].state, "superseded",
+        "a resolved obligation must not remain readable as an actionable P0 notice"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn review_accept_fails_closed_when_master_presence_is_unknown() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master presence test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate".into()),
+        )
+        .ok
+    );
+
+    // Dropping the tmux server makes the master's presence probe Unknown, which
+    // is ambiguous authority: accept must fail closed instead of silently
+    // downgrading to owner self-integration.
+    stop_registered_test_tmux_server();
+
+    let response = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(!response.ok);
+    assert_eq!(response.error.as_deref(), Some("MASTER_PRESENCE_UNKNOWN"));
+    let state = server.state.lock().unwrap();
+    assert!(
+        !state.pending_merges.contains_key("task"),
+        "an ambiguous master presence must not register a merge obligation"
+    );
+    assert_eq!(state.tasks["task"].status, "delivered");
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_merge_requires_the_delivered_candidate_on_main() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved candidate merge test");
+    initialize_main(&root);
+
+    git_ok(&root, &["checkout", "-q", "-b", "codex/candidate"]);
+    std::fs::write(root.join("candidate.txt"), "candidate\n").unwrap();
+    git_ok(&root, &["add", "candidate.txt"]);
+    git_ok(&root, &["commit", "-q", "-m", "candidate work"]);
+    let candidate = current_head(&root);
+    git_ok(&root, &["checkout", "-q", "main"]);
+    let main_before_merge = current_head(&root);
+    // The candidate must be delivered from a real worktree checked out on the
+    // registered branch; a branch ref alone is not proof of the delivered
+    // commit under the fail-closed binding rule.
+    let worktree_dir = root.join("playground/candidate");
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree_dir.to_str().unwrap(),
+            "codex/candidate",
+        ],
+    );
+    assert_eq!(rev_parse(&worktree_dir, "HEAD"), candidate);
+
+    let registered = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        None,
+        Some("feature".into()),
+        Some("playground/candidate".into()),
+        Some("codex/candidate".into()),
+        Some(main_before_merge.clone()),
+        default_priority(),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    let worktree = server.state.lock().unwrap().tasks["task"]
+        .worktree_path
+        .clone()
+        .unwrap();
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate delivered".into()),
+            Some(worktree),
+        )
+        .ok
+    );
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["task"]
+            .delivery_commit
+            .as_deref(),
+        Some(candidate.as_str()),
+        "deliver must bind the obligation to the exact candidate commit"
+    );
+    assert!(
+        handle_task_review(
+            &server,
+            "master".into(),
+            "token-master".into(),
+            "task".into(),
+            true,
+            false,
+            "accepted".into(),
+        )
+        .ok
+    );
+
+    // An unrelated pre-existing main commit must not satisfy the obligation.
+    let unrelated = handle_task_integrated(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "task".into(),
+        main_before_merge.clone(),
+        "unrelated main sha".into(),
+    );
+    assert!(!unrelated.ok, "{unrelated:?}");
+    assert_eq!(unrelated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+    assert!(
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation must survive an unrelated-main integration attempt"
+    );
+
+    // Only after the candidate itself lands on main may the master record it.
+    git_ok(&root, &["merge", "--no-ff", "-q", "codex/candidate", "-m", "merge candidate"]);
+    let merged = handle_task_integrated(
+        &server,
+        "master".into(),
+        "token-master".into(),
+        "task".into(),
+        candidate.clone(),
+        "candidate merged onto main".into(),
+    );
+    assert!(merged.ok, "{merged:?}");
+    assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved worktree-head merge test");
+    initialize_main(&root);
+
+    // The worktree HEAD is the delivered commit. The registered branch ref is
+    // main, deliberately stale relative to the delivered worktree HEAD, so the
+    // binding must fail closed instead of trusting the branch ref.
+    let worktree_dir = root.join("playground/candidate-relative");
+    std::fs::create_dir_all(root.join("playground")).unwrap();
+    git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            "codex/candidate-relative",
+            "refs/heads/main",
+        ],
+    );
+    std::fs::write(worktree_dir.join("candidate.txt"), "candidate\n").unwrap();
+    git_ok(&worktree_dir, &["add", "candidate.txt"]);
+    git_ok(&worktree_dir, &["commit", "-q", "-m", "candidate work"]);
+    let candidate = rev_parse(&worktree_dir, "HEAD");
+    let main_before_merge = rev_parse(&root, "refs/heads/main");
+    assert_ne!(candidate, main_before_merge);
+
+    let registered = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        None,
+        Some("feature".into()),
+        Some("playground/candidate-relative".into()),
+        Some("main".into()),
+        Some(main_before_merge.clone()),
+        default_priority(),
+    );
+    assert!(registered.ok, "{}", registered.error.unwrap_or_default());
+    let registered_worktree = server.state.lock().unwrap().tasks["task"]
+        .worktree_path
+        .clone()
+        .unwrap();
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate delivered".into()),
+            Some(registered_worktree),
+        )
+        .ok
+    );
+    assert_eq!(
+        server.state.lock().unwrap().task_lifecycle["task"]
+            .delivery_commit
+            .as_deref(),
+        None,
+        "a stale branch ref must fail closed rather than bind the branch ref"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn review_accept_surfaces_failed_immediate_wake_attempt() {
+    let (mut server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master wake attempt test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+    for status in ["verifying", "reviewed"] {
+        assert!(
+            handle_task_update(
+                &server,
+                "owner".into(),
+                "token-owner".into(),
+                "task".into(),
+                Some(status.into()),
+                None,
+            )
+            .ok
+        );
+    }
+    assert!(
+        handle_task_deliver(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("candidate commit and gates passed".into()),
+            Some("/tmp/candidate".into()),
+        )
+        .ok
+    );
+
+    // Disable notifications so the immediate wake cannot deliver; the
+    // obligation must still be durable, but the response must surface the
+    // explicit failure instead of pretending success.
+    server.config.notifications.enabled = false;
+    let response = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        true,
+        false,
+        "review passed".into(),
+    );
+    assert!(response.ok, "{}", response.error.clone().unwrap_or_default());
+    assert_eq!(
+        response.data["notification"],
+        serde_json::json!("subscribed-not-sent")
+    );
+    assert_eq!(response.data["repair_required"], serde_json::json!(true));
+    assert!(
+        response.data["notification_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("notifications are disabled")),
+        "{}",
+        response.data
+    );
+    assert!(
+        server.state.lock().unwrap().pending_merges.contains_key("task"),
+        "the obligation remains durable even when the wake cannot deliver"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_accepted_update_to_rework_resolves_pending_merge() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master rework test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    accept_task(&server, "owner", "task");
+    assert!(server.state.lock().unwrap().pending_merges.contains_key("task"));
+
+    assert!(
+        handle_task_update(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("rework".into()),
+            Some("review requested rework".into()),
+        )
+        .ok
+    );
+    let state = server.state.lock().unwrap();
+    assert!(
+        !state.pending_merges.contains_key("task"),
+        "accepted -> rework must resolve the pending merge"
+    );
+    assert_eq!(state.tasks["task"].status, "rework");
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn authenticated_send_rejects_missing_binding() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
@@ -1337,6 +2080,8 @@ fn current_head(root: &Path) -> String {
 
 /// Drive one task to the accepted state that `task integrated` requires.
 fn accept_task(server: &Server, owner: &str, id: &str) {
+    let root = server.root.clone();
+    let worktree = candidate_worktree(&root, id);
     for status in ["verifying", "reviewed"] {
         assert!(
             handle_task_update(
@@ -1357,7 +2102,7 @@ fn accept_task(server: &Server, owner: &str, id: &str) {
             format!("token-{owner}"),
             id.into(),
             Some("candidate commit and gates passed".into()),
-            Some("/tmp/candidate".into()),
+            Some(worktree.to_string_lossy().into_owned()),
         )
         .ok
     );
@@ -1374,6 +2119,42 @@ fn accept_task(server: &Server, owner: &str, id: &str) {
         .ok
     );
     assert_eq!(server.state.lock().unwrap().tasks[id].status, "accepted");
+    git_ok(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+}
+
+/// A daemon pending merge binds the obligation to the exact delivered commit,
+/// so tests that later integrate under a live master need a real git worktree
+/// whose HEAD resolves. Each call gets a unique path so parallel tests cannot
+/// collide on the same worktree lock.
+fn candidate_worktree(root: &Path, id: &str) -> PathBuf {
+    static WT_SEQ: AtomicU64 = AtomicU64::new(0);
+    if !Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--verify", "refs/heads/main"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        initialize_main(root);
+    }
+    let seq = WT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let worktree = std::env::temp_dir().join(format!(
+        "collab-candidate-{}-{seq}-{id}",
+        std::process::id()
+    ));
+    let branch = format!("codex/candidate-{seq}-{id}");
+    git_ok(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree.to_str().unwrap(),
+            "-b",
+            &branch,
+            "refs/heads/main",
+        ],
+    );
+    worktree
 }
 
 fn rev_parse(root: &Path, rev: &str) -> String {
@@ -6068,8 +6849,8 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
     assert!(
         handle_task_integrated(
             &server,
-            "owner".into(),
-            "token-owner".into(),
+            "master".into(),
+            "token-master".into(),
             "master-cleanup".into(),
             main_commit,
             "main verified".into(),

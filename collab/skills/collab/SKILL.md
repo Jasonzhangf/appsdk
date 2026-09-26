@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "Collab: 只跑 collab context, 自动查身份/恢复/注册/补齐上下文+角色操作。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
+description: "Collab: 只跑 collab context, 自动查身份/恢复/注册/补齐上下文+角色操作。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, master 必须 merge 后 task integrated 才能 close (TASK_MERGE_PENDING), 见 context/status/longhorizon/idle wake。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
 ---
 
 # Collab
@@ -141,6 +141,17 @@ reported to the live master; an agent does not run `collab down`/`collab up`,
 identity/token/route state. Daemon restart drops in-flight mailbox, leases,
 and bound tasks for every peer in the global daemon and is a separate,
 explicitly authorized maintenance operation, not recovery.
+
+When `collab context` cannot match a current pane/session/thread to any
+persisted peer, it probes the project's persisted identities before failing.
+Records that are provably dead (tmux pane missing, AppServer thread reported
+`systemError`, thread/read returns not-found/no-rollout) are archived under
+`~/.collab/archives/identities-retired-<ms>/` automatically; only then is a
+fresh peer registration allowed. A cold (`notLoaded`) AppServer thread is
+*not* dead: the endpoint can resume it through `turn/start`, so it keeps
+blocking with `IDENTITY_REBIND_UNPROVEN` and a live agent is never silently
+displaced. This archival is automatic and reversible: nothing is deleted, and
+the retired bytes stay on disk for audit.
 
 Master recovery is the same one-step shape: when `collab context` shows no
 live master, it also lists `promote_master` with `requires_approval`, and
@@ -691,10 +702,16 @@ explicitly. Give each peer its own worktree and file
 scope. Independent peers may decline an invite to protect their current task.
 Wait for evidence summaries, then integrate. Chat tone is not completion.
 
-Delivery and review are not lifecycle endpoints. After a delivered candidate,
-the live master drives review, integration, cleanup, task close, and then the
-next ready assignment. Do not leave a peer idle merely because its last task
-returned `delivered`, `merged`, or a review verdict. Reuse the same live peer
+Delivery and review are not lifecycle endpoints. `task review --accept`
+registers a daemon-owned pending merge and notifies the live master; the
+obligation is durable, appears in `collab context`, `collab status --all`
+(`pending_merges`), `appsdk longhorizon show` (待合并), and master idle wake
+text, and `task close` fails with `TASK_MERGE_PENDING` until the master records
+`collab task integrated`. Never rely on remembering a merge from a message.
+After a delivered candidate, the live master drives review, integration,
+cleanup, task close, and then the next ready assignment. Do not leave a peer
+idle merely because its last task returned `delivered`, `merged`, or a review
+verdict. Reuse the same live peer
 or a fresh managed subagent for the next non-overlapping P0/P1 assignment
 whenever capacity exists. Closing or force-closing a stale task is a scheduling
 decision that must preserve evidence, not a reason to stop dispatching.
@@ -763,6 +780,7 @@ authoritative snapshot plus the current role's `operations`.
 | Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
 | Unsure whether a live master exists | `collab master status` from the canonical root | infer "no master" from a failed context or a missing `who.master` |
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
+| Master has a pending merge | `collab status --all` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
 
 Only these are operator-facing diagnostics and are not part of the agent flow:
 `collab init`, `collab whoami`, `collab worker recover`, `collab route resolve`,
@@ -780,7 +798,8 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 | `state_snapshot` | 引导成功；含 role/operations/master/peers/inbox/worktrees/tasks | 读快照执行当前角色的 `operations` |
 | `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根 | 保留错误，改在 canonical main 再跑 `collab context` |
 | 拒绝在 playground 创建基线 | 在 worktree 内引导 | 回到项目 main 根执行，不删旧身份 |
-| `TOKEN_MISMATCH` / `IDENTITY_REBIND_UNPROVEN` | 身份无法验真 | 保留错误并报告 live master，不复制 token、不 mint 新身份 |
+| `TOKEN_MISMATCH` | 身份无法验真 | 保留错误并报告 live master，不复制 token、不 mint 新身份 |
+| `IDENTITY_REBIND_UNPROVEN` | 存在无法匹配但可能存活的对端 | 保留错误并报告 live master；`collab context` 会自动归档可证已死的旧 peer，只有仍可达/不可验的对端才保持 fail-closed |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；

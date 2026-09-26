@@ -4,6 +4,10 @@
     {
       "id": "appsdk-collab-context",
       "path": "docs/dagpipe/collab-context.graph.json"
+    },
+    {
+      "id": "appsdk-collab-merge-pending",
+      "path": "docs/dagpipe/merge-pending.graph.json"
     }
   ]
 }

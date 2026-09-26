@@ -9383,7 +9383,23 @@ fn handle_task_update(
         task.next_step = next_step;
     }
     task.updated_ms = now_ms();
-    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    let mut events = vec![Event::TaskUpdated { task: task.clone() }];
+    // A registered merge obligation exists iff the task is still awaiting the
+    // merge of an accepted candidate. Any other transition (rework, cancel,
+    // legacy merge) ends that obligation in the same transaction.
+    if task.status != "accepted" && st.pending_merges.contains_key(&task_id) {
+        let stale_notices = pending_merge_notice_ids(&st, &task_id);
+        events.push(Event::MergeResolved {
+            task_id: task_id.clone(),
+            resolved_by: worker_id.clone(),
+            reason: Some(format!("task no longer awaits merge (status={})", task.status)),
+            at_ms: task.updated_ms,
+        });
+        if !stale_notices.is_empty() {
+            events.push(Event::Superseded { ids: stale_notices });
+        }
+    }
+    server.commit_locked(&mut st, &events);
     Resp::data(json!({
         "task": task.id,
         "status": task.status,
@@ -9578,6 +9594,9 @@ fn handle_task_deliver(
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
     lifecycle.delivery_evidence = Some(evidence.clone());
     lifecycle.delivered_ms = Some(now);
+    // Capture the exact candidate commit so a later pending merge can prove
+    // the delivered candidate itself reached main, not just some main ref.
+    lifecycle.delivery_commit = resolve_candidate_commit(&server.root, &task, &worktree);
     server.commit_locked(
         &mut st,
         &[
@@ -9598,6 +9617,46 @@ fn handle_task_deliver(
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},
     }))
+}
+
+fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {
+    // The delivered worktree HEAD is the authoritative candidate. A branch
+    // ref may point at a stale or unrelated commit; it is only admissible as
+    // a consistency cross-check, never as the binding on its own.
+    let worktree_dir = if Path::new(worktree).is_absolute() {
+        PathBuf::from(worktree)
+    } else {
+        root.join(worktree)
+    };
+    let worktree_head = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!head.is_empty()).then_some(head)
+        })?;
+    if let Some(branch) = task.branch.as_deref() {
+        let branch_head = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                (!head.is_empty()).then_some(head)
+            });
+        // Fail closed on divergence: the delivered worktree HEAD must agree
+        // with the registered branch or the candidate is not provably the
+        // delivered commit.
+        if branch_head.as_deref() != Some(worktree_head.as_str()) {
+            return None;
+        }
+    }
+    Some(worktree_head)
 }
 
 fn task_integration_authorized(
@@ -9757,25 +9816,138 @@ fn handle_task_review(
     lifecycle.review_evidence = Some(evidence.to_owned());
     lifecycle.reviewer = Some(worker_id.clone());
     lifecycle.reviewed_ms = Some(now);
-    server.commit_locked(
-        &mut st,
-        &[
-            Event::TaskUpdated {
-                task: reviewed.clone(),
-            },
-            Event::TaskLifecycleUpdated {
+    let delivery_commit = lifecycle.delivery_commit.clone();
+    let mut events = vec![
+        Event::TaskUpdated {
+            task: reviewed.clone(),
+        },
+        Event::TaskLifecycleUpdated {
+            task_id: task_id.clone(),
+            record: lifecycle,
+        },
+    ];
+    let mut pending_notification = None;
+    let mut notification_missing = false;
+    let mut merge_pending_registered = false;
+    if accept {
+        // A merge obligation exists only when a live master owns the merge. In
+        // a master-less project the owner keeps the plain self-integration
+        // lifecycle; registering a pending merge there would deadlock close.
+        // An unresolvable master presence is ambiguous authority: fail closed
+        // instead of silently downgrading to owner self-integration.
+        let master_id = match live_master_id(server, &st) {
+            Ok(master_id) => master_id,
+            Err(error) => {
+                return Resp::err_data(
+                    "MASTER_PRESENCE_UNKNOWN",
+                    json!({
+                        "task_id": task_id,
+                        "error": error,
+                        "rule": "cannot accept a task while master presence is unknown; probe transport and retry",
+                    }),
+                );
+            }
+        };
+        if let Some(master_id) = master_id {
+            let candidate_commit = delivery_commit;
+            let request = state::PendingMerge {
                 task_id: task_id.clone(),
-                record: lifecycle,
-            },
-        ],
-    );
-    Resp::data(json!({
+                owner: reviewed.owner.clone(),
+                requested_by: worker_id.clone(),
+                requested_ms: now,
+                candidate_commit,
+            };
+            events.push(Event::MergeRequested { request });
+            merge_pending_registered = true;
+            if master_id != worker_id {
+                let message_id = gen_msg_id();
+                events.push(Event::Sent {
+                    msg: Message {
+                        id: message_id.clone(),
+                        from: "collab-server".into(),
+                        to: master_id.clone(),
+                        mtype: "notify".into(),
+                        subject: Some(format!("merge-pending:{}", task_id)),
+                        body: format!(
+                            "MERGE_PENDING task={} owner={} requested_by={}. Master must integrate the accepted candidate on refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before the task can close.",
+                            task_id, reviewed.owner, worker_id
+                        ),
+                        in_reply_to: None,
+                        created_ms: now,
+                        state: "pending".into(),
+                        wake_attempt_count: 0,
+                        last_wake_attempt_ms: 0,
+                        retry_attempted: false,
+                    },
+                });
+                // A pending merge is the master's blocking obligation: wake it
+                // immediately instead of waiting for the batched window, while
+                // pending_merges stays the durable fallback.
+                events.push(Event::DeliveryMode {
+                    msg_id: message_id.clone(),
+                    mode: "immediate".into(),
+                    source_thread_id: None,
+                });
+                if let Some(subscription) =
+                    st.matching_subscription(&master_id, "direct-message", None, now)
+                {
+                    events.push(Event::WakeBound {
+                        message_id: message_id.clone(),
+                        subscription_id: subscription.id.clone(),
+                    });
+                    pending_notification = Some((message_id, subscription.id.clone()));
+                } else {
+                    // The obligation is durable, but a missing direct-message
+                    // subscription leaves the master mailbox-only with no wake.
+                    // Surface the explicit repair terminal instead of success.
+                    notification_missing = true;
+                }
+            }
+        }
+    }
+    server.commit_locked(&mut st, &events);
+    drop(st);
+    let mut notification_attempt_failure: Option<String> = None;
+    if let Some((message_id, subscription_id)) = pending_notification {
+        // Surface any non-accepted wake attempt as an explicit repair terminal;
+        // pending_merges stays durable regardless.
+        match attempt_notification_detailed_with_at(
+            server,
+            &message_id,
+            &subscription_id,
+            now,
+        ) {
+            NotificationAttempt::Accepted => {}
+            NotificationAttempt::Rejected(error) => {
+                notification_attempt_failure = Some(error);
+            }
+            NotificationAttempt::NotAttempted(error) => {
+                notification_attempt_failure = Some(error);
+            }
+        }
+    }
+    let mut review_data = json!({
         "task": task_id,
         "status": reviewed.status,
         "reviewer": worker_id,
         "evidence": evidence,
+        "merge_pending": merge_pending_registered,
         "next_action": reviewed.next_step,
-    }))
+    });
+    if notification_missing {
+        apply_mailbox_only_repair_fields(&mut review_data);
+        review_data["notification"] = json!("mailbox-only-no-subscription");
+    } else if let Some(error) = notification_attempt_failure {
+        review_data["durable"] = json!(true);
+        review_data["notification"] = json!("subscribed-not-sent");
+        review_data["notification_error"] = json!(error);
+        review_data["failure"] = json!("notification_delivery_failed");
+        review_data["repair_required"] = json!(true);
+        review_data["escalation"] = json!(
+            "the merge obligation is durable but this wake was not delivered; do not retry this wake, have the master run `collab recv` and rebind the selected wake transport"
+        );
+    }
+    Resp::data(review_data)
 }
 
 fn handle_task_integrated(
@@ -9807,6 +9979,38 @@ fn handle_task_integrated(
     if !task_integration_authorized(server, &st, &task, &worker_id) {
         return Resp::err("task integrated requires task owner or live master authority");
     }
+    if st.pending_merges.contains_key(&task_id) {
+        let request = st.pending_merges.get(&task_id).cloned().unwrap();
+        // A pending merge binds the obligation to the exact delivered commit.
+        // If that candidate was never resolved, the obligation is unprovable
+        // and must fail closed until it is re-bound (rework + re-deliver).
+        if request.candidate_commit.is_none() {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "candidate_commit": None::<String>,
+                    "rule": "this pending merge has no bound candidate commit; rework the task and re-deliver with a resolvable worktree/branch so the accepted candidate can be proven on refs/heads/main before integration",
+                }),
+            );
+        }
+        let is_live_master = live_master_id(server, &st)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(worker_id.as_str());
+        if !is_live_master {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "rule": "an accepted task with a daemon pending merge must be integrated by the live master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
+                }),
+            );
+        }
+    }
     let head = match resolve_authoritative_main_head(&server.root) {
         Ok(head) => head,
         Err(error) => return error,
@@ -9827,6 +10031,32 @@ fn handle_task_integrated(
             }),
         );
     }
+    // When a pending merge carries the delivered candidate, the recorded
+    // integration must prove that candidate itself reached main; an unrelated
+    // pre-existing main commit must not satisfy the obligation. The
+    // unbound-candidate case already failed closed above, so the candidate is
+    // guaranteed to be present here.
+    if let Some(candidate) = st
+        .pending_merges
+        .get(&task_id)
+        .and_then(|request| request.candidate_commit.as_deref())
+    {
+        match commit_is_integrated_in_main(&server.root, candidate) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Resp::err_data(
+                    "TASK_MERGE_PENDING",
+                    json!({
+                        "task_id": task_id,
+                        "candidate_commit": candidate,
+                        "provided": commit,
+                        "rule": "the delivered candidate must be merged onto refs/heads/main before the pending merge can be resolved",
+                    }),
+                );
+            }
+            Err(error) => return error,
+        }
+    }
     let now = now_ms();
     let mut integrated = task;
     integrated.status = "merged".into();
@@ -9836,18 +10066,28 @@ fn handle_task_integrated(
     lifecycle.integration_commit = Some(commit.to_owned());
     lifecycle.integration_evidence = Some(evidence.to_owned());
     lifecycle.integrated_ms = Some(now);
-    server.commit_locked(
-        &mut st,
-        &[
-            Event::TaskUpdated {
-                task: integrated.clone(),
-            },
-            Event::TaskLifecycleUpdated {
-                task_id: task_id.clone(),
-                record: lifecycle,
-            },
-        ],
-    );
+    let mut events = vec![
+        Event::TaskUpdated {
+            task: integrated.clone(),
+        },
+        Event::TaskLifecycleUpdated {
+            task_id: task_id.clone(),
+            record: lifecycle,
+        },
+    ];
+    if st.pending_merges.contains_key(&task_id) {
+        let stale_notices = pending_merge_notice_ids(&st, &task_id);
+        events.push(Event::MergeResolved {
+            task_id: task_id.clone(),
+            resolved_by: worker_id.clone(),
+            reason: Some("integrated into main".into()),
+            at_ms: now,
+        });
+        if !stale_notices.is_empty() {
+            events.push(Event::Superseded { ids: stale_notices });
+        }
+    }
+    server.commit_locked(&mut st, &events);
     Resp::data(json!({
         "task": task_id,
         "status": integrated.status,
@@ -9964,17 +10204,29 @@ fn handle_task_close(
             })
             .map(|m| m.id.clone())
             .collect();
-        let mut events: Vec<Event> = vec![
-            Event::CleanupVerified {
-                receipt: receipt.clone(),
-            },
-            Event::TaskUpdated {
-                task: closed.clone(),
-            },
-        ];
-        if !superseded.is_empty() {
-            events.push(Event::Superseded {
-                ids: superseded.clone(),
+    let mut events: Vec<Event> = vec![
+        Event::CleanupVerified {
+            receipt: receipt.clone(),
+        },
+        Event::TaskUpdated {
+            task: closed.clone(),
+        },
+    ];
+    if st.pending_merges.contains_key(&closed.id) {
+        let stale_notices = pending_merge_notice_ids(&st, &closed.id);
+        events.push(Event::MergeResolved {
+            task_id: closed.id.clone(),
+            resolved_by: worker_id.clone(),
+            reason: Some(format!("force close: {reason}")),
+            at_ms: closed.updated_ms,
+        });
+        if !stale_notices.is_empty() {
+            events.push(Event::Superseded { ids: stale_notices });
+        }
+    }
+    if !superseded.is_empty() {
+        events.push(Event::Superseded {
+            ids: superseded.clone(),
             });
         }
         let other_actionable = st.tasks.values().any(|t| {
@@ -10024,6 +10276,17 @@ fn handle_task_close(
         }
     }
     if task.status != "merged" {
+        if let Some(request) = st.pending_merges.get(&task_id) {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "requested_by": request.requested_by,
+                    "rule": "master must merge the accepted candidate onto refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before close",
+                }),
+            );
+        }
         return Resp::err(format!(
             "task {} must be merged by its owner before close (current: {})",
             task_id, task.status
@@ -10468,6 +10731,12 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
             "evidence": lifecycle.and_then(|record| record.integration_evidence.clone()),
             "at": lifecycle.and_then(|record| record.integrated_ms.map(iso)),
         },
+        "merge": state.pending_merges.get(&task.id).map(|request| json!({
+            "pending": true,
+            "requested_by": request.requested_by,
+            "requested_at": iso(request.requested_ms),
+            "owner": request.owner,
+        })).unwrap_or_else(|| json!({"pending": false})),
         "cleanup": {
             "required": cleanup_required,
             "status": if !cleanup_required {
@@ -10486,6 +10755,43 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "updated_at": iso(task.updated_ms),
         "keepalive": keepalive::view(state, &task.owner),
     })
+}
+
+fn pending_merge_views(state: &State) -> Vec<serde_json::Value> {
+    let mut views: Vec<_> = state
+        .pending_merges
+        .values()
+        .map(|request| {
+            let task = state.tasks.get(&request.task_id);
+            json!({
+                "task_id": request.task_id,
+                "owner": request.owner,
+                "requested_by": request.requested_by,
+                "requested_at": iso(request.requested_ms),
+                "status": task.map(|task| task.status.as_str()).unwrap_or("unknown"),
+                "branch": task.and_then(|task| task.branch.clone()),
+                "worktree": task.and_then(|task| task.worktree_path.clone()),
+            })
+        })
+        .collect();
+    views.sort_by(|a, b| a["task_id"].as_str().cmp(&b["task_id"].as_str()));
+    views
+}
+
+/// Durable merge-pending notices for a task that may still be readable after a
+/// resolution (integrated/rework/cancel). Superseding them prevents a stale P0
+/// obligation from surviving in the mailbox once pending_merges is gone.
+fn pending_merge_notice_ids(state: &State, task_id: &str) -> Vec<String> {
+    let subject = format!("merge-pending:{task_id}");
+    state
+        .msgs
+        .values()
+        .filter(|message| {
+            message.subject.as_deref() == Some(subject.as_str())
+                && matches!(message.state.as_str(), "pending" | "delivered")
+        })
+        .map(|message| message.id.clone())
+        .collect()
 }
 
 fn daemon_context_view(server: &Server) -> serde_json::Value {
@@ -10616,6 +10922,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let master_approval = master_grant.as_ref().map(|grant| grant.approval.clone());
     let master_assigned_ms = master_grant.as_ref().map(|grant| grant.granted_at_ms);
     let master_wake = st.master_wake.clone();
+    let pending_merges = pending_merge_views(&st);
     drop(st);
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
@@ -10734,6 +11041,13 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             .get("worker_id")
             .and_then(serde_json::Value::as_str)
             .is_some();
+        if live_master && !pending_merges.is_empty() {
+            operations.push(json!({
+                "kind": "merge_pending",
+                "action": "for each pending merge, merge the accepted candidate on refs/heads/main, then record collab task integrated before close",
+                "pending_merges": pending_merges,
+            }));
+        }
         if !live_master {
             operations.push(json!({
                 "kind": "promote_master",
@@ -10773,6 +11087,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         },
         "agent": agent,
         "tasks": tasks,
+        "pending_merges": pending_merges,
         "worktrees": worktrees,
         "subscriptions": subscriptions,
         "peers": peers,
@@ -12264,6 +12579,7 @@ fn dispatch_with_route_context(
                 msgs_map,
                 keepalives_map,
                 master_wake,
+                pending_merges,
                 now,
                 role_briefs,
             ) = {
@@ -12282,6 +12598,7 @@ fn dispatch_with_route_context(
                 subagents.sort_by(|a, b| a.id.cmp(&b.id));
                 let msgs_len = st.msgs.len();
                 let now = now_ms();
+                let pending_merges = pending_merge_views(&st);
                 (
                     workers_rec,
                     tasks,
@@ -12291,6 +12608,7 @@ fn dispatch_with_route_context(
                     st.msgs.clone(),
                     st.keepalives.clone(),
                     st.master_wake.clone(),
+                    pending_merges,
                     now,
                     role_briefs,
                 )
@@ -12319,6 +12637,7 @@ fn dispatch_with_route_context(
                     "now": iso(now),
                 },
                 "master_wake": master_wake,
+                "pending_merges": pending_merges,
                 "workers": workers,
                 "tasks": tasks,
                 "subagents": subagents,

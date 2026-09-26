@@ -103,13 +103,13 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_review",
-            "Accept a delivered task or return it for rework with durable evidence.",
+            "Accept a delivered task or return it for rework with durable evidence. Accept registers a daemon-owned pending merge and notifies the live master; the master must merge on refs/heads/main and record collab_task_integrated before the task can close (TASK_MERGE_PENDING).",
             json!({"id":{"type":"string"},"accept":{"type":"boolean"},"rework":{"type":"boolean"},"evidence":{"type":"string"}}),
             &["id", "evidence"]
         ),
         tool(
             "collab_task_integrated",
-            "Record exact integration of an accepted task on refs/heads/main.",
+            "Record exact integration of an accepted task on refs/heads/main and resolve its daemon-owned pending merge. Required before close; surfaced by collab_context, collab status --all pending_merges, appsdk longhorizon show, and master idle wake.",
             json!({"id":{"type":"string"},"commit":{"type":"string"},"evidence":{"type":"string"}}),
             &["id", "commit", "evidence"]
         ),
@@ -133,7 +133,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_close",
-            "Close the owner's merged task and safely clean its declared resources.",
+            "Close the owner's merged task and safely clean its declared resources. Fails with TASK_MERGE_PENDING while a pending merge is unresolved.",
             json!({"id":{"type":"string"}}),
             &["id"]
         ),

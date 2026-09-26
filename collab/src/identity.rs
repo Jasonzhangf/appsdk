@@ -896,11 +896,112 @@ fn load_or_create_resolved(
 enum ScopeRebindOutcome {
     /// One durable identity matches a current tmux/Codex anchor.
     Adopted(Identity),
-    /// No durable record to protect: first registration for this project.
+    /// No durable record left to protect: first registration for this project,
+    /// or every stale record was provably dead and has been archived.
     NoCandidate,
     /// A durable record exists but its state cannot be established. Minting
     /// here would silently orphan it, so the caller must fail closed.
     Unproven(String),
+}
+
+/// Whether a persisted peer can still be reached. Only `Dead` authorizes
+/// retiring the record: a probe that merely failed is `Unknown` and must keep
+/// blocking, because "cannot prove it is gone" is not "it is gone".
+enum PeerLiveness {
+    Live,
+    Dead,
+    Unknown,
+}
+
+fn persisted_peer_liveness(identity: &Identity) -> PeerLiveness {
+    let Some(transport) = identity.transport.as_ref() else {
+        // No transport cannot be proven dead. Fail closed: a record with no
+        // re-anchor is still protected unless an endpoint probe proves it is
+        // gone.
+        return PeerLiveness::Unknown;
+    };
+    match transport.kind {
+        TransportKind::Tmux => {
+            let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+                return PeerLiveness::Unknown;
+            };
+            match crate::client::adapters::tmux::probe(endpoint) {
+                Ok(crate::client::adapters::tmux::PanePresence::Present) => PeerLiveness::Live,
+                Ok(crate::client::adapters::tmux::PanePresence::Missing) => PeerLiveness::Dead,
+                Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
+                    PeerLiveness::Unknown
+                }
+            }
+        }
+        TransportKind::AppServer => {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return PeerLiveness::Unknown;
+            };
+            match crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
+            {
+                Ok(raw) => classify_thread_status(&raw),
+                Err(error) => classify_probe_error(&error.to_string()),
+            }
+        }
+    }
+}
+
+/// Only an explicitly dead signal retires the record. A `notLoaded` thread is
+/// cold, not gone: the AppServer contract can resume it through `turn/start`,
+/// so it must keep blocking rebind instead of being archived.
+fn classify_thread_status(raw: &serde_json::Value) -> PeerLiveness {
+    match raw
+        .pointer("/thread/status/type")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("systemError") => PeerLiveness::Dead,
+        Some("notLoaded") => PeerLiveness::Unknown,
+        Some(_) => PeerLiveness::Live,
+        None => PeerLiveness::Unknown,
+    }
+}
+
+fn classify_probe_error(detail: &str) -> PeerLiveness {
+    let lowered = detail.to_ascii_lowercase();
+    if lowered.contains("not found")
+        || lowered.contains("no rollout")
+        || lowered.contains("missing")
+        || lowered.contains("gone")
+    {
+        PeerLiveness::Dead
+    } else {
+        PeerLiveness::Unknown
+    }
+}
+
+/// Move provably dead peers out of the live identity set so a new pane can
+/// register. The bytes are archived, never deleted, and only peers whose
+/// endpoint is *proven* gone are retired.
+fn archive_dead_peers(host_paths: &HostPaths, dead: &[Identity]) -> anyhow::Result<()> {
+    if dead.is_empty() {
+        return Ok(());
+    }
+    let archive_root = host_paths
+        .state_root()
+        .join("archives")
+        .join(format!("identities-retired-{}", now_ms()));
+    std::fs::create_dir_all(&archive_root)?;
+    for identity in dead {
+        validate_id(&identity.worker_id)?;
+        let source = host_paths
+            .state_root()
+            .join("identities")
+            .join(&identity.worker_id);
+        let destination = archive_root.join(&identity.worker_id);
+        std::fs::rename(&source, &destination).with_context(|| {
+            format!(
+                "IDENTITY_RETIRE_FAILED: cannot archive stale peer {} at {}",
+                identity.worker_id,
+                source.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Find a persisted identity matching one current pane, session, or thread
@@ -926,6 +1027,7 @@ fn identity_for_scope_rebind_at(
         return Ok(ScopeRebindOutcome::NoCandidate);
     }
     let mut persisted = Vec::new();
+    let mut dead = Vec::new();
     for entry in std::fs::read_dir(identities_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -937,15 +1039,31 @@ fn identity_for_scope_rebind_at(
         if identity.project_scope.as_ref() != Some(&project_scope) {
             continue;
         }
-        persisted.push(identity.worker_id);
+        match persisted_peer_liveness(&identity) {
+            PeerLiveness::Dead => dead.push(identity),
+            PeerLiveness::Live | PeerLiveness::Unknown => persisted.push(identity.worker_id),
+        }
     }
     match persisted.len() {
-        0 => Ok(ScopeRebindOutcome::NoCandidate),
+        0 => {
+            // Every persisted peer in this project is provably gone, so the
+            // record is an orphan that would otherwise deadlock registration
+            // forever. Archive it and let the caller mint a fresh identity.
+            archive_dead_peers(host_paths, &dead)?;
+            Ok(ScopeRebindOutcome::NoCandidate)
+        }
         _ => Ok(ScopeRebindOutcome::Unproven(format!(
-            "persisted peers exist in this project ({}) but none matches the current pane, Codex session, or Codex thread",
+            "persisted peers exist in this project ({}) but none matches the current pane, Codex session, or Codex thread; a reachable or unverifiable peer cannot be displaced",
             persisted.join(", ")
         ))),
     }
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 fn load_or_create_resolved_at(
@@ -1983,6 +2101,81 @@ mod tests {
             .unwrap()
             .is_file());
         std::fs::remove_dir_all(state_root).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn appserver_thread_status_retires_only_proven_dead() {
+        // A cold thread can still be resumed through turn/start, so it must
+        // keep blocking rebind rather than being archived.
+        assert!(matches!(
+            classify_thread_status(&serde_json::json!({
+                "thread": {"status": {"type": "notLoaded"}}
+            })),
+            PeerLiveness::Unknown
+        ));
+        assert!(matches!(
+            classify_thread_status(&serde_json::json!({
+                "thread": {"status": {"type": "systemError"}}
+            })),
+            PeerLiveness::Dead
+        ));
+        assert!(matches!(
+            classify_thread_status(&serde_json::json!({
+                "thread": {"status": {"type": "idle"}}
+            })),
+            PeerLiveness::Live
+        ));
+        assert!(matches!(
+            classify_thread_status(&serde_json::json!({"thread": {}})),
+            PeerLiveness::Unknown
+        ));
+        assert!(matches!(
+            classify_probe_error("thread not loaded: deadbeef"),
+            PeerLiveness::Unknown
+        ));
+        assert!(matches!(
+            classify_probe_error("no rollout found for thread id deadbeef"),
+            PeerLiveness::Dead
+        ));
+        assert!(matches!(
+            classify_probe_error("connection refused"),
+            PeerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn archive_dead_peers_moves_bytes_and_keeps_the_project_unblocked() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = test_root("ci-archive-dead");
+        std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+        let scope = test_scope(root.clone());
+        let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+        saved_identity(
+            &host_paths,
+            &scope,
+            "dead-peer",
+            Some("session-dead"),
+            Some("thread-dead"),
+            None,
+        );
+        let source = host_paths.state_root().join("identities/dead-peer");
+        assert!(source.is_dir());
+
+        let dead = read_identity(&source.join("identity.json"))
+            .unwrap()
+            .unwrap();
+        archive_dead_peers(&host_paths, std::slice::from_ref(&dead)).unwrap();
+        assert!(!source.exists(), "archived identity must leave the live set");
+        let archive_root = host_paths.state_root().join("archives");
+        let entries: Vec<_> = std::fs::read_dir(&archive_root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert!(!entries.is_empty(), "archive directory must exist");
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path().join("dead-peer").is_dir()));
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -6710,8 +6710,8 @@ fn communication_recovery_brief() -> serde_json::Value {
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
             "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
-            "After a daemon restart, identity mismatch, or missing route, run `collab context` from the canonical project main tree; do not run `collab worker recover` from a worktree or inject recovery into a foreign thread.",
-            "If `collab context` still fails with an exact identity or route error, preserve that error and worker_id; send one bounded recovery report request instead of replaying an old message batch or retrying automatically.",
+            "After a daemon restart, identity mismatch, or missing route, run `collab context` from the canonical project main tree; do not run `collab worker recover` or inject recovery into a foreign thread.",
+            "If `collab context` still fails with an exact identity or route error, preserve that error and the worker_id from the error or the last successful `collab context`; report both to the live master with `collab sendmessage --to <master> --subject blocker` instead of replaying an old message batch or retrying automatically.",
             "If recovery still fails, report the exact error, root cause, proposed fix, and decision needed to the live master; do not edit routes, journal, mailbox, tokens, or start a second daemon."
         ],
         "close_only_when": [

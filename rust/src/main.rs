@@ -64,6 +64,7 @@ const CANONICAL_RECORD_CONTRACTS: [&str; 20] = [
     "contracts/records/freeze-record.schema.json",
     "contracts/records/record-graph.contract.json",
 ];
+const TEST_GOVERNANCE_RESULT_ROOT: &str = ".appsdk/records/test-scenario-results";
 const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "contracts/sdk-bundle.manifest.json",
@@ -74,6 +75,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/project.schema.json",
         "contracts",
         include_str!("../../contracts/project.schema.json"),
+    ),
+    (
+        "contracts/test-governance.schema.json",
+        "contracts",
+        include_str!("../../contracts/test-governance.schema.json"),
     ),
     (
         "contracts/communication/communication-request.schema.json",
@@ -211,6 +217,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/records/evidence-record.schema.json"),
     ),
     (
+        "contracts/records/test-scenario-result-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/test-scenario-result-record.schema.json"),
+    ),
+    (
         "contracts/records/review-record.schema.json",
         "contracts",
         include_str!("../../contracts/records/review-record.schema.json"),
@@ -309,6 +320,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "docs/design/appsdk-project-integration.md",
         "docs",
         include_str!("../../docs/design/appsdk-project-integration.md"),
+    ),
+    (
+        "docs/design/optional-test-governance.md",
+        "docs",
+        include_str!("../../docs/design/optional-test-governance.md"),
     ),
     (
         "docs/design/apps-sdk-communication.md",
@@ -1928,6 +1944,672 @@ fn assert_governance_maps(root: &Path) {
                 }
             }
         }
+    }
+}
+
+fn optional_test_governance_selection(project: &Value) -> Result<Option<&Value>, String> {
+    let Some(selection) = project.get("test_governance") else {
+        return Ok(None);
+    };
+    let object = selection
+        .as_object()
+        .ok_or_else(|| "INVALID_TEST_GOVERNANCE_SELECTION".to_string())?;
+    if object.keys().any(|key| key != "mode" && key != "manifest") {
+        return Err("INVALID_TEST_GOVERNANCE_SELECTION".to_string());
+    }
+    let mode = object
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "INVALID_TEST_GOVERNANCE_SELECTION".to_string())?;
+    match mode {
+        "off" => Ok(None),
+        "selected" => {
+            if object
+                .get("manifest")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err("TEST_GOVERNANCE_MANIFEST_REQUIRED".to_string());
+            }
+            Ok(Some(selection))
+        }
+        _ => Err("INVALID_TEST_GOVERNANCE_MODE".to_string()),
+    }
+}
+
+fn read_json_file(root: &Path, path: &Path, error: &str) -> Result<Value, String> {
+    assert_no_symlink_components(root, path, error);
+    let metadata = fs::symlink_metadata(path).map_err(|_| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(error.to_string());
+    }
+    let bytes = fs::read(path).map_err(|_| error.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|_| error.to_string())
+}
+
+fn test_governance_string<'a>(
+    value: &'a Value,
+    pointer: &str,
+    error: &str,
+) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|entry| !entry.is_empty())
+        .ok_or_else(|| error.to_string())
+}
+
+fn test_governance_identifier(value: &Value, pointer: &str, error: &str) -> Result<(), String> {
+    let value = test_governance_string(value, pointer, error)?;
+    if value.is_empty()
+        || !value.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+fn test_governance_datetime(value: &str, error: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| error.to_string())
+}
+
+fn validate_test_governance_manifest(
+    root: &Path,
+    project: &Value,
+    selection: &Value,
+) -> Result<Value, String> {
+    let manifest_relative =
+        test_governance_string(selection, "/manifest", "TEST_GOVERNANCE_MANIFEST_REQUIRED")?;
+    let manifest_path = safe_owned_path(root, manifest_relative, "test_governance_manifest");
+    let manifest = read_json_file(root, &manifest_path, "TEST_GOVERNANCE_MANIFEST_UNAVAILABLE")?;
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || manifest.get("mode").and_then(Value::as_str) != Some("selected")
+    {
+        return Err("INVALID_TEST_GOVERNANCE_MANIFEST".to_string());
+    }
+    let objects = manifest
+        .get("objects")
+        .and_then(Value::as_array)
+        .filter(|objects| !objects.is_empty())
+        .ok_or_else(|| "TEST_GOVERNANCE_OBJECTS_REQUIRED".to_string())?;
+    let runners = manifest
+        .get("trusted_runners")
+        .and_then(Value::as_array)
+        .filter(|runners| !runners.is_empty())
+        .ok_or_else(|| "TEST_GOVERNANCE_TRUSTED_RUNNERS_REQUIRED".to_string())?;
+    let mut runner_refs = BTreeSet::new();
+    for runner in runners {
+        test_governance_identifier(runner, "/runner_ref", "INVALID_TEST_GOVERNANCE_RUNNER")?;
+        test_governance_string(runner, "/entrypoint", "INVALID_TEST_GOVERNANCE_RUNNER")?;
+        test_governance_string(runner, "/owner", "INVALID_TEST_GOVERNANCE_RUNNER")?;
+        if !runner_refs.insert(
+            test_governance_string(runner, "/runner_ref", "INVALID_TEST_GOVERNANCE_RUNNER")?
+                .to_string(),
+        ) {
+            return Err("DUPLICATE_TEST_GOVERNANCE_RUNNER".to_string());
+        }
+    }
+    let authorizations = manifest
+        .get("effect_authorizations")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut authorization_ids = BTreeSet::new();
+    for authorization in authorizations {
+        test_governance_identifier(
+            authorization,
+            "/authorization_id",
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        test_governance_identifier(
+            authorization,
+            "/object_id",
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        test_governance_identifier(
+            authorization,
+            "/scenario_id",
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        test_governance_string(
+            authorization,
+            "/environment",
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        let allowed_effects = authorization
+            .get("allowed_effects")
+            .and_then(Value::as_array)
+            .filter(|effects| !effects.is_empty())
+            .ok_or_else(|| "INVALID_TEST_GOVERNANCE_AUTHORIZATION".to_string())?;
+        if allowed_effects.iter().any(|effect| {
+            effect
+                .as_str()
+                .filter(|effect| !effect.is_empty())
+                .is_none()
+        }) {
+            return Err("INVALID_TEST_GOVERNANCE_AUTHORIZATION".to_string());
+        }
+        let valid_from = test_governance_datetime(
+            test_governance_string(
+                authorization,
+                "/valid_from",
+                "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+            )?,
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        let valid_until = test_governance_datetime(
+            test_governance_string(
+                authorization,
+                "/valid_until",
+                "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+            )?,
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        if valid_from > valid_until {
+            return Err("INVALID_TEST_GOVERNANCE_AUTHORIZATION".to_string());
+        }
+        test_governance_string(
+            authorization,
+            "/approval_ref",
+            "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+        )?;
+        if !authorization_ids.insert(
+            test_governance_string(
+                authorization,
+                "/authorization_id",
+                "INVALID_TEST_GOVERNANCE_AUTHORIZATION",
+            )?
+            .to_string(),
+        ) {
+            return Err("DUPLICATE_TEST_GOVERNANCE_AUTHORIZATION".to_string());
+        }
+    }
+
+    let modules = project
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "INVALID_PROJECT_CONTRACT:/modules".to_string())?;
+    let module_ids = modules
+        .iter()
+        .filter_map(|module| module.get("module_id").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut object_ids = BTreeSet::new();
+    for object in objects {
+        let object_id =
+            test_governance_string(object, "/object_id", "INVALID_TEST_GOVERNANCE_OBJECT")?;
+        test_governance_identifier(object, "/object_id", "INVALID_TEST_GOVERNANCE_OBJECT")?;
+        if !module_ids.contains(object_id) {
+            return Err(format!("TEST_GOVERNANCE_OBJECT_NOT_FOUND:{}", object_id));
+        }
+        if !object_ids.insert(object_id.to_string()) {
+            return Err(format!("DUPLICATE_TEST_GOVERNANCE_OBJECT:{}", object_id));
+        }
+        test_governance_string(object, "/graph_id", "INVALID_TEST_GOVERNANCE_OBJECT")?;
+        test_governance_string(object, "/graph_version", "INVALID_TEST_GOVERNANCE_OBJECT")?;
+        let confirmation = object
+            .get("scope_confirmation")
+            .ok_or_else(|| "TEST_GOVERNANCE_SCOPE_CONFIRMATION_REQUIRED".to_string())?;
+        test_governance_string(
+            confirmation,
+            "/reference",
+            "INVALID_TEST_GOVERNANCE_SCOPE_CONFIRMATION",
+        )?;
+        test_governance_string(
+            confirmation,
+            "/confirmed_by",
+            "INVALID_TEST_GOVERNANCE_SCOPE_CONFIRMATION",
+        )?;
+        test_governance_datetime(
+            test_governance_string(
+                confirmation,
+                "/confirmed_at",
+                "INVALID_TEST_GOVERNANCE_SCOPE_CONFIRMATION",
+            )?,
+            "INVALID_TEST_GOVERNANCE_SCOPE_CONFIRMATION",
+        )?;
+        let scenarios = object
+            .get("scenarios")
+            .and_then(Value::as_array)
+            .filter(|scenarios| !scenarios.is_empty())
+            .ok_or_else(|| "TEST_GOVERNANCE_SCENARIOS_REQUIRED".to_string())?;
+        let mut scenario_ids = BTreeSet::new();
+        for scenario in scenarios {
+            let scenario_id = test_governance_string(
+                scenario,
+                "/scenario_id",
+                "INVALID_TEST_GOVERNANCE_SCENARIO",
+            )?;
+            test_governance_identifier(
+                scenario,
+                "/scenario_id",
+                "INVALID_TEST_GOVERNANCE_SCENARIO",
+            )?;
+            if !scenario_ids.insert(scenario_id.to_string()) {
+                return Err(format!(
+                    "DUPLICATE_TEST_GOVERNANCE_SCENARIO:{}:{}",
+                    object_id, scenario_id
+                ));
+            }
+            for field in [
+                "/semantic_name",
+                "/entrypoint",
+                "/stimulus",
+                "/cleanup",
+                "/runner_ref",
+            ] {
+                test_governance_string(scenario, field, "INVALID_TEST_GOVERNANCE_SCENARIO")?;
+            }
+            let runner_ref = test_governance_string(
+                scenario,
+                "/runner_ref",
+                "INVALID_TEST_GOVERNANCE_SCENARIO",
+            )?;
+            if !runner_refs.contains(runner_ref) {
+                return Err(format!("TEST_GOVERNANCE_RUNNER_NOT_TRUSTED:{}", runner_ref));
+            }
+            for field in ["/preconditions", "/observable_assertions"] {
+                let values = scenario
+                    .get(field.trim_start_matches('/'))
+                    .and_then(Value::as_array)
+                    .filter(|values| !values.is_empty())
+                    .ok_or_else(|| "INVALID_TEST_GOVERNANCE_SCENARIO".to_string())?;
+                if values
+                    .iter()
+                    .any(|value| value.as_str().filter(|value| !value.is_empty()).is_none())
+                {
+                    return Err("INVALID_TEST_GOVERNANCE_SCENARIO".to_string());
+                }
+            }
+            let expected_effects = scenario
+                .get("expected_effects")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "INVALID_TEST_GOVERNANCE_SCENARIO".to_string())?;
+            if expected_effects
+                .iter()
+                .any(|value| value.as_str().filter(|value| !value.is_empty()).is_none())
+            {
+                return Err("INVALID_TEST_GOVERNANCE_SCENARIO".to_string());
+            }
+            let classification = scenario
+                .get("classification")
+                .and_then(Value::as_array)
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| "INVALID_TEST_GOVERNANCE_SCENARIO".to_string())?;
+            let mut seen_classification = BTreeSet::new();
+            for value in classification {
+                let value = value
+                    .as_str()
+                    .filter(|value| {
+                        matches!(*value, "normal" | "negative" | "lifecycle" | "effect")
+                    })
+                    .ok_or_else(|| "INVALID_TEST_GOVERNANCE_SCENARIO".to_string())?;
+                if !seen_classification.insert(value) {
+                    return Err("INVALID_TEST_GOVERNANCE_SCENARIO".to_string());
+                }
+            }
+            if seen_classification.contains("effect") {
+                let authorization_id = test_governance_string(
+                    scenario,
+                    "/effect_authorization_id",
+                    "TEST_GOVERNANCE_EFFECT_AUTHORIZATION_REQUIRED",
+                )?;
+                let authorization = authorizations
+                    .iter()
+                    .find(|authorization| {
+                        authorization
+                            .get("authorization_id")
+                            .and_then(Value::as_str)
+                            == Some(authorization_id)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "TEST_GOVERNANCE_EFFECT_AUTHORIZATION_NOT_FOUND:{}",
+                            authorization_id
+                        )
+                    })?;
+                if authorization.get("object_id").and_then(Value::as_str) != Some(object_id)
+                    || authorization.get("scenario_id").and_then(Value::as_str) != Some(scenario_id)
+                {
+                    return Err(format!(
+                        "TEST_GOVERNANCE_EFFECT_AUTHORIZATION_MISMATCH:{}",
+                        authorization_id
+                    ));
+                }
+                let allowed_effects = authorization
+                    .get("allowed_effects")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "INVALID_TEST_GOVERNANCE_AUTHORIZATION".to_string())?;
+                if expected_effects.iter().any(|effect| {
+                    !allowed_effects
+                        .iter()
+                        .any(|allowed| allowed.as_str() == effect.as_str())
+                }) {
+                    return Err(format!(
+                        "TEST_GOVERNANCE_EFFECT_AUTHORIZATION_SCOPE_MISMATCH:{}",
+                        authorization_id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(manifest)
+}
+
+fn test_governance_object_status(
+    root: &Path,
+    object: &Value,
+    candidate_commit: &str,
+    manifest: &Value,
+    now: DateTime<Utc>,
+) -> Value {
+    let object_id = object
+        .get("object_id")
+        .and_then(Value::as_str)
+        .unwrap_or("invalid-object");
+    let graph_id = object.get("graph_id").and_then(Value::as_str).unwrap_or("");
+    let graph_version = object
+        .get("graph_version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let scenarios = object
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let authorizations = manifest
+        .get("effect_authorizations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut scenario_reports = Vec::new();
+    let mut object_blocked = false;
+    for scenario in scenarios {
+        let scenario_id = scenario
+            .get("scenario_id")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid-scenario");
+        let result_relative = format!(
+            "{}/{}/{}.json",
+            TEST_GOVERNANCE_RESULT_ROOT, object_id, scenario_id
+        );
+        let result_path = root.join(&result_relative);
+        let result = match read_json_file(root, &result_path, "TEST_GOVERNANCE_RESULT_UNAVAILABLE")
+        {
+            Ok(result) => result,
+            Err(_) => {
+                object_blocked = true;
+                scenario_reports.push(serde_json::json!({
+                    "scenario_id": scenario_id,
+                    "status": "blocked",
+                    "reason": "result_missing"
+                }));
+                continue;
+            }
+        };
+        let mut reason = None;
+        let status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("blocked");
+        if result.get("object_id").and_then(Value::as_str) != Some(object_id)
+            || result.get("scenario_id").and_then(Value::as_str) != Some(scenario_id)
+            || result.get("graph_id").and_then(Value::as_str) != Some(graph_id)
+            || result.get("graph_version").and_then(Value::as_str) != Some(graph_version)
+        {
+            reason = Some("identity_mismatch");
+        }
+        if result.get("candidate_commit").and_then(Value::as_str) != Some(candidate_commit) {
+            reason = Some("candidate_commit_mismatch");
+        }
+        if result.get("entrypoint").and_then(Value::as_str)
+            != scenario.get("entrypoint").and_then(Value::as_str)
+        {
+            reason = Some("entrypoint_mismatch");
+        }
+        let cleanup_status = result
+            .pointer("/cleanup_result/status")
+            .and_then(Value::as_str)
+            .unwrap_or("blocked");
+        if cleanup_status == "failed" || cleanup_status == "blocked" {
+            reason = Some("cleanup_failed");
+        }
+        let environment = result
+            .get("environment")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let mut authorization_checked = false;
+        let classification_has_effect = scenario
+            .get("classification")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().any(|value| value.as_str() == Some("effect")))
+            .unwrap_or(false);
+        if classification_has_effect {
+            let authorization_id = result
+                .get("effect_authorization_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let authorization = authorizations.iter().find(|authorization| {
+                authorization
+                    .get("authorization_id")
+                    .and_then(Value::as_str)
+                    == Some(authorization_id)
+            });
+            let Some(authorization) = authorization else {
+                reason = Some("effect_authorization_missing");
+                scenario_reports.push(serde_json::json!({
+                    "scenario_id": scenario_id,
+                    "status": "blocked",
+                    "reason": reason
+                }));
+                object_blocked = true;
+                continue;
+            };
+            if authorization.get("object_id").and_then(Value::as_str) != Some(object_id)
+                || authorization.get("scenario_id").and_then(Value::as_str) != Some(scenario_id)
+                || authorization.get("environment").and_then(Value::as_str) != Some(environment)
+            {
+                reason = Some("effect_authorization_mismatch");
+            }
+            let valid_from = authorization
+                .get("valid_from")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            let valid_until = authorization
+                .get("valid_until")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            let finished_at = result
+                .get("finished_at")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            if valid_from.is_none()
+                || valid_until.is_none()
+                || finished_at.is_none()
+                || finished_at.unwrap() < valid_from.unwrap()
+                || finished_at.unwrap() > valid_until.unwrap()
+                || now > valid_until.unwrap()
+            {
+                reason = Some("effect_authorization_expired");
+            }
+            authorization_checked = true;
+        }
+        if status == "passed" {
+            let evidence_id = result.get("evidence_id").and_then(Value::as_str);
+            if evidence_id.is_none() {
+                reason = Some("evidence_missing");
+            } else if let Some(evidence_id) = evidence_id {
+                let evidence_path = root
+                    .join(".appsdk")
+                    .join("records")
+                    .join("evidence")
+                    .join(object_id)
+                    .join(format!("{}.json", evidence_id));
+                let evidence = match read_json_file(
+                    root,
+                    &evidence_path,
+                    "TEST_GOVERNANCE_EVIDENCE_UNAVAILABLE",
+                ) {
+                    Ok(evidence) => evidence,
+                    Err(_) => {
+                        reason = Some("evidence_missing");
+                        scenario_reports.push(serde_json::json!({
+                            "scenario_id": scenario_id,
+                            "status": "blocked",
+                            "reason": reason
+                        }));
+                        object_blocked = true;
+                        continue;
+                    }
+                };
+                if evidence.get("evidence_id").and_then(Value::as_str) != Some(evidence_id)
+                    || evidence.get("source_commit").and_then(Value::as_str)
+                        != Some(candidate_commit)
+                    || evidence.get("result").and_then(Value::as_str) != Some("pass")
+                    || evidence.get("environment_id").and_then(Value::as_str) != Some(environment)
+                    || evidence.get("entrypoint").and_then(Value::as_str)
+                        != scenario.get("entrypoint").and_then(Value::as_str)
+                    || evidence.get("phase").and_then(Value::as_str) != Some("deployed_blackbox")
+                    || evidence.pointer("/scope/module_id").and_then(Value::as_str)
+                        != Some(object_id)
+                {
+                    reason = Some("evidence_mismatch");
+                } else {
+                    let expires_at = evidence
+                        .get("expires_at")
+                        .and_then(Value::as_str)
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc));
+                    if expires_at.is_none() || now > expires_at.unwrap() {
+                        reason = Some("evidence_expired");
+                    }
+                }
+            }
+        } else {
+            reason = Some(match status {
+                "planned" => "planned",
+                "failed" => "failed",
+                "blocked" => "blocked",
+                _ => "invalid_status",
+            });
+        }
+        if !authorization_checked && classification_has_effect {
+            reason = Some("effect_authorization_missing");
+        }
+        if reason.is_some() {
+            object_blocked = true;
+        }
+        scenario_reports.push(serde_json::json!({
+            "scenario_id": scenario_id,
+            "status": if reason.is_none() { "passed" } else { "blocked" },
+            "reason": reason
+        }));
+    }
+    serde_json::json!({
+        "object_id": object_id,
+        "graph_id": graph_id,
+        "graph_version": graph_version,
+        "status": if object_blocked { "blocked" } else { "passed" },
+        "scenarios": scenario_reports
+    })
+}
+
+fn test_governance_report(
+    root: &Path,
+    project: &Value,
+    object_filter: Option<&str>,
+    strict: bool,
+) -> Result<Value, String> {
+    let Some(selection) = optional_test_governance_selection(project)? else {
+        if let Some(object_id) = object_filter {
+            return Ok(serde_json::json!({
+                "mode": "off",
+                "status": "not_selected",
+                "objects": [{"object_id": object_id, "status": "not_selected"}]
+            }));
+        }
+        return Ok(serde_json::json!({
+            "mode": "off",
+            "status": "not_selected",
+            "objects": []
+        }));
+    };
+    let manifest = validate_test_governance_manifest(root, project, selection)?;
+    let candidate_commit = git_value(
+        root,
+        &["rev-parse", "HEAD"],
+        "TEST_GOVERNANCE_CANDIDATE_COMMIT_UNAVAILABLE",
+    );
+    let objects = manifest
+        .get("objects")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "TEST_GOVERNANCE_OBJECTS_REQUIRED".to_string())?;
+    let now = Utc::now();
+    let mut reports = Vec::new();
+    for object in objects {
+        let object_id = object
+            .get("object_id")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid-object");
+        if object_filter.is_some_and(|filter| filter != object_id) {
+            continue;
+        }
+        reports.push(test_governance_object_status(
+            root,
+            object,
+            &candidate_commit,
+            &manifest,
+            now,
+        ));
+    }
+    if let Some(filter) = object_filter {
+        if reports.is_empty() {
+            reports.push(serde_json::json!({
+                "object_id": filter,
+                "status": "not_selected"
+            }));
+        }
+    }
+    let blocked = reports
+        .iter()
+        .any(|report| report.get("status").and_then(Value::as_str) == Some("blocked"));
+    let status = if blocked { "blocked" } else { "passed" };
+    if strict && blocked {
+        return Err(format!(
+            "TEST_GOVERNANCE_BLOCKED:{}",
+            reports
+                .iter()
+                .filter(|report| report.get("status").and_then(Value::as_str) == Some("blocked"))
+                .filter_map(|report| report.get("object_id").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    Ok(serde_json::json!({
+        "mode": "selected",
+        "status": status,
+        "objects": reports
+    }))
+}
+
+fn verify_test_admission(root: &Path, object_id: Option<&str>) {
+    assert_project_root_safe(root);
+    let project = read_project(root);
+    assert_declared_contracts(root, &project);
+    assert_project_contract(root, &project);
+    let report = test_governance_report(root, &project, object_id, false)
+        .unwrap_or_else(|error| fail(error));
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    if report.get("status").and_then(Value::as_str) == Some("blocked") {
+        fail("TEST_GOVERNANCE_BLOCKED");
     }
 }
 
@@ -13108,6 +13790,28 @@ fn verify_internal(
     verify_sdk_migration_record(root, admission);
     assert_declared_contracts(root, &project);
     assert_project_contract(root, &project);
+    let test_governance = if emit_result {
+        match test_governance_report(root, &project, None, admission) {
+            Ok(report) => {
+                if admission && report.get("status").and_then(Value::as_str) == Some("blocked") {
+                    fail("TEST_GOVERNANCE_BLOCKED");
+                }
+                report
+            }
+            Err(error) => {
+                if admission {
+                    fail(error);
+                }
+                serde_json::json!({
+                    "mode": "selected",
+                    "status": "blocked",
+                    "error": error
+                })
+            }
+        }
+    } else {
+        Value::Null
+    };
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
         fail("UNSUPPORTED_PROJECT_SCHEMA");
     }
@@ -13513,6 +14217,7 @@ fn verify_internal(
             "development_ready": true,
             "delivery_verified": delivery_verified,
             "delivery_assessed": delivery_assessed,
+            "test_governance": test_governance,
             "baseline_status": final_baseline_status,
             "reason": if reset_epoch && !admission {
                 Value::String("baseline_required".into())
@@ -13734,6 +14439,7 @@ fn write_project_scaffold(root: &Path) {
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
+  "test_governance": {"mode": "off"},
   "guidance": {
     "enforcement": "advisory",
     "compiled_manifest": ".appsdk/guidance/compiled.json",
@@ -22489,7 +23195,7 @@ fn is_help(value: &str) -> bool {
 fn print_cli_help(command: Option<&str>) {
     let usage = match command {
         Some("verify") => {
-            "Usage: appsdk verify [project]\n       appsdk verify --admission [project]\n       appsdk verify --review-admission [project] --module <id>"
+            "Usage: appsdk verify [project]\n       appsdk verify --admission [project]\n       appsdk verify --test-admission [project] [--object <id>]\n       appsdk verify --review-admission [project] --module <id>"
         }
         Some("compile") => "Usage: appsdk compile [project] [--module <id>]",
         Some("compile-module") => "Usage: appsdk compile-module [project] --module <id>",
@@ -22587,6 +23293,26 @@ fn main() {
                     fail("USAGE: appsdk verify --admission [project]");
                 }
                 verify(&root, true);
+            } else if args.peek().is_some_and(|value| value == "--test-admission") {
+                args.next();
+                let root = project_root_or_cwd(&mut args);
+                let mut object_id: Option<String> = None;
+                while let Some(arg) = args.next() {
+                    match arg.as_str() {
+                        "--object" | "-o" => {
+                            if object_id.is_some() {
+                                fail("USAGE: appsdk verify --test-admission [project] [--object <id>]");
+                            }
+                            object_id = Some(args.next().unwrap_or_else(|| {
+                                fail("USAGE: appsdk verify --test-admission [project] [--object <id>]")
+                            }));
+                        }
+                        _ => {
+                            fail("USAGE: appsdk verify --test-admission [project] [--object <id>]")
+                        }
+                    }
+                }
+                verify_test_admission(&root, object_id.as_deref());
             } else if args
                 .peek()
                 .is_some_and(|value| value == "--review-admission")

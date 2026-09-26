@@ -17,6 +17,15 @@
 - `appsdk verify`, module promotion, freeze, and Active publish enforce the same graph.
 - `appsdk verify-sdk-source-registry` rejects unowned, multiply owned, or forbidden SDK source paths and is wired into CI before release.
 - Existing Active/Protected history remains immutable; a new version starts from `begin-version`.
+- Optional black-box test governance is AppSDK-owned. It is selected per
+  project via `project.json#/test_governance` and, when selected, requires
+  committed scenario/manifest, result, evidence and effect-authorization
+  bindings. `verify --admission` applies the selected-object gate; ordinary
+  `verify` reports `not_selected`, `passed`, or `blocked` without making tests
+  a delivery requirement, and `compile` does not depend on the manifest.
+- DAGpipe CLI remains graph-only and is never a substitute for AppSDK test
+  evidence or admission. Existing module whitebox and blackbox gates are not
+  weakened by optional test governance.
 
 ## Known boundary
 

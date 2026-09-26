@@ -20,6 +20,9 @@
     "manifest": ".appsdk/contracts/development-scenarios.manifest.json",
     "enabled": []
   },
+  "test_governance": {
+    "mode": "off"
+  },
   "governance": {
     "playground_root": "playground/experiments/**",
     "active_root": "active/lib/**",

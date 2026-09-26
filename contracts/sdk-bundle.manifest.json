@@ -7,6 +7,7 @@
     "contracts": [
       "contracts/sdk-bundle.manifest.json",
       "contracts/project.schema.json",
+      "contracts/test-governance.schema.json",
       "contracts/communication/communication-request.schema.json",
       "contracts/communication/communication-event.schema.json",
       "contracts/communication/communication-capabilities.schema.json",
@@ -34,6 +35,7 @@
       "contracts/records/worktree-record.schema.json",
       "contracts/records/reproduction-record.schema.json",
       "contracts/records/evidence-record.schema.json",
+      "contracts/records/test-scenario-result-record.schema.json",
       "contracts/records/fix-candidate-record.schema.json",
       "contracts/records/goal-clarification-record.schema.json",
       "contracts/records/review-record.schema.json",
@@ -56,6 +58,7 @@
     ],
     "docs": [
       "docs/design/appsdk-project-integration.md",
+      "docs/design/optional-test-governance.md",
       "docs/design/apps-sdk-communication.md",
       "docs/design/fix-lifecycle-v2.md",
       "docs/design/development-scenarios.md",

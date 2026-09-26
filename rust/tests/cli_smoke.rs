@@ -9162,7 +9162,7 @@ fn repeated_init_refreshes_sdk_bundle_without_overwriting_project_truth() {
     .unwrap();
     let mut goal_value: Value = serde_json::from_slice(&fs::read(&goal).unwrap()).unwrap();
     goal_value["raw_request"] = Value::String("project-owned request".into());
-    fs::write(&goal, serde_json::to_vec_pretty(&goal_value).unwrap()).unwrap();
+    fs::write(&goal, serde_json::to_string_pretty(&goal_value).unwrap()).unwrap();
     fs::write(
         &map,
         "{\"schema_version\":1,\"resources\":[{\"resource_id\":\"project-owned\"}]}\n",
@@ -22977,6 +22977,502 @@ fn canonical_function_map_required_gates_resolve_exactly_once() {
             );
         }
     }
+}
+
+#[test]
+fn optional_test_governance_off_is_compatible_and_compile_does_not_depend_on_test_manifest() {
+    let root = temp_root("optional-test-governance-off");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+
+    let test_admission = run(&["verify", "--test-admission", root_text]);
+    assert!(
+        test_admission.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&test_admission.stdout),
+        String::from_utf8_lossy(&test_admission.stderr)
+    );
+    let report: Value = serde_json::from_slice(&test_admission.stdout).unwrap();
+    assert_eq!(report["mode"], "off");
+    assert_eq!(report["status"], "not_selected");
+
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&admission.stdout),
+        String::from_utf8_lossy(&admission.stderr)
+    );
+
+    let goal = root.join(".appsdk/goal.json");
+    let mut goal_value: Value = serde_json::from_slice(&fs::read(&goal).unwrap()).unwrap();
+    goal_value["status"] = Value::String("confirmed".into());
+    goal_value["confirmed_by"] = Value::String("test".into());
+    goal_value["confirmed_at"] = Value::String("2026-01-01T00:00:00Z".into());
+    fs::write(&goal, serde_json::to_vec_pretty(&goal_value).unwrap()).unwrap();
+
+    let project = root.join(".appsdk/project.json");
+    let mut project_value: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    project_value["test_governance"] = serde_json::json!({
+        "mode": "selected",
+        "manifest": ".appsdk/test-governance.json"
+    });
+    fs::write(
+        &project,
+        serde_json::to_string_pretty(&project_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    init_git(&root);
+    assert!(run(&["promote", root_text, "--to", "source_implemented"])
+        .status
+        .success());
+    assert!(run(&["promote", root_text, "--to", "contract_bound"])
+        .status
+        .success());
+    let compiled = run(&["compile", root_text]);
+    assert!(
+        compiled.status.success(),
+        "compile must not depend on the optional test manifest; stdout={} stderr={}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn optional_test_governance_selection_requires_scope_and_scenarios() {
+    let root = temp_root("optional-test-governance-required-fields");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    let project = root.join(".appsdk/project.json");
+    let mut project_value: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    project_value["test_governance"] = serde_json::json!({
+        "mode": "selected",
+        "manifest": ".appsdk/test-governance.json"
+    });
+    fs::write(
+        &project,
+        serde_json::to_string_pretty(&project_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let manifest = root.join(".appsdk/test-governance.json");
+    fs::write(&manifest, r#"{"schema_version":1,"mode":"selected","objects":[],"trusted_runners":[],"effect_authorizations":[]}"#.to_owned() + "\n")
+        .unwrap();
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("TEST_GOVERNANCE_OBJECTS_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    fs::write(&manifest, r#"{"schema_version":1,"mode":"selected","objects":[{"object_id":"app-core","graph_id":"app-core","graph_version":"1","scope_confirmation":{"reference":"ref","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z"},"scenarios":[]}],"trusted_runners":[{"runner_ref":"runner","entrypoint":"entry","owner":"app-core"}],"effect_authorizations":[]}"#.to_owned() + "\n")
+        .unwrap();
+    let rejected_empty = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_empty.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_empty.stderr)
+            .contains("TEST_GOVERNANCE_SCENARIOS_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected_empty.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn optional_test_governance_effect_requires_authorization_and_passed_evidence_closes() {
+    let root = temp_root("optional-test-governance-admission");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let head = Command::new("git")
+        .args(["-C", root_text, "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let project = root.join(".appsdk/project.json");
+    let mut project_value: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    project_value["test_governance"] = serde_json::json!({
+        "mode": "selected",
+        "manifest": ".appsdk/test-governance.json"
+    });
+    fs::write(
+        &project,
+        serde_json::to_string_pretty(&project_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let manifest = root.join(".appsdk/test-governance.json");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(
+        &manifest,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": "selected",
+            "objects": [{
+                "object_id": "app-core",
+                "graph_id": "app-core",
+                "graph_version": "1",
+                "scope_confirmation": {
+                    "reference": "evidence://scope/app-core",
+                    "confirmed_by": "test",
+                    "confirmed_at": "2026-01-01T00:00:00Z"
+                },
+                "scenarios": [{
+                    "scenario_id": "scenario-1",
+                    "semantic_name": "happy path",
+                    "entrypoint": "POST /orders",
+                    "preconditions": ["isolated fixture"],
+                    "stimulus": "submit order",
+                    "observable_assertions": ["returns accepted"],
+                    "expected_effects": ["order created"],
+                    "cleanup": "remove fixture",
+                    "runner_ref": "runner-1",
+                    "classification": ["normal"]
+                }]
+            }],
+            "trusted_runners": [{
+                "runner_ref": "runner-1",
+                "entrypoint": "POST /orders",
+                "owner": "app-core"
+            }],
+            "effect_authorizations": []
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let blocked_no_evidence = run(&["verify", "--test-admission", root_text]);
+    assert!(!blocked_no_evidence.status.success());
+    let report: Value = serde_json::from_slice(&blocked_no_evidence.stdout).unwrap();
+    assert_eq!(report["status"], "blocked");
+    assert_eq!(report["objects"][0]["status"], "blocked");
+
+    let evidence_dir = root.join(".appsdk/records/evidence/app-core");
+    fs::create_dir_all(&evidence_dir).unwrap();
+    fs::write(
+        evidence_dir.join("evidence-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_id": "evidence-1",
+            "issue_id": "4995b1a",
+            "experiment_id": "optional-governance",
+            "phase": "deployed_blackbox",
+            "kind": "sample_replay",
+            "source_commit": head,
+            "execution_surface": "deployed_blackbox",
+            "environment_id": "test",
+            "entrypoint": "POST /orders",
+            "scope": {"module_id": "app-core"},
+            "producer": {"adapter": "test", "identity": "test-worker"},
+            "result": "pass",
+            "created_at": "2026-01-02T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "input_hashes": [],
+            "scope_hash": "abc"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let result_dir = root.join(".appsdk/records/test-scenario-results/app-core");
+    fs::create_dir_all(&result_dir).unwrap();
+    fs::write(
+        result_dir.join("scenario-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "result_id": "result-1",
+            "object_id": "app-core",
+            "scenario_id": "scenario-1",
+            "graph_id": "app-core",
+            "graph_version": "1",
+            "candidate_commit": head,
+            "status": "passed",
+            "entrypoint": "POST /orders",
+            "environment": "test",
+            "evidence_id": "evidence-1",
+            "cleanup_result": {"status": "passed", "detail": "cleaned"},
+            "producer": {"adapter": "test", "identity": "test-worker"},
+            "started_at": "2026-01-02T00:00:00Z",
+            "finished_at": "2026-01-02T00:00:05Z"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let passed = run(&["verify", "--test-admission", root_text]);
+    assert!(
+        passed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&passed.stdout),
+        String::from_utf8_lossy(&passed.stderr)
+    );
+    let passed_report: Value = serde_json::from_slice(&passed.stdout).unwrap();
+    assert_eq!(passed_report["objects"][0]["status"], "passed");
+
+    let admission = run(&["verify", "--admission", root_text]);
+    assert!(
+        admission.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&admission.stdout),
+        String::from_utf8_lossy(&admission.stderr)
+    );
+
+    let unselected = run(&[
+        "verify",
+        "--test-admission",
+        root_text,
+        "--object",
+        "unselected",
+    ]);
+    assert!(unselected.status.success());
+    let unselected_report: Value = serde_json::from_slice(&unselected.stdout).unwrap();
+    assert_eq!(unselected_report["objects"][0]["status"], "not_selected");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() {
+    let root = temp_root("optional-test-governance-blockers");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let head = Command::new("git")
+        .args(["-C", root_text, "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let project = root.join(".appsdk/project.json");
+    let mut project_value: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    project_value["test_governance"] = serde_json::json!({
+        "mode": "selected",
+        "manifest": ".appsdk/test-governance.json"
+    });
+    fs::write(
+        &project,
+        serde_json::to_string_pretty(&project_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let manifest_path = root.join(".appsdk/test-governance.json");
+    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "mode": "selected",
+        "objects": [{
+            "object_id": "app-core",
+            "graph_id": "app-core",
+            "graph_version": "1",
+            "scope_confirmation": {
+                "reference": "evidence://scope/app-core",
+                "confirmed_by": "test",
+                "confirmed_at": "2026-01-01T00:00:00Z"
+            },
+            "scenarios": [{
+                "scenario_id": "scenario-1",
+                "semantic_name": "effect path",
+                "entrypoint": "POST /orders",
+                "preconditions": ["isolated fixture"],
+                "stimulus": "submit order",
+                "observable_assertions": ["returns accepted"],
+                "expected_effects": ["order created"],
+                "cleanup": "remove fixture",
+                "runner_ref": "runner-1",
+                "classification": ["effect"],
+                "effect_authorization_id": "auth-1"
+            }]
+        }],
+        "trusted_runners": [{
+            "runner_ref": "runner-1",
+            "entrypoint": "POST /orders",
+            "owner": "app-core"
+        }],
+        "effect_authorizations": [{
+            "authorization_id": "auth-1",
+            "object_id": "app-core",
+            "scenario_id": "scenario-1",
+            "environment": "test",
+            "allowed_effects": ["order created"],
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_until": "2099-01-01T00:00:00Z",
+            "approval_ref": "approval://owners/app-core"
+        }]
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let evidence_dir = root.join(".appsdk/records/evidence/app-core");
+    fs::create_dir_all(&evidence_dir).unwrap();
+    fs::write(
+        evidence_dir.join("evidence-1.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "evidence_id": "evidence-1",
+            "issue_id": "4995b1a",
+            "experiment_id": "optional-governance",
+            "phase": "deployed_blackbox",
+            "kind": "sample_replay",
+            "source_commit": head,
+            "execution_surface": "deployed_blackbox",
+            "environment_id": "test",
+            "entrypoint": "POST /orders",
+            "scope": {"module_id": "app-core"},
+            "producer": {"adapter": "test", "identity": "test-worker"},
+            "result": "pass",
+            "created_at": "2026-01-02T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "input_hashes": [],
+            "scope_hash": "abc"
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+
+    let result_dir = root.join(".appsdk/records/test-scenario-results/app-core");
+    fs::create_dir_all(&result_dir).unwrap();
+    let result_path = result_dir.join("scenario-1.json");
+    let write_result = |status: &str,
+                        effect_auth: &str,
+                        graph_version: &str,
+                        candidate: &str,
+                        scenario_id: &str,
+                        cleanup_status: &str| {
+        fs::write(
+            &result_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "result_id": "result-1",
+                "object_id": "app-core",
+                "scenario_id": scenario_id,
+                "graph_id": "app-core",
+                "graph_version": graph_version,
+                "candidate_commit": candidate,
+                "status": status,
+                "entrypoint": "POST /orders",
+                "environment": "test",
+                "evidence_id": if status == "passed" {"evidence-1"} else {""},
+                "effect_authorization_id": effect_auth,
+                "cleanup_result": {"status": cleanup_status, "detail": "cleaned"},
+                "producer": {"adapter": "test", "identity": "test-worker"},
+                "started_at": "2026-01-02T00:00:00Z",
+                "finished_at": "2026-01-02T00:00:05Z"
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    };
+
+    let cases: [(&str, &str, &str, &str, &str, &str); 8] = [
+        ("wrong-graph", "auth-1", "2", &head, "scenario-1", "passed"),
+        (
+            "wrong-commit",
+            "auth-1",
+            "1",
+            "not-the-candidate",
+            "scenario-1",
+            "passed",
+        ),
+        (
+            "wrong-scenario",
+            "auth-1",
+            "1",
+            &head,
+            "scenario-other",
+            "passed",
+        ),
+        (
+            "missing-auth",
+            "auth-missing",
+            "1",
+            &head,
+            "scenario-1",
+            "passed",
+        ),
+        ("planned", "auth-1", "1", &head, "scenario-1", "passed"),
+        ("failed", "auth-1", "1", &head, "scenario-1", "passed"),
+        ("blocked", "auth-1", "1", &head, "scenario-1", "passed"),
+        (
+            "cleanup-failed",
+            "auth-1",
+            "1",
+            &head,
+            "scenario-1",
+            "failed",
+        ),
+    ];
+    for (label, effect_auth, graph_version, candidate, scenario_id, cleanup_status) in cases {
+        let status = match label {
+            "planned" => "planned",
+            "failed" => "failed",
+            "blocked" => "blocked",
+            _ => "passed",
+        };
+        write_result(
+            status,
+            effect_auth,
+            graph_version,
+            candidate,
+            scenario_id,
+            cleanup_status,
+        );
+        let rejected = run(&["verify", "--test-admission", root_text]);
+        assert!(
+            !rejected.status.success(),
+            "{label} must block optional test governance"
+        );
+        let report: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(
+            report["objects"][0]["status"],
+            "blocked",
+            "{label}: {report}",
+            label = label
+        );
+    }
+
+    let ordinary_verify = run(&["verify", root_text]);
+    assert!(
+        ordinary_verify.status.success(),
+        "ordinary verify must report blocked optional test governance without requiring tests to pass; stdout={} stderr={}",
+        String::from_utf8_lossy(&ordinary_verify.stdout),
+        String::from_utf8_lossy(&ordinary_verify.stderr)
+    );
+    let ordinary_report: Value = serde_json::from_slice(&ordinary_verify.stdout).unwrap();
+    assert_eq!(ordinary_report["test_governance"]["status"], "blocked");
+
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let effect_missing_auth = {
+        let mut effect = manifest.clone();
+        effect["objects"][0]["scenarios"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("effect_authorization_id");
+        effect
+    };
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&effect_missing_auth).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("TEST_GOVERNANCE_EFFECT_AUTHORIZATION_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

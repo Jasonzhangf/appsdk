@@ -9785,15 +9785,18 @@ fn handle_task_review(
     let mut pending_notification = None;
     let mut notification_missing = false;
     if accept {
-        let request = state::PendingMerge {
-            task_id: task_id.clone(),
-            owner: reviewed.owner.clone(),
-            requested_by: worker_id.clone(),
-            requested_ms: now,
-            candidate_commit: None,
-        };
-        events.push(Event::MergeRequested { request });
+        // A merge obligation exists only when a live master owns the merge. In
+        // a master-less project the owner keeps the plain self-integration
+        // lifecycle; registering a pending merge there would deadlock close.
         if let Ok(Some(master_id)) = live_master_id(server, &st) {
+            let request = state::PendingMerge {
+                task_id: task_id.clone(),
+                owner: reviewed.owner.clone(),
+                requested_by: worker_id.clone(),
+                requested_ms: now,
+                candidate_commit: None,
+            };
+            events.push(Event::MergeRequested { request });
             if master_id != worker_id {
                 let message_id = gen_msg_id();
                 events.push(Event::Sent {
@@ -9888,6 +9891,23 @@ fn handle_task_integrated(
     }
     if !task_integration_authorized(server, &st, &task, &worker_id) {
         return Resp::err("task integrated requires task owner or live master authority");
+    }
+    if st.pending_merges.contains_key(&task_id) {
+        let is_live_master = live_master_id(server, &st)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(worker_id.as_str());
+        if !is_live_master {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "rule": "an accepted task with a daemon pending merge must be integrated by the live master after the merge lands on refs/heads/main; the owner records evidence after that and closes only after master integrated",
+                }),
+            );
+        }
     }
     let head = match resolve_authoritative_main_head(&server.root) {
         Ok(head) => head,

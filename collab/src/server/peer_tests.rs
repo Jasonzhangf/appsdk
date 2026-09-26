@@ -923,12 +923,23 @@ fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
     assert!(!refused.ok, "{refused:?}");
     assert_eq!(refused.error.as_deref(), Some("TASK_MERGE_PENDING"));
 
+    let owner_integrated = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        current_head(&root),
+        "owner bypass attempt".into(),
+    );
+    assert!(!owner_integrated.ok, "owner could not bypass the master merge obligation");
+    assert_eq!(owner_integrated.error.as_deref(), Some("TASK_MERGE_PENDING"));
+
     let head = current_head(&root);
     assert!(
         handle_task_integrated(
             &server,
-            "owner".into(),
-            "token-owner".into(),
+            "master".into(),
+            "token-master".into(),
             "task".into(),
             head,
             "main merged".into(),
@@ -984,8 +995,8 @@ fn integrated_supersedes_stale_merge_pending_notice() {
     assert!(
         handle_task_integrated(
             &server,
-            "owner".into(),
-            "token-owner".into(),
+            "master".into(),
+            "token-master".into(),
             "task".into(),
             head,
             "merged onto main".into(),
@@ -6324,8 +6335,8 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
     assert!(
         handle_task_integrated(
             &server,
-            "owner".into(),
-            "token-owner".into(),
+            "master".into(),
+            "token-master".into(),
             "master-cleanup".into(),
             main_commit,
             "main verified".into(),

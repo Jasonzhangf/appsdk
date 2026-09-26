@@ -32,7 +32,13 @@ const SDK_MAP_MIGRATION_0_1_5_TO_0_1_6: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
 const SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007: &str =
     include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 2] = ["0.1.5-to-0.1.6", "0.1.6-to-0.1.0007"];
+const SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json");
+const SDK_MAP_MIGRATION_STEPS: [&str; 3] = [
+    "0.1.5-to-0.1.6",
+    "0.1.6-to-0.1.0007",
+    "0.1.0007-to-0.1.0008",
+];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
     include_str!("../../contracts/transitions/zone-transition.manifest.json");
@@ -147,6 +153,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"),
     ),
     (
+        "contracts/migrations/sdk-0.1.0007-to-0.1.0008.json",
+        "contracts",
+        include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json"),
+    ),
+    (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
@@ -185,6 +196,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/0.1.6/governance-maps/verification-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"),
     ),
     (
         "contracts/transitions/zone-transition.manifest.json",
@@ -491,6 +522,22 @@ fn historical_governance_map(version: &str, name: &str) -> &'static str {
         ("0.1.6", "verification-map.json") => {
             include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json")
         }
+        ("0.1.0007", "resource-map.json") => {
+            include_str!("../../contracts/migrations/0.1.0007/governance-maps/resource-map.json")
+        }
+        ("0.1.0007", "function-map.json") => {
+            include_str!("../../contracts/migrations/0.1.0007/governance-maps/function-map.json")
+        }
+        ("0.1.0007", "mainline-call-map.json") => {
+            include_str!(
+                "../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"
+            )
+        }
+        ("0.1.0007", "verification-map.json") => {
+            include_str!(
+                "../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"
+            )
+        }
         _ => fail("UNKNOWN_GOVERNANCE_MAP"),
     }
 }
@@ -499,6 +546,11 @@ fn sdk_map_migration_manifest(step: &str) -> Value {
     let (manifest_text, source_version, target_version) = match step {
         "0.1.5-to-0.1.6" => (SDK_MAP_MIGRATION_0_1_5_TO_0_1_6, "0.1.5", "0.1.6"),
         "0.1.6-to-0.1.0007" => (SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007, "0.1.6", "0.1.0007"),
+        "0.1.0007-to-0.1.0008" => (
+            SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008,
+            "0.1.0007",
+            "0.1.0008",
+        ),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };
     let manifest: Value = serde_json::from_str(manifest_text)
@@ -2000,6 +2052,45 @@ fn test_governance_string<'a>(
         .ok_or_else(|| error.to_string())
 }
 
+fn test_governance_non_command_string<'a>(
+    value: &'a Value,
+    pointer: &str,
+    error: &str,
+) -> Result<&'a str, String> {
+    let value = test_governance_string(value, pointer, error)?;
+    if value.chars().any(|character| {
+        matches!(
+            character,
+            ';' | '&'
+                | '|'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '`'
+                | '$'
+                | '\\'
+                | '\''
+                | '"'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '!'
+                | '*'
+                | '?'
+                | '~'
+                | '#'
+                | '\n'
+                | '\r'
+                | '\t'
+        )
+    }) {
+        return Err(error.to_string());
+    }
+    Ok(value)
+}
+
 fn test_governance_identifier(value: &Value, pointer: &str, error: &str) -> Result<(), String> {
     let value = test_governance_string(value, pointer, error)?;
     if value.is_empty()
@@ -2046,7 +2137,11 @@ fn validate_test_governance_manifest(
     let mut runner_refs = BTreeSet::new();
     for runner in runners {
         test_governance_identifier(runner, "/runner_ref", "INVALID_TEST_GOVERNANCE_RUNNER")?;
-        test_governance_string(runner, "/entrypoint", "INVALID_TEST_GOVERNANCE_RUNNER")?;
+        test_governance_non_command_string(
+            runner,
+            "/entrypoint",
+            "INVALID_TEST_GOVERNANCE_RUNNER",
+        )?;
         test_governance_string(runner, "/owner", "INVALID_TEST_GOVERNANCE_RUNNER")?;
         if !runner_refs.insert(
             test_governance_string(runner, "/runner_ref", "INVALID_TEST_GOVERNANCE_RUNNER")?
@@ -2196,14 +2291,15 @@ fn validate_test_governance_manifest(
                     object_id, scenario_id
                 ));
             }
-            for field in [
-                "/semantic_name",
-                "/entrypoint",
-                "/stimulus",
-                "/cleanup",
-                "/runner_ref",
-            ] {
+            for field in ["/semantic_name", "/stimulus", "/runner_ref"] {
                 test_governance_string(scenario, field, "INVALID_TEST_GOVERNANCE_SCENARIO")?;
+            }
+            for field in ["/entrypoint", "/cleanup"] {
+                test_governance_non_command_string(
+                    scenario,
+                    field,
+                    "INVALID_TEST_GOVERNANCE_SCENARIO",
+                )?;
             }
             let runner_ref = test_governance_string(
                 scenario,
@@ -2378,6 +2474,42 @@ fn test_governance_object_status(
             .unwrap_or("blocked");
         if cleanup_status == "failed" || cleanup_status == "blocked" {
             reason = Some("cleanup_failed");
+        } else {
+            let cleanup_detail = result
+                .pointer("/cleanup_result/detail")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if cleanup_detail.is_empty()
+                || cleanup_detail.chars().any(|character| {
+                    matches!(
+                        character,
+                        ';' | '\n'
+                            | '|'
+                            | '<'
+                            | '>'
+                            | '('
+                            | ')'
+                            | '`'
+                            | '$'
+                            | '\\'
+                            | '\''
+                            | '"'
+                            | '['
+                            | ']'
+                            | '{'
+                            | '}'
+                            | '!'
+                            | '*'
+                            | '?'
+                            | '~'
+                            | '#'
+                            | '\r'
+                            | '\t'
+                    )
+                })
+            {
+                reason = Some("cleanup_failed");
+            }
         }
         let environment = result
             .get("environment")
@@ -2394,6 +2526,13 @@ fn test_governance_object_status(
                 .get("effect_authorization_id")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if scenario
+                .get("effect_authorization_id")
+                .and_then(Value::as_str)
+                != Some(authorization_id)
+            {
+                reason = Some("effect_authorization_mismatch");
+            }
             let authorization = authorizations.iter().find(|authorization| {
                 authorization
                     .get("authorization_id")
@@ -2474,21 +2613,42 @@ fn test_governance_object_status(
                     || evidence.get("source_commit").and_then(Value::as_str)
                         != Some(candidate_commit)
                     || evidence.get("result").and_then(Value::as_str) != Some("pass")
+                    || evidence
+                        .get("artifact_hash")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .is_none()
                     || evidence.get("environment_id").and_then(Value::as_str) != Some(environment)
                     || evidence.get("entrypoint").and_then(Value::as_str)
                         != scenario.get("entrypoint").and_then(Value::as_str)
                     || evidence.get("phase").and_then(Value::as_str) != Some("deployed_blackbox")
+                    || evidence.get("execution_surface").and_then(Value::as_str)
+                        != Some("deployed_blackbox")
+                    || !matches!(
+                        evidence.get("kind").and_then(Value::as_str),
+                        Some("runtime" | "sample_replay")
+                    )
                     || evidence.pointer("/scope/module_id").and_then(Value::as_str)
                         != Some(object_id)
                 {
                     reason = Some("evidence_mismatch");
                 } else {
+                    let created_at = evidence
+                        .get("created_at")
+                        .and_then(Value::as_str)
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc));
                     let expires_at = evidence
                         .get("expires_at")
                         .and_then(Value::as_str)
                         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
                         .map(|value| value.with_timezone(&Utc));
-                    if expires_at.is_none() || now > expires_at.unwrap() {
+                    if created_at.is_none()
+                        || expires_at.is_none()
+                        || now < created_at.unwrap()
+                        || created_at.unwrap() > expires_at.unwrap()
+                        || now > expires_at.unwrap()
+                    {
                         reason = Some("evidence_expired");
                     }
                 }
@@ -14435,7 +14595,7 @@ fn write_project_scaffold(root: &Path) {
         r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0007", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.0008", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "access": {"protected_paths": [".appsdk/**", "generated/**", "protected/source/**"]},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
@@ -18716,7 +18876,7 @@ fn pin_lock(root: &Path, binary: &Path) {
         required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT").to_string();
     if !matches!(
         project_version.as_str(),
-        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007"
+        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007" | "0.1.0008"
     ) {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:{}",
@@ -18736,23 +18896,40 @@ fn pin_lock(root: &Path, binary: &Path) {
         fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
     }
     reconcile_authoring_bundle_manifest(root);
-    if matches!(project_version.as_str(), "0.1.3" | "0.1.4") {
+    let original_version = project_version.clone();
+    if matches!(original_version.as_str(), "0.1.3" | "0.1.4") {
         write_legacy_migration_step(root, &project_version);
         project["sdk"]["version"] = Value::String("0.1.5".into());
         write_project(root, &project);
     }
-    if matches!(project_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
+    if matches!(original_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
         let migrated_project = read_project(root);
         migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6");
         project = migrated_project;
         project["sdk"]["version"] = Value::String("0.1.6".into());
         write_project(root, &project);
-    } else {
-        let current_project = read_project(root);
-        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6");
     }
+    for step in ["0.1.5-to-0.1.6", "0.1.6-to-0.1.0007"] {
+        let manifest = sdk_map_migration_manifest(step);
+        let source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                == record_str(
+                    sdk_map_migration_entry(&manifest, name),
+                    "/source_digest",
+                    "sdk-map-migration",
+                )
+        });
+        let record_exists = sdk_map_migration_root(root, step)
+            .join("record.json")
+            .is_file();
+        if record_exists || source_matches {
+            let current_project = read_project(root);
+            migrate_governance_maps(root, &current_project, step);
+        }
+    }
+    let current_project = read_project(root);
+    migrate_governance_maps(root, &current_project, "0.1.0007-to-0.1.0008");
     let migrated_project = read_project(root);
-    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.0007");
     install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());

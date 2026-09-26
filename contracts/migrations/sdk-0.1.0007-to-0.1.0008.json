@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "migration_id": "appsdk-0.1.0007-to-0.1.0008",
+  "source_version": "0.1.0007",
+  "target_version": "0.1.0008",
+  "materialization": "pin_lock_when_migrating",
+  "snapshot_root": ".appsdk/migrations/0.1.0007-to-0.1.0008/maps",
+  "record_path": ".appsdk/migrations/0.1.0007-to-0.1.0008/record.json",
+  "maps": [
+    {
+      "name": "resource-map.json",
+      "review_hash_field": "resource_map_hash",
+      "source": "contracts/migrations/0.1.0007/governance-maps/resource-map.json",
+      "source_digest": "sha256:05bd659f2ff634de66cef0cf93bcfea64d14afeef3ed27541c6aecd687e72a72",
+      "target": "contracts/maps/resource-map.json",
+      "target_digest": "sha256:4073e213121c8b6296ac68a1188de6935d03a930a6090dd355dfdbb30b92a31a"
+    },
+    {
+      "name": "function-map.json",
+      "review_hash_field": "function_map_hash",
+      "source": "contracts/migrations/0.1.0007/governance-maps/function-map.json",
+      "source_digest": "sha256:963a8a2a0d80e7482a63ffd5e7a04ce1029e75666a670b9747cf7cabcbe3d430",
+      "target": "contracts/maps/function-map.json",
+      "target_digest": "sha256:6a0d7026cb345420d3d02ae28679cc7e93f37e78018f8df16477113aef9cc7d3"
+    },
+    {
+      "name": "mainline-call-map.json",
+      "review_hash_field": "mainline_call_map_hash",
+      "source": "contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json",
+      "source_digest": "sha256:5d04ef3b62980469685851859ba494cd2a3382008f79fc1c3b3f001c70ad362e",
+      "target": "contracts/maps/mainline-call-map.json",
+      "target_digest": "sha256:9e9a21ba1c5b8dd25ef565e6b02211baabba3568e1fa89e8944134a115847684"
+    },
+    {
+      "name": "verification-map.json",
+      "review_hash_field": "verification_map_hash",
+      "source": "contracts/migrations/0.1.0007/governance-maps/verification-map.json",
+      "source_digest": "sha256:2a273f5e9b69486365d97350a28e0a07fc83dc2c5d40bd55b6cea793e856e377",
+      "target": "contracts/maps/verification-map.json",
+      "target_digest": "sha256:70897ce7c3b53379a7c385678fe1b0b88772599cecae75c2a8c37d39e1381e17"
+    }
+  ]
+}

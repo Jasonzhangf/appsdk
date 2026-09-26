@@ -1183,11 +1183,11 @@ fn init_fresh_migrates_supported_legacy_sdk_pin_and_preserves_project_contract()
 
     let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
     let mut expected = project;
-    expected["sdk"]["version"] = Value::String("0.1.0007".into());
+    expected["sdk"]["version"] = Value::String("0.1.0008".into());
     assert_eq!(after, expected);
     let lock: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
-    assert_eq!(lock["version"], "0.1.0007");
+    assert_eq!(lock["version"], "0.1.0008");
     let reset: Value = serde_json::from_str(
         &fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
     )
@@ -1245,7 +1245,7 @@ fn init_fresh_rebuilds_any_legacy_sdk_pin_without_legacy_migration_records() {
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
         assert_eq!(after["project_id"], project_id);
-        assert_eq!(after["sdk"]["version"], "0.1.0007");
+        assert_eq!(after["sdk"]["version"], "0.1.0008");
         assert_eq!(after["modules"][0]["module_id"], "legacy-module");
         assert_eq!(after["modules"][0]["source_owner"], "legacy-module");
         assert!(!root.join(".appsdk/migrations/0.1.5-to-0.1.6").exists());
@@ -1295,7 +1295,7 @@ fn project_creation_and_initialization_persist_host_registration() {
         first_receipt["project_root"],
         root.canonicalize().unwrap().to_str().unwrap()
     );
-    assert_eq!(first_receipt["sdk_version"], "0.1.0007");
+    assert_eq!(first_receipt["sdk_version"], "0.1.0008");
     assert_eq!(first_receipt["idempotent"], false);
 
     let initialized = Command::new(binary())
@@ -2048,7 +2048,7 @@ fn init_fresh_normalizes_sdk_owned_contract_fields_without_losing_project_fields
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
         assert_eq!(after["sdk"]["name"], "appsdk");
-        assert_eq!(after["sdk"]["version"], "0.1.0007");
+        assert_eq!(after["sdk"]["version"], "0.1.0008");
         assert_eq!(
             after["sdk"]["bundle_manifest"],
             ".appsdk/contracts/sdk-bundle.manifest.json"
@@ -3554,7 +3554,7 @@ fn init_upgrades_legacy_placeholder_lock_without_pin_lock() {
     assert!(run(&["new", root_text]).status.success());
     fs::write(
         root.join(".appsdk/sdk.lock"),
-        r#"{"sdk":"appsdk","version":"0.1.0007","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.0008","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     )
     .unwrap();
@@ -9033,7 +9033,7 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         intake_json["standard_template"]["path"],
         ".appsdk/templates/minimal/AGENTS.md"
     );
-    assert_eq!(intake_json["standard_template"]["version"], "0.1.0007");
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.0008");
     assert_eq!(
         intake_json["standard_template"]["digest"],
         file_digest(&reference)
@@ -10441,7 +10441,7 @@ fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
 
     assert_eq!(
         truth_store("sdk_bundle"),
-        "AppSDK 0.1.0007 embedded Bundle manifest/resources"
+        "AppSDK 0.1.0008 embedded Bundle manifest/resources"
     );
     assert_eq!(
         truth_store("historical_governance_maps"),
@@ -10454,6 +10454,7 @@ fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
     for text in [
         include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json"),
         include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"),
+        include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json"),
     ] {
         let descriptor: Value = serde_json::from_str(text).unwrap();
         assert_eq!(descriptor["materialization"], "pin_lock_when_migrating");
@@ -10526,7 +10527,7 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
 
     let lock_path = root.join(".appsdk/sdk.lock");
     let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
-    lock["version"] = Value::String("0.1.0007".into());
+    lock["version"] = Value::String("0.1.0008".into());
     lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
     lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
     fs::write(
@@ -11090,10 +11091,10 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
     let (_, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
-    let migration_root = root.join(".appsdk/migrations/0.1.6-to-0.1.0007");
+    let migration_root = root.join(".appsdk/migrations/0.1.0007-to-0.1.0008");
     fs::create_dir_all(migration_root.join("maps")).unwrap();
     let manifest: Value = serde_json::from_str(include_str!(
-        "../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"
+        "../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json"
     ))
     .unwrap();
     let mut maps = Vec::new();
@@ -11101,19 +11102,23 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
     for (name, source) in [
         (
             "resource-map.json",
-            include_str!("../../contracts/migrations/0.1.6/governance-maps/resource-map.json"),
+            include_str!("../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
         ),
         (
             "function-map.json",
-            include_str!("../../contracts/migrations/0.1.6/governance-maps/function-map.json"),
+            include_str!("../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
         ),
         (
             "mainline-call-map.json",
-            include_str!("../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+            include_str!(
+                "../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"
+            ),
         ),
         (
             "verification-map.json",
-            include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+            include_str!(
+                "../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"
+            ),
         ),
     ] {
         let declared = manifest["maps"]
@@ -11133,15 +11138,15 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
             "source_digest": digest(source),
             "target_digest": digest(&custom),
             "canonical_source_digest": declared["source_digest"].clone(),
-            "canonical_target_digest": format!("sha256:{}", "f".repeat(64)),
-            "snapshot_path": format!(".appsdk/migrations/0.1.6-to-0.1.0007/maps/{}", name)
+            "canonical_target_digest": declared["target_digest"].clone(),
+            "snapshot_path": format!(".appsdk/migrations/0.1.0007-to-0.1.0008/maps/{}", name)
         }));
     }
     let record = serde_json::json!({
         "schema_version": 1,
-        "migration_id": "appsdk-0.1.6-to-0.1.0007",
-        "source_version": "0.1.6",
-        "target_version": "0.1.0007",
+        "migration_id": "appsdk-0.1.0007-to-0.1.0008",
+        "source_version": "0.1.0007",
+        "target_version": "0.1.0008",
         "bundle_digest": previous_bundle_digest,
         "maps": maps,
         "frozen_reviews": [],
@@ -11151,6 +11156,15 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
     let historical_record = serde_json::to_string_pretty(&record).unwrap() + "\n";
     let record_path = migration_root.join("record.json");
     fs::write(&record_path, &historical_record).unwrap();
+
+    let lock_path = root.join(".appsdk/sdk.lock");
+    let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+    lock["previous_bundle_digest"] = Value::String(previous_bundle_digest.clone());
+    fs::write(
+        &lock_path,
+        serde_json::to_string_pretty(&lock).unwrap() + "\n",
+    )
+    .unwrap();
 
     let result = run(&[
         "pin-lock",
@@ -11353,7 +11367,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     ]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr)
-        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0007"));
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0008"));
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
 
     project["sdk"]["version"] = Value::String("0.1.5".into());
@@ -11392,8 +11406,8 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
         serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
     let migrated_lock: Value =
         serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
-    assert_eq!(migrated_project["sdk"]["version"], "0.1.0007");
-    assert_eq!(migrated_lock["version"], "0.1.0007");
+    assert_eq!(migrated_project["sdk"]["version"], "0.1.0008");
+    assert_eq!(migrated_lock["version"], "0.1.0008");
     assert!(run(&["verify", root_text]).status.success());
 
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
@@ -13983,7 +13997,7 @@ fn confirmed_goal_and_initialized_lock_allow_compile_and_adjacent_promote() {
     fs::write(root.join(".appsdk/project.json"), r#"{
   "schema_version": 1,
   "project_id": "change-me",
-  "sdk": {"name": "appsdk", "version": "0.1.0007", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
+  "sdk": {"name": "appsdk", "version": "0.1.0008", "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json", "resource_record": ".appsdk/sdk-resources.json"},
   "lifecycle": {"stage": "draft"},
   "development_scenarios": {"manifest": ".appsdk/contracts/development-scenarios.manifest.json", "enabled": []},
   "access": {"protected_paths":[".appsdk/**"]},
@@ -23162,6 +23176,7 @@ fn optional_test_governance_effect_requires_authorization_and_passed_evidence_cl
             "experiment_id": "optional-governance",
             "phase": "deployed_blackbox",
             "kind": "sample_replay",
+            "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "source_commit": head,
             "execution_surface": "deployed_blackbox",
             "environment_id": "test",
@@ -23320,6 +23335,7 @@ fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() 
             "experiment_id": "optional-governance",
             "phase": "deployed_blackbox",
             "kind": "sample_replay",
+            "artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             "source_commit": head,
             "execution_surface": "deployed_blackbox",
             "environment_id": "test",
@@ -23449,6 +23465,80 @@ fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() 
     let ordinary_report: Value = serde_json::from_slice(&ordinary_verify.stdout).unwrap();
     assert_eq!(ordinary_report["test_governance"]["status"], "blocked");
 
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let evidence_path = evidence_dir.join("evidence-1.json");
+    let original_evidence = fs::read_to_string(&evidence_path).unwrap();
+    let mut missing_artifact: Value = serde_json::from_str(&original_evidence).unwrap();
+    missing_artifact
+        .as_object_mut()
+        .unwrap()
+        .remove("artifact_hash");
+    fs::write(
+        &evidence_path,
+        serde_json::to_string_pretty(&missing_artifact).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_missing_artifact = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_missing_artifact.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_missing_artifact.stdout).contains("evidence_mismatch"),
+        "missing artifact_hash must block deployed_blackbox evidence: {}",
+        String::from_utf8_lossy(&rejected_missing_artifact.stdout)
+    );
+    fs::write(&evidence_path, &original_evidence).unwrap();
+
+    let mut second_auth_manifest = manifest.clone();
+    second_auth_manifest["effect_authorizations"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "authorization_id": "auth-2",
+            "object_id": "app-core",
+            "scenario_id": "scenario-1",
+            "environment": "test",
+            "allowed_effects": ["order created"],
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_until": "2099-01-01T00:00:00Z",
+            "approval_ref": "approval://owners/app-core"
+        }));
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&second_auth_manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    write_result("passed", "auth-2", "1", &head, "scenario-1", "passed");
+    let rejected_wrong_auth = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_wrong_auth.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_wrong_auth.stdout)
+            .contains("effect_authorization_mismatch"),
+        "result effect_authorization_id must equal the declared scenario authorization: {}",
+        String::from_utf8_lossy(&rejected_wrong_auth.stdout)
+    );
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let mut command_cleanup_result: Value =
+        serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    command_cleanup_result["cleanup_result"]["detail"] =
+        Value::String("remove fixture; curl http://evil".into());
+    fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&command_cleanup_result).unwrap() + "\n",
+    )
+    .unwrap();
+    let rejected_command_cleanup = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_command_cleanup.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_command_cleanup.stdout).contains("cleanup_failed"),
+        "command-style cleanup detail must block optional test governance: {}",
+        String::from_utf8_lossy(&rejected_command_cleanup.stdout)
+    );
     write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
 
     let effect_missing_auth = {

@@ -5343,6 +5343,44 @@ fn context_rearms_missing_default_lease_for_reused_registration() {
 }
 
 #[test]
+fn context_rearm_never_overrides_a_concurrent_explicit_unsubscribe() {
+    use std::sync::Arc as StdArc;
+
+    let (server, root) = test_server();
+    assert!(register(&server, "peer", "%peer").ok);
+    let server = StdArc::new(server);
+
+    // Race an explicit owner unsubscribe against the context rearm. The
+    // unsubscribe must always be the final durable state: the rearm runs
+    // under the same state lock, so it can never apply a NotificationSubscribed
+    // event after the newer explicit-unsubscribe suppression.
+    let unsub_server = StdArc::clone(&server);
+    let unsubscribe = std::thread::spawn(move || {
+        handle_notification_unsubscribe(
+            &unsub_server,
+            "peer".into(),
+            "token-peer".into(),
+            "sub-default-direct-message-peer".into(),
+        )
+    });
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{}", context.error.unwrap_or_default());
+    let cancelled = unsubscribe.join().unwrap();
+    assert!(cancelled.ok, "{}", cancelled.error.unwrap_or_default());
+
+    // After both operations settle, one more context must still respect the
+    // explicit unsubscribe and leave the lease stopped.
+    let context = handle_context(&server, "peer".into(), "token-peer".into());
+    assert!(context.ok, "{}", context.error.unwrap_or_default());
+    let state = server.state.lock().unwrap();
+    let lease = &state.notification_subscriptions["sub-default-direct-message-peer"];
+    assert_eq!(lease.status, "cancelled");
+    assert_eq!(lease.status_reason.as_deref(), Some("explicit-unsubscribe"));
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn context_keeps_explicit_unsubscribe_stopped() {
     let (server, root) = test_server();
     assert!(register(&server, "peer", "%peer").ok);

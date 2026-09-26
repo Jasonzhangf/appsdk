@@ -10507,15 +10507,12 @@ fn daemon_context_view(server: &Server) -> serde_json::Value {
 }
 
 fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
-    let worker = {
-        let st = server.state.lock().unwrap();
-        if let Err(e) = verify(&st, &worker_id, &token) {
-            return e;
-        }
-        let Some(worker) = st.workers.get(&worker_id).cloned() else {
-            return Resp::err(format!("worker {} not registered", worker_id));
-        };
-        worker
+    let mut st = server.state.lock().unwrap();
+    if let Err(e) = verify(&st, &worker_id, &token) {
+        return e;
+    }
+    let Some(worker) = st.workers.get(&worker_id).cloned() else {
+        return Resp::err(format!("worker {} not registered", worker_id));
     };
     // `collab context` is the single bootstrap entry, so it must also be the
     // place where the system-owned default direct-message lease is restored.
@@ -10524,15 +10521,13 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // mailbox-only after the lease expired or was lost. Explicit owner
     // unsubscribe stays authoritative; only the legacy/expired shapes re-arm.
     if let Some(transport) = selected_transport_for_worker(&worker) {
-        let events = {
-            let st = server.state.lock().unwrap();
-            default_direct_message_events(&st, &worker_id, &transport, now_ms())
-        };
+        let events = default_direct_message_events(&st, &worker_id, &transport, now_ms());
         if !events.is_empty() {
-            server.commit(&events);
+            if let Err(error) = server.try_commit_locked(&mut st, &events) {
+                return Resp::err(format!("default lease rearm failed: {error}"));
+            }
         }
     }
-    let st = server.state.lock().unwrap();
     let mut tasks: Vec<serde_json::Value> = st
         .tasks
         .values()

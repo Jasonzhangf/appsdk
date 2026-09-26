@@ -72,6 +72,9 @@ pub fn notification_class(subject: &str, from: &str, mtype: &str) -> (&'static s
     if subject.starts_with("master-idle") {
         return ("P1", "run the scheduling pass: inspect graph/load/liveness, dispatch authorized work, and resolve blockers");
     }
+    if subject.starts_with("merge-pending:") {
+        return ("P0", "the accepted task is awaiting your merge on refs/heads/main; record collab task integrated before close");
+    }
     if subject.starts_with("subagent-status") {
         return ("P1", "re-dispatch, close, or leave the child idle");
     }

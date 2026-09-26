@@ -314,6 +314,8 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
     let newly_idle = state.master_wake.newly_idle_workers.clone();
     let live_idle = state.master_wake.idle_workers.clone();
     let blocked = state.master_wake.blocked_or_timed_out_tasks.clone();
+    let mut pending_merges: Vec<_> = state.pending_merges.keys().cloned().collect();
+    pending_merges.sort();
     let subject = if newly_idle.len() == 1 && newly_idle[0].starts_with("subagent:") {
         "subagent-status".to_string()
     } else if newly_idle.len() == 1 {
@@ -322,10 +324,11 @@ fn flush_idle_batches_if_ready(server: &Server, now: i64) {
         "master-wake-batch".to_string()
     };
     let body = format!(
-        "newly_idle={} live_idle={} blocked={} goal_due={}. Scheduling continues: saturate live present peers first, then schedule managed subagents within the configured cap. Never stay idle while eligible capacity remains. Inspect the task graph, every live peer and managed subagent, liveness, saturation, and blockers; dispatch the next ready non-overlapping P0/P1 task to each idle eligible worker, or resolve and reassign blockers. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
+        "newly_idle={} live_idle={} blocked={} pending_merges={} goal_due={}. Scheduling continues: saturate live present peers first, then schedule managed subagents within the configured cap. Never stay idle while eligible capacity remains. Inspect the task graph, every live peer and managed subagent, liveness, saturation, blockers, and pending merges; dispatch the next ready non-overlapping P0/P1 task to each idle eligible worker, resolve and reassign blockers, and merge accepted candidates that are pending. Cancel only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains, using collab notify unsubscribe {} and record the receipt. If the goal is complete, report the evidence to the user.",
         newly_idle.join(","),
         live_idle.join(","),
         blocked.join(","),
+        pending_merges.join(","),
         state.master_wake.goal_due,
         subscription.id
     );
@@ -705,6 +708,79 @@ mod tests {
         let transport = worker.transport.as_ref().unwrap();
         assert_eq!(transport.kind, crate::proto::TransportKind::Tmux);
         assert_eq!(transport.thread_id.as_deref(), Some("thread-worker"));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn master_idle_batch_surfaces_pending_merges() {
+        let (server, root) = test_server();
+        register(&server, "master", "thread-master");
+        register(&server, "child", "thread-child");
+        assert!(
+            super::super::handle_master_promote(
+                &server,
+                "master".into(),
+                "token-master".into(),
+                "user approved master".into(),
+            )
+            .ok
+        );
+        let now = super::super::state::now_ms();
+        server.commit(&[
+            Event::MergeRequested {
+                request: crate::server::state::PendingMerge {
+                    task_id: "task-merge".into(),
+                    owner: "child".into(),
+                    requested_by: "child".into(),
+                    requested_ms: now,
+                    candidate_commit: None,
+                },
+            },
+            Event::MasterWakeSignal {
+                signal: super::super::state::MasterWakeSignal::WorkerIdle {
+                    worker_id: "child".into(),
+                },
+                at_ms: now,
+            },
+            Event::KeepaliveUpdated {
+                worker_id: "master".into(),
+                record: Record {
+                    observed: "working".into(),
+                    idle_since_ms: now - 1,
+                    working_seen: true,
+                    ..Default::default()
+                },
+            },
+        ]);
+
+        server.commit(&[Event::KeepaliveUpdated {
+            worker_id: "master".into(),
+            record: Record {
+                observed: "idle".into(),
+                idle_since_ms: now + 1,
+                working_seen: true,
+                ..Default::default()
+            },
+        }]);
+        tick_at(&server, now + 2);
+
+        let state = server.state.lock().unwrap();
+        let batch = state
+            .msgs
+            .values()
+            .find(|message| {
+                message.to == "master"
+                    && message
+                        .body
+                        .contains("Scheduling continues")
+            })
+            .expect("master idle batch");
+        assert!(
+            batch.body.contains("pending_merges=task-merge"),
+            "{}",
+            batch.body
+        );
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

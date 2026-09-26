@@ -413,6 +413,21 @@ pub struct TaskLifecycleRecord {
     pub integrated_ms: Option<i64>,
 }
 
+/// Daemon-owned registration that an accepted task is awaiting a merge on
+/// `refs/heads/main`. Created when a task review is accepted; resolved when
+/// `collab task integrated` records a main-reachable commit, or when the task
+/// leaves the mergeable lifecycle (rework/cancel/manual close). The daemon is
+/// the single owner so a busy master cannot lose the obligation in chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingMerge {
+    pub task_id: String,
+    pub owner: String,
+    pub requested_by: String,
+    pub requested_ms: i64,
+    #[serde(default)]
+    pub candidate_commit: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "CleanupReceiptRepr")]
 pub struct CleanupReceipt {
@@ -653,6 +668,16 @@ pub enum Event {
         task_id: String,
         record: TaskLifecycleRecord,
     },
+    MergeRequested {
+        request: PendingMerge,
+    },
+    MergeResolved {
+        task_id: String,
+        resolved_by: String,
+        #[serde(default)]
+        reason: Option<String>,
+        at_ms: i64,
+    },
     CleanupVerified {
         receipt: CleanupReceipt,
     },
@@ -747,6 +772,10 @@ pub struct State {
     pub tasks: HashMap<String, TaskRec>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
+    /// Accepted tasks awaiting a main merge, keyed by task id. Daemon-owned so
+    /// the merge obligation survives a busy master, session change, and
+    /// restart.
+    pub pending_merges: HashMap<String, PendingMerge>,
     pub cleanup_receipts: HashMap<String, CleanupReceipt>,
     pub delivery_modes: HashMap<String, String>,
     pub delivery_source_threads: HashMap<String, String>,
@@ -1398,6 +1427,13 @@ impl State {
             Event::TaskLifecycleUpdated { task_id, record } => {
                 self.task_lifecycle.insert(task_id.clone(), record.clone());
             }
+            Event::MergeRequested { request } => {
+                self.pending_merges
+                    .insert(request.task_id.clone(), request.clone());
+            }
+            Event::MergeResolved { task_id, .. } => {
+                self.pending_merges.remove(task_id);
+            }
             Event::CleanupVerified { receipt } => {
                 self.cleanup_receipts
                     .insert(receipt.task_id.clone(), receipt.clone());
@@ -1670,6 +1706,13 @@ impl State {
                     task_id: task_id.clone(),
                     record: record.clone(),
                 }),
+        );
+        let mut merges: Vec<_> = self.pending_merges.values().cloned().collect();
+        merges.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        events.extend(
+            merges
+                .into_iter()
+                .map(|request| Event::MergeRequested { request }),
         );
         let mut receipts: Vec<_> = self.cleanup_receipts.values().cloned().collect();
         receipts.sort_by(|a, b| a.task_id.cmp(&b.task_id));
@@ -1954,6 +1997,51 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static REPLAY_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn pending_merge_survives_snapshot_replay_and_resolution_removes_it() {
+        let mut state = State::default();
+        state.apply(&Event::MergeRequested {
+            request: PendingMerge {
+                task_id: "task-a".into(),
+                owner: "owner".into(),
+                requested_by: "owner".into(),
+                requested_ms: 10,
+                candidate_commit: None,
+            },
+        });
+        state.apply(&Event::MergeRequested {
+            request: PendingMerge {
+                task_id: "task-b".into(),
+                owner: "owner".into(),
+                requested_by: "owner".into(),
+                requested_ms: 20,
+                candidate_commit: None,
+            },
+        });
+        state.apply(&Event::MergeResolved {
+            task_id: "task-b".into(),
+            resolved_by: "master".into(),
+            reason: Some("integrated into main".into()),
+            at_ms: 30,
+        });
+
+        let replayed =
+            state
+                .snapshot_events()
+                .into_iter()
+                .fold(State::default(), |mut replayed, event| {
+                    replayed.apply(&event);
+                    replayed
+                });
+
+        assert_eq!(
+            replayed.pending_merges.keys().collect::<Vec<_>>(),
+            vec!["task-a"],
+            "replay must preserve the unresolved obligation and drop the resolved one"
+        );
+        assert_eq!(replayed.pending_merges["task-a"].requested_ms, 10);
+    }
 
     #[test]
     fn dropping_a_message_retires_its_notification_delivery_evidence() {

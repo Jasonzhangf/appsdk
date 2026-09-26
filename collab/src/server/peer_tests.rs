@@ -780,6 +780,125 @@ fn master_idle_subscription_is_restricted_to_the_live_master_and_supported_inter
 }
 
 #[test]
+fn review_accept_registers_daemon_owned_pending_merge_with_master_notification() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master merge registration test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    accept_task(&server, "owner", "task");
+
+    let state = server.state.lock().unwrap();
+    assert!(
+        state.pending_merges.contains_key("task"),
+        "review --accept must register a durable daemon-owned pending merge"
+    );
+    let request = state.pending_merges["task"].clone();
+    assert_eq!(request.owner, "owner");
+    assert_eq!(request.task_id, "task");
+    let notified = state.msgs.values().any(|message| {
+        message.to == "master"
+            && message
+                .subject
+                .as_deref()
+                .is_some_and(|subject| subject == "merge-pending:task")
+    });
+    assert!(
+        notified,
+        "review --accept must create a durable merge-pending notice for the live master"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn close_refuses_pending_merge_until_task_integrated_resolves_it() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master close gate test");
+    initialize_main(&root);
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    accept_task(&server, "owner", "task");
+
+    let refused = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
+    );
+    assert!(!refused.ok, "{refused:?}");
+    assert_eq!(refused.error.as_deref(), Some("TASK_MERGE_PENDING"));
+
+    let head = current_head(&root);
+    assert!(
+        handle_task_integrated(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            head,
+            "main merged".into(),
+        )
+        .ok
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(
+            !state.pending_merges.contains_key("task"),
+            "task integrated must resolve the pending merge"
+        );
+        assert_eq!(state.tasks["task"].status, "merged");
+    }
+    let closed = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "task".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{}", closed.error.unwrap_or_default());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_accepted_update_to_rework_resolves_pending_merge() {
+    let (server, root) = test_server();
+    register(&server, "owner", "%owner");
+    register(&server, "master", "%master");
+    promote_master(&server, "master", "user approved master rework test");
+    assert!(create_task(&server, "owner", "task", "feature").ok);
+
+    accept_task(&server, "owner", "task");
+    assert!(server.state.lock().unwrap().pending_merges.contains_key("task"));
+
+    assert!(
+        handle_task_update(
+            &server,
+            "owner".into(),
+            "token-owner".into(),
+            "task".into(),
+            Some("rework".into()),
+            Some("review requested rework".into()),
+        )
+        .ok
+    );
+    let state = server.state.lock().unwrap();
+    assert!(
+        !state.pending_merges.contains_key("task"),
+        "accepted -> rework must resolve the pending merge"
+    );
+    assert_eq!(state.tasks["task"].status, "rework");
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn authenticated_send_rejects_missing_binding() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");

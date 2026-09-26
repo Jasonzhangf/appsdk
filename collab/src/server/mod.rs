@@ -9383,7 +9383,19 @@ fn handle_task_update(
         task.next_step = next_step;
     }
     task.updated_ms = now_ms();
-    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    let mut events = vec![Event::TaskUpdated { task: task.clone() }];
+    // A registered merge obligation exists iff the task is still awaiting the
+    // merge of an accepted candidate. Any other transition (rework, cancel,
+    // legacy merge) ends that obligation in the same transaction.
+    if task.status != "accepted" && st.pending_merges.contains_key(&task_id) {
+        events.push(Event::MergeResolved {
+            task_id: task_id.clone(),
+            resolved_by: worker_id.clone(),
+            reason: Some(format!("task no longer awaits merge (status={})", task.status)),
+            at_ms: task.updated_ms,
+        });
+    }
+    server.commit_locked(&mut st, &events);
     Resp::data(json!({
         "task": task.id,
         "status": task.status,
@@ -9757,23 +9769,70 @@ fn handle_task_review(
     lifecycle.review_evidence = Some(evidence.to_owned());
     lifecycle.reviewer = Some(worker_id.clone());
     lifecycle.reviewed_ms = Some(now);
-    server.commit_locked(
-        &mut st,
-        &[
-            Event::TaskUpdated {
-                task: reviewed.clone(),
-            },
-            Event::TaskLifecycleUpdated {
-                task_id: task_id.clone(),
-                record: lifecycle,
-            },
-        ],
-    );
+    let mut events = vec![
+        Event::TaskUpdated {
+            task: reviewed.clone(),
+        },
+        Event::TaskLifecycleUpdated {
+            task_id: task_id.clone(),
+            record: lifecycle,
+        },
+    ];
+    let mut pending_notification = None;
+    if accept {
+        let request = state::PendingMerge {
+            task_id: task_id.clone(),
+            owner: reviewed.owner.clone(),
+            requested_by: worker_id.clone(),
+            requested_ms: now,
+            candidate_commit: None,
+        };
+        events.push(Event::MergeRequested { request });
+        if let Ok(Some(master_id)) = live_master_id(server, &st) {
+            if master_id != worker_id {
+                let message_id = gen_msg_id();
+                events.push(Event::Sent {
+                    msg: Message {
+                        id: message_id.clone(),
+                        from: "collab-server".into(),
+                        to: master_id.clone(),
+                        mtype: "notify".into(),
+                        subject: Some(format!("merge-pending:{}", task_id)),
+                        body: format!(
+                            "MERGE_PENDING task={} owner={} requested_by={}. Master must integrate the accepted candidate on refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before the task can close.",
+                            task_id, reviewed.owner, worker_id
+                        ),
+                        in_reply_to: None,
+                        created_ms: now,
+                        state: "pending".into(),
+                        wake_attempt_count: 0,
+                        last_wake_attempt_ms: 0,
+                        retry_attempted: false,
+                    },
+                });
+                if let Some(subscription) =
+                    st.matching_subscription(&master_id, "direct-message", None, now)
+                {
+                    events.push(Event::WakeBound {
+                        message_id: message_id.clone(),
+                        subscription_id: subscription.id.clone(),
+                    });
+                    pending_notification = Some((message_id, subscription.id.clone()));
+                }
+            }
+        }
+    }
+    server.commit_locked(&mut st, &events);
+    drop(st);
+    if let Some((message_id, subscription_id)) = pending_notification {
+        attempt_notification(server, &message_id, &subscription_id);
+    }
     Resp::data(json!({
         "task": task_id,
         "status": reviewed.status,
         "reviewer": worker_id,
         "evidence": evidence,
+        "merge_pending": accept,
         "next_action": reviewed.next_step,
     }))
 }
@@ -9836,18 +9895,24 @@ fn handle_task_integrated(
     lifecycle.integration_commit = Some(commit.to_owned());
     lifecycle.integration_evidence = Some(evidence.to_owned());
     lifecycle.integrated_ms = Some(now);
-    server.commit_locked(
-        &mut st,
-        &[
-            Event::TaskUpdated {
-                task: integrated.clone(),
-            },
-            Event::TaskLifecycleUpdated {
-                task_id: task_id.clone(),
-                record: lifecycle,
-            },
-        ],
-    );
+    let mut events = vec![
+        Event::TaskUpdated {
+            task: integrated.clone(),
+        },
+        Event::TaskLifecycleUpdated {
+            task_id: task_id.clone(),
+            record: lifecycle,
+        },
+    ];
+    if st.pending_merges.contains_key(&task_id) {
+        events.push(Event::MergeResolved {
+            task_id: task_id.clone(),
+            resolved_by: worker_id.clone(),
+            reason: Some("integrated into main".into()),
+            at_ms: now,
+        });
+    }
+    server.commit_locked(&mut st, &events);
     Resp::data(json!({
         "task": task_id,
         "status": integrated.status,
@@ -9964,17 +10029,25 @@ fn handle_task_close(
             })
             .map(|m| m.id.clone())
             .collect();
-        let mut events: Vec<Event> = vec![
-            Event::CleanupVerified {
-                receipt: receipt.clone(),
-            },
-            Event::TaskUpdated {
-                task: closed.clone(),
-            },
-        ];
-        if !superseded.is_empty() {
-            events.push(Event::Superseded {
-                ids: superseded.clone(),
+    let mut events: Vec<Event> = vec![
+        Event::CleanupVerified {
+            receipt: receipt.clone(),
+        },
+        Event::TaskUpdated {
+            task: closed.clone(),
+        },
+    ];
+    if st.pending_merges.contains_key(&closed.id) {
+        events.push(Event::MergeResolved {
+            task_id: closed.id.clone(),
+            resolved_by: worker_id.clone(),
+            reason: Some(format!("force close: {reason}")),
+            at_ms: closed.updated_ms,
+        });
+    }
+    if !superseded.is_empty() {
+        events.push(Event::Superseded {
+            ids: superseded.clone(),
             });
         }
         let other_actionable = st.tasks.values().any(|t| {
@@ -10024,6 +10097,17 @@ fn handle_task_close(
         }
     }
     if task.status != "merged" {
+        if let Some(request) = st.pending_merges.get(&task_id) {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "requested_by": request.requested_by,
+                    "rule": "master must merge the accepted candidate onto refs/heads/main and record `collab task integrated --commit <sha> --evidence \"<text>\"` before close",
+                }),
+            );
+        }
         return Resp::err(format!(
             "task {} must be merged by its owner before close (current: {})",
             task_id, task.status
@@ -10468,6 +10552,12 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
             "evidence": lifecycle.and_then(|record| record.integration_evidence.clone()),
             "at": lifecycle.and_then(|record| record.integrated_ms.map(iso)),
         },
+        "merge": state.pending_merges.get(&task.id).map(|request| json!({
+            "pending": true,
+            "requested_by": request.requested_by,
+            "requested_at": iso(request.requested_ms),
+            "owner": request.owner,
+        })).unwrap_or_else(|| json!({"pending": false})),
         "cleanup": {
             "required": cleanup_required,
             "status": if !cleanup_required {
@@ -10486,6 +10576,27 @@ fn task_view(state: &State, task: &TaskRec) -> serde_json::Value {
         "updated_at": iso(task.updated_ms),
         "keepalive": keepalive::view(state, &task.owner),
     })
+}
+
+fn pending_merge_views(state: &State) -> Vec<serde_json::Value> {
+    let mut views: Vec<_> = state
+        .pending_merges
+        .values()
+        .map(|request| {
+            let task = state.tasks.get(&request.task_id);
+            json!({
+                "task_id": request.task_id,
+                "owner": request.owner,
+                "requested_by": request.requested_by,
+                "requested_at": iso(request.requested_ms),
+                "status": task.map(|task| task.status.as_str()).unwrap_or("unknown"),
+                "branch": task.and_then(|task| task.branch.clone()),
+                "worktree": task.and_then(|task| task.worktree_path.clone()),
+            })
+        })
+        .collect();
+    views.sort_by(|a, b| a["task_id"].as_str().cmp(&b["task_id"].as_str()));
+    views
 }
 
 fn daemon_context_view(server: &Server) -> serde_json::Value {
@@ -10616,6 +10727,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let master_approval = master_grant.as_ref().map(|grant| grant.approval.clone());
     let master_assigned_ms = master_grant.as_ref().map(|grant| grant.granted_at_ms);
     let master_wake = st.master_wake.clone();
+    let pending_merges = pending_merge_views(&st);
     drop(st);
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
@@ -10734,6 +10846,13 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
             .get("worker_id")
             .and_then(serde_json::Value::as_str)
             .is_some();
+        if live_master && !pending_merges.is_empty() {
+            operations.push(json!({
+                "kind": "merge_pending",
+                "action": "for each pending merge, merge the accepted candidate on refs/heads/main, then record collab task integrated before close",
+                "pending_merges": pending_merges,
+            }));
+        }
         if !live_master {
             operations.push(json!({
                 "kind": "promote_master",
@@ -10773,6 +10892,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         },
         "agent": agent,
         "tasks": tasks,
+        "pending_merges": pending_merges,
         "worktrees": worktrees,
         "subscriptions": subscriptions,
         "peers": peers,
@@ -12264,6 +12384,7 @@ fn dispatch_with_route_context(
                 msgs_map,
                 keepalives_map,
                 master_wake,
+                pending_merges,
                 now,
                 role_briefs,
             ) = {
@@ -12282,6 +12403,7 @@ fn dispatch_with_route_context(
                 subagents.sort_by(|a, b| a.id.cmp(&b.id));
                 let msgs_len = st.msgs.len();
                 let now = now_ms();
+                let pending_merges = pending_merge_views(&st);
                 (
                     workers_rec,
                     tasks,
@@ -12291,6 +12413,7 @@ fn dispatch_with_route_context(
                     st.msgs.clone(),
                     st.keepalives.clone(),
                     st.master_wake.clone(),
+                    pending_merges,
                     now,
                     role_briefs,
                 )
@@ -12319,6 +12442,7 @@ fn dispatch_with_route_context(
                     "now": iso(now),
                 },
                 "master_wake": master_wake,
+                "pending_merges": pending_merges,
                 "workers": workers,
                 "tasks": tasks,
                 "subagents": subagents,

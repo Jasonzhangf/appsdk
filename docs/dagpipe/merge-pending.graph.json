@@ -1,0 +1,80 @@
+{
+  "id": "appsdk-collab-merge-pending",
+  "version": "0.1.0",
+  "inputs": [
+    {
+      "id": "task_review_accept",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "register_pending_merge",
+      "operator": "appsdk.collab_merge.register_pending",
+      "operator_version": "1",
+      "inputs": ["task_review_accept"],
+      "output": {"id": "merge_requested", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_merge_obligation",
+      "operator": "appsdk.collab_merge.publish_obligation",
+      "operator_version": "1",
+      "inputs": ["merge_requested"],
+      "output": {"id": "merge_published", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "remind_master_while_idle",
+      "operator": "appsdk.collab_merge.remind_master",
+      "operator_version": "1",
+      "inputs": ["merge_published"],
+      "output": {"id": "merge_reminded", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "master_integrates_main",
+      "operator": "appsdk.collab_merge.integrate_main",
+      "operator_version": "1",
+      "inputs": ["merge_reminded"],
+      "output": {"id": "merge_integrated", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_pending_merge",
+      "operator": "appsdk.collab_merge.resolve_pending",
+      "operator_version": "1",
+      "inputs": ["merge_integrated"],
+      "output": {"id": "merge_resolved", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "close_task",
+      "operator": "appsdk.collab_merge.close_task",
+      "operator_version": "1",
+      "inputs": ["merge_resolved"],
+      "output": {"id": "task_closed", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "register_pending_merge", "to": "publish_merge_obligation", "arc_id": "merge_requested"},
+    {"from": "publish_merge_obligation", "to": "remind_master_while_idle", "arc_id": "merge_published"},
+    {"from": "remind_master_while_idle", "to": "master_integrates_main", "arc_id": "merge_reminded"},
+    {"from": "master_integrates_main", "to": "resolve_pending_merge", "arc_id": "merge_integrated"},
+    {"from": "resolve_pending_merge", "to": "close_task", "arc_id": "merge_resolved"}
+  ],
+  "outputs": ["task_closed"]
+}

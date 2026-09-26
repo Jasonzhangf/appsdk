@@ -325,7 +325,10 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
                             }
                         }),
                         body: if subscription.event == "master-idle" {
-                            format!("MASTER_IDLE_WAKE subject={} scheduling continues; inspect actionable tasks and authorized open bugs. Cancel this subscription only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains: collab notify unsubscribe {}", subscription.subject.as_deref().unwrap_or_default(), subscription.id)
+                            let mut pending_merges: Vec<_> =
+                                state.pending_merges.keys().cloned().collect();
+                            pending_merges.sort();
+                            format!("MASTER_IDLE_WAKE subject={} pending_merges={} scheduling continues; inspect actionable tasks, pending merges, and authorized open bugs. Merge accepted candidates by recording collab task integrated after moving the commit onto refs/heads/main. Cancel this subscription only iff no actionable task, dependency, resolvable blocker, or authorized open bug remains: collab notify unsubscribe {}", subscription.subject.as_deref().unwrap_or_default(), pending_merges.join(","), subscription.id)
                         } else {
                             format!("DEADLINE_REACHED subject={}{}", subscription.subject.as_deref().unwrap_or_default(), if subscription.fired_count + 1 >= if subscription.interval_ms.is_some() { subscription.repeat_count } else { subscription.trigger_times_ms.len().max(1) as u32 } { "; LAST_REMINDER=true; renew explicitly: collab notify subscribe --event deadline --subject <subject> --at-ms <future-epoch-ms> --ttl-seconds <bounded>" } else { "" })
                         },

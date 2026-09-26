@@ -21086,6 +21086,10 @@ fn longhorizon_show(root: &Path, format_json: bool) {
         .as_ref()
         .and_then(|s| s["tasks"].as_array())
         .unwrap_or(&empty);
+    let pending_merges = status
+        .as_ref()
+        .and_then(|s| s["pending_merges"].as_array())
+        .unwrap_or(&empty);
     let workers = status
         .as_ref()
         .and_then(|s| s["workers"].as_array())
@@ -21134,6 +21138,7 @@ fn longhorizon_show(root: &Path, format_json: bool) {
                 "objective": objective,
             },
             "assigned": active_tasks,
+            "pending_merges": pending_merges,
             "blocked": blocked_tasks,
             "idle_workers": idle_workers,
             "workers_needing_intervention": broken_workers,
@@ -21214,6 +21219,22 @@ fn longhorizon_show(root: &Path, format_json: bool) {
         );
     }
 
+    println!("\n待合并 ({}):", pending_merges.len());
+    if pending_merges.is_empty() {
+        println!("- 无");
+    }
+    for merge in pending_merges {
+        println!(
+            "- {} [{}] owner={} requested_by={} branch={} worktree={}",
+            merge["task_id"].as_str().unwrap_or("?"),
+            merge["status"].as_str().unwrap_or("?"),
+            merge["owner"].as_str().unwrap_or("?"),
+            merge["requested_by"].as_str().unwrap_or("?"),
+            merge["branch"].as_str().unwrap_or("?"),
+            merge["worktree"].as_str().unwrap_or("?"),
+        );
+    }
+
     println!("\n## 3. 阻塞与缺陷\n");
     println!("Blocked / 等待中的任务 ({}):", blocked_tasks.len());
     if blocked_tasks.is_empty() {
@@ -21266,10 +21287,11 @@ fn longhorizon_show(root: &Path, format_json: bool) {
     println!("\n## 4. 本轮下一步\n");
     match role {
         ExecutionRole::Master => {
-            println!("从以下三者中选一个并立即执行，不要以 ACK 或\"已读\"结束本轮：");
+            println!("从以下四项中选一项并立即执行，不要以 ACK 或\"已读\"结束本轮：");
             println!("1. 派发 ready 工作给空闲 worker（优先消除空闲产能）；");
             println!("2. 解决一个 blocker 或介入一个失联 worker；");
-            println!("3. 用证据宣告某个阶段完成，并推动 verify / merge / close worktree。");
+            println!("3. 合并一个 pending merge（accepted 任务）并记录 collab task integrated，再关闭 worktree；");
+            println!("4. 用证据宣告某个阶段完成，并推动 verify / merge / close worktree。");
             println!("\n若确为外部门禁（需人类批准的不可逆操作、发布、成本、新范围）：");
             println!("  collab master wake hold --reason \"<门禁与解除条件>\" --ttl-seconds <n>");
         }

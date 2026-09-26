@@ -20652,6 +20652,60 @@ esac
 }
 
 #[test]
+fn longhorizon_show_lists_daemon_registered_pending_merges() {
+    let root = temp_root("longhorizon-pending-merges");
+    fs::create_dir_all(root.join(".appsdk-control")).unwrap();
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_collab = fake_bin.join("collab");
+    fs::write(
+        &fake_collab,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "status --all")
+    printf '%s\n' '{"workers":[{"id":"master-peer","active_task":null,"endpoint_live":true,"identity_valid":true,"suspected_offline":false,"agent_state":"waiting"}],"tasks":[],"subagents":[],"pending_merges":[{"task_id":"task-merge-1","owner":"worker-a","requested_by":"master-peer","requested_at":"2026-09-25T00:00:00Z","status":"accepted","branch":"codex/merge-1","worktree":"playground/merge-1"}]}'
+    ;;
+  "*")
+    exit 64
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let text = Command::new(binary())
+        .args(["longhorizon", "show"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("待合并"));
+    assert!(stdout.contains("task-merge-1"));
+    assert!(stdout.contains("codex/merge-1"));
+
+    let json_res = Command::new(binary())
+        .args(["longhorizon", "show", "--json"])
+        .current_dir(&root)
+        .env("PATH", &fake_bin)
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(json_res.status.success());
+    let payload: Value = serde_json::from_slice(&json_res.stdout).unwrap();
+    assert_eq!(payload["pending_merges"][0]["task_id"], "task-merge-1");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn longhorizon_show_never_upgrades_worker_or_unknown_to_master() {
     let root = temp_root("longhorizon-role-projection");
     fs::create_dir_all(&root).unwrap();

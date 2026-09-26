@@ -9818,6 +9818,7 @@ fn handle_task_review(
     ];
     let mut pending_notification = None;
     let mut notification_missing = false;
+    let mut merge_pending_registered = false;
     if accept {
         // A merge obligation exists only when a live master owns the merge. In
         // a master-less project the owner keeps the plain self-integration
@@ -9847,6 +9848,7 @@ fn handle_task_review(
                 candidate_commit,
             };
             events.push(Event::MergeRequested { request });
+            merge_pending_registered = true;
             if master_id != worker_id {
                 let message_id = gen_msg_id();
                 events.push(Event::Sent {
@@ -9919,7 +9921,7 @@ fn handle_task_review(
         "status": reviewed.status,
         "reviewer": worker_id,
         "evidence": evidence,
-        "merge_pending": accept,
+        "merge_pending": merge_pending_registered,
         "next_action": reviewed.next_step,
     });
     if notification_missing {
@@ -9968,6 +9970,21 @@ fn handle_task_integrated(
         return Resp::err("task integrated requires task owner or live master authority");
     }
     if st.pending_merges.contains_key(&task_id) {
+        let request = st.pending_merges.get(&task_id).cloned().unwrap();
+        // A pending merge binds the obligation to the exact delivered commit.
+        // If that candidate was never resolved, the obligation is unprovable
+        // and must fail closed until it is re-bound (rework + re-deliver).
+        if request.candidate_commit.is_none() {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "candidate_commit": None::<String>,
+                    "rule": "this pending merge has no bound candidate commit; rework the task and re-deliver with a resolvable worktree/branch so the accepted candidate can be proven on refs/heads/main before integration",
+                }),
+            );
+        }
         let is_live_master = live_master_id(server, &st)
             .ok()
             .flatten()
@@ -10008,6 +10025,17 @@ fn handle_task_integrated(
     // integration must prove that candidate itself reached main; an unrelated
     // pre-existing main commit must not satisfy the obligation.
     if let Some(request) = st.pending_merges.get(&task_id) {
+        if request.candidate_commit.is_none() {
+            return Resp::err_data(
+                "TASK_MERGE_PENDING",
+                json!({
+                    "task_id": task_id,
+                    "candidate_commit": None::<String>,
+                    "provided": commit,
+                    "rule": "the pending merge carries no bound candidate commit; rework and re-deliver with a resolvable candidate before integration",
+                }),
+            );
+        }
         if let Some(candidate) = request.candidate_commit.as_deref() {
             match commit_is_integrated_in_main(&server.root, candidate) {
                 Ok(true) => {}

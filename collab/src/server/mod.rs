@@ -9810,6 +9810,14 @@ fn handle_task_review(
                         retry_attempted: false,
                     },
                 });
+                // A pending merge is the master's blocking obligation: wake it
+                // immediately instead of waiting for the batched window, while
+                // pending_merges stays the durable fallback.
+                events.push(Event::DeliveryMode {
+                    msg_id: message_id.clone(),
+                    mode: "immediate".into(),
+                    source_thread_id: None,
+                });
                 if let Some(subscription) =
                     st.matching_subscription(&master_id, "direct-message", None, now)
                 {

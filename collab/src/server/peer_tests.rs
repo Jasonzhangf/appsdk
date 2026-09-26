@@ -808,6 +808,18 @@ fn review_accept_registers_daemon_owned_pending_merge_with_master_notification()
         notified,
         "review --accept must create a durable merge-pending notice for the live master"
     );
+    let notice_id = state
+        .msgs
+        .values()
+        .find(|message| message.subject.as_deref() == Some("merge-pending:task"))
+        .expect("merge-pending notice")
+        .id
+        .clone();
+    assert_eq!(
+        state.delivery_modes.get(&notice_id).map(String::as_str),
+        Some("immediate"),
+        "the master's merge obligation must wake immediately, not wait for the batch window"
+    );
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }

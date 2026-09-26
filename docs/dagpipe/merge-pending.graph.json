@@ -1,6 +1,7 @@
 {
   "id": "appsdk-collab-merge-pending",
   "version": "0.1.0",
+  "description": "Happy-path SESE slice of the merge obligation: register -> publish -> remind -> integrate -> resolve -> close. The other resolution terminals (review rework, accepted->rework, authorized force close) converge on the same Event::MergeResolved sink and are enumerated in docs/collab-merge-pending-state-machine.md; they are not separate graph nodes because SESE forbids converging multi-entry nodes.",
   "inputs": [
     {
       "id": "task_review_accept",

@@ -23055,7 +23055,7 @@ fn optional_test_governance_off_is_compatible_and_compile_does_not_depend_on_tes
 }
 
 #[test]
-fn optional_test_governance_selection_requires_scope_and_scenarios() {
+fn optional_test_governance_selection_requires_scope_semantic_graph_and_scenarios() {
     let root = temp_root("optional-test-governance-required-fields");
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
@@ -23084,6 +23084,17 @@ fn optional_test_governance_selection_requires_scope_and_scenarios() {
 
     fs::write(&manifest, r#"{"schema_version":1,"mode":"selected","objects":[{"object_id":"app-core","graph_id":"app-core","graph_version":"1","scope_confirmation":{"reference":"ref","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z"},"scenarios":[]}],"trusted_runners":[{"runner_ref":"runner","entrypoint":"entry","owner":"app-core"}],"effect_authorizations":[]}"#.to_owned() + "\n")
         .unwrap();
+    let rejected_missing_graph = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected_missing_graph.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_missing_graph.stderr)
+            .contains("TEST_GOVERNANCE_SEMANTIC_GRAPH_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected_missing_graph.stderr)
+    );
+
+    fs::write(&manifest, r#"{"schema_version":1,"mode":"selected","objects":[{"object_id":"app-core","graph_id":"app-core","graph_version":"1","semantic_graph":{"entry":"trigger","exit":"terminal","nodes":[{"id":"trigger","label":"收到外部订单请求"},{"id":"terminal","label":"完成验收并交付结果"}],"edges":[{"from":"trigger","to":"terminal"}]},"scope_confirmation":{"reference":"ref","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z"},"scenarios":[]}],"trusted_runners":[{"runner_ref":"runner","entrypoint":"entry","owner":"app-core"}],"effect_authorizations":[]}"#.to_owned() + "\n")
+        .unwrap();
     let rejected_empty = run(&["verify", "--test-admission", root_text]);
     assert!(!rejected_empty.status.success());
     assert!(
@@ -23092,6 +23103,189 @@ fn optional_test_governance_selection_requires_scope_and_scenarios() {
         "stderr={}",
         String::from_utf8_lossy(&rejected_empty.stderr)
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn optional_test_governance_rejects_invalid_semantic_graphs_and_unmapped_scenarios() {
+    let root = temp_root("optional-test-governance-semantic-graph-rejection");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let project = root.join(".appsdk/project.json");
+    let mut project_value: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    project_value["test_governance"] = serde_json::json!({
+        "mode": "selected",
+        "manifest": ".appsdk/test-governance.json"
+    });
+    fs::write(
+        &project,
+        serde_json::to_string_pretty(&project_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let manifest_path = root.join(".appsdk/test-governance.json");
+    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    let schema_manifest = serde_json::json!({
+        "schema_version": 1,
+        "mode": "selected",
+        "objects": [{
+            "object_id": "app-core",
+            "graph_id": "app-core",
+            "graph_version": "1",
+            "semantic_graph": {
+                "entry": "trigger",
+                "exit": "terminal",
+                "nodes": [
+                    {"id": "trigger", "label": "收到外部订单请求"},
+                    {"id": "terminal", "label": "完成验收并交付结果"}
+                ],
+                "edges": [
+                    {"from": "trigger", "to": "terminal"}
+                ]
+            },
+            "scope_confirmation": {
+                "reference": "evidence://scope/app-core",
+                "confirmed_by": "test",
+                "confirmed_at": "2026-01-01T00:00:00Z"
+            },
+            "scenarios": [{
+                "scenario_id": "scenario-1",
+                "semantic_name": "happy path",
+                "entrypoint": "POST /orders",
+                "preconditions": ["isolated fixture"],
+                "stimulus": "submit order",
+                "observable_assertions": ["returns accepted"],
+                "path_node_ids": ["trigger", "terminal"],
+                "expected_effects": ["order created"],
+                "cleanup": "remove fixture",
+                "runner_ref": "runner-1",
+                "classification": ["normal"]
+            }]
+        }],
+        "trusted_runners": [{
+            "runner_ref": "runner-1",
+            "entrypoint": "POST /orders",
+            "owner": "app-core"
+        }],
+        "effect_authorizations": []
+    });
+    let write_manifest = |manifest: &Value| {
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(manifest).unwrap() + "\n",
+        )
+        .unwrap();
+    };
+    write_manifest(&schema_manifest);
+    let accepted = run(&["verify", "--test-admission", root_text]);
+    let accepted_stderr = String::from_utf8_lossy(&accepted.stderr);
+    assert!(
+        !accepted_stderr.contains("TEST_GOVERNANCE_SEMANTIC_GRAPH")
+            && !accepted_stderr.contains("INVALID_TEST_GOVERNANCE_MANIFEST"),
+        "valid semantic graph must pass manifest validation; stderr={}",
+        accepted_stderr
+    );
+    let accepted_report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted_report["objects"][0]["status"], "blocked");
+
+    let mut missing_graph = schema_manifest.clone();
+    missing_graph["objects"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("semantic_graph");
+    write_manifest(&missing_graph);
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("TEST_GOVERNANCE_SEMANTIC_GRAPH_REQUIRED"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let mut non_chinese = schema_manifest.clone();
+    non_chinese["objects"][0]["semantic_graph"]["nodes"][0]["label"] =
+        Value::String("submit order".into());
+    write_manifest(&non_chinese);
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("TEST_GOVERNANCE_SEMANTIC_GRAPH_NODE_LABEL_NOT_CHINESE"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let mut multi_entry = schema_manifest.clone();
+    multi_entry["objects"][0]["semantic_graph"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "second-source",
+            "label": "第二个外部触发"
+        }));
+    multi_entry["objects"][0]["semantic_graph"]["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "from": "second-source",
+            "to": "terminal"
+        }));
+    write_manifest(&multi_entry);
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("TEST_GOVERNANCE_SEMANTIC_GRAPH_NOT_SESE_MULTI_ENTRY"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let mut multi_exit = schema_manifest.clone();
+    multi_exit["objects"][0]["semantic_graph"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "second-exit",
+            "label": "另一个接受退出"
+        }));
+    multi_exit["objects"][0]["semantic_graph"]["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "from": "trigger",
+            "to": "second-exit"
+        }));
+    write_manifest(&multi_exit);
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("TEST_GOVERNANCE_SEMANTIC_GRAPH_NOT_SESE_MULTI_EXIT"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let mut unmapped = schema_manifest.clone();
+    unmapped["objects"][0]["scenarios"][0]["path_node_ids"] =
+        serde_json::json!(["trigger", "missing-node"]);
+    write_manifest(&unmapped);
+    let rejected = run(&["verify", "--test-admission", root_text]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("TEST_GOVERNANCE_SCENARIO_PATH_NODE_UNDEFINED"),
+        "stderr={}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let schema: Value = serde_json::from_slice(include_bytes!(
+        "../../contracts/test-governance.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(!validator.is_valid(&missing_graph));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -23122,6 +23316,17 @@ fn optional_test_governance_runner_grammar_matches_contract_and_schema() {
             "object_id": "app-core",
             "graph_id": "app-core",
             "graph_version": "1",
+            "semantic_graph": {
+                "entry": "trigger",
+                "exit": "terminal",
+                "nodes": [
+                    {"id": "trigger", "label": "收到外部订单请求"},
+                    {"id": "terminal", "label": "完成验收并交付结果"}
+                ],
+                "edges": [
+                    {"from": "trigger", "to": "terminal"}
+                ]
+            },
             "scope_confirmation": {
                 "reference": "evidence://scope/app-core",
                 "confirmed_by": "test",
@@ -23134,6 +23339,7 @@ fn optional_test_governance_runner_grammar_matches_contract_and_schema() {
                 "preconditions": ["isolated fixture"],
                 "stimulus": "submit order",
                 "observable_assertions": ["returns accepted"],
+                "path_node_ids": ["trigger", "terminal"],
                 "expected_effects": ["order created"],
                 "cleanup": "remove fixture",
                 "runner_ref": "runner-ref",
@@ -23237,6 +23443,17 @@ fn optional_test_governance_effect_requires_authorization_and_passed_evidence_cl
                 "object_id": "app-core",
                 "graph_id": "app-core",
                 "graph_version": "1",
+                "semantic_graph": {
+                    "entry": "trigger",
+                    "exit": "terminal",
+                    "nodes": [
+                        {"id": "trigger", "label": "收到外部订单请求"},
+                        {"id": "terminal", "label": "完成验收并交付结果"}
+                    ],
+                    "edges": [
+                        {"from": "trigger", "to": "terminal"}
+                    ]
+                },
                 "scope_confirmation": {
                     "reference": "evidence://scope/app-core",
                     "confirmed_by": "test",
@@ -23249,6 +23466,7 @@ fn optional_test_governance_effect_requires_authorization_and_passed_evidence_cl
                     "preconditions": ["isolated fixture"],
                     "stimulus": "submit order",
                     "observable_assertions": ["returns accepted"],
+                    "path_node_ids": ["trigger", "terminal"],
                     "expected_effects": ["order created"],
                     "cleanup": "remove fixture",
                     "runner_ref": "runner-1",
@@ -23391,6 +23609,17 @@ fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() 
             "object_id": "app-core",
             "graph_id": "app-core",
             "graph_version": "1",
+            "semantic_graph": {
+                "entry": "trigger",
+                "exit": "terminal",
+                "nodes": [
+                    {"id": "trigger", "label": "收到外部订单请求"},
+                    {"id": "terminal", "label": "完成验收并交付结果"}
+                ],
+                "edges": [
+                    {"from": "trigger", "to": "terminal"}
+                ]
+            },
             "scope_confirmation": {
                 "reference": "evidence://scope/app-core",
                 "confirmed_by": "test",
@@ -23403,6 +23632,7 @@ fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() 
                 "preconditions": ["isolated fixture"],
                 "stimulus": "submit order",
                 "observable_assertions": ["returns accepted"],
+                "path_node_ids": ["trigger", "terminal"],
                 "expected_effects": ["order created"],
                 "cleanup": "remove fixture",
                 "runner_ref": "runner-1",

@@ -17,6 +17,20 @@ runner references, and effect authorizations. AppSDK never executes shell
 strings from governance records. Scenarios refer to runners by stable
 `runner_ref`; the actual project test entrypoint remains project-owned.
 
+## Semantic graph contract
+
+Every selected object must declare a Chinese business semantic graph in
+`semantic_graph`. The graph is a single-source/single-sink (SESE) shape on
+business states or observable behaviors: one `entry` node for the external
+trigger, one `exit` node for the acceptable terminal state, Chinese business
+labels on every node, and edges that keep every node reachable from `entry`
+and co-reachable to `exit`.
+
+Each scenario must map onto that graph with `path_node_ids`, a non-empty
+traversable path that starts at `entry` and ends at `exit`. Missing, empty,
+non-Chinese, multi-entry/multi-exit, unreachable, or unbound scenario paths
+are explicit validation failures and block selected-object admission.
+
 ## Result records
 
 Each selected scenario has a result record at

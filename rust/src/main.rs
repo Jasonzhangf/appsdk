@@ -2159,6 +2159,222 @@ fn test_governance_datetime(value: &str, error: &str) -> Result<DateTime<Utc>, S
         .map_err(|_| error.to_string())
 }
 
+struct TestGovernanceSemanticGraph {
+    entry: String,
+    exit: String,
+    nodes: BTreeSet<String>,
+    edges: BTreeSet<(String, String)>,
+}
+
+fn test_governance_has_chinese(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character,
+            '\u{3400}'..='\u{4DBF}'
+                | '\u{4E00}'..='\u{9FFF}'
+                | '\u{F900}'..='\u{FAFF}'
+        )
+    })
+}
+
+fn test_governance_semantic_graph(
+    object: &Value,
+    object_id: &str,
+) -> Result<TestGovernanceSemanticGraph, String> {
+    let semantic_graph = object
+        .get("semantic_graph")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| "TEST_GOVERNANCE_SEMANTIC_GRAPH_REQUIRED".to_string())?;
+    let entry = test_governance_string(
+        semantic_graph,
+        "/entry",
+        &format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_ENTRY_REQUIRED:{object_id}"),
+    )?
+    .to_string();
+    let exit = test_governance_string(
+        semantic_graph,
+        "/exit",
+        &format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_EXIT_REQUIRED:{object_id}"),
+    )?
+    .to_string();
+    let nodes = semantic_graph
+        .get("nodes")
+        .and_then(Value::as_array)
+        .filter(|nodes| !nodes.is_empty())
+        .ok_or_else(|| format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_NODES_REQUIRED:{object_id}"))?;
+    let mut node_ids = BTreeSet::new();
+    for node in nodes {
+        let node_id = test_governance_string(
+            node,
+            "/id",
+            &format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_NODE_INVALID:{object_id}"),
+        )?
+        .to_string();
+        let label = test_governance_string(
+            node,
+            "/label",
+            &format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_NODE_LABEL_REQUIRED:{object_id}:{node_id}"),
+        )?;
+        if !test_governance_has_chinese(label) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SEMANTIC_GRAPH_NODE_LABEL_NOT_CHINESE:{object_id}:{node_id}"
+            ));
+        }
+        if !node_ids.insert(node_id.clone()) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SEMANTIC_GRAPH_NODE_DUPLICATE:{object_id}:{node_id}"
+            ));
+        }
+    }
+    if !node_ids.contains(&entry) {
+        return Err(format!(
+            "TEST_GOVERNANCE_SEMANTIC_GRAPH_ENTRY_UNDEFINED:{object_id}:{entry}"
+        ));
+    }
+    if !node_ids.contains(&exit) {
+        return Err(format!(
+            "TEST_GOVERNANCE_SEMANTIC_GRAPH_EXIT_UNDEFINED:{object_id}:{exit}"
+        ));
+    }
+    let edges = semantic_graph
+        .get("edges")
+        .and_then(Value::as_array)
+        .filter(|edges| !edges.is_empty())
+        .ok_or_else(|| format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_EDGES_REQUIRED:{object_id}"))?;
+    let mut edge_set = BTreeSet::new();
+    for edge in edges {
+        let from = test_governance_string(
+            edge,
+            "/from",
+            &format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_EDGE_INVALID:{object_id}"),
+        )?
+        .to_string();
+        let to = test_governance_string(
+            edge,
+            "/to",
+            &format!("TEST_GOVERNANCE_SEMANTIC_GRAPH_EDGE_INVALID:{object_id}"),
+        )?
+        .to_string();
+        if !node_ids.contains(&from) || !node_ids.contains(&to) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SEMANTIC_GRAPH_EDGE_UNDEFINED:{object_id}:{from}->{to}"
+            ));
+        }
+        edge_set.insert((from, to));
+    }
+    let indegree_zero = node_ids
+        .iter()
+        .filter(|node_id| !edge_set.iter().any(|(_, to)| to == *node_id))
+        .collect::<Vec<_>>();
+    let outdegree_zero = node_ids
+        .iter()
+        .filter(|node_id| !edge_set.iter().any(|(from, _)| from == *node_id))
+        .collect::<Vec<_>>();
+    if indegree_zero.len() != 1 {
+        return Err(format!(
+            "TEST_GOVERNANCE_SEMANTIC_GRAPH_NOT_SESE_MULTI_ENTRY:{object_id}"
+        ));
+    }
+    if outdegree_zero.len() != 1 {
+        return Err(format!(
+            "TEST_GOVERNANCE_SEMANTIC_GRAPH_NOT_SESE_MULTI_EXIT:{object_id}"
+        ));
+    }
+    if indegree_zero[0] != &entry || outdegree_zero[0] != &exit {
+        return Err(format!(
+            "TEST_GOVERNANCE_SEMANTIC_GRAPH_ENTRY_EXIT_MISMATCH:{object_id}"
+        ));
+    }
+
+    let mut reachable = BTreeSet::new();
+    reachable.insert(entry.clone());
+    let mut frontier = vec![entry.clone()];
+    while let Some(node) = frontier.pop() {
+        for (_, to) in edge_set.iter().filter(|(from, _)| *from == node) {
+            if reachable.insert(to.clone()) {
+                frontier.push(to.clone());
+            }
+        }
+    }
+    let mut reaches_exit = BTreeSet::new();
+    reaches_exit.insert(exit.clone());
+    let mut frontier = vec![exit.clone()];
+    while let Some(node) = frontier.pop() {
+        for (from, _) in edge_set.iter().filter(|(_, to)| *to == node) {
+            if reaches_exit.insert(from.clone()) {
+                frontier.push(from.clone());
+            }
+        }
+    }
+    for node_id in &node_ids {
+        if !reachable.contains(node_id) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SEMANTIC_GRAPH_UNREACHABLE_NODE:{object_id}:{node_id}"
+            ));
+        }
+        if !reaches_exit.contains(node_id) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SEMANTIC_GRAPH_NODE_NO_EXIT:{object_id}:{node_id}"
+            ));
+        }
+    }
+    Ok(TestGovernanceSemanticGraph {
+        entry,
+        exit,
+        nodes: node_ids,
+        edges: edge_set,
+    })
+}
+
+fn test_governance_scenario_semantic_path(
+    scenario: &Value,
+    object_id: &str,
+    scenario_id: &str,
+    graph: &TestGovernanceSemanticGraph,
+) -> Result<(), String> {
+    let path = scenario
+        .get("path_node_ids")
+        .and_then(Value::as_array)
+        .filter(|path| path.len() >= 2)
+        .ok_or_else(|| {
+            format!("TEST_GOVERNANCE_SCENARIO_PATH_REQUIRED:{object_id}:{scenario_id}")
+        })?;
+    let mut node_ids = Vec::new();
+    for (index, value) in path.iter().enumerate() {
+        let node_id = value
+            .as_str()
+            .filter(|node_id| !node_id.is_empty())
+            .ok_or_else(|| {
+                format!("TEST_GOVERNANCE_SCENARIO_PATH_INVALID:{object_id}:{scenario_id}:{index}")
+            })?;
+        if !graph.nodes.contains(node_id) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SCENARIO_PATH_NODE_UNDEFINED:{object_id}:{scenario_id}:{node_id}"
+            ));
+        }
+        node_ids.push(node_id.to_string());
+    }
+    if node_ids.first() != Some(&graph.entry) {
+        return Err(format!(
+            "TEST_GOVERNANCE_SCENARIO_PATH_ENTRY_MISMATCH:{object_id}:{scenario_id}"
+        ));
+    }
+    if node_ids.last() != Some(&graph.exit) {
+        return Err(format!(
+            "TEST_GOVERNANCE_SCENARIO_PATH_EXIT_MISMATCH:{object_id}:{scenario_id}"
+        ));
+    }
+    for pair in node_ids.windows(2) {
+        if !graph.edges.contains(&(pair[0].clone(), pair[1].clone())) {
+            return Err(format!(
+                "TEST_GOVERNANCE_SCENARIO_PATH_EDGE_MISSING:{object_id}:{scenario_id}:{}->{}",
+                pair[0], pair[1]
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_test_governance_manifest(
     root: &Path,
     project: &Value,
@@ -2317,6 +2533,7 @@ fn validate_test_governance_manifest(
             )?,
             "INVALID_TEST_GOVERNANCE_SCOPE_CONFIRMATION",
         )?;
+        let semantic_graph = test_governance_semantic_graph(object, object_id)?;
         let scenarios = object
             .get("scenarios")
             .and_then(Value::as_array)
@@ -2358,6 +2575,12 @@ fn validate_test_governance_manifest(
             if !runner_refs.contains(runner_ref) {
                 return Err(format!("TEST_GOVERNANCE_RUNNER_NOT_TRUSTED:{}", runner_ref));
             }
+            test_governance_scenario_semantic_path(
+                scenario,
+                object_id,
+                scenario_id,
+                &semantic_graph,
+            )?;
             for field in ["/preconditions", "/observable_assertions"] {
                 let values = scenario
                     .get(field.trim_start_matches('/'))

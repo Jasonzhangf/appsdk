@@ -13,11 +13,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["object_id", "graph_id", "graph_version", "scope_confirmation", "scenarios"],
+        "required": ["object_id", "graph_id", "graph_version", "scope_confirmation", "semantic_graph", "scenarios"],
         "properties": {
           "object_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
           "graph_id": {"type": "string", "minLength": 1},
           "graph_version": {"type": "string", "minLength": 1},
+          "semantic_graph": {"$ref": "#/$defs/semantic_graph"},
           "scope_confirmation": {
             "type": "object",
             "additionalProperties": false,
@@ -66,6 +67,7 @@
         "preconditions",
         "stimulus",
         "observable_assertions",
+        "path_node_ids",
         "expected_effects",
         "cleanup",
         "runner_ref",
@@ -78,6 +80,7 @@
         "preconditions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "stimulus": {"type": "string", "minLength": 1},
         "observable_assertions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "path_node_ids": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
         "expected_effects": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "cleanup": {"type": "string", "minLength": 1},
         "runner_ref": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
@@ -95,6 +98,41 @@
           "then": {"required": ["effect_authorization_id"]}
         }
       ]
+    },
+    "semantic_graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry", "exit", "nodes", "edges"],
+      "properties": {
+        "entry": {"type": "string", "minLength": 1},
+        "exit": {"type": "string", "minLength": 1},
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "label": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to"],
+            "properties": {
+              "from": {"type": "string", "minLength": 1},
+              "to": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
     },
     "effect_authorization": {
       "type": "object",

@@ -1,0 +1,113 @@
+{
+  "id": "appsdk-collab-context",
+  "version": "0.1.0",
+  "inputs": [
+    {
+      "id": "context_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "resolve_context_root",
+      "operator": "appsdk.collab_context.resolve_root",
+      "operator_version": "1",
+      "inputs": ["context_request"],
+      "output": {"id": "resolved_scope", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "ensure_baseline",
+      "operator": "appsdk.collab_context.ensure_baseline",
+      "operator_version": "1",
+      "inputs": ["resolved_scope"],
+      "output": {"id": "baseline_ready", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "ensure_daemon",
+      "operator": "appsdk.collab_context.ensure_daemon",
+      "operator_version": "1",
+      "inputs": ["baseline_ready"],
+      "output": {"id": "daemon_ready", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "load_identity",
+      "operator": "appsdk.collab_context.load_identity",
+      "operator_version": "1",
+      "inputs": ["daemon_ready"],
+      "output": {"id": "identity_token", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_token",
+      "operator": "appsdk.collab_context.verify_token",
+      "operator_version": "1",
+      "inputs": ["identity_token"],
+      "output": {"id": "verified_identity", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "ensure_registration",
+      "operator": "appsdk.collab_context.ensure_registration",
+      "operator_version": "1",
+      "inputs": ["verified_identity"],
+      "output": {"id": "registered_route", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "restore_default_lease",
+      "operator": "appsdk.collab_context.restore_default_lease",
+      "operator_version": "1",
+      "inputs": ["registered_route"],
+      "output": {"id": "notify_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "find_master",
+      "operator": "appsdk.collab_context.find_master",
+      "operator_version": "1",
+      "inputs": ["notify_state"],
+      "output": {"id": "master_grant", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_snapshot",
+      "operator": "appsdk.collab_context.emit_snapshot",
+      "operator_version": "1",
+      "inputs": ["master_grant"],
+      "output": {"id": "state_snapshot", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "resolve_context_root", "to": "ensure_baseline", "arc_id": "resolved_scope"},
+    {"from": "ensure_baseline", "to": "ensure_daemon", "arc_id": "baseline_ready"},
+    {"from": "ensure_daemon", "to": "load_identity", "arc_id": "daemon_ready"},
+    {"from": "load_identity", "to": "verify_token", "arc_id": "identity_token"},
+    {"from": "verify_token", "to": "ensure_registration", "arc_id": "verified_identity"},
+    {"from": "ensure_registration", "to": "restore_default_lease", "arc_id": "registered_route"},
+    {"from": "restore_default_lease", "to": "find_master", "arc_id": "notify_state"},
+    {"from": "find_master", "to": "emit_snapshot", "arc_id": "master_grant"}
+  ],
+  "outputs": ["state_snapshot"]
+}

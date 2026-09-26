@@ -331,13 +331,14 @@ and explicit `close <id>`.
 tools when this session lists them. The `collab` CLI is also valid.
 If MCP is missing, unsupported, aborted, or unknown, run the same
 actions with the CLI in the inherited project cwd:
-`collab init`, `collab recv`, `collab ack <id>` / `collab ack --all`,
+`collab context`, `collab recv`, `collab ack <id>` / `collab ack --all`,
 `collab msg <id>`,
 `collab inbox`, `collab worker status [id]`, `collab subagent ready|working <id>`,
 `collab sendmessage --to <parent> --subject <topic> "<body>"`.
 The CLI is a complete protocol path. Missing MCP is not a blocker and
-does not justify skipping receive or waiting. Do not repeat `collab init`
-after it already succeeded. Child results go to the parent with
+does not justify skipping receive or waiting. `collab context` is the only
+bootstrap entry; do not run `collab init` or `collab whoami` as an agent.
+Child results go to the parent with
 `collab sendmessage`, not the parent-only `subagent send` action.
 No ACK loops, automatic respawn or redispatch.
 
@@ -725,13 +726,13 @@ is an observation, never task or control truth.
 
 | Intent | Command |
 |---|---|
+| Bootstrap, recover, or re-locate this agent | `collab context` |
 | Notify a peer now | `collab sendmessage --to <peer> --subject <short-topic> "<original message>"` |
 | Receive and consume notifications | `collab recv` |
 | Read one notification without consuming | `collab msg <notification-id>` |
 | List unread messages | `collab inbox` |
 | Recover an already-delivered notification | `collab ack <id>` or `collab ack --all` |
 | Inspect worker health and notification status | `collab worker status [id]` |
-| Automatic bootstrap + authoritative context + role operations | `collab context` |
 | List peers | `collab who` |
 | Check own subscriptions | `collab notify status` |
 | Inspect live master | `collab master status` |
@@ -746,6 +747,45 @@ urgency against the current task. When selecting the notice, run
 `collab msg <notification-id>`, read durable detail, and execute the actionable
 request inside this Agent's scope. Do not stop at ACK or waiting; mailbox truth
 persists.
+
+### Situation -> action (one entry)
+
+`collab context` is the single agent entry. It resolves the canonical root,
+creates a missing baseline, starts a stopped daemon, restores identity and
+registration, re-arms the default direct-message lease, and returns the
+authoritative snapshot plus the current role's `operations`.
+
+| Situation | Do this | Never do this |
+|---|---|---|
+| First time in a project | `collab context` | `collab init`, `collab whoami` |
+| Thread/session changed, or after daemon restart | `collab context` (rebinds in place) | `collab worker recover`, `collab down`/`up` |
+| Token mismatch, `PROJECT_SCOPE_UNKNOWN`, or route loss | preserve the exact error, run `collab context` from the canonical main tree | edit token/route state, copy identity, reset the project |
+| Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
+| Unsure whether a live master exists | `collab master status` from the canonical root | infer "no master" from a failed context or a missing `who.master` |
+| Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
+
+Only these are operator-facing diagnostics and are not part of the agent flow:
+`collab init`, `collab whoami`, `collab worker recover`, `collab route resolve`,
+`collab down`/`up`, and any direct transport or socket call.
+
+### Context 状态与终点（DAGpipe：单源单汇）
+
+`context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
+DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动守护 → 装载/创建身份
+→ 校验令牌 → 注册/重建对端 → 恢复默认订阅 → 查找主控 → 输出快照。失败终点显式
+报错，不允许把失败当作成功快照：
+
+| 状态/终态 | 含义 | Agent 动作 |
+| --- | --- | --- |
+| `state_snapshot` | 引导成功；含 role/operations/master/peers/inbox/worktrees/tasks | 读快照执行当前角色的 `operations` |
+| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根 | 保留错误，改在 canonical main 再跑 `collab context` |
+| 拒绝在 playground 创建基线 | 在 worktree 内引导 | 回到项目 main 根执行，不删旧身份 |
+| `TOKEN_MISMATCH` / `IDENTITY_REBIND_UNPROVEN` | 身份无法验真 | 保留错误并报告 live master，不复制 token、不 mint 新身份 |
+| 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
+
+完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
+机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`
+（`dagpipe graph validate`）。
 
 ## Initialize once
 

@@ -25,13 +25,13 @@ fn tools() -> Value {
         tool("collab_subagent", "Parent manages children; child uses ready/working and sends results via collab_sendmessage. status includes mailbox, keepalive and notification history. snapshot is explicit screen-tail read only, not a health probe. Observers without an App Server push channel must check status/mailbox themselves. rearm requires an explicit operator request after exhaustion. start accepts optional runtime=codex to override ~/.appsdk/config.toml. dispatch assigns a real task through the live master scheduler and is idempotent by request_id.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close"]},"id":{"type":"string"},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
         tool(
             "collab_init",
-            "Initialize/register this live project identity. Supply worker_id only when intentionally creating/selecting a peer because no persisted session/thread anchor matches this runtime.",
+            "Operator-only. Prefer `collab_context`, which performs initialization, recovery, and registration automatically. Use this only for explicit operator-driven project initialization or an intentional peer selection via worker_id.",
             json!({"worker_id":{"type":"string","minLength":1}}),
             &[]
         ),
         tool(
             "collab_whoami",
-            "Return the authenticated Collab identity.",
+            "Operator-only diagnostic. Returns the authenticated Collab identity; `collab_context` already restores and returns identity automatically.",
             json!({}),
             &[]
         ),
@@ -151,7 +151,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_context",
-            "Return one read-only authoritative snapshot after a notification or restart.",
+            "The single agent bootstrap entry. Automatically resolves the canonical project root, creates a missing baseline, starts a stopped daemon, restores identity and registration, re-arms the default direct-message lease unless the owner explicitly unsubscribed, and returns the authoritative snapshot plus the current role's operations. Idempotent; call it on bootstrap, thread/session change, daemon restart, identity mismatch, or route loss. Do not use init, whoami, worker recover, route resolve, or down/up for this.",
             json!({}),
             &[]
         ),

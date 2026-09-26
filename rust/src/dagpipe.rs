@@ -833,6 +833,7 @@ fn notification_event_has_key(event: &Value, key: &str) -> bool {
 
 fn validate_delivery_failures(events: &[Value], key: &str) -> Result<(), String> {
     let mut pending: Option<(String, String)> = None;
+    let mut terminal_seen = false;
     for event in events {
         let kind = event["kind"].as_str();
         if !matches!(
@@ -862,14 +863,13 @@ fn validate_delivery_failures(events: &[Value], key: &str) -> Result<(), String>
             | Some("notification.batch_emitted")
             | Some("notification.superseded") => {
                 pending = None;
+                terminal_seen = true;
             }
             Some("notification.delivery_failed") => {
                 let operation = event["data"]["operation"]
                     .as_str()
                     .ok_or_else(|| format!("NOTIFICATION_OBJECT_FAILURE_OPERATION_MISSING:{key}"))?
                     .to_owned();
-                // Adapter-selection failures legitimately have no attemptId;
-                // only an attempt-bearing failure must match the pending attempt.
                 if let Some(attempt_id) = event["data"]["attemptId"].as_str() {
                     if pending.as_ref() != Some(&(attempt_id.to_owned(), operation.clone())) {
                         return Err(format!(
@@ -877,6 +877,13 @@ fn validate_delivery_failures(events: &[Value], key: &str) -> Result<(), String>
                         ));
                     }
                     pending = None;
+                } else if pending.is_some() || terminal_seen {
+                    // Pre-adapter failures legitimately omit attemptId, but only
+                    // before any delivery attempt has started and before a
+                    // terminal receipt has been recorded for this object.
+                    return Err(format!(
+                        "NOTIFICATION_OBJECT_DELIVERY_FAILURE_MISMATCH:{key}"
+                    ));
                 }
             }
             _ => {}

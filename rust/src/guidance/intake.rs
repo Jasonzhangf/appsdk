@@ -242,7 +242,7 @@ fn bootstrap_setup(root: &Path, project: &Value, selected_module: &Value, task: 
         .map(|source| {
             serde_json::json!({
                 "path": source["path"],
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": env!("APPSDK_VERSION"),
                 "digest": source["digest"],
                 "disposition": "standard_reference",
                 "enforcement": "advisory"

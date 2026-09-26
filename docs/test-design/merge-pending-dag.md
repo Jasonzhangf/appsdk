@@ -60,5 +60,5 @@
 | T9 master-only | `live4`：peer-a `task integrated` 与 `task close` 均返回 `TASK_MERGE_PENDING`；peer-b（master）`integrated` 成功后才可 close |
 | T9 candidate-bound | `live5`：master 用无关 main SHA `integrated` 被 `TASK_MERGE_PENDING` 拒绝；真实候选 `dc26aa0` 合入 main 后 `integrated` 成功 |
 | T10 | `kill -TERM <server.pid>` 后 `collab up` 重启隔离 daemon；`live-merge-task2` 仍出现在 `pending_merges`，close 仍返回 `TASK_MERGE_PENDING` |
-| T11 | `scripts/install-global-collab.sh` → `collab 0.2.0123` sha256 `2fc03fb9…`；`scripts/install-global-appsdk.sh` → `appsdk 0.1.7`；真实 daemon PID 52134 加载新 binary，`collab status --all` 含 `pending_merges`，`appsdk longhorizon show` 渲染 `待合并` |
+| T11 | `scripts/install-global-collab.sh` → `collab 0.2.0123` sha256 `2fc03fb9…`；`scripts/install-global-appsdk.sh` → `appsdk 0.1.0007`；真实 daemon PID 52134 加载新 binary，`collab status --all` 含 `pending_merges`，`appsdk longhorizon show` 渲染 `待合并` |
 | T12 | Codex/AGY review r1 PASS；r2-r4 逐轮修 P1/P2（immediate wake、mailbox-only repair、stale supersede、master-only、unknown fail-closed、candidate-bound、wake failure surface）后重跑；r5 为最终候选 |

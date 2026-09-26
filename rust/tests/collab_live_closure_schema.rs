@@ -120,7 +120,7 @@ fn promotion() -> Value {
         "merged_commit": "merged-1",
         "source_commit": "source-1",
         "previous_active_version": null,
-        "new_active_version": "0.1.7",
+        "new_active_version": "0.1.0007",
         "review_id": "review-1",
         "evidence_ids": ["evidence-1"],
         "required_gate_results": [

@@ -32,13 +32,13 @@ run_install_test() {
   mkdir -p \
     "$fake_bin" \
     "$test_root/home/.local/bin" \
-    "$test_root/home/.local/lib/appsdk/0.1.7" \
-    "$test_root/home/.local/share/appsdk/0.1.7" \
+    "$test_root/home/.local/lib/appsdk/0.1.0007" \
+    "$test_root/home/.local/share/appsdk/0.1.0007" \
     "$test_root/home/.local/share/appsdk/not-appsdk"
   cp "$fixture" "$test_root/fixture"
-  printf '%s\n' 'keep this unrelated file' > "$test_root/home/.local/lib/appsdk/0.1.7/keep.txt"
+  printf '%s\n' 'keep this unrelated file' > "$test_root/home/.local/lib/appsdk/0.1.0007/keep.txt"
   cp "$repo_root/contracts/sdk-bundle.manifest.json" \
-    "$test_root/home/.local/share/appsdk/0.1.7/sdk-bundle.manifest.json"
+    "$test_root/home/.local/share/appsdk/0.1.0007/sdk-bundle.manifest.json"
   printf '%s\n' 'keep this unrelated bundle file' \
     > "$test_root/home/.local/share/appsdk/not-appsdk/keep.txt"
 
@@ -62,7 +62,7 @@ FAKE_CARGO
 
   cp "$test_root/fixture" "$test_root/home/.local/bin/appsdk"
   cp "$repo_root/rust/target/release/project-memory" "$test_root/home/.local/bin/project-memory"
-  cp "$test_root/fixture" "$test_root/home/.local/lib/appsdk/0.1.7/appsdk"
+  cp "$test_root/fixture" "$test_root/home/.local/lib/appsdk/0.1.0007/appsdk"
   PATH="$fake_bin:/usr/bin:/bin" HOME="$test_root/home" APPSDK_TEST_FIXTURE="$test_root/fixture" \
     bash "$installer" >/dev/null
 
@@ -76,14 +76,14 @@ FAKE_CARGO
     echo 'migration Skill dependency missing' >&2
     exit 1
   }
-  [[ "$($fake_bin/appsdk version)" == 'appsdk 0.1.7 (rust)' ]] || {
+  [[ "$($fake_bin/appsdk version)" == 'appsdk 0.1.0007 (rust)' ]] || {
     echo 'canonical version mismatch' >&2
     exit 1
   }
   assert_file_absent "$test_root/home/.local/bin/appsdk"
-  assert_file_absent "$test_root/home/.local/lib/appsdk/0.1.7/appsdk"
-  assert_file_present "$test_root/home/.local/share/appsdk/0.1.7"
-  [[ "$(<"$test_root/home/.local/lib/appsdk/0.1.7/keep.txt")" == 'keep this unrelated file' ]] || {
+  assert_file_absent "$test_root/home/.local/lib/appsdk/0.1.0007/appsdk"
+  assert_file_present "$test_root/home/.local/share/appsdk/0.1.0007"
+  [[ "$(<"$test_root/home/.local/lib/appsdk/0.1.0007/keep.txt")" == 'keep this unrelated file' ]] || {
     echo 'unrelated file was changed' >&2
     exit 1
   }

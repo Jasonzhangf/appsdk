@@ -380,9 +380,18 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 .unwrap_or("")
                 .to_owned();
             let generation = notification.get("generation").and_then(Value::as_u64);
-            if let Some(existing) = objects.iter_mut().rev().find(|object| {
-                object.key == key && object.generation == generation && object.terminal_count == 0
-            }) {
+            if let Some(existing) = objects
+                .iter_mut()
+                .rev()
+                .find(|object| object.key == key && object.generation == generation)
+            {
+                if existing.terminal_count > 0 {
+                    // A terminal closes this key/generation.  A later queue for
+                    // the same logical object is a replayed source, not a new
+                    // generation, and must fail closed instead of opening a
+                    // second object with its own terminal.
+                    return Err(format!("NOTIFICATION_OBJECT_SOURCE_DUPLICATE:{key}"));
+                }
                 existing.events.push(event.clone());
                 // Coalesced queue replacement retargets the object at the new
                 // source message; the validator must close against the latest
@@ -760,7 +769,7 @@ impl Operator for NotificationObjectValidateOperator {
             return Err(format!("NOTIFICATION_OBJECT_MULTIPLE_SINKS:{key}"));
         }
         if let Some(event) = terminal.first() {
-            validate_terminal_event(&events, event, key, notification_id)?;
+            validate_terminal_event(&events, event, key, notification_id, message_id)?;
         }
         validate_delivery_failures(&events, key, notification_id, message_id)?;
         let failures = events
@@ -925,6 +934,7 @@ fn validate_terminal_event(
     terminal: &Value,
     key: &str,
     notification_id: &str,
+    message_id: &str,
 ) -> Result<(), String> {
     let kind = terminal
         .get("kind")
@@ -1008,15 +1018,46 @@ fn validate_terminal_event(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batch_or_ids_missing"
                 ));
             }
-            if !delivery_attempt_matches_before(
+            let batch = data
+                .get("batch")
+                .and_then(Value::as_object)
+                .expect("batch_matches checked");
+            let batch_id = batch
+                .get("batchId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batchId_missing")
+                })?;
+            let batch_item_matches =
+                batch
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("notificationId").and_then(Value::as_str)
+                                == Some(notification_id)
+                                || item.get("messageId").and_then(Value::as_str) == Some(message_id)
+                        })
+                    });
+            if !batch_item_matches {
+                return Err(format!(
+                    "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batch_item_missing"
+                ));
+            }
+            let Some(attempt) = delivery_attempt_event_before(
                 events,
                 terminal_index,
                 attempt_id,
                 key,
                 "notification.batch_emitted",
-            ) {
+            ) else {
                 return Err(format!(
                     "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:attempt_missing:{attempt_id}"
+                ));
+            };
+            if attempt["data"]["attempt"]["batchId"].as_str() != Some(batch_id) {
+                return Err(format!(
+                    "NOTIFICATION_TERMINAL_INVALID:{key}:{kind}:batch_id_mismatch"
                 ));
             }
         }
@@ -1046,14 +1087,14 @@ fn validate_terminal_event(
     Ok(())
 }
 
-fn delivery_attempt_matches_before(
-    events: &[Value],
+fn delivery_attempt_event_before<'a>(
+    events: &'a [Value],
     terminal_index: usize,
     attempt_id: &str,
     key: &str,
     operation: &str,
-) -> bool {
-    events[..terminal_index].iter().any(|event| {
+) -> Option<&'a Value> {
+    events[..terminal_index].iter().find(|event| {
         event["kind"] == "notification.delivery_attempt"
             && event["data"]["attemptId"].as_str() == Some(attempt_id)
             && event["data"]["keys"]
@@ -1063,6 +1104,16 @@ fn delivery_attempt_matches_before(
             && event["data"]["attempt"].get("batchId").is_some()
                 == (operation == "notification.batch_emitted")
     })
+}
+
+fn delivery_attempt_matches_before(
+    events: &[Value],
+    terminal_index: usize,
+    attempt_id: &str,
+    key: &str,
+    operation: &str,
+) -> bool {
+    delivery_attempt_event_before(events, terminal_index, attempt_id, key, operation).is_some()
 }
 
 fn embedded_graph_sources() -> [(&'static str, &'static str); 2] {

@@ -9594,6 +9594,9 @@ fn handle_task_deliver(
     let mut lifecycle = st.task_lifecycle.get(&task.id).cloned().unwrap_or_default();
     lifecycle.delivery_evidence = Some(evidence.clone());
     lifecycle.delivered_ms = Some(now);
+    // Capture the exact candidate commit so a later pending merge can prove
+    // the delivered candidate itself reached main, not just some main ref.
+    lifecycle.delivery_commit = resolve_candidate_commit(&server.root, &task, &worktree);
     server.commit_locked(
         &mut st,
         &[
@@ -9614,6 +9617,36 @@ fn handle_task_deliver(
         "next_action": task.next_step,
         "identity": {"worker_id": worker.id, "kind": "peer"},
     }))
+}
+
+fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {
+    if let Some(branch) = task.branch.as_deref() {
+        if let Ok(output) = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])
+            .output()
+        {
+            if output.status.success() {
+                let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !head.is_empty() {
+                    return Some(head);
+                }
+            }
+        }
+    }
+    if let Ok(output) = Command::new("git")
+        .current_dir(worktree)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+    {
+        if output.status.success() {
+            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !head.is_empty() {
+                return Some(head);
+            }
+        }
+    }
+    None
 }
 
 fn task_integration_authorized(
@@ -9773,6 +9806,7 @@ fn handle_task_review(
     lifecycle.review_evidence = Some(evidence.to_owned());
     lifecycle.reviewer = Some(worker_id.clone());
     lifecycle.reviewed_ms = Some(now);
+    let delivery_commit = lifecycle.delivery_commit.clone();
     let mut events = vec![
         Event::TaskUpdated {
             task: reviewed.clone(),
@@ -9788,13 +9822,29 @@ fn handle_task_review(
         // A merge obligation exists only when a live master owns the merge. In
         // a master-less project the owner keeps the plain self-integration
         // lifecycle; registering a pending merge there would deadlock close.
-        if let Ok(Some(master_id)) = live_master_id(server, &st) {
+        // An unresolvable master presence is ambiguous authority: fail closed
+        // instead of silently downgrading to owner self-integration.
+        let master_id = match live_master_id(server, &st) {
+            Ok(master_id) => master_id,
+            Err(error) => {
+                return Resp::err_data(
+                    "MASTER_PRESENCE_UNKNOWN",
+                    json!({
+                        "task_id": task_id,
+                        "error": error,
+                        "rule": "cannot accept a task while master presence is unknown; probe transport and retry",
+                    }),
+                );
+            }
+        };
+        if let Some(master_id) = master_id {
+            let candidate_commit = delivery_commit;
             let request = state::PendingMerge {
                 task_id: task_id.clone(),
                 owner: reviewed.owner.clone(),
                 requested_by: worker_id.clone(),
                 requested_ms: now,
-                candidate_commit: None,
+                candidate_commit,
             };
             events.push(Event::MergeRequested { request });
             if master_id != worker_id {
@@ -9845,8 +9895,24 @@ fn handle_task_review(
     }
     server.commit_locked(&mut st, &events);
     drop(st);
+    let mut notification_attempt_failure: Option<String> = None;
     if let Some((message_id, subscription_id)) = pending_notification {
-        attempt_notification(server, &message_id, &subscription_id);
+        // Surface any non-accepted wake attempt as an explicit repair terminal;
+        // pending_merges stays durable regardless.
+        match attempt_notification_detailed_with_at(
+            server,
+            &message_id,
+            &subscription_id,
+            now,
+        ) {
+            NotificationAttempt::Accepted => {}
+            NotificationAttempt::Rejected(error) => {
+                notification_attempt_failure = Some(error);
+            }
+            NotificationAttempt::NotAttempted(error) => {
+                notification_attempt_failure = Some(error);
+            }
+        }
     }
     let mut review_data = json!({
         "task": task_id,
@@ -9859,6 +9925,15 @@ fn handle_task_review(
     if notification_missing {
         apply_mailbox_only_repair_fields(&mut review_data);
         review_data["notification"] = json!("mailbox-only-no-subscription");
+    } else if let Some(error) = notification_attempt_failure {
+        review_data["durable"] = json!(true);
+        review_data["notification"] = json!("subscribed-not-sent");
+        review_data["notification_error"] = json!(error);
+        review_data["failure"] = json!("notification_delivery_failed");
+        review_data["repair_required"] = json!(true);
+        review_data["escalation"] = json!(
+            "the merge obligation is durable but this wake was not delivered; do not retry this wake, have the master run `collab recv` and rebind the selected wake transport"
+        );
     }
     Resp::data(review_data)
 }
@@ -9928,6 +10003,28 @@ fn handle_task_integrated(
                 ),
             }),
         );
+    }
+    // When a pending merge carries the delivered candidate, the recorded
+    // integration must prove that candidate itself reached main; an unrelated
+    // pre-existing main commit must not satisfy the obligation.
+    if let Some(request) = st.pending_merges.get(&task_id) {
+        if let Some(candidate) = request.candidate_commit.as_deref() {
+            match commit_is_integrated_in_main(&server.root, candidate) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Resp::err_data(
+                        "TASK_MERGE_PENDING",
+                        json!({
+                            "task_id": task_id,
+                            "candidate_commit": candidate,
+                            "provided": commit,
+                            "rule": "the delivered candidate must be merged onto refs/heads/main before the pending merge can be resolved",
+                        }),
+                    );
+                }
+                Err(error) => return error,
+            }
+        }
     }
     let now = now_ms();
     let mut integrated = task;

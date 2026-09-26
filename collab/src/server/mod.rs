@@ -6710,8 +6710,8 @@ fn communication_recovery_brief() -> serde_json::Value {
         "on_error": "Preserve the exact communication error and durable IDs; an ACK, notification acceptance, daemon health, or timeout is not delivery.",
         "steps": [
             "Run `collab context` and inspect the named route, identity, daemon, task, and inbox state.",
-            "After a daemon restart, identity mismatch, or missing route, run `collab worker recover` only from the canonical project main tree; never inject recovery into a foreign thread.",
-            "Run `collab context` again, then send one bounded recovery report request; do not replay an old message batch or retry automatically.",
+            "After a daemon restart, identity mismatch, or missing route, run `collab context` from the canonical project main tree; do not run `collab worker recover` or inject recovery into a foreign thread.",
+            "If `collab context` still fails with `IDENTITY_REBIND_UNPROVEN`, preserve that error and the worker_id from the error or the last successful `collab context`; report both to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker \"<exact error; worker_id=<worker_id>; cause; decision needed>\"`; if that command cannot authenticate, report out-of-band to the live master through a healthy peer or the human. For `IDENTITY_RESTORE_CROSS_PROJECT`, report out-of-band to the live master through a healthy peer or the human instead of retrying `collab sendmessage` through the same failing identity path.",
             "If recovery still fails, report the exact error, root cause, proposed fix, and decision needed to the live master; do not edit routes, journal, mailbox, tokens, or start a second daemon."
         ],
         "close_only_when": [

@@ -9634,8 +9634,13 @@ fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Opti
             }
         }
     }
+    let worktree_dir = if Path::new(worktree).is_absolute() {
+        PathBuf::from(worktree)
+    } else {
+        root.join(worktree)
+    };
     if let Ok(output) = Command::new("git")
-        .current_dir(worktree)
+        .current_dir(worktree_dir)
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .output()
     {
@@ -10023,35 +10028,28 @@ fn handle_task_integrated(
     }
     // When a pending merge carries the delivered candidate, the recorded
     // integration must prove that candidate itself reached main; an unrelated
-    // pre-existing main commit must not satisfy the obligation.
-    if let Some(request) = st.pending_merges.get(&task_id) {
-        if request.candidate_commit.is_none() {
-            return Resp::err_data(
-                "TASK_MERGE_PENDING",
-                json!({
-                    "task_id": task_id,
-                    "candidate_commit": None::<String>,
-                    "provided": commit,
-                    "rule": "the pending merge carries no bound candidate commit; rework and re-deliver with a resolvable candidate before integration",
-                }),
-            );
-        }
-        if let Some(candidate) = request.candidate_commit.as_deref() {
-            match commit_is_integrated_in_main(&server.root, candidate) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Resp::err_data(
-                        "TASK_MERGE_PENDING",
-                        json!({
-                            "task_id": task_id,
-                            "candidate_commit": candidate,
-                            "provided": commit,
-                            "rule": "the delivered candidate must be merged onto refs/heads/main before the pending merge can be resolved",
-                        }),
-                    );
-                }
-                Err(error) => return error,
+    // pre-existing main commit must not satisfy the obligation. The
+    // unbound-candidate case already failed closed above, so the candidate is
+    // guaranteed to be present here.
+    if let Some(candidate) = st
+        .pending_merges
+        .get(&task_id)
+        .and_then(|request| request.candidate_commit.as_deref())
+    {
+        match commit_is_integrated_in_main(&server.root, candidate) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Resp::err_data(
+                    "TASK_MERGE_PENDING",
+                    json!({
+                        "task_id": task_id,
+                        "candidate_commit": candidate,
+                        "provided": commit,
+                        "rule": "the delivered candidate must be merged onto refs/heads/main before the pending merge can be resolved",
+                    }),
+                );
             }
+            Err(error) => return error,
         }
     }
     let now = now_ms();

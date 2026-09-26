@@ -656,13 +656,22 @@ impl Operator for NotificationObjectValidateOperator {
         if created != 1 {
             return Err(format!("NOTIFICATION_OBJECT_MESSAGE_SOURCE_MISMATCH:{key}"));
         }
-        let accepted = events
-            .iter()
-            .filter(|event| event["kind"] == "message.state")
-            .filter(|event| event["data"]["messageId"] == message_id)
-            .filter(|event| event["data"]["state"] == "accepted")
-            .count();
-        if accepted < 1 {
+        let accepted = events.iter().any(|event| match event["kind"].as_str() {
+            Some("message.state") => {
+                event["data"]["messageId"] == message_id && event["data"]["state"] == "accepted"
+            }
+            Some("message.created") => {
+                event["data"]["messageId"] == message_id
+                    && event["data"]["state"] == "accepted"
+                    && event["data"]["evidence"]
+                        .as_array()
+                        .is_some_and(|evidence| {
+                            evidence.iter().any(|record| record["state"] == "accepted")
+                        })
+            }
+            _ => false,
+        });
+        if !accepted {
             return Err(format!("NOTIFICATION_OBJECT_MESSAGE_ACCEPT_MISSING:{key}"));
         }
         let terminal = events

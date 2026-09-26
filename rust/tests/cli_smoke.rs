@@ -23096,6 +23096,113 @@ fn optional_test_governance_selection_requires_scope_and_scenarios() {
 }
 
 #[test]
+fn optional_test_governance_runner_grammar_matches_contract_and_schema() {
+    let root = temp_root("optional-test-governance-runner-grammar");
+    let root_text = root.to_str().unwrap();
+    assert!(run(&["new", root_text]).status.success());
+    init_git(&root);
+    let project = root.join(".appsdk/project.json");
+    let mut project_value: Value = serde_json::from_slice(&fs::read(&project).unwrap()).unwrap();
+    project_value["test_governance"] = serde_json::json!({
+        "mode": "selected",
+        "manifest": ".appsdk/test-governance.json"
+    });
+    fs::write(
+        &project,
+        serde_json::to_string_pretty(&project_value).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let manifest_path = root.join(".appsdk/test-governance.json");
+    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    let schema_manifest = serde_json::json!({
+        "schema_version": 1,
+        "mode": "selected",
+        "objects": [{
+            "object_id": "app-core",
+            "graph_id": "app-core",
+            "graph_version": "1",
+            "scope_confirmation": {
+                "reference": "evidence://scope/app-core",
+                "confirmed_by": "test",
+                "confirmed_at": "2026-01-01T00:00:00Z"
+            },
+            "scenarios": [{
+                "scenario_id": "scenario-1",
+                "semantic_name": "happy path",
+                "entrypoint": "POST /orders",
+                "preconditions": ["isolated fixture"],
+                "stimulus": "submit order",
+                "observable_assertions": ["returns accepted"],
+                "expected_effects": ["order created"],
+                "cleanup": "remove fixture",
+                "runner_ref": "runner-ref",
+                "classification": ["normal"]
+            }]
+        }],
+        "trusted_runners": [{
+            "runner_ref": "runner-ref",
+            "entrypoint": "POST /orders",
+            "owner": "app-core"
+        }],
+        "effect_authorizations": []
+    });
+    let write_manifest = |runner: &str| {
+        let mut manifest = schema_manifest.clone();
+        manifest["trusted_runners"][0]["runner_ref"] = Value::String(runner.to_string());
+        manifest["objects"][0]["scenarios"][0]["runner_ref"] = Value::String(runner.to_string());
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+        )
+        .unwrap();
+    };
+
+    write_manifest("runner-ref");
+    let accepted = run(&["verify", "--test-admission", root_text]);
+    assert!(
+        !String::from_utf8_lossy(&accepted.stderr).contains("INVALID_TEST_GOVERNANCE_RUNNER"),
+        "hyphenated runner_ref must pass runtime validation; stderr={}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let accepted_report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted_report["objects"][0]["status"], "blocked");
+    assert_eq!(
+        accepted_report["objects"][0]["scenarios"][0]["reason"],
+        "result_missing"
+    );
+
+    for invalid_runner in ["runner.one", "r"] {
+        write_manifest(invalid_runner);
+        let rejected = run(&["verify", "--test-admission", root_text]);
+        assert!(
+            !rejected.status.success(),
+            "{invalid_runner} must be rejected as a runner_ref"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("INVALID_TEST_GOVERNANCE_RUNNER"),
+            "{invalid_runner} must fail runtime identifier grammar; stderr={}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+    }
+
+    let schema: Value = serde_json::from_slice(include_bytes!(
+        "../../contracts/test-governance.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&schema_manifest));
+    let mut dot_manifest = schema_manifest.clone();
+    dot_manifest["trusted_runners"][0]["runner_ref"] = Value::String("runner.one".into());
+    assert!(!validator.is_valid(&dot_manifest));
+    let mut one_char_manifest = schema_manifest.clone();
+    one_char_manifest["trusted_runners"][0]["runner_ref"] = Value::String("r".into());
+    assert!(!validator.is_valid(&one_char_manifest));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn optional_test_governance_effect_requires_authorization_and_passed_evidence_closes() {
     let root = temp_root("optional-test-governance-admission");
     let root_text = root.to_str().unwrap();
@@ -23599,6 +23706,88 @@ fn optional_test_governance_blocks_bad_results_effect_and_evidence_mismatches() 
     )
     .unwrap();
     write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let future_authorization = {
+        let mut authorization = manifest.clone();
+        authorization["effect_authorizations"][0]["valid_from"] =
+            Value::String("2099-01-01T00:00:00Z".into());
+        authorization["effect_authorizations"][0]["valid_until"] =
+            Value::String("2099-12-31T00:00:00Z".into());
+        authorization
+    };
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&future_authorization).unwrap() + "\n",
+    )
+    .unwrap();
+    let mut future_auth_result: Value =
+        serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    future_auth_result["started_at"] = Value::String("2099-01-02T00:00:00Z".into());
+    future_auth_result["finished_at"] = Value::String("2099-01-02T00:00:05Z".into());
+    fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&future_auth_result).unwrap() + "\n",
+    )
+    .unwrap();
+    let future_auth = run(&["verify", "--test-admission", root_text]);
+    assert!(!future_auth.status.success());
+    assert!(
+        String::from_utf8_lossy(&future_auth.stdout).contains("effect_authorization_expired"),
+        "future valid_from with future result timestamps must block: {}",
+        String::from_utf8_lossy(&future_auth.stdout)
+    );
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let mut future_result: Value =
+        serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    future_result["started_at"] = Value::String("2099-01-02T00:00:00Z".into());
+    future_result["finished_at"] = Value::String("2099-01-02T00:00:05Z".into());
+    fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&future_result).unwrap() + "\n",
+    )
+    .unwrap();
+    let future_result_run = run(&["verify", "--test-admission", root_text]);
+    assert!(!future_result_run.status.success());
+    assert!(
+        String::from_utf8_lossy(&future_result_run.stdout).contains("effect_authorization_expired"),
+        "future result timestamps must block before authorization can pass: {}",
+        String::from_utf8_lossy(&future_result_run.stdout)
+    );
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let mut inverted_result: Value =
+        serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    inverted_result["started_at"] = Value::String("2026-01-02T00:00:10Z".into());
+    inverted_result["finished_at"] = Value::String("2026-01-02T00:00:05Z".into());
+    fs::write(
+        &result_path,
+        serde_json::to_string_pretty(&inverted_result).unwrap() + "\n",
+    )
+    .unwrap();
+    let inverted_run = run(&["verify", "--test-admission", root_text]);
+    assert!(!inverted_run.status.success());
+    assert!(
+        String::from_utf8_lossy(&inverted_run.stdout).contains("effect_authorization_expired"),
+        "started_at after finished_at must block: {}",
+        String::from_utf8_lossy(&inverted_run.stdout)
+    );
+    write_result("passed", "auth-1", "1", &head, "scenario-1", "passed");
+
+    let legal_window = run(&["verify", "--test-admission", root_text]);
+    assert!(
+        legal_window.status.success(),
+        "valid authorization window must pass; stdout={} stderr={}",
+        String::from_utf8_lossy(&legal_window.stdout),
+        String::from_utf8_lossy(&legal_window.stderr)
+    );
+    let legal_report: Value = serde_json::from_slice(&legal_window.stdout).unwrap();
+    assert_eq!(legal_report["objects"][0]["status"], "passed");
 
     let mut command_cleanup_result: Value =
         serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();

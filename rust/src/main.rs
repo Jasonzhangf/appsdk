@@ -2118,7 +2118,7 @@ fn test_governance_non_command_string<'a>(
 
 fn test_governance_identifier(value: &Value, pointer: &str, error: &str) -> Result<(), String> {
     let value = test_governance_string(value, pointer, error)?;
-    if value.is_empty()
+    if value.len() < 2
         || !value.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         || !value
             .chars()
@@ -2443,6 +2443,9 @@ fn validate_test_governance_manifest(
             }
         }
     }
+    if validate_record_schema("contracts/test-governance.schema.json", &manifest).is_err() {
+        return Err("INVALID_TEST_GOVERNANCE_MANIFEST".to_string());
+    }
     Ok(manifest)
 }
 
@@ -2628,6 +2631,11 @@ fn test_governance_object_status(
                 .and_then(Value::as_str)
                 .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
                 .map(|value| value.with_timezone(&Utc));
+            let started_at = result
+                .get("started_at")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
             let finished_at = result
                 .get("finished_at")
                 .and_then(Value::as_str)
@@ -2635,8 +2643,11 @@ fn test_governance_object_status(
                 .map(|value| value.with_timezone(&Utc));
             if valid_from.is_none()
                 || valid_until.is_none()
+                || started_at.is_none()
                 || finished_at.is_none()
-                || finished_at.unwrap() < valid_from.unwrap()
+                || started_at.unwrap() > finished_at.unwrap()
+                || finished_at.unwrap() > now
+                || valid_from.unwrap() > started_at.unwrap()
                 || finished_at.unwrap() > valid_until.unwrap()
                 || now > valid_until.unwrap()
             {

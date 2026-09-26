@@ -2056,6 +2056,15 @@ impl GlobalState {
                 next.current_thread_route_tombstones
                     .insert(key, RuntimeBindingTombstone::new(&old, &binding)?);
             }
+            // An address that was tombstoned when it retired can legitimately
+            // become live again under a later binding generation. That live
+            // route and its stale tombstone must not coexist, so clear the
+            // tombstone for the exact address we are re-activating.
+            next.current_thread_route_tombstones.remove(&current_route_address_key(
+                &session_id,
+                &native_thread_id,
+                binding.tmux_endpoint.as_ref(),
+            ));
             next.current_thread_routes.insert(route_address, binding);
             // Installing the strict dual-key route for a thread upgrades that
             // identity off the legacy compatibility index.  Only the upgraded
@@ -4124,6 +4133,64 @@ mod tests {
         );
         assert!(state
             .lookup_current_thread_route_tombstone(&session_id, &thread_id)
+            .is_none());
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn rebinding_an_address_after_tombstoning_drops_the_stale_tombstone() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let first_session = SessionId::new("session-first").unwrap();
+        let first_thread = NativeThreadId::new("thread-first").unwrap();
+        let second_session = SessionId::new("session-second").unwrap();
+        let second_thread = NativeThreadId::new("thread-second").unwrap();
+        let first = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            1,
+            Some(first_session.clone()),
+            Some(first_thread.clone()),
+        )
+        .unwrap();
+        let second = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            2,
+            Some(second_session.clone()),
+            Some(second_thread.clone()),
+        )
+        .unwrap();
+        let rebound = RuntimeBinding::new_with_session(
+            scope.clone(),
+            app_scope("app-one"),
+            AgentId::new("agent-one").unwrap(),
+            RuntimeId::new("runtime-one").unwrap(),
+            BindingId::new("binding-one").unwrap(),
+            3,
+            Some(first_session.clone()),
+            Some(first_thread.clone()),
+        )
+        .unwrap();
+
+        state.bind_runtime(first.clone()).unwrap();
+        state.set_current_thread_route(first).unwrap();
+        state.bind_runtime(second.clone()).unwrap();
+        state.set_current_thread_route(second).unwrap();
+        state.bind_runtime(rebound.clone()).unwrap();
+        state.set_current_thread_route(rebound).unwrap();
+
+        assert!(state
+            .lookup_current_thread_route_tombstone(&first_session, &first_thread)
             .is_none());
         state.validate().unwrap();
     }

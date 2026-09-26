@@ -215,7 +215,8 @@ enum Cmd {
         #[arg(long)]
         worker: Option<String>,
     },
-    /// Return one read-only authoritative snapshot after a notification/restart
+    /// Single agent bootstrap: resolve root, start daemon, restore identity and
+    /// registration, re-arm default notify, then return the authoritative snapshot
     Context {
         #[arg(long)]
         worker: Option<String>,

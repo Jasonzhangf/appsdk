@@ -331,13 +331,14 @@ and explicit `close <id>`.
 tools when this session lists them. The `collab` CLI is also valid.
 If MCP is missing, unsupported, aborted, or unknown, run the same
 actions with the CLI in the inherited project cwd:
-`collab init`, `collab recv`, `collab ack <id>` / `collab ack --all`,
+`collab context`, `collab recv`, `collab ack <id>` / `collab ack --all`,
 `collab msg <id>`,
 `collab inbox`, `collab worker status [id]`, `collab subagent ready|working <id>`,
 `collab sendmessage --to <parent> --subject <topic> "<body>"`.
 The CLI is a complete protocol path. Missing MCP is not a blocker and
-does not justify skipping receive or waiting. Do not repeat `collab init`
-after it already succeeded. Child results go to the parent with
+does not justify skipping receive or waiting. `collab context` is the only
+bootstrap entry; do not run `collab init` or `collab whoami` as an agent.
+Child results go to the parent with
 `collab sendmessage`, not the parent-only `subagent send` action.
 No ACK loops, automatic respawn or redispatch.
 
@@ -725,13 +726,13 @@ is an observation, never task or control truth.
 
 | Intent | Command |
 |---|---|
+| Bootstrap, recover, or re-locate this agent | `collab context` |
 | Notify a peer now | `collab sendmessage --to <peer> --subject <short-topic> "<original message>"` |
 | Receive and consume notifications | `collab recv` |
 | Read one notification without consuming | `collab msg <notification-id>` |
 | List unread messages | `collab inbox` |
 | Recover an already-delivered notification | `collab ack <id>` or `collab ack --all` |
 | Inspect worker health and notification status | `collab worker status [id]` |
-| Automatic bootstrap + authoritative context + role operations | `collab context` |
 | List peers | `collab who` |
 | Check own subscriptions | `collab notify status` |
 | Inspect live master | `collab master status` |
@@ -746,6 +747,26 @@ urgency against the current task. When selecting the notice, run
 `collab msg <notification-id>`, read durable detail, and execute the actionable
 request inside this Agent's scope. Do not stop at ACK or waiting; mailbox truth
 persists.
+
+### Situation -> action (one entry)
+
+`collab context` is the single agent entry. It resolves the canonical root,
+creates a missing baseline, starts a stopped daemon, restores identity and
+registration, re-arms the default direct-message lease, and returns the
+authoritative snapshot plus the current role's `operations`.
+
+| Situation | Do this | Never do this |
+|---|---|---|
+| First time in a project | `collab context` | `collab init`, `collab whoami` |
+| Thread/session changed, or after daemon restart | `collab context` (rebinds in place) | `collab worker recover`, `collab down`/`up` |
+| Token mismatch, `PROJECT_SCOPE_UNKNOWN`, or route loss | preserve the exact error, run `collab context` from the canonical main tree | edit token/route state, copy identity, reset the project |
+| Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
+| Unsure whether a live master exists | `collab master status` from the canonical root | infer "no master" from a failed context or a missing `who.master` |
+| Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
+
+Only these are operator-facing diagnostics and are not part of the agent flow:
+`collab init`, `collab whoami`, `collab worker recover`, `collab route resolve`,
+`collab down`/`up`, and any direct transport or socket call.
 
 ## Initialize once
 

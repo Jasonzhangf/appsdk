@@ -4813,7 +4813,10 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap().contains("collab worker recover"))
+            .any(|line| line
+                .as_str()
+                .unwrap()
+                .contains("`collab context` from the canonical project main tree"))
     );
     let context = handle_context(&server, "peer-a".into(), "token-peer-a".into());
     assert_eq!(context.data["master"]["worker_id"], "peer-a");

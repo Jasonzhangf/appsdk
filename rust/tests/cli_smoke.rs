@@ -24703,6 +24703,147 @@ fn dagpipe_validate_notifications_rejects_attemptless_failure_while_attempt_pend
 }
 
 #[test]
+fn dagpipe_validate_notifications_rejects_failure_after_ids_only_batch_terminal() {
+    let root = temp_root("dagpipe-notification-ids-only-batch-terminal-failure");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    let summary = dagpipe_notification_summary("notification-id-1", "message-1", 0);
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            dagpipe_message_created_event("event-created", "2026-01-01T00:00:00Z", "message-1"),
+            dagpipe_message_state_event(
+                "event-accepted",
+                "2026-01-01T00:00:01Z",
+                "message-1",
+                "accepted",
+            ),
+            dagpipe_notification_queued(
+                "event-queued",
+                "2026-01-01T00:00:02Z",
+                "notification-1",
+                "notification-id-1",
+                "message-1",
+                0,
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt",
+                "2026-01-01T00:00:02.5Z",
+                "attempt-1",
+                &["notification-1"],
+                "notification.batch_emitted",
+            ),
+            serde_json::json!({
+                "protocol": "appsdk-comm/v1",
+                "eventId": "event-ids-only-batch-emitted",
+                "at": "2026-01-01T00:00:03Z",
+                "kind": "notification.batch_emitted",
+                "data": {
+                    "attemptId": "attempt-1",
+                    "batch": {
+                        "batchId": "batch-1",
+                        "recipient": dagpipe_address("recipient"),
+                        "createdAt": "2026-01-01T00:00:02Z",
+                        "adapterId": "adapter-1",
+                        "items": [summary]
+                    },
+                    "notificationIds": ["notification-id-1"],
+                    "at": "2026-01-01T00:00:03Z"
+                }
+            }),
+            dagpipe_notification_failed_event(
+                "event-failed-after-ids-only-terminal",
+                "2026-01-01T00:00:04Z",
+                &["notification-1"],
+                "notification.batch_emitted",
+                "attempt-1",
+            ),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("NOTIFICATION_OBJECT_DELIVERY_FAILURE_MISMATCH:notification-1:attempt-1"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_rejects_delivery_attempt_after_terminal_sink() {
+    let root = temp_root("dagpipe-notification-attempt-after-terminal-sink");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            dagpipe_message_created_event("event-created", "2026-01-01T00:00:00Z", "message-1"),
+            dagpipe_message_state_event(
+                "event-accepted",
+                "2026-01-01T00:00:01Z",
+                "message-1",
+                "accepted",
+            ),
+            dagpipe_notification_queued(
+                "event-queued",
+                "2026-01-01T00:00:02Z",
+                "notification-1",
+                "notification-id-1",
+                "message-1",
+                0,
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt",
+                "2026-01-01T00:00:02.5Z",
+                "attempt-1",
+                &["notification-1"],
+                "notification.emitted",
+            ),
+            dagpipe_notification_emitted_event(
+                "event-emitted",
+                "2026-01-01T00:00:03Z",
+                "attempt-1",
+                &["notification-1"],
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt-after-terminal",
+                "2026-01-01T00:00:04Z",
+                "attempt-1",
+                &["notification-1"],
+                "notification.emitted",
+            ),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("NOTIFICATION_OBJECT_DELIVERY_ATTEMPT_AFTER_TERMINAL:notification-1"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn dagpipe_validate_notifications_rejects_duplicate_event_ids() {
     let root = temp_root("dagpipe-notification-duplicate-event");
     let root_text = root.to_str().unwrap();

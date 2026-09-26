@@ -722,7 +722,6 @@ impl Operator for NotificationObjectValidateOperator {
         if !accepted {
             return Err(format!("NOTIFICATION_OBJECT_MESSAGE_ACCEPT_MISSING:{key}"));
         }
-        validate_delivery_failures(&events, key)?;
         let terminal = events
             .iter()
             .filter(|event| {
@@ -763,6 +762,7 @@ impl Operator for NotificationObjectValidateOperator {
         if let Some(event) = terminal.first() {
             validate_terminal_event(&events, event, key, notification_id)?;
         }
+        validate_delivery_failures(&events, key, notification_id, message_id)?;
         let failures = events
             .iter()
             .filter(|event| event["kind"] == "notification.delivery_failed")
@@ -824,14 +824,37 @@ fn terminal_requires_repair(terminal: &Value) -> bool {
         || terminal.get("mailbox_only").and_then(Value::as_bool) == Some(true)
 }
 
-fn notification_event_has_key(event: &Value, key: &str) -> bool {
-    event["data"]["keys"]
+fn notification_event_matches_object(
+    event: &Value,
+    key: &str,
+    notification_id: &str,
+    message_id: &str,
+) -> bool {
+    let data = &event["data"];
+    if data["keys"]
         .as_array()
-        .or_else(|| event["data"]["notificationKeys"].as_array())
+        .or_else(|| data["notificationKeys"].as_array())
         .is_some_and(|keys| keys.iter().any(|candidate| candidate == &json!(key)))
+    {
+        return true;
+    }
+    if !notification_id.is_empty()
+        && (data["notificationIds"].as_array().is_some_and(|ids| {
+            ids.iter()
+                .any(|candidate| candidate == &json!(notification_id))
+        }) || data["notificationId"].as_str() == Some(notification_id))
+    {
+        return true;
+    }
+    data["messageId"].as_str() == Some(message_id)
 }
 
-fn validate_delivery_failures(events: &[Value], key: &str) -> Result<(), String> {
+fn validate_delivery_failures(
+    events: &[Value],
+    key: &str,
+    notification_id: &str,
+    message_id: &str,
+) -> Result<(), String> {
     let mut pending: Option<(String, String)> = None;
     let mut terminal_seen = false;
     for event in events {
@@ -843,12 +866,17 @@ fn validate_delivery_failures(events: &[Value], key: &str) -> Result<(), String>
                 | Some("notification.batch_emitted")
                 | Some("notification.superseded")
                 | Some("notification.delivery_failed")
-        ) || !notification_event_has_key(event, key)
+        ) || !notification_event_matches_object(event, key, notification_id, message_id)
         {
             continue;
         }
         match kind {
             Some("notification.delivery_attempt") => {
+                if terminal_seen {
+                    return Err(format!(
+                        "NOTIFICATION_OBJECT_DELIVERY_ATTEMPT_AFTER_TERMINAL:{key}"
+                    ));
+                }
                 let attempt_id = event["data"]["attemptId"]
                     .as_str()
                     .ok_or_else(|| format!("NOTIFICATION_OBJECT_ATTEMPT_ID_MISSING:{key}"))?

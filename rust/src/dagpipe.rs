@@ -277,6 +277,9 @@ fn validate_notification_objects(root: &Path) -> Result<Value, String> {
 }
 
 fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        return Err("COMMUNICATION_MAILBOX_EVENT_INVALID:missing_trailing_newline".to_owned());
+    }
     let schema: Value = serde_json::from_str(COMMUNICATION_EVENT_SCHEMA)
         .map_err(|error| format!("COMMUNICATION_EVENT_SCHEMA_INVALID:{error}"))?;
     let validator = jsonschema::validator_for(&schema)
@@ -381,6 +384,11 @@ fn notification_object_groups(events: &[Value]) -> Result<Vec<(String, Vec<Value
                 object.key == key && object.generation == generation && object.terminal_count == 0
             }) {
                 existing.events.push(event.clone());
+                // Coalesced queue replacement retargets the object at the new
+                // source message; the validator must close against the latest
+                // notification record, not the obsolete first queue.
+                existing.message_id = message_id;
+                existing.notification_id = notification_id;
                 continue;
             }
             objects.push(NotificationObject {
@@ -588,14 +596,17 @@ fn notification_input(key: &str, events: &[Value]) -> Result<Value, String> {
     if queues.is_empty() {
         return Err(format!("NOTIFICATION_OBJECT_SOURCE_MISSING:{key}"));
     }
-    let message_id = queues[0]["data"]["notification"]["messageId"]
+    let message_id = queues.last().expect("queues checked non-empty")["data"]["notification"]
+        ["messageId"]
         .as_str()
         .ok_or_else(|| "NOTIFICATION_MESSAGE_ID_MISSING".to_owned())?
         .to_owned();
     Ok(json!({
         "key": key,
         "messageId": message_id,
-        "notificationId": queues[0]["data"]["notification"]["notificationId"]
+        "notificationId": queues
+            .last()
+            .expect("queues checked non-empty")["data"]["notification"]["notificationId"]
             .as_str()
             .unwrap_or(""),
         "events": events,

@@ -23818,6 +23818,74 @@ fn dagpipe_validate_notifications_folds_pending_coalesced_queues() {
 }
 
 #[test]
+fn dagpipe_validate_notifications_binds_coalesced_queue_to_latest_message_source() {
+    let root = temp_root("dagpipe-notification-coalesce-latest-source");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        [
+            dagpipe_message_created_event("event-created-1", "2026-01-01T00:00:00Z", "message-1"),
+            dagpipe_message_state_event(
+                "event-accepted-1",
+                "2026-01-01T00:00:01Z",
+                "message-1",
+                "accepted",
+            ),
+            dagpipe_notification_queued(
+                "event-queued-1",
+                "2026-01-01T00:00:02Z",
+                "notification-1",
+                "notification-id-1",
+                "message-1",
+                0,
+            ),
+            // The second queued record replaces the object source under the same
+            // key/generation but never reaches accepted.
+            dagpipe_message_created_event("event-created-2", "2026-01-01T00:01:00Z", "message-2"),
+            dagpipe_notification_queued(
+                "event-queued-2",
+                "2026-01-01T00:01:02Z",
+                "notification-1",
+                "notification-id-2",
+                "message-2",
+                0,
+            ),
+            dagpipe_notification_attempt_event(
+                "event-attempt",
+                "2026-01-01T00:02:00Z",
+                "attempt-coalesced",
+                &["notification-1"],
+                "notification.emitted",
+            ),
+            dagpipe_notification_emitted_event(
+                "event-emitted",
+                "2026-01-01T00:02:01Z",
+                "attempt-coalesced",
+                &["notification-1"],
+            ),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("NOTIFICATION_OBJECT_MESSAGE_ACCEPT_MISSING"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn dagpipe_validate_notifications_rejects_terminal_without_delivery_attempt() {
     let root = temp_root("dagpipe-notification-terminal-without-attempt");
     let root_text = root.to_str().unwrap();
@@ -24134,6 +24202,30 @@ fn dagpipe_validate_notifications_rejects_symlinked_mailbox() {
     fs::remove_file(&external_mailbox).unwrap();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(external).unwrap();
+}
+
+#[test]
+fn dagpipe_validate_notifications_rejects_mailbox_missing_trailing_newline() {
+    let root = temp_root("dagpipe-notification-no-trailing-newline");
+    let root_text = root.to_str().unwrap();
+    let communication = root.join(".appsdk-control/communication");
+    fs::create_dir_all(&communication).unwrap();
+    fs::write(
+        communication.join("mailbox.jsonl"),
+        dagpipe_message_created_event("event-created", "2026-01-01T00:00:00Z", "message-1")
+            .to_string(),
+    )
+    .unwrap();
+
+    let output = run(&["dagpipe", "validate-notifications", root_text]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("COMMUNICATION_MAILBOX_EVENT_INVALID:missing_trailing_newline"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

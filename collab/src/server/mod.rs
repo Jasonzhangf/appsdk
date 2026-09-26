@@ -9620,38 +9620,43 @@ fn handle_task_deliver(
 }
 
 fn resolve_candidate_commit(root: &Path, task: &TaskRec, worktree: &str) -> Option<String> {
-    if let Some(branch) = task.branch.as_deref() {
-        if let Ok(output) = Command::new("git")
-            .current_dir(root)
-            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])
-            .output()
-        {
-            if output.status.success() {
-                let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !head.is_empty() {
-                    return Some(head);
-                }
-            }
-        }
-    }
+    // The delivered worktree HEAD is the authoritative candidate. A branch
+    // ref may point at a stale or unrelated commit; it is only admissible as
+    // a consistency cross-check, never as the binding on its own.
     let worktree_dir = if Path::new(worktree).is_absolute() {
         PathBuf::from(worktree)
     } else {
         root.join(worktree)
     };
-    if let Ok(output) = Command::new("git")
+    let worktree_head = Command::new("git")
         .current_dir(worktree_dir)
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .output()
-    {
-        if output.status.success() {
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
             let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !head.is_empty() {
-                return Some(head);
-            }
+            (!head.is_empty()).then_some(head)
+        })?;
+    if let Some(branch) = task.branch.as_deref() {
+        let branch_head = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                (!head.is_empty()).then_some(head)
+            });
+        // Fail closed on divergence: the delivered worktree HEAD must agree
+        // with the registered branch or the candidate is not provably the
+        // delivered commit.
+        if branch_head.as_deref() != Some(worktree_head.as_str()) {
+            return None;
         }
     }
-    None
+    Some(worktree_head)
 }
 
 fn task_integration_authorized(

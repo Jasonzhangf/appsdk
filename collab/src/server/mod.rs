@@ -7,6 +7,8 @@ pub mod presence;
 pub mod state;
 pub mod timers;
 
+pub const EXPLICIT_UNSUBSCRIBE_REASON: &str = "explicit-unsubscribe";
+
 pub use global_state::{GlobalState, ProjectRegistration, RuntimeBinding};
 
 use crate::identity::{
@@ -3882,10 +3884,18 @@ fn default_direct_message_events(
 ) -> Vec<Event> {
     let mut events = Vec::new();
     let default_id = default_direct_message_id(worker_id);
+    // Only an explicit owner unsubscribe is a durable stop for the
+    // system-owned default lease. Any other `cancelled` state (for example a
+    // legacy automatic cancel, or an untyped status write) is recoverable and
+    // is re-armed below, so a retired default lease can never leave a
+    // registered peer permanently wake-less.
     if state
         .notification_subscriptions
         .get(&default_id)
-        .is_some_and(|subscription| subscription.status == "cancelled")
+        .is_some_and(|subscription| {
+            subscription.status == "cancelled"
+                && subscription.status_reason.as_deref() == Some(EXPLICIT_UNSUBSCRIBE_REASON)
+        })
     {
         return events;
     }
@@ -4011,35 +4021,6 @@ fn registered_peer_default_events(state: &State, now: i64) -> Vec<Event> {
             default_direct_message_events(state, worker_id, &transport, now)
         })
         .collect()
-}
-
-/// The closing owner's last unfinished task cancels its default direct-message
-/// lease so a retired peer stops receiving automatic wakes. Cancellation is
-/// control-plane only: it must not supersede already-delivered mailbox
-/// messages, because an explicit `recv` still owes the unread payload. A
-/// later explicit `notify subscribe --event direct-message` rearms delivery.
-fn default_lease_cancel_on_last_close(
-    state: &State,
-    owner: &str,
-    closed_task_id: &str,
-    now: i64,
-) -> Option<Event> {
-    let other_unfinished = state.tasks.values().any(|task| {
-        task.id != closed_task_id && task.owner == owner && keepalive::unfinished(&task.status)
-    });
-    if other_unfinished {
-        return None;
-    }
-    let subscription_id = default_direct_message_id(owner);
-    let subscription = state.notification_subscriptions.get(&subscription_id)?;
-    if subscription.status != "armed" {
-        return None;
-    }
-    Some(Event::NotificationStatus {
-        subscription_id,
-        status: "cancelled".into(),
-        updated_ms: now,
-    })
 }
 
 fn restore_registered_peer_default_leases(server: &Server) {
@@ -4549,6 +4530,14 @@ fn notification_send_response(
     if !subscription_present {
         data["durable"] = json!(true);
         data["notification"] = json!("mailbox-only-no-subscription");
+        data["notification_error"] = json!(
+            "no armed direct-message subscription matches this recipient's registered transport"
+        );
+        data["failure"] = json!("notification_subscription_missing");
+        data["repair_required"] = json!(true);
+        data["escalation"] = json!(
+            "the message is durable but this wake has no subscription; have the recipient run collab context to recover or re-register its default direct-message lease, then send a new message if another wake is needed"
+        );
         return Resp::data(data);
     }
     match notification {
@@ -5706,9 +5695,10 @@ fn handle_notification_unsubscribe(
     if subscription.worker_id != worker_id {
         return Resp::err("only the subscription owner may unsubscribe");
     }
-    let mut events = vec![Event::NotificationStatus {
+    let mut events = vec![Event::NotificationSuppressed {
         subscription_id: subscription_id.clone(),
         status: "cancelled".into(),
+        reason: EXPLICIT_UNSUBSCRIBE_REASON.into(),
         updated_ms: now_ms(),
     }];
     let pending = state
@@ -10124,11 +10114,6 @@ fn handle_task_close(
             }
         }
     }
-    if let Some(cancel) =
-        default_lease_cancel_on_last_close(&st, &closed.owner, &closed.id, closed.updated_ms)
-    {
-        close_events.push(cancel);
-    }
     server.commit_locked(&mut st, &close_events);
 
     let subscribed_notifications = release_dependents_of_closed_task(server, &mut st, &closed.id);
@@ -10333,14 +10318,6 @@ fn handle_task_finalize_cleanup(
             .map(|waiter| waiter.id)
             .collect::<Vec<_>>();
         let notifications = resume_cleanup_release(server, &mut st, &task.id);
-        // The lease stop is part of the same obligation, so a resumed attempt
-        // completes it too instead of reporting lifecycle complete over an
-        // armed lease.
-        if let Some(cancel) =
-            default_lease_cancel_on_last_close(&st, &task.owner, &task.id, now_ms())
-        {
-            server.commit_locked(&mut st, &[cancel]);
-        }
         drop(st);
         for (message_id, subscription_id) in notifications {
             attempt_notification(server, &message_id, &subscription_id);
@@ -10416,12 +10393,6 @@ fn handle_task_finalize_cleanup(
             receipt: receipt.clone(),
         }],
     );
-    // Verification is durable now, so the owner's responsibility really is
-    // finished. Stop its automatic lease exactly as a normal close does, unless
-    // the owner still holds another unfinished task.
-    if let Some(cancel) = default_lease_cancel_on_last_close(&st, &task.owner, &task.id, now) {
-        server.commit_locked(&mut st, &[cancel]);
-    }
     let released = waiting_dependents_of(&st, &task.id)
         .into_iter()
         .map(|waiter| waiter.id)

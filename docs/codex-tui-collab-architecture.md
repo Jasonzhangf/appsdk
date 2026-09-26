@@ -91,6 +91,144 @@ actionable unreachable/wrong-owner result, makes no binding mutation, and does
 not fall back to tmux. This closes that topology as an explicit failure
 terminal instead of an unresolved transport fallback.
 
+Current-runtime correction: each Codex TUI instance uses its own embedded
+AppServer. The isolated experiment above tested a deliberately configured
+shared endpoint; it does not describe the current default TUI topology. Desktop
+has a separate native session bridge (`codex_app`) that can address other
+sessions without a parent/child relationship. These host-level thread
+operations are distinct from connecting to an embedded AppServer socket.
+
+### Desktop and TUI session discovery and messaging probe (2026-09-25)
+
+The callable native `codex_app` thread tools were absent from this execution,
+but the installed Codex CLI exposes the shared local AppServer session surface:
+`codex agents` opens the Agent command center, and `codex queue --thread
+<session-uuid> --message <text>` sends a turn to an existing session. This is a
+verified CLI path from the Desktop task's shell; it does not depend on reading a
+socket path or sharing an embedded AppServer process.
+
+Observed evidence:
+
+- `codex agents` listed 10 tasks across project directories, with `Working`,
+  `Ready`, and `Inactive` states. The list included a task named “验证 Desktop
+  RPC 并补齐接入架构”. This proves session/task discovery and reported task
+  state for sessions visible to this local daemon; it does not establish
+  network-wide agent presence.
+- The current tool's `collaboration.list_agents` returned `/root` only, then
+  returned `/root` and its explicitly spawned `/root/rpc_probe` after creation.
+  That API is scoped to this tool agent tree, not the Desktop session catalog.
+- From `codex agents`, `n` opened a new TUI session. Its `/status` reported
+  session UUID `01a0d8f0-d7b6-7ce2-8827-03cd1b43fd51` and “Local background
+  server”. This proves the command-center-launched TUI session used by this
+  probe is reachable through that daemon; it does not establish that a
+  separately launched, embedded-AppServer TUI is discoverable the same way.
+  The TUI returned `TUI_SHARED_APP_SERVER_PROBE_OK` to its initial prompt.
+- Running `codex queue --thread
+  01a0d8f0-d7b6-7ce2-8827-03cd1b43fd51 --message 'Reply with exactly:
+  QUEUE_TO_TUI_SESSION_OK. Do not inspect or modify files.'` returned queued
+  message ID `01a0d8f2-6c7c-7170-bfaa-dea0372fafb4`. The TUI then displayed
+  `QUEUE_TO_TUI_SESSION_OK.`. This verifies cross-turn delivery, target
+  execution, and reply visibility in the TUI.
+
+Join/registration architecture:
+
+1. Discover local sessions through `codex agents`; use the reported status as
+   session state, not as proof that a process is currently online or reachable.
+2. Address an existing session by its returned Session UUID using `codex queue`.
+   Keep that route key distinct from Collab peer identity and project identity.
+3. Treat the CLI queue response as transport acceptance only. Confirm target
+   consumption and reply from the target session history/state before recording
+   a successful Collab message delivery.
+4. A Desktop/TUI Collab adapter should persist the route kind, session UUID,
+   project scope, and verified capabilities in the normal peer registration
+   transaction. Collab remains the owner of peer roles, leases, mailbox state,
+   tasks, subscriptions, and consumption acknowledgements.
+5. The exact `codex_app` host bridge remains a separate possible transport; it
+   was not directly callable here and is not required for the tested CLI queue
+   path.
+
+Current result: **local session discovery and Desktop-shell-to-TUI bidirectional
+messaging PASS through `codex agents` + `codex queue`. Collab registration,
+Desktop UI-specific agent discovery semantics, and route persistence remain
+UNVERIFIED/INCOMPLETE.**
+
+### Integrating Desktop and TUI with existing Collab comm
+
+The current Collab daemon has two registered peers in this project; both
+bindings report `transport.kind=tmux`. `collab master status` from this Desktop
+execution returns `TMUX_ENDPOINT_MISSING`, so this Desktop session is not
+currently bound as a Collab peer. The previous CLI probe proves that the local
+Codex session daemon can relay a message to a command-center-launched TUI
+session; it does not prove Collab can address either native endpoint yet.
+
+Keep Collab's current communication ownership and extend its route adapter:
+
+```mermaid
+sequenceDiagram
+    participant A as Desktop or TUI peer A
+    participant D as Existing Collab daemon
+    participant B as Desktop or TUI peer B
+    participant R as B's native RPC server/bridge
+    A->>D: sendmessage(to stable peer B, durable message)
+    D->>D: resolve B's current verified route; persist attempt
+    D->>B: relay request on B's registered bridge
+    B->>R: native send/turn-start to B's session
+    R-->>B: accepted / error
+    B-->>D: transport receipt; B later consumes via recv
+    B->>D: sendmessage(reply to stable peer A)
+    D->>A: relay reply using A's registered bridge
+```
+
+Registration and routing contract:
+
+1. Each Desktop/TUI session joins as an ordinary Collab peer with a stable
+   daemon-issued peer identity. The session ID, native thread ID, project root,
+   provider namespace, route generation, and capability set are binding facts;
+   none substitutes for the peer identity.
+2. The joining session registers its **own server bridge** with the daemon.
+   For Desktop this is the host's `codex_app` bridge; for TUI it is that TUI
+   instance's `codex_tui` AppServer bridge. A private embedded server's socket
+   is not copied into another session or assumed reachable by the daemon.
+3. The daemon stores a route handle to the registered bridge, not an
+   unverified remote address. A bridge may be a daemon-reachable endpoint or a
+   session-owned duplex relay connection; both are adapter implementations of
+   the same current-peer route binding, selected and verified at registration.
+   The session-side bridge must be able to receive a daemon request and invoke
+   its own native server. If the host exposes only caller-initiated RPC and no
+   inbound/duplex bridge, registration must report that it cannot accept
+   inbound messages; it must not claim a send-capable route.
+4. Registration proves ownership by challenge: the daemon sends a nonce-bound
+   probe through the claimed bridge, and the native response must match the
+   registering session/thread, namespace, and canonical project scope. The
+   runtime supplies current IDs; the daemon validates uniqueness and conflicts
+   before committing one binding generation. No ID is derived from another.
+5. `collab sendmessage` remains the single message admission API. It commits
+   the durable mailbox message and attempt first, resolves the recipient's
+   current bridge by stable peer identity, then relays the request to that
+   peer's own server. Acceptance, target execution, reply turn, and `recv`
+   consumption remain separate evidence; uncertainty or bridge loss never
+   triggers a second transport or automatic duplicate send.
+6. Replies use the same path in reverse: the receiving agent addresses the
+   sender's stable peer ID through Collab. The daemon resolves the sender's
+   current route; neither agent needs the other's socket path or AppServer
+   credentials. Route replacement advances the binding generation and
+   tombstones the old route, preserving message and receipt history.
+7. Advertise only operations proven for that bridge (`send`, `read`, `wait`,
+   `interrupt`, and any receipt capability). Desktop's `codex_app` bridge and
+   TUI's embedded AppServer may expose different operation sets; namespace and
+   provider identity stay typed control state, outside message payloads.
+
+The present evidence does not establish the key new edge: whether Desktop's
+host bridge and a separately launched embedded TUI can each accept a
+daemon-originated request over a registered bridge. The shared-daemon `codex
+queue` probe is a viable TUI route for command-center-launched sessions, but is
+not substituted for a `codex_tui` embedded-server adapter. Close that gap with
+two independent tests before enabling admission: (a) register a Desktop peer
+and have an independently launched TUI session send through `collab
+sendmessage`, then capture Desktop target receipt/reply; (b) reverse the roles
+and prove Desktop-to-TUI consumption and reply. Only then mark Desktop/TUI
+Collab comm integrated.
+
 ## Current implementation versus target
 
 The current source does not implement the tested native path in production:
@@ -486,6 +624,75 @@ init/context/send/recv receipts (`appserver-input-submitted`, consumed after
 `collab recv`), and fails closed for a missing App Server endpoint. Any live
 fixture must stop only its own daemon and remove only its own resources.
 
+## Live AppServer RPC capability matrix (2026-09-25)
+
+Verified against a real `codex app-server` daemon (Codex CLI 0.156.1) running on
+an isolated `CODEX_HOME` and an isolated unix socket. The probes were driven by
+raw WebSocket JSON-RPC clients (not by tmux), plus one isolated Collab daemon
+with two AppServer-transport peers. The matrix answers: for each thread state,
+can an independent connection read state and wake the thread?
+
+### Same AppServer owner, same process
+
+One AppServer process; each probe used a fresh WebSocket connection unless
+noted.
+
+| State | `thread/read` | `thread/resume` | `turn/start` | `turn/steer` | `thread/queue/add` | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| Idle thread created by another connection | OK (status returned) | OK after materialization; before first user message returns `thread ... is not materialized yet` for turns, `no rollout found` for resume on an unmaterialized thread | OK (creates inProgress turn) | OK when a turn is inProgress | OK | RPC wake + sensing work across connections on the same owner |
+| Active thread (inProgress turn) | OK | OK | OK (returns the existing inProgress turn id on this version) | OK | OK | Steer and queue both work on the same owner |
+| Cold persisted thread after AppServer restart | OK (rollout metadata served) | OK (resumes) | OK (loads and starts) | n/a until started | n/a until started | Persisted cold thread is a normal RPC state, not a failure |
+| Missing / never-materialized thread on this owner | `thread not loaded: <id>` | `no rollout found for thread id <id>` | `thread not found: <id>` | not reached | not reached | Explicit fail-closed terminal; not a capability to wake |
+
+### Different AppServer owner, same thread id
+
+Thread created and loaded on AppServer A; probe from a different AppServer
+process B that shares the same `CODEX_HOME` rollout store.
+
+| Operation | Result | Classification |
+| --- | --- | --- |
+| `thread/read` from B | OK (rollout metadata is shared on disk) | Read-only metadata is available cross-process; does not prove B owns the thread |
+| `thread/resume` from B | `thread ... already has an active writer` | Writer-conflict terminal: the thread belongs to A's live writer, not a transport limitation of Collab |
+| `turn/start` from B | `thread not found: <id>` | Route unavailable on B; Collab must deliver through the owner A |
+| `thread/loaded/list` from B | does not include A's thread | Thread residency is per-owner |
+
+### Desktop/shared control socket method surface
+
+The real `~/.codex/app-server-control/app-server-control.sock` control socket
+(managed daemon 0.156.1) exposes `turn/start`, `turn/steer`,
+`thread/queue/add`, `thread/resume`, `thread/turns/list`, `thread/items/list`,
+`thread/read`, `thread/archive`, `thread/list`, and `thread/loaded/list`. All
+methods exist (probe with invalid params returned `-32600`, not `-32601`).
+This is the same RPC surface the adapter already calls.
+
+### Collab end-to-end over a live isolated AppServer
+
+An isolated Collab daemon registered two peers (`peer-a`, `peer-b`) as
+AppServer-transport peers against one real isolated `codex app-server`
+process. `collab send --from peer-a --to peer-b` returned
+`notification: appserver-input-submitted`, `consumed: false`, and a durable
+message id, and peer-b's thread gained a turn whose user message matched the
+delegation envelope. `collab recv` is the only consumption terminal; transport
+acceptance is not consumption.
+
+### Determinism check
+
+The deterministic AppServer adapter tests (`cargo test --bin collab --
+codex_app_server::tests`) passed 40/40 three consecutive runs with no sleep or
+timing assertions. The `appserver_two_tui_integration` fixture (a stub unix
+socket AppServer, no real daemon) passed 3/3 three consecutive runs with tmux
+env removed, and `tmux_recv_e2e` passed 1/1 three consecutive runs. No observed
+flake.
+
+### Design consequence (no fallback)
+
+The capability boundary is **owner**, not transport. Same-owner RPC is
+capable of read/wake/steer/queue; different-owner threads fail closed
+(`ADAPTER_ROUTE_UNAVAILABLE` / writer-conflict terminal). tmux is not a second
+transport to retry when RPC fails; it remains an identity/pane recovery anchor
+and, for pane-only registration, a wake transport whose own receipt semantics
+are weaker. A route must commit to exactly one verified owner.
+
 ## Review of this design
 
 - Experiment supports shared-owner native RPC and thread-addressed start,
@@ -522,3 +729,46 @@ Ambiguous RPC completion stops retries and has no tmux fallback. The private
 embedded topology is explicitly unsupported because its in-process API has no
 external endpoint. Pane-only recovery and message-bound `collab recv`
 consumption remain implementation acceptance gates, not assumptions.
+
+## Live proof: plain TUI embedded AppServer is daemon-reachable (2026-09-25)
+
+The private-embedded "unsupported" conclusion above applies only to a TUI that
+refuses the shared local daemon (explicit `--remote`, `--profile`, `--no-daemon`,
+or incompatible overrides). A plain `codex` TUI launch (no remote, no profile,
+`CODEX_HOME` isolated, `daemon_auto_start=true`) starts the managed local
+daemon and exposes `$CODEX_HOME/app-server-control/app-server-control.sock`
+as a real WebSocket unix endpoint. This run proved the full chain in an
+isolated project under `/tmp/ac-embed-23398`:
+
+| Step | Command / probe | Result |
+| --- | --- | --- |
+| 1. Plain TUI starts shared local daemon | `CODEX_HOME=/tmp/ac-embed-23398/home codex` in tmux pane | `app-server-control.sock` appears; `thread/loaded/list` returns `01a0db76-6d92-7692-b7be-596a2c81df35` |
+| 2. Independent connection reads the thread | raw WebSocket JSON-RPC `thread/read` | returns session, cwd, model, status, `canAcceptDirectInput: true` |
+| 3. Independent connection starts a turn | `thread/resume` + `turn/start` with `clientUserMessageId=collab-probe-123` | accepted; new turn id returned |
+| 4. Recipient TUI shows the injected message | tmux `capture-pane` | `COLLAB_EMBED_PROBE_123` appears as the active prompt and as a user message |
+| 5. Turn completes on the thread | `thread/turns/list` | userMessage + agentMessage final_answer `COLLAB_EMBED_PROBE_123`, status `completed` |
+| 6. TUI process exits | explicit PID kill of pane process | daemon stays alive; `thread/loaded/list` still lists the thread |
+| 7. Thread survives and state is readable | `thread/read` after TUI exit | status `idle`, preview preserved, path/rollout intact |
+| 8. Thread can be woken after TUI exit | `thread/resume` + `turn/start` again | accepted; new turn runs headless and completes with an agentMessage final answer |
+
+Key consequences for Collab daemon routing:
+
+- Embedded-appserver TUI (plain launch, no remote) is **not** an in-process
+  dead end. Its thread is owned by the shared local daemon once the TUI joins
+  it; the daemon can read, wake, and execute turns through
+  `app-server-control.sock`.
+- Thread persistence and wake are daemon-level facts, not TUI-liveness facts.
+  After the TUI exits, the same thread id remains loaded, its state is
+  readable (`idle`), and `turn/start` can start a headless turn that completes.
+- Notification selection is therefore state-based, not transport-based:
+  while the TUI/thread is reachable through `app-server-control.sock`,
+  AppServer RPC (`turn/start`) is the wake mechanism; if the endpoint is gone
+  or the thread is unknown to the current daemon owner, tmux remains the
+  pane-recovery wake anchor (send-keys/paste) whose receipt is weaker.
+- The atomic daemon operation this supports is: one request → durable
+  journal/mailbox write → select current recipient route → if
+  appserver control socket is live and owns the thread, `turn/start` via
+  `app-server-control.sock` → record native acceptance; never treat native
+  acceptance as consumption (`collab recv`/ACK is the consumption terminal).
+- Cleanup after the run: isolated daemon PIDs 57443/57577 were stopped,
+  tmux session removed, `/tmp/ac-embed-23398` retained as evidence.

@@ -39,6 +39,7 @@ fn dispatch_with_route_context(
             token,
             cwd,
             candidates,
+            ..
         } => {
             let recover_existing = project_context.as_ref().is_some_and(|context| {
                 is_provisional_cli_runtime(context, &worker_id)

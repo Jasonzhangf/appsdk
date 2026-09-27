@@ -64,12 +64,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(project_context.clone()),
-            Req::Register {
-                worker_id: "target-master".into(),
-                token: "token-target-master".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-target-master"),
-            },
+            Req::register("target-master".into(),
+                 "token-target-master".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-target-master")),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -247,12 +245,10 @@
         let thread_id = "thread-resident-route-worker";
         let (_, response) = manager.dispatch_sync(
             Some(context_with_app(&root, crate::identity::CLI_APP_SERVER_ID)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: "token-resident-route-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(thread_id),
-            },
+            Req::register(worker_id.into(),
+                 "token-resident-route-worker".into(),
+                 root.display().to_string(),
+                 test_candidates(thread_id)),
         );
         assert!(response.ok, "{response:?}");
         let resolved = manager
@@ -279,12 +275,10 @@
 
         let (resident_runtime, registered) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "resident-replay-worker".into(),
-                token: "token-resident-replay-worker".into(),
-                cwd: host_root.display().to_string(),
-                candidates: test_candidates("thread-resident-replay-worker"),
-            },
+            Req::register("resident-replay-worker".into(),
+                 "token-resident-replay-worker".into(),
+                 host_root.display().to_string(),
+                 test_candidates("thread-resident-replay-worker")),
         );
         assert!(registered.ok, "{registered:?}");
         assert!(Arc::ptr_eq(&resident_runtime, &server));
@@ -323,12 +317,10 @@
         let thread_id = "thread-resident-replay-after-restart";
         let (selected, response) = replayed_manager.dispatch_sync(
             Some(context),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: "token-resident-replay-after-restart".into(),
-                cwd: host_root.display().to_string(),
-                candidates: test_candidates(thread_id),
-            },
+            Req::register(worker_id.into(),
+                 "token-resident-replay-after-restart".into(),
+                 host_root.display().to_string(),
+                 test_candidates(thread_id)),
         );
         assert!(response.ok, "{response:?}");
         assert!(Arc::ptr_eq(&selected, &server));
@@ -366,12 +358,10 @@
         let context = context_with_app(&root, crate::identity::CLI_APP_SERVER_ID);
         let (_, failed) = manager.dispatch_sync(
             Some(context),
-            Req::Register {
-                worker_id: "resident-route-failure-worker".into(),
-                token: "token-resident-route-failure-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-resident-route-failure-worker"),
-            },
+            Req::register("resident-route-failure-worker".into(),
+                 "token-resident-route-failure-worker".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-resident-route-failure-worker")),
         );
         assert!(!failed.ok, "{failed:?}");
         assert!(
@@ -697,12 +687,10 @@
                 crate::identity::CLI_APP_SERVER_ID,
                 &RuntimeIdentity::cli_adapter("resident-repair-worker").unwrap(),
             )),
-            Req::Register {
-                worker_id: "resident-repair-worker".into(),
-                token: "token-resident-repair-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-resident-repair-worker"),
-            },
+            Req::register("resident-repair-worker".into(),
+                 "token-resident-repair-worker".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-resident-repair-worker")),
         );
         assert!(retried.1.ok, "{:?}", retried.1);
         commit_current_thread_route_for_runtime(
@@ -838,12 +826,10 @@
         let seed_context = context_with_app(&project_root, "runtime-seed");
         let (_, seed_response) = manager.dispatch_sync(
             Some(seed_context),
-            Req::Register {
-                worker_id: "runtime-seed-worker".into(),
-                token: "token-runtime-seed-worker".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-runtime-seed-worker"),
-            },
+            Req::register("runtime-seed-worker".into(),
+                 "token-runtime-seed-worker".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-runtime-seed-worker")),
         );
         assert!(seed_response.ok, "{seed_response:?}");
 
@@ -854,12 +840,10 @@
         let before_route_journal = std::fs::read(&route_journal).unwrap();
         let (_, escape_response) = manager.dispatch_sync(
             Some(escape_context.clone()),
-            Req::Register {
-                worker_id: "runtime-escape-worker".into(),
-                token: "token-runtime-escape-worker".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-runtime-escape-worker"),
-            },
+            Req::register("runtime-escape-worker".into(),
+                 "token-runtime-escape-worker".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-runtime-escape-worker")),
         );
 
         assert!(!escape_response.ok, "{escape_response:?}");
@@ -1042,12 +1026,10 @@
         let context = context_with_app(&external_root, "permission-external-app");
         let (_runtime, response) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "permission-external-worker".into(),
-                token: "token-permission-external".into(),
-                cwd: external_root.display().to_string(),
-                candidates: test_candidates("thread-permission-external-worker"),
-            },
+            Req::register("permission-external-worker".into(),
+                 "token-permission-external".into(),
+                 external_root.display().to_string(),
+                 test_candidates("thread-permission-external-worker")),
         );
         std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -1083,12 +1065,10 @@
         let response = dispatch_wire(
             server.clone(),
             Some(project_context),
-            Req::Register {
-                worker_id: "wire-worker".into(),
-                token: "token-wire-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-wire-worker"),
-            },
+            Req::register("wire-worker".into(),
+                 "token-wire-worker".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-wire-worker")),
         )
         .await;
         assert!(response.ok, "{response:?}");
@@ -1120,17 +1100,15 @@
         let repeated = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, "app-wire", &runtime)),
-            Req::Register {
-                worker_id: "wire-worker".into(),
-                token: "token-wire-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates_for_registered(
+            Req::register("wire-worker".into(),
+                 "token-wire-worker".into(),
+                 root.display().to_string(),
+                 test_candidates_for_registered(
                     &server,
                     &root,
                     "wire-worker",
                     "app-wire",
-                ),
-            },
+                )),
         )
         .await;
         assert!(repeated.ok, "{repeated:?}");
@@ -1177,12 +1155,10 @@
         let response = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &runtime)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: "token-wire-runtime-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-wire-runtime-worker"),
-            },
+            Req::register(worker_id.into(),
+                 "token-wire-runtime-worker".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-wire-runtime-worker")),
         )
         .await;
         assert!(response.ok, "{response:?}");
@@ -1202,18 +1178,14 @@
         let project_scope = GlobalState::canonical_project_scope(&root).unwrap();
         let first_context = context_with_app(&root, "app-a");
         let second_context = context_with_app(&root, "app-b");
-        let first_request = Req::Register {
-            worker_id: "worker-a".into(),
-            token: "token-worker-a".into(),
-            cwd: root.display().to_string(),
-            candidates: test_candidates("thread-worker-a"),
-        };
-        let second_request = Req::Register {
-            worker_id: "worker-b".into(),
-            token: "token-worker-b".into(),
-            cwd: root.display().to_string(),
-            candidates: test_candidates("thread-worker-b"),
-        };
+        let first_request = Req::register("worker-a".into(),
+             "token-worker-a".into(),
+             root.display().to_string(),
+             test_candidates("thread-worker-a"));
+        let second_request = Req::register("worker-b".into(),
+             "token-worker-b".into(),
+             root.display().to_string(),
+             test_candidates("thread-worker-b"));
 
         // Both wire requests can pass host admission before either handler
         // reaches the typed commit boundary.
@@ -1303,12 +1275,10 @@
         let parent = dispatch_wire(
             server.clone(),
             Some(context.clone()),
-            Req::Register {
-                worker_id: "parent".into(),
-                token: "token-parent".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-parent"),
-            },
+            Req::register("parent".into(),
+                 "token-parent".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-parent")),
         )
         .await;
         assert!(parent.ok, "{parent:?}");

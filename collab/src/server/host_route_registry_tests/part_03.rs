@@ -20,16 +20,14 @@
         let register = |context: ProjectContext, worker_id: &str, token: &str| {
             let (runtime, response) = manager.dispatch_sync(
                 Some(context),
-                Req::Register {
-                    worker_id: worker_id.into(),
-                    token: token.into(),
-                    cwd: if worker_id == "app-a-worker" || worker_id == "app-b-worker" {
+                Req::register(worker_id.into(),
+                     token.into(),
+                     if worker_id == "app-a-worker" || worker_id == "app-b-worker" {
                         project_a.display().to_string()
                     } else {
                         project_b.display().to_string()
                     },
-                    candidates: test_candidates(&format!("thread-{worker_id}")),
-                },
+                     test_candidates(&format!("thread-{worker_id}"))),
             );
             assert!(response.ok, "registration {worker_id}: {response:?}");
             runtime
@@ -423,12 +421,10 @@
         let token_b = "token-cross-project-master-b";
         let (source_runtime, source_registration) = manager.dispatch_sync(
             Some(context_with_app(&project_a, app_a)),
-            Req::Register {
-                worker_id: master_a.into(),
-                token: token_a.into(),
-                cwd: project_a.display().to_string(),
-                candidates: test_candidates_at("thread-a", &project_a),
-            },
+            Req::register(master_a.into(),
+                 token_a.into(),
+                 project_a.display().to_string(),
+                 test_candidates_at("thread-a", &project_a)),
         );
         assert!(source_registration.ok, "{source_registration:?}");
         assert_eq!(
@@ -442,12 +438,10 @@
 
         let (target_runtime, target_registration) = manager.dispatch_sync(
             Some(context_with_app(&project_b, app_b)),
-            Req::Register {
-                worker_id: master_b.into(),
-                token: token_b.into(),
-                cwd: project_b.display().to_string(),
-                candidates: test_candidates_at("thread-b", &project_b),
-            },
+            Req::register(master_b.into(),
+                 token_b.into(),
+                 project_b.display().to_string(),
+                 test_candidates_at("thread-b", &project_b)),
         );
         assert!(target_registration.ok, "{target_registration:?}");
         assert_eq!(
@@ -595,22 +589,18 @@
 
         let (sender_runtime, sender_registration) = manager.dispatch_sync(
             Some(context_with_app(&project_root, app_scope)),
-            Req::Register {
-                worker_id: sender_id.into(),
-                token: sender_token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-full-replay-sender"),
-            },
+            Req::register(sender_id.into(),
+                 sender_token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-full-replay-sender")),
         );
         assert!(sender_registration.ok, "{sender_registration:?}");
         let (recipient_runtime, recipient_registration) = manager.dispatch_sync(
             Some(context_with_app(&project_root, app_scope)),
-            Req::Register {
-                worker_id: recipient_id.into(),
-                token: recipient_token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-full-replay-recipient"),
-            },
+            Req::register(recipient_id.into(),
+                 recipient_token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-full-replay-recipient")),
         );
         assert!(recipient_registration.ok, "{recipient_registration:?}");
         assert!(Arc::ptr_eq(&sender_runtime, &recipient_runtime));
@@ -801,12 +791,10 @@
         let register = |context: ProjectContext, worker_id: &str, token: &str| {
             let (runtime, response) = manager.dispatch_sync(
                 Some(context),
-                Req::Register {
-                    worker_id: worker_id.into(),
-                    token: token.into(),
-                    cwd: project_root.display().to_string(),
-                    candidates: test_candidates(&format!("thread-{worker_id}")),
-                },
+                Req::register(worker_id.into(),
+                     token.into(),
+                     project_root.display().to_string(),
+                     test_candidates(&format!("thread-{worker_id}"))),
             );
             assert!(response.ok, "registration {worker_id}: {response:?}");
             runtime
@@ -976,12 +964,10 @@
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let (_runtime, collision_response) = manager.dispatch_sync(
             Some(context_with_app(&project_root, candidate_app_scope)),
-            Req::Register {
-                worker_id: "prospective-collision-worker".into(),
-                token: "token-prospective-collision".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-prospective-collision-worker"),
-            },
+            Req::register("prospective-collision-worker".into(),
+                 "token-prospective-collision".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-prospective-collision-worker")),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -998,12 +984,10 @@
         let legacy_context = context_with_app(&project_root, legacy_app_scope);
         let (_runtime, registration_response) = manager.dispatch_sync(
             Some(legacy_context.clone()),
-            Req::Register {
-                worker_id: "legacy-replayed-worker".into(),
-                token: "token-legacy-replayed".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-legacy-replayed-worker"),
-            },
+            Req::register("legacy-replayed-worker".into(),
+                 "token-legacy-replayed".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-legacy-replayed-worker")),
         );
         assert!(registration_response.ok, "{registration_response:?}");
         let (_runtime, status_response) =
@@ -1053,12 +1037,10 @@
         let resident_context = context_with_app(&host_root, "resident-app");
         let (_runtime, resident_response) = manager.dispatch_sync(
             Some(resident_context.clone()),
-            Req::Register {
-                worker_id: "resident-worker".into(),
-                token: "token-resident-worker".into(),
-                cwd: host_root.display().to_string(),
-                candidates: test_candidates("thread-resident-worker"),
-            },
+            Req::register("resident-worker".into(),
+                 "token-resident-worker".into(),
+                 host_root.display().to_string(),
+                 test_candidates("thread-resident-worker")),
         );
         assert!(resident_response.ok, "{resident_response:?}");
         let after_resident = std::fs::read(&route_journal).unwrap();
@@ -1075,12 +1057,10 @@
         let collision_context = context_with_app(&resident_storage_root, "collision-app");
         let (_runtime, collision_response) = manager.dispatch_sync(
             Some(collision_context.clone()),
-            Req::Register {
-                worker_id: "resident-collision-worker".into(),
-                token: "token-resident-collision".into(),
-                cwd: resident_storage_root.display().to_string(),
-                candidates: test_candidates("thread-resident-collision-worker"),
-            },
+            Req::register("resident-collision-worker".into(),
+                 "token-resident-collision".into(),
+                 resident_storage_root.display().to_string(),
+                 test_candidates("thread-resident-collision-worker")),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -1123,22 +1103,18 @@
 
         let (seed_runtime, seed_response) = manager.dispatch_sync(
             Some(context_with_app(&project_root, "seed")),
-            Req::Register {
-                worker_id: "nested-seed-worker".into(),
-                token: "token-nested-seed".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-nested-seed-worker"),
-            },
+            Req::register("nested-seed-worker".into(),
+                 "token-nested-seed".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-nested-seed-worker")),
         );
         assert!(seed_response.ok, "{seed_response:?}");
         let (app_runtime, app_response) = manager.dispatch_sync(
             Some(context_with_app(&project_root, "app/a")),
-            Req::Register {
-                worker_id: "nested-app-worker".into(),
-                token: "token-nested-app".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-nested-app-worker"),
-            },
+            Req::register("nested-app-worker".into(),
+                 "token-nested-app".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-nested-app-worker")),
         );
         assert!(app_response.ok, "{app_response:?}");
         assert!(!Arc::ptr_eq(&seed_runtime, &app_runtime));
@@ -1152,12 +1128,10 @@
         let before_collision = std::fs::read(&route_journal).unwrap();
         let (_runtime, collision_response) = manager.dispatch_sync(
             Some(context_with_app(&nested_root, "nested-app")),
-            Req::Register {
-                worker_id: "nested-collision-worker".into(),
-                token: "token-nested-collision".into(),
-                cwd: nested_root.display().to_string(),
-                candidates: test_candidates("thread-nested-collision-worker"),
-            },
+            Req::register("nested-collision-worker".into(),
+                 "token-nested-collision".into(),
+                 nested_root.display().to_string(),
+                 test_candidates("thread-nested-collision-worker")),
         );
         assert!(!collision_response.ok, "{collision_response:?}");
         assert!(
@@ -1300,12 +1274,10 @@
 
         let (runtime, response) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "routecodex-master".into(),
-                token: "token-routecodex-master".into(),
-                cwd: external_root.display().to_string(),
-                candidates: test_candidates("thread-routecodex-master"),
-            },
+            Req::register("routecodex-master".into(),
+                 "token-routecodex-master".into(),
+                 external_root.display().to_string(),
+                 test_candidates("thread-routecodex-master")),
         );
         assert!(response.ok, "{response:?}");
 
@@ -1335,17 +1307,15 @@
                 "routecodex-app",
                 &runtime_identity,
             )),
-            Req::Register {
-                worker_id: "routecodex-master".into(),
-                token: "token-routecodex-master".into(),
-                cwd: external_root.display().to_string(),
-                candidates: test_candidates_for_registered(
+            Req::register("routecodex-master".into(),
+                 "token-routecodex-master".into(),
+                 external_root.display().to_string(),
+                 test_candidates_for_registered(
                     &runtime,
                     &external_root,
                     "routecodex-master",
                     "routecodex-app",
-                ),
-            },
+                )),
         );
         assert!(repeated.ok, "{repeated:?}");
         assert_eq!(repeated.data["replayed"], true);
@@ -1383,12 +1353,10 @@
         let response = dispatch_wire(
             server.clone(),
             Some(context),
-            Req::Register {
-                worker_id: "uninitialized-worker".into(),
-                token: "token-uninitialized-worker".into(),
-                cwd: external_root.display().to_string(),
-                candidates: test_candidates("thread-uninitialized-worker"),
-            },
+            Req::register("uninitialized-worker".into(),
+                 "token-uninitialized-worker".into(),
+                 external_root.display().to_string(),
+                 test_candidates("thread-uninitialized-worker")),
         )
         .await;
         assert!(!response.ok, "{response:?}");
@@ -1417,12 +1385,10 @@
         let response = dispatch_wire(
             server.clone(),
             Some(context),
-            Req::Register {
-                worker_id: "wrong-cwd-worker".into(),
-                token: "token-wrong-cwd-worker".into(),
-                cwd: child_root.display().to_string(),
-                candidates: test_candidates("thread-wrong-cwd-worker"),
-            },
+            Req::register("wrong-cwd-worker".into(),
+                 "token-wrong-cwd-worker".into(),
+                 child_root.display().to_string(),
+                 test_candidates("thread-wrong-cwd-worker")),
         )
         .await;
         assert!(!response.ok, "{response:?}");

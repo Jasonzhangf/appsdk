@@ -681,14 +681,41 @@ fn identity_by_tmux_anchor_at(
     scope: &Scope,
     candidate: &crate::proto::TmuxCandidate,
 ) -> anyhow::Result<Option<Identity>> {
-    identity_by_current_anchors_at(host_paths, scope, Some(candidate))
+    identity_by_current_anchors_same_scope_at(host_paths, scope, Some(candidate))
+}
+
+/// What a current tmux/Codex anchor uniquely resolved to. The calling path
+/// decides whether a cross-project peer may be retired so `collab context`
+/// can re-register the same pane/thread under the current project instead of
+/// stranding the agent in a hard-fail recovery loop.
+enum AnchorResolution {
+    /// The anchor belongs to the current project scope.
+    CurrentScope(Identity),
+    /// The anchor uniquely belongs to another project scope.
+    CrossProject(Identity),
+}
+
+/// Fail-closed wrapper for scope resolution, init, and explicit recovery:
+/// a cross-project match is an error on these paths.
+fn identity_by_current_anchors_same_scope_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    candidate: Option<&crate::proto::TmuxCandidate>,
+) -> anyhow::Result<Option<Identity>> {
+    match identity_by_current_anchors_at(host_paths, scope, candidate)? {
+        Some(AnchorResolution::CurrentScope(identity)) => Ok(Some(identity)),
+        Some(AnchorResolution::CrossProject(_)) => anyhow::bail!(
+            "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
+        ),
+        None => Ok(None),
+    }
 }
 
 fn identity_by_current_anchors_at(
     host_paths: &HostPaths,
     scope: &Scope,
     candidate: Option<&crate::proto::TmuxCandidate>,
-) -> anyhow::Result<Option<Identity>> {
+) -> anyhow::Result<Option<AnchorResolution>> {
     let identities_root = host_paths.state_root().join("identities");
     if !identities_root.is_dir() {
         return Ok(None);
@@ -800,10 +827,13 @@ fn identity_by_current_anchors_at(
             let expected_scope = scope
                 .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
                 .project_scope_id;
-            if identity.project_scope.as_ref() != Some(&expected_scope) {
-                anyhow::bail!("IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project");
-            }
-            Ok(Some(identity))
+            Ok(Some(
+                if identity.project_scope.as_ref() == Some(&expected_scope) {
+                    AnchorResolution::CurrentScope(identity)
+                } else {
+                    AnchorResolution::CrossProject(identity)
+                },
+            ))
         }
         _ => anyhow::bail!(
             "IDENTITY_RESTORE_CONFLICT: supplied tmux/Codex anchors identify different peers"
@@ -818,7 +848,19 @@ pub fn load_or_create(
     _endpoint_override: Option<String>,
 ) -> anyhow::Result<Identity> {
     let _ = _endpoint_override;
-    load_or_create_resolved(scope, worker_id, true)
+    load_or_create_full(&HostPaths::resolve()?, scope, worker_id, true, false)
+}
+
+/// Identity entry point used only by `collab context`.
+///
+/// `context` is the single bootstrap command an agent is expected to run, so it
+/// may auto-register the current pane/thread instead of requiring a human or
+/// agent to decide which persisted peer is stale and to pass `--worker-id`.
+pub fn load_or_create_for_context(
+    scope: &Scope,
+    worker_id: Option<String>,
+) -> anyhow::Result<Identity> {
+    load_or_create_full(&HostPaths::resolve()?, scope, worker_id, true, true)
 }
 
 pub(crate) fn load_existing_at(
@@ -837,7 +879,7 @@ pub(crate) fn load_existing_at(
             .filter(|value| !value.trim().is_empty())
     });
     let anchored_identity =
-        identity_by_current_anchors_at(host_paths, scope, tmux_candidate.as_ref())?;
+        identity_by_current_anchors_same_scope_at(host_paths, scope, tmux_candidate.as_ref())?;
     if let (Some(explicit_worker), Some(identity)) =
         (explicit_worker.as_deref(), anchored_identity.as_ref())
     {
@@ -881,15 +923,23 @@ fn load_or_create_for_init_at(
     scope: &Scope,
     worker_id: Option<String>,
 ) -> anyhow::Result<Identity> {
-    load_or_create_resolved_at(host_paths, scope, worker_id, true)
+    load_or_create_resolved_full_at(host_paths, scope, worker_id, true, false)
 }
 
-fn load_or_create_resolved(
+pub(crate) fn load_or_create_full(
+    host_paths: &HostPaths,
     scope: &Scope,
     worker_id: Option<String>,
     allow_scope_rebind: bool,
+    allow_fresh_registration: bool,
 ) -> anyhow::Result<Identity> {
-    load_or_create_resolved_at(&HostPaths::resolve()?, scope, worker_id, allow_scope_rebind)
+    load_or_create_resolved_full_at(
+        host_paths,
+        scope,
+        worker_id,
+        allow_scope_rebind,
+        allow_fresh_registration,
+    )
 }
 
 /// Why identity loading may not mint a brand-new peer for this project.
@@ -937,8 +987,9 @@ fn persisted_peer_liveness(identity: &Identity) -> PeerLiveness {
             let Some(thread_id) = transport.thread_id.as_deref() else {
                 return PeerLiveness::Unknown;
             };
-            match crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
-            {
+            match crate::client::adapters::codex_app_server::read_thread_status(
+                transport, thread_id,
+            ) {
                 Ok(raw) => classify_thread_status(&raw),
                 Err(error) => classify_probe_error(&error.to_string()),
             }
@@ -1019,7 +1070,9 @@ fn identity_for_scope_rebind_at(
     } else {
         None
     };
-    if let Some(identity) = identity_by_current_anchors_at(host_paths, scope, candidate.as_ref())? {
+    if let Some(identity) =
+        identity_by_current_anchors_same_scope_at(host_paths, scope, candidate.as_ref())?
+    {
         return Ok(ScopeRebindOutcome::Adopted(identity));
     }
     let identities_root = host_paths.state_root().join("identities");
@@ -1072,6 +1125,16 @@ fn load_or_create_resolved_at(
     worker_id: Option<String>,
     allow_scope_rebind: bool,
 ) -> anyhow::Result<Identity> {
+    load_or_create_resolved_full_at(host_paths, scope, worker_id, allow_scope_rebind, false)
+}
+
+fn load_or_create_resolved_full_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    worker_id: Option<String>,
+    allow_scope_rebind: bool,
+    allow_fresh_registration: bool,
+) -> anyhow::Result<Identity> {
     let tmux_candidate = if std::env::var_os("TMUX_PANE").is_some() {
         Some(crate::client::adapters::tmux::candidate_from_env().map_err(anyhow::Error::msg)?)
     } else {
@@ -1086,8 +1149,31 @@ fn load_or_create_resolved_at(
     let candidate = tmux_candidate.as_ref().ok_or_else(|| {
         anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane, a valid App Server endpoint, or an explicit worker_id")
     });
-    let anchored_identity =
-        identity_by_current_anchors_at(host_paths, scope, candidate.as_ref().ok().copied())?;
+    let mut retired_cross_project = false;
+    let anchored_identity = match identity_by_current_anchors_at(
+        host_paths,
+        scope,
+        candidate.as_ref().ok().copied(),
+    )? {
+        Some(AnchorResolution::CurrentScope(identity)) => Some(identity),
+        Some(AnchorResolution::CrossProject(identity)) => {
+            if allow_scope_rebind {
+                // The same pane/thread previously registered in another
+                // project. The pane can only belong to one live Collab peer,
+                // so archive the stale cross-project record and let the
+                // current project mint a fresh peer instead of leaving the
+                // agent stuck in a manual recovery loop.
+                archive_dead_peers(host_paths, std::slice::from_ref(&identity))?;
+                retired_cross_project = true;
+                None
+            } else {
+                anyhow::bail!(
+                    "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
+                );
+            }
+        }
+        None => None,
+    };
     if let (Some(explicit_worker), Some(identity)) =
         (explicit_worker.as_deref(), anchored_identity.as_ref())
     {
@@ -1102,7 +1188,7 @@ fn load_or_create_resolved_at(
         if let Some(identity) = anchored_identity {
             return Ok(identity);
         }
-        if allow_scope_rebind {
+        if allow_scope_rebind && !retired_cross_project && !allow_fresh_registration {
             match identity_for_scope_rebind_at(host_paths, scope)? {
                 ScopeRebindOutcome::Adopted(identity) => return Ok(identity),
                 ScopeRebindOutcome::NoCandidate => {}

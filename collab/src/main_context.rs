@@ -96,8 +96,11 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
     let cwd = std::env::current_dir()?;
     let bootstrap = context_bootstrap(&host_paths, &cwd)?;
     let scope = bootstrap.scope;
-    let mut ident = identity::load_or_create(&scope, worker, None)?;
-    let (_, identity_state) = ensure_registration_with_outcome(&scope, &mut ident)?;
+    let mut ident = identity::load_or_create_for_context(&scope, worker)?;
+    crate::set_context_registration_requested(true);
+    let result = ensure_registration_with_outcome(&scope, &mut ident);
+    crate::set_context_registration_requested(false);
+    let (_, identity_state) = result?;
     let identity_state = match identity_state {
         RegistrationOutcome::Created => "created",
         RegistrationOutcome::Reused => "reused",

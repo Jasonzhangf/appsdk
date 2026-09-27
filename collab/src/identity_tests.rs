@@ -351,6 +351,111 @@ fn tmux_identity_recovery_rejects_anchor_conflict_and_cross_project() {
 }
 
 #[test]
+fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = test_root("ci-cross-rebind");
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    let scope = test_scope(root.clone());
+    let other = root.join("other-project");
+    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
+    let other_scope = test_scope(other.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+
+    let candidate = tmux_candidate(Some("session-cross"), Some("thread-cross"), "%5");
+    saved_identity(
+        &host_paths,
+        &other_scope,
+        "codex-%5",
+        Some("session-cross"),
+        Some("thread-cross"),
+        Some(candidate.endpoint.clone()),
+    );
+
+    // Non-rebind paths (scope resolution / init) still fail closed on a
+    // cross-project unique anchor instead of displacing another project.
+    let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+    let previous_session = std::env::var_os("CODEX_SESSION_ID");
+    let previous_worker = std::env::var_os("COLLAB_WORKER");
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    std::env::set_var("TMUX_PANE", "%5");
+    std::env::set_var("CODEX_THREAD_ID", "thread-cross");
+    std::env::set_var("CODEX_SESSION_ID", "session-cross");
+    std::env::remove_var("COLLAB_WORKER");
+    let hard_fail = load_or_create_resolved_at(&host_paths, &scope, None, false);
+    let hard_fail_error = hard_fail.as_ref().unwrap_err().to_string();
+    assert!(
+        hard_fail_error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
+        "{hard_fail_error}"
+    );
+
+    // Another unverifiable peer in the current project must not block the
+    // same-pane re-registration after the stale cross-project peer is retired.
+    let blocker_scope = scope
+        .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+        .unwrap()
+        .project_scope_id;
+    let blocker = Identity {
+        worker_id: "blocker-peer".into(),
+        token: "blocker-token".into(),
+        project_scope: Some(blocker_scope),
+        runtime: None,
+        transport: None,
+    };
+    write_identity(
+        &identity_path_at(&host_paths, &blocker.worker_id).unwrap(),
+        &blocker,
+    )
+    .unwrap();
+
+    // Ordinary command path (allow_scope_rebind=true) retires the stale
+    // cross-project peer and mints a fresh peer for the current project, so
+    // `collab context` recovers without agent judgement or manual steps.
+    let recovered = load_or_create_resolved_at(&host_paths, &scope, None, true).unwrap();
+    assert_eq!(recovered.worker_id, "codex-%5");
+    assert_eq!(recovered.project_scope, None);
+
+    // The live identity path now holds a fresh current-project identity.
+    let current = read_identity(&identity_path_at(&host_paths, "codex-%5").unwrap())
+        .unwrap()
+        .expect("current identity exists");
+    assert_eq!(current.worker_id, "codex-%5");
+    assert_eq!(current.project_scope, None);
+
+    // The stale cross-project peer was archived intact for audit.
+    let archives = host_paths.state_root().join("archives");
+    let mut archived_old_peer = None;
+    for archive in std::fs::read_dir(&archives).unwrap() {
+        let archive_path = archive.unwrap().path().join("codex-%5/identity.json");
+        if let Some(old) = read_identity(&archive_path).unwrap() {
+            archived_old_peer = Some(old);
+            break;
+        }
+    }
+    let old = archived_old_peer.expect("cross-project peer was archived");
+    assert_eq!(old.project_scope.as_ref().map(|v| v.as_str()), Some(canonical_test_scope(&other_scope).as_str()));
+    assert_eq!(old.token, "token-codex-%5");
+
+    match previous_thread {
+        Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+        None => std::env::remove_var("CODEX_THREAD_ID"),
+    }
+    match previous_session {
+        Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+        None => std::env::remove_var("CODEX_SESSION_ID"),
+    }
+    match previous_worker {
+        Some(value) => std::env::set_var("COLLAB_WORKER", value),
+        None => std::env::remove_var("COLLAB_WORKER"),
+    }
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn tmux_identity_rebind_refuses_unknown_pane_when_project_identity_exists() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = test_root("ci-tmux-unknown");

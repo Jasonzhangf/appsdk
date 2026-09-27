@@ -289,6 +289,49 @@ fn init_rejects_identity_recovery_without_a_matching_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// `context` is the one-shot recovery command, so it may mint a fresh peer
+/// after stale project identities are present. Ordinary command loading must
+/// still fail closed and require an explicit worker selection.
+#[test]
+fn context_loads_or_creates_without_manual_worker_selection() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    persist_peer_at(
+        &host_paths,
+        &scope,
+        "other-peer",
+        "session-other",
+        "thread-other",
+        1,
+    );
+
+    let ordinary = with_current_address("thread-new", "session-new", || {
+        load_or_create_resolved_at(&host_paths, &scope, None, true)
+    });
+    assert!(ordinary
+        .unwrap_err()
+        .to_string()
+        .contains("IDENTITY_REBIND_UNPROVEN"));
+
+    let created = with_current_address("thread-new", "session-new", || {
+        load_or_create_full(&host_paths, &scope, None, true, true)
+    });
+
+    let created = created.unwrap();
+    assert_ne!(created.worker_id, "other-peer");
+    let persisted = read_identity(&identity_path_at(&host_paths, &created.worker_id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.worker_id, created.worker_id);
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// A dead App Server route cannot substitute for one of the approved tmux
 /// identity anchors; mismatched session/thread must not recover this peer.
 #[test]

@@ -13,12 +13,10 @@
         let session = "session-thread-cwd-route";
         let (_, registered) = manager.dispatch_sync(
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: "worker-cwd-route".into(),
-                token: "token-worker-cwd-route".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(thread),
-            },
+            Req::register("worker-cwd-route".into(),
+                 "token-worker-cwd-route".into(),
+                 root.display().to_string(),
+                 test_candidates(thread)),
         );
         assert!(registered.ok, "{registered:?}");
 
@@ -56,12 +54,10 @@
         let endpoint = candidates.tmux.as_ref().unwrap().endpoint.clone();
         let (_, registered) = manager.dispatch_sync(
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: "worker-cwd-owner".into(),
-                token: "token-worker-cwd-owner".into(),
-                cwd: root.display().to_string(),
-                candidates: Some(candidates),
-            },
+            Req::register("worker-cwd-owner".into(),
+                 "token-worker-cwd-owner".into(),
+                 root.display().to_string(),
+                 Some(candidates)),
         );
         assert!(registered.ok, "{registered:?}");
 
@@ -290,18 +286,16 @@
         ] {
             let (_, response) = manager.dispatch_sync(
                 Some(context_with_app(&root, "app-tmux-collision")),
-                Req::Register {
-                    worker_id: worker_id.into(),
-                    token: token.into(),
-                    cwd: root.to_string_lossy().into_owned(),
-                    candidates: Some(TransportCandidates {
+                Req::register(worker_id.into(),
+                     token.into(),
+                     root.to_string_lossy().into_owned(),
+                     Some(TransportCandidates {
                         appserver: None,
                         tmux: Some(crate::proto::TmuxCandidate {
                             endpoint,
                             cwd: root.to_string_lossy().into_owned(),
                         }),
-                    }),
-                },
+                    })),
             );
             assert!(response.ok, "{response:?}");
         }
@@ -349,12 +343,10 @@
         let context = context_with_app(&external_root, "atomic-register-app");
         let response = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "atomic-register-worker".into(),
-                token: "token-atomic-register-worker".into(),
-                cwd: external_root.display().to_string(),
-                candidates: test_candidates("thread-atomic-register-worker"),
-            },
+            Req::register("atomic-register-worker".into(),
+                 "token-atomic-register-worker".into(),
+                 external_root.display().to_string(),
+                 test_candidates("thread-atomic-register-worker")),
         );
         assert!(!response.1.ok, "{:?}", response.1);
         assert!(response
@@ -403,22 +395,18 @@
 
         let (_, first) = manager.dispatch_sync(
             Some(context_a.clone()),
-            Req::Register {
-                worker_id: "current-worker-a".into(),
-                token: "token-current-a".into(),
-                cwd: project_a.display().to_string(),
-                candidates: test_candidates(shared_thread),
-            },
+            Req::register("current-worker-a".into(),
+                 "token-current-a".into(),
+                 project_a.display().to_string(),
+                 test_candidates(shared_thread)),
         );
         assert!(first.ok, "{first:?}");
         let (_, second) = manager.dispatch_sync(
             Some(context_b.clone()),
-            Req::Register {
-                worker_id: "current-worker-b".into(),
-                token: "token-current-b".into(),
-                cwd: project_b.display().to_string(),
-                candidates: test_candidates(shared_thread),
-            },
+            Req::register("current-worker-b".into(),
+                 "token-current-b".into(),
+                 project_b.display().to_string(),
+                 test_candidates(shared_thread)),
         );
         assert!(!second.ok, "{second:?}");
         assert!(
@@ -442,12 +430,10 @@
 
         let (_, rejected) = manager.dispatch_sync(
             Some(context_b.clone()),
-            Req::Register {
-                worker_id: "rejected-worker".into(),
-                token: "token-rejected-worker".into(),
-                cwd: project_a.display().to_string(),
-                candidates: test_candidates(shared_thread),
-            },
+            Req::register("rejected-worker".into(),
+                 "token-rejected-worker".into(),
+                 project_a.display().to_string(),
+                 test_candidates(shared_thread)),
         );
         assert!(!rejected.ok, "{rejected:?}");
         assert_eq!(
@@ -522,24 +508,20 @@
 
         let (_, first) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(shared_thread),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(shared_thread)),
         );
         assert!(first.ok, "{first:?}");
 
         let provisional = RuntimeIdentity::cli_adapter(worker_id).unwrap();
         let (_, rebound) = manager.dispatch_sync(
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-same-worker-new"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates("thread-same-worker-new")),
         );
         assert!(rebound.ok, "{rebound:?}");
 
@@ -599,24 +581,20 @@
 
         let (_, first) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: candidates("session-same-thread-old"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 candidates("session-same-thread-old")),
         );
         assert!(first.ok, "{first:?}");
         let previous = runtime_for_registered(&server, &root, worker_id, app);
 
         let (_, rebound) = manager.dispatch_sync(
             Some(context_with_runtime(&root, app, &previous)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: candidates("session-same-thread-new"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 candidates("session-same-thread-new")),
         );
         assert!(rebound.ok, "{rebound:?}");
         assert_eq!(rebound.data["recovered"], true);
@@ -666,23 +644,19 @@
 
         let (_, first_registration) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "session-pair-worker-a".into(),
-                token: "token-session-pair-worker-a".into(),
-                cwd: root.display().to_string(),
-                candidates: candidates("session-pair-a"),
-            },
+            Req::register("session-pair-worker-a".into(),
+                 "token-session-pair-worker-a".into(),
+                 root.display().to_string(),
+                 candidates("session-pair-a")),
         );
         assert!(first_registration.ok, "{first_registration:?}");
 
         let (_, second_registration) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "session-pair-worker-b".into(),
-                token: "token-session-pair-worker-b".into(),
-                cwd: root.display().to_string(),
-                candidates: candidates("session-pair-b"),
-            },
+            Req::register("session-pair-worker-b".into(),
+                 "token-session-pair-worker-b".into(),
+                 root.display().to_string(),
+                 candidates("session-pair-b")),
         );
         assert!(!second_registration.ok, "{second_registration:?}");
         assert!(second_registration.error.as_deref().is_some_and(|error| {
@@ -710,12 +684,10 @@
 
         let (_, registered) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-host-route-failure-old"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates("thread-host-route-failure-old")),
         );
         assert!(registered.ok, "{registered:?}");
         let binding = server
@@ -747,12 +719,10 @@
                     native_thread_id: binding.native_thread_id.clone(),
                 },
             )),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-host-route-failure-new"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates("thread-host-route-failure-new")),
         );
         assert!(!response.ok, "{response:?}");
         assert!(
@@ -796,12 +766,10 @@
 
         let (_, response) = manager.dispatch_sync(
             Some(context),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-first-route-compensation"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates("thread-first-route-compensation")),
         );
         assert!(!response.ok, "{response:?}");
         assert!(
@@ -867,12 +835,10 @@
 
         let (runtime, registered) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-host-route-compensation-old"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-host-route-compensation-old")),
         );
         assert!(registered.ok, "{registered:?}");
         assert!(!Arc::ptr_eq(&runtime, &server));
@@ -957,12 +923,10 @@
                     native_thread_id: binding.native_thread_id.clone(),
                 },
             )),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-host-route-compensation-new"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-host-route-compensation-new")),
         );
         assert!(!response.ok, "{response:?}");
         assert!(
@@ -1119,12 +1083,10 @@
 
         let (runtime, registered) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-host-route-ambiguous-old"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-host-route-ambiguous-old")),
         );
         assert!(registered.ok, "{registered:?}");
         let previous = server
@@ -1155,12 +1117,10 @@
                     native_thread_id: previous.native_thread_id.clone(),
                 },
             )),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-host-route-ambiguous-new"),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-host-route-ambiguous-new")),
         );
         assert!(!response.ok, "{response:?}");
         assert!(
@@ -1226,12 +1186,10 @@
 
         let (runtime, response) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "manager-external-worker".into(),
-                token: "token-manager-external-worker".into(),
-                cwd: external_root.display().to_string(),
-                candidates: test_candidates("thread-manager-external-worker"),
-            },
+            Req::register("manager-external-worker".into(),
+                 "token-manager-external-worker".into(),
+                 external_root.display().to_string(),
+                 test_candidates("thread-manager-external-worker")),
         );
         assert!(response.ok, "{response:?}");
         assert!(!Arc::ptr_eq(&runtime, &server));
@@ -1287,22 +1245,18 @@
 
         let (sender_runtime, sender_registration) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: sender_id.into(),
-                token: sender_token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-route-aware-sender"),
-            },
+            Req::register(sender_id.into(),
+                 sender_token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-route-aware-sender")),
         );
         assert!(sender_registration.ok, "{sender_registration:?}");
         let (recipient_runtime, recipient_registration) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: recipient_id.into(),
-                token: recipient_token.into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-route-aware-recipient"),
-            },
+            Req::register(recipient_id.into(),
+                 recipient_token.into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-route-aware-recipient")),
         );
         assert!(recipient_registration.ok, "{recipient_registration:?}");
         assert!(Arc::ptr_eq(&sender_runtime, &recipient_runtime));

@@ -1085,34 +1085,30 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
         .unwrap();
     let rebound = dispatch(
         &server,
-        Req::Register {
-            worker_id: "peer".into(),
-            token: "token-peer".into(),
-            cwd: root.display().to_string(),
-            candidates: Some(crate::proto::TransportCandidates {
+        Req::register("peer".into(),
+             "token-peer".into(),
+             root.display().to_string(),
+             Some(crate::proto::TransportCandidates {
                 appserver: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint: endpoint.clone(),
                     cwd: root.display().to_string(),
                 }),
-            }),
-        },
+            })),
     );
     assert!(rebound.ok);
     let new_identity = dispatch(
         &server,
-        Req::Register {
-            worker_id: "new-peer".into(),
-            token: "token-new-peer".into(),
-            cwd: root.display().to_string(),
-            candidates: Some(crate::proto::TransportCandidates {
+        Req::register("new-peer".into(),
+             "token-new-peer".into(),
+             root.display().to_string(),
+             Some(crate::proto::TransportCandidates {
                 appserver: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint,
                     cwd: root.display().to_string(),
                 }),
-            }),
-        },
+            })),
     );
     assert_eq!(
         new_identity.error.as_deref(),

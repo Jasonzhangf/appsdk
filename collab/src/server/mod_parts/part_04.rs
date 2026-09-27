@@ -240,6 +240,7 @@ impl ProjectRuntimeManager {
         let Req::Register {
             worker_id,
             candidates: Some(candidates),
+            retire_cross_project_anchor,
             ..
         } = req
         else {
@@ -308,21 +309,80 @@ impl ProjectRuntimeManager {
         }
         if let Some(binding) = anchor_matches.first() {
             if binding.agent_id.as_str() != worker_id {
-                return Err(format!(
-                    "RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker {}",
-                    binding.agent_id
-                ));
+                if !*retire_cross_project_anchor {
+                    return Err(format!(
+                        "RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker {}",
+                        binding.agent_id
+                    ));
+                }
+                self.retire_cross_project_anchor_candidate(context, &candidate.endpoint, binding)?;
             }
-            if binding.app_scope_id != context.app_scope_id
-                || binding.project_scope != context.project_scope
-            {
+            let remaining_scope_mismatch = binding.app_scope_id != context.app_scope_id
+                || binding.project_scope != context.project_scope;
+            if remaining_scope_mismatch && !*retire_cross_project_anchor {
                 return Err(
                     "RUNTIME_BINDING_REJECTED: tmux identity anchor belongs to another project route"
                         .to_owned(),
                 );
             }
+            if remaining_scope_mismatch {
+                self.retire_cross_project_anchor_candidate(context, &candidate.endpoint, binding)?;
+            }
         }
         Ok(())
+    }
+
+    fn retire_cross_project_anchor_candidate(
+        &self,
+        context: &ProjectContext,
+        candidate: &crate::server::global_state::TmuxEndpoint,
+        binding: &RuntimeBinding,
+    ) -> Result<(), String> {
+        let candidate_scope_mismatch = binding.app_scope_id != context.app_scope_id
+            || binding.project_scope != context.project_scope;
+        if !candidate_scope_mismatch {
+            return Ok(());
+        }
+        let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
+            "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no native thread id"
+                .to_owned()
+        })?;
+        let session_id = binding.session_id.as_ref().ok_or_else(|| {
+            "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no session id"
+                .to_owned()
+        })?;
+        let matches_candidate = |previous: &RuntimeBinding| {
+            previous.session_id.as_ref() == Some(session_id)
+                && previous.native_thread_id.as_ref() == Some(native_thread_id)
+                && previous.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                    endpoint.socket_path == candidate.socket_path
+                        && endpoint.server_pid == candidate.server_pid
+                        && endpoint.tmux_session_id == candidate.tmux_session_id
+                        && endpoint.pane_id == candidate.pane_id
+                })
+        };
+        self.host
+            .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+                binding: binding.clone(),
+            }])
+            .map(|_| ())
+            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
+        let retired = {
+            let state = self.host.state.lock().unwrap();
+            !state
+                .global
+                .current_thread_routes
+                .values()
+                .any(|route| route.binding_id == binding.binding_id && matches_candidate(route))
+        };
+        if retired {
+            Ok(())
+        } else {
+            Err(
+                "RUNTIME_BINDING_REJECTED: stale cross-project anchor retirement was not applied"
+                    .to_owned(),
+            )
+        }
     }
 
     fn runtimes(&self) -> Vec<Arc<Server>> {

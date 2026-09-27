@@ -15,6 +15,7 @@ use proto::{Req, Resp, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use std::cell::Cell;
 
 mod main_live_closure;
 use main_live_closure::*;
@@ -222,6 +223,20 @@ fn register(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::V
     register_with_runtime(scope, ident, context_runtime)
 }
 
+fn context_registration_requested() -> bool {
+    thread_local! {
+        static CONTEXT_RETIRE_CROSS_PROJECT: Cell<bool> = const { Cell::new(false) };
+    }
+    CONTEXT_RETIRE_CROSS_PROJECT.with(Cell::get)
+}
+
+pub(crate) fn set_context_registration_requested(value: bool) {
+    thread_local! {
+        static CONTEXT_RETIRE_CROSS_PROJECT: Cell<bool> = const { Cell::new(false) };
+    }
+    CONTEXT_RETIRE_CROSS_PROJECT.with(|flag| flag.set(value));
+}
+
 /// Bootstrap recovery with the only runtime identity accepted before the
 /// daemon has restored this worker's registered route.
 fn register_recovery(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::Value> {
@@ -249,6 +264,7 @@ fn register_with_runtime(
                     .map_err(anyhow::Error::msg)?,
                 tmux: crate::client::adapters::tmux::candidate_from_env().ok(),
             }),
+            retire_cross_project_anchor: context_registration_requested(),
         },
         &scope.root,
         &context_runtime,

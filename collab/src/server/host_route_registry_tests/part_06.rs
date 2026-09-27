@@ -7,12 +7,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -37,12 +35,10 @@
             let response = dispatch_wire(
                 rebind_server.clone(),
                 Some(recovery_context),
-                Req::Register {
-                    worker_id: worker_id.into(),
-                    token: token.into(),
-                    cwd: rebind_root.display().to_string(),
-                    candidates: test_candidates(&format!("thread-{worker_id}")),
-                },
+                Req::register(worker_id.into(),
+                     token.into(),
+                     rebind_root.display().to_string(),
+                     test_candidates(&format!("thread-{worker_id}"))),
             )
             .await;
             assert!(response.ok, "{response:?}");

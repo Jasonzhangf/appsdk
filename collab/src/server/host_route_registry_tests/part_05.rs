@@ -11,12 +11,10 @@
         let context = context_with_app(&project_root, "child-route-app");
         let (runtime, parent) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::Register {
-                worker_id: "child-route-parent".into(),
-                token: "token-child-route-parent".into(),
-                cwd: project_root.display().to_string(),
-                candidates: test_candidates("thread-child-route-parent"),
-            },
+            Req::register("child-route-parent".into(),
+                 "token-child-route-parent".into(),
+                 project_root.display().to_string(),
+                 test_candidates("thread-child-route-parent")),
         );
         assert!(parent.ok, "{parent:?}");
         assert!(!Arc::ptr_eq(&runtime, &host));
@@ -152,12 +150,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -245,12 +241,10 @@
             let response = dispatch_wire(
                 server.clone(),
                 Some(context_with_app(&root, app)),
-                Req::Register {
-                    worker_id: worker_id.clone(),
-                    token: token.clone(),
-                    cwd: root.display().to_string(),
-                    candidates: test_candidates(&format!("thread-{worker_id}")),
-                },
+                Req::register(worker_id.clone(),
+                     token.clone(),
+                     root.display().to_string(),
+                     test_candidates(&format!("thread-{worker_id}"))),
             )
             .await;
             assert!(response.ok, "{response:?}");
@@ -464,12 +458,10 @@
             let response = dispatch_wire(
                 server.clone(),
                 Some(context_with_app(&root, app)),
-                Req::Register {
-                    worker_id: worker_id.into(),
-                    token: format!("token-{worker_id}"),
-                    cwd: root.display().to_string(),
-                    candidates: test_candidates(&format!("thread-{worker_id}")),
-                },
+                Req::register(worker_id.into(),
+                     format!("token-{worker_id}"),
+                     root.display().to_string(),
+                     test_candidates(&format!("thread-{worker_id}"))),
             )
             .await;
             assert!(response.ok, "{response:?}");
@@ -564,12 +556,10 @@
         let first = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(first.ok, "{first:?}");
@@ -593,12 +583,10 @@
         let recovered = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(recovered.ok, "{recovered:?}");
@@ -649,12 +637,10 @@
         let first = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: old_token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 old_token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(first.ok, "{first:?}");
@@ -689,12 +675,10 @@
         let recovered = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: new_token.into(),
-                cwd: root.display().to_string(),
-                candidates: Some(recovery_candidates),
-            },
+            Req::register(worker_id.into(),
+                 new_token.into(),
+                 root.display().to_string(),
+                 Some(recovery_candidates)),
         )
         .await;
         assert!(recovered.ok, "{recovered:?}");
@@ -732,12 +716,10 @@
         let first = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: old_token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 old_token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(first.ok, "{first:?}");
@@ -754,12 +736,10 @@
         let recovered = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &persisted_runtime)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: new_token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates_for_registered(&server, &root, worker_id, app),
-            },
+            Req::register(worker_id.into(),
+                 new_token.into(),
+                 root.display().to_string(),
+                 test_candidates_for_registered(&server, &root, worker_id, app)),
         )
         .await;
         assert!(recovered.ok, "{recovered:?}");
@@ -787,12 +767,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -822,12 +800,10 @@
         let recovered = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates_for_registered(&server, &root, worker_id, app),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates_for_registered(&server, &root, worker_id, app)),
         )
         .await;
         assert!(recovered.ok, "{recovered:?}");
@@ -872,12 +848,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -906,12 +880,10 @@
         let forged = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: "forged-token".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-unbound-replacement"),
-            },
+            Req::register(worker_id.into(),
+                 "forged-token".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-unbound-replacement")),
         )
         .await;
         assert!(!forged.ok, "{forged:?}");
@@ -937,12 +909,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -963,12 +933,10 @@
         let forged = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: "forged-token".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 "forged-token".into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(!forged.ok, "{forged:?}");
@@ -994,12 +962,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -1041,12 +1007,10 @@
         let rejected = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(!rejected.ok, "{rejected:?}");
@@ -1073,12 +1037,10 @@
         let registered = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(registered.ok, "{registered:?}");
@@ -1099,12 +1061,10 @@
         let wrong_token = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: "forged-token".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-forged-token"),
-            },
+            Req::register(worker_id.into(),
+                 "forged-token".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-forged-token")),
         )
         .await;
         assert!(!wrong_token.ok, "{wrong_token:?}");
@@ -1122,12 +1082,10 @@
         let other = dispatch_wire(
             server.clone(),
             Some(context_with_app(&root, app)),
-            Req::Register {
-                worker_id: "other-worker".into(),
-                token: "token-other-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-another-worker"),
-            },
+            Req::register("other-worker".into(),
+                 "token-other-worker".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-another-worker")),
         )
         .await;
         assert!(other.ok, "{other:?}");
@@ -1146,12 +1104,10 @@
         let wrong_thread = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates_for_registered(&server, &root, "other-worker", app),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 root.display().to_string(),
+                 test_candidates_for_registered(&server, &root, "other-worker", app)),
         )
         .await;
         assert!(!wrong_thread.ok, "{wrong_thread:?}");
@@ -1177,12 +1133,10 @@
         let wrong_route = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&wrong_root, app, &provisional)),
-            Req::Register {
-                worker_id: worker_id.into(),
-                token: token.into(),
-                cwd: wrong_root.display().to_string(),
-                candidates: test_candidates(&format!("thread-{worker_id}")),
-            },
+            Req::register(worker_id.into(),
+                 token.into(),
+                 wrong_root.display().to_string(),
+                 test_candidates(&format!("thread-{worker_id}"))),
         )
         .await;
         assert!(!wrong_route.ok, "{wrong_route:?}");
@@ -1205,12 +1159,10 @@
         let forged = dispatch_wire(
             server.clone(),
             Some(forged_context),
-            Req::Register {
-                worker_id: forged_worker.into(),
-                token: "token-forged-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: test_candidates("thread-forged-worker"),
-            },
+            Req::register(forged_worker.into(),
+                 "token-forged-worker".into(),
+                 root.display().to_string(),
+                 test_candidates("thread-forged-worker")),
         )
         .await;
         assert!(!forged.ok, "{forged:?}");

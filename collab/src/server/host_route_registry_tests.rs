@@ -1,0 +1,1 @@
+include!("host_route_registry_tests/part_01.rs");include!("host_route_registry_tests/part_02.rs");include!("host_route_registry_tests/part_03.rs");include!("host_route_registry_tests/part_04.rs");include!("host_route_registry_tests/part_05.rs");include!("host_route_registry_tests/part_06.rs");

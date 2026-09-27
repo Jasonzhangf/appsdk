@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "Collab: 只跑 collab context, 自动查身份/恢复/注册/补齐上下文+角色操作。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, master 必须 merge 后 task integrated 才能 close (TASK_MERGE_PENDING), 见 context/status/longhorizon/idle wake。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
+description: "Collab: 只跑 collab context, 自动查身份/恢复/注册/补齐上下文+角色操作。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, master 或满足收口条件的 peer merge 后 task integrated 才能 close (TASK_MERGE_PENDING); peer merge 失败上报 master。见 context/status/longhorizon/idle wake。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
 ---
 
 # Collab
@@ -707,14 +707,42 @@ registers a daemon-owned pending merge and notifies the live master; the
 obligation is durable, appears in `collab context`, `collab status --all`
 (`pending_merges`), `appsdk longhorizon show` (待合并), and master idle wake
 text, and `task close` fails with `TASK_MERGE_PENDING` until the master records
-`collab task integrated`. Never rely on remembering a merge from a message.
-After a delivered candidate, the live master drives review, integration,
+`collab task integrated` (or, if the peer performed the verified merge itself under the conditions in the next section, that same recording step still applies). Never rely on remembering a merge from a message.
+After a delivered candidate, either the peer merges and pushes the verified candidate under the next section’s conditions, or the live master drives review, integration,
 cleanup, task close, and then the next ready assignment. Do not leave a peer
 idle merely because its last task returned `delivered`, `merged`, or a review
 verdict. Reuse the same live peer
 or a fresh managed subagent for the next non-overlapping P0/P1 assignment
 whenever capacity exists. Closing or force-closing a stale task is a scheduling
 decision that must preserve evidence, not a reason to stop dispatching.
+
+### Verified merge and resource cleanup DAG（单源单汇）
+
+一个交付/resource 回收任务必须以唯一入口进入、唯一终点收口；节点内部可以是状态机，但独立功能之间不得跨节点回边改真源。
+
+**peer 可直接 merge + push，当且仅当：**
+
+1. merge 前 fetch 最新 `origin/main`，确认远端 main 没有比自己主链更新的提交；
+2. 候选已 rebase/组合到该最新 main，并重跑过受影响验证 + 独立 review PASS；
+3. 当前项目没有 pending merge/release 锁（简单 queue 文件或 daemon 状态）；
+4. merge 后立即核对本地 main 与已验候选等价，并确认 `origin/main` 回执；
+5. 任何失败（合并冲突、push 拒绝、CI 未跑通）都必须停下并上报 master，不允许强行推进。
+
+否则 merge 的 owner 仍是 live master；review PASS 不授予流程外发布或生产变更。
+
+**peer 资源回收单源单汇：**
+
+- 入口：本任务生命周期终点；
+- 终点：本任务创建且确认不再需要的资源全部移除，并留下核对证据；
+- 范围：worktree、playground、临时文件、日志、进程、forward；
+- 核对：`git -C <repo> worktree list --porcelain` 不含本任务 worktree；`test ! -e <playground>` 成功；本轮 tmp/日志/进程已移除。
+
+**master 资源回收单源单汇：**
+
+- 入口：调度/交付收口；
+- 终点：idle/stale 资源核销：过时 playground、失效 worktree、dirty main、已审查完成或明确 drop 的分支/候选/交付记录，逐个按 review/commit/drop 的授权终点核销并留证据；
+- 边界：只回收已确认 stale 且有 owner 证据的资源，不得跨节点直接删除他人资源、共享 playground、共享进程或未经核销的候选；
+- 失败：任何回收失败必须显式报告原因并标为未收口，不允许静默跳过。
 
 A worker or subagent executes only the approved assignment, owns that
 task's full lifecycle, and returns evidence. It has no global schedule.

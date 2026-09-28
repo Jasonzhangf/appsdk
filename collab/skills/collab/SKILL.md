@@ -24,6 +24,24 @@ release builds fail with an instruction to use the official entry. An upgrade
 targets the current reviewed source and does not migrate, replay, or interpret
 older local versions.
 
+The canonical reviewed-source delivery sequence is a single source, single
+sink DAG. Every applicable node must finish before claiming delivery:
+
+```text
+reviewed_source
+  -> targeted_tests + build/install
+  -> if runtime/daemon is affected: collab down -> collab up (one maintenance window)
+  -> installed binary + collab context + collab-mcp initialize live checks
+  -> commit/merge/push and cleanup
+```
+
+For ordinary peer bootstrap and identity recovery, the only entry remains
+`collab context`. That command is not a daemon lifecycle owner. A Collab runtime
+delivery that changes server, notification, identity, route, MCP, CLI, or daemon
+behavior must cross the runtime lifecycle boundary in the same delivery unit
+after installation, unless the owner explicitly records why no daemon change is
+applicable.
+
 The canonical install sequence from the reviewed source is:
 
 ```sh
@@ -46,12 +64,22 @@ verified pair. A path that cannot prove that identity is a collision: preserve
 it and report the exact path. Never delete `~/.local/bin/collab*` or
 `~/.local/lib/collab/*` merely because the pathname matches.
 
-Installing a new binary does not replace a running daemon. The global daemon
-may be serving other projects, so do not run `collab down` or `collab up`
-merely because the binary was upgraded. Keep the existing daemon running until
-an explicitly authorized maintenance window. In that window, use the
-controlled lifecycle and preserve PID/socket/identity/journal/mailbox evidence;
-never use a broad process kill or a second daemon.
+Installing a new binary does not itself replace a running daemon. Do not run
+`collab down` or `collab up` merely to refresh a peer identity. For a verified
+runtime delivery, use one controlled maintenance window and preserve old/new
+PID/socket, binary version/digest, identity, journal/mailbox, context, MCP, and
+live replay evidence:
+
+```sh
+collab down
+collab up
+collab context
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"0.0.0"}}}\n' | collab-mcp
+```
+
+Never use a broad process kill or a second daemon. If `collab context` reports
+a daemon PID that predates the maintenance window, the runtime node is
+`INCOMPLETE`, not delivered.
 
 Before changing the installed binary, inspect the current source version,
 installed version, canonical paths, and daemon PID/socket:
@@ -129,18 +157,12 @@ Do not start the default agent flow with `collab master status`,
 remain available only as explicit human diagnostics and are not required for
 recovery. `collab context` performs the minimal bootstrap write automatically.
 
-Daemon restart is never part of identity or binary-version recovery. After
-the daemon binary is replaced, or after the current Codex session/thread
-changes, the persisted worker token stays valid and `collab context` rebinds
-the runtime in place automatically and idempotently. If in-place recovery
-cannot be verified, a peer is re-registered fresh with the same worker token
-(the previous binding is superseded as the active peer) without a daemon
-restart. Only a true failure of that fresh re-register is preserved and
-reported to the live master; an agent does not run `collab down`/`collab up`,
-`collab worker recover`, or a status hunt, and does not edit
-identity/token/route state. Daemon restart drops in-flight mailbox, leases,
-and bound tasks for every peer in the global daemon and is a separate,
-explicitly authorized maintenance operation, not recovery.
+Daemon restart is not part of ordinary identity recovery. After a daemon binary
+is replaced as part of a verified Collab runtime delivery, the old daemon still
+counts as an open delivery node until the controlled down/up window is
+completed and the live entry points are rechecked. Ordinary peer recovery still
+uses `collab context` only: it rebinds the current runtime in place and must not
+run `collab down`/`collab up`, `collab worker recover`, or a status hunt.
 
 When `collab context` cannot match a current pane/session/thread to any
 persisted peer, it probes the project's persisted identities before failing.
@@ -729,6 +751,31 @@ decision that must preserve evidence, not a reason to stop dispatching.
 5. 任何失败（合并冲突、push 拒绝、CI 未跑通）都必须停下并上报 master，不允许强行推进。
 
 否则 merge 的 owner 仍是 live master；review PASS 不授予流程外发布或生产变更。
+
+### Collab runtime delivery DAG（单源单汇）
+
+适用范围：Collab server、daemon、CLI、MCP、route、identity、notification、wake、
+mailbox、task lifecycle 或安装包的修复/发布。源码测试和 `git push` 都不是终点；
+runtime 节点未完成时必须报 `INCOMPLETE`。
+
+```text
+入口: reviewed_origin_main_candidate
+  -> applicable_targeted_tests_pass
+  -> scripts/install-global-collab.sh
+  -> installed_binary_version_digest_verified
+  -> collab_down_exact
+  -> collab_up_exact
+  -> collab_context_registered_live
+  -> collab_mcp_initialize_matches_version
+  -> live_replay_or_explicit_non_applicable_reason
+  -> commit_merge_push_verified
+终点: cleanup_verified
+```
+
+维护窗口只使用 `collab down` 和 `collab up`。不得用 broad kill、第二个 daemon、
+旧 binary、跳过重启或手工 route/identity 文件替代节点。重启后必须同时记录旧/新
+PID/socket、installed binary SHA256、MCP version、context worker/role/transport、
+pending_merges/worktrees 状态；任一项不匹配都不能声称交付完成。
 
 **peer 资源回收单源单汇：**
 

@@ -182,9 +182,11 @@ collab up
   maintenance.
 - Use official lifecycle; never broad process-name kills.
 - Resolve exact project socket/cwd/PID/tasks/migration/journal/mailbox first.
-- Installing a binary does not replace a live daemon.
-- Do not restart the global daemon merely to pick up an upgraded binary while
-  other projects may still be using it. Schedule the maintenance explicitly.
+- Installing a binary does not replace a live daemon and does not close a
+  runtime delivery.
+- Do not restart the global daemon for peer identity recovery. Schedule the
+  explicit runtime delivery maintenance window when daemon/server behavior was
+  installed.
 - Keep an explicitly stopped daemon down through implementation and review.
 - Restart only after reviewed source reaches verified latest main.
 - After restart prove one PID/socket, preserved durable state, identity rebind,

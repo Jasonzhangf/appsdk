@@ -13,10 +13,10 @@ paths, and refreshed embedded Skill byte-for-byte. Refresh the Skill with the
 exact `$CARGO_HOME/bin/collab` binary, not a bare command that may resolve an
 older PATH entry. Remove only legacy copies whose binary identity proves they
 are matching Collab artifacts, then validate the new baseline only: do not
-migrate or replay old local control-plane history. Installing a binary does
-not restart the global daemon. A daemon restart is a separate, explicitly
-authorized maintenance operation with PID/socket, identity, journal/mailbox,
-and live-replay evidence.
+migrate or replay old local control-plane history. For a Collab runtime
+delivery, installation is not the endpoint: run one controlled `collab down`
+and `collab up` window, then verify installed binary digest, daemon PID/socket,
+`collab context`, MCP initialize, identity, durable state, and live replay.
 
 Before review, prove the affected subset and every changed invariant:
 

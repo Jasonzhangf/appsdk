@@ -113,7 +113,7 @@ fn mailbox_events(raw: &str) -> Result<Vec<Value>, String> {
         if event
             .get("at")
             .and_then(Value::as_str)
-            .is_none_or(|value| value.trim().is_empty())
+            .map_or(true, |value| value.trim().is_empty())
         {
             return Err(format!(
                 "COMMUNICATION_MAILBOX_EVENT_INVALID:at:{}",
@@ -452,7 +452,7 @@ fn notification_input(key: &str, events: &[Value]) -> Result<Value, String> {
     }))
 }
 
-fn register_notification_operator(registry: &mut Registry) -> Result<(), String> {
+pub(super) fn register_notification_operator(registry: &mut Registry) -> Result<(), String> {
     registry
         .register(NotificationObjectValidateOperator)
         .map_err(|error| format!("DAGPIPE_OPERATOR_REGISTER_FAILED:{error}"))

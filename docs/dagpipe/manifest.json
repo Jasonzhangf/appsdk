@@ -2,8 +2,28 @@
   "schema_version": 1,
   "graphs": [
     {
+      "id": "appsdk-fix-lifecycle",
+      "path": "contracts/dagpipe/fix-lifecycle.graph.json"
+    },
+    {
+      "id": "appsdk-notification-object",
+      "path": "contracts/dagpipe/notification.graph.json"
+    },
+    {
       "id": "appsdk-collab-context",
       "path": "docs/dagpipe/collab-context.graph.json"
+    },
+    {
+      "id": "appsdk-collab-appserver-route-repair",
+      "path": "docs/dagpipe/appserver-route-repair.graph.json"
+    },
+    {
+      "id": "appsdk-collab-subscription-lifecycle",
+      "path": "docs/dagpipe/collab-subscription-lifecycle.graph.json"
+    },
+    {
+      "id": "appsdk-collab-notification-consumption",
+      "path": "docs/dagpipe/collab-notification-consumption.graph.json"
     },
     {
       "id": "appsdk-collab-merge-pending",

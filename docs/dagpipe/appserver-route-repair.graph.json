@@ -1,0 +1,70 @@
+{
+  "id": "appsdk-collab-appserver-route-repair",
+  "version": "0.2.0",
+  "description": "SESE route-repair graph entered only after a proven route-unavailable notification failure. It discovers a unique live thread, rebinds durable state, refreshes the worker transport/lease, retries once, and emits one terminal receipt.",
+  "inputs": [
+    {
+      "id": "route_unavailable_failure",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "discover_live_session_thread",
+      "operator": "appsdk.collab_appserver_route.discover_live_thread",
+      "operator_version": "1",
+      "inputs": ["route_unavailable_failure"],
+      "output": {"id": "discovery_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "rebind_current_route",
+      "operator": "appsdk.collab_appserver_route.rebind_current_route",
+      "operator_version": "1",
+      "inputs": ["discovery_result"],
+      "output": {"id": "route_refresh_decision", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "refresh_worker_transport_lease",
+      "operator": "appsdk.collab_appserver_route.refresh_worker_transport_lease",
+      "operator_version": "1",
+      "inputs": ["route_refresh_decision"],
+      "output": {"id": "route_refreshed", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "retry_notification_once",
+      "operator": "appsdk.collab_appserver_route.retry_notification_once",
+      "operator_version": "1",
+      "inputs": ["route_refreshed"],
+      "output": {"id": "retry_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_notification_result_receipt",
+      "operator": "appsdk.collab_appserver_route.emit_notification_result_receipt",
+      "operator_version": "1",
+      "inputs": ["retry_result"],
+      "output": {"id": "notification_result_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "discover_live_session_thread", "to": "rebind_current_route", "arc_id": "discovery_result"},
+    {"from": "rebind_current_route", "to": "refresh_worker_transport_lease", "arc_id": "route_refresh_decision"},
+    {"from": "refresh_worker_transport_lease", "to": "retry_notification_once", "arc_id": "route_refreshed"},
+    {"from": "retry_notification_once", "to": "emit_notification_result_receipt", "arc_id": "retry_result"}
+  ],
+  "outputs": ["notification_result_receipt"]
+}

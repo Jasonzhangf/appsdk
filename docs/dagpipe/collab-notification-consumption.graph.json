@@ -1,0 +1,48 @@
+{
+  "id": "appsdk-collab-notification-consumption",
+  "version": "0.2.0",
+  "description": "SESE consumption graph. It starts independently from a recipient consume request, consumes durable mailbox entries, and never mutates route, subscription, or transport truth.",
+  "inputs": [
+    {
+      "id": "recipient_consume_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "verify_message_owner",
+      "operator": "appsdk.collab_notification_consume.verify_owner",
+      "operator_version": "1",
+      "inputs": ["recipient_consume_request"],
+      "output": {"id": "owned_mailbox_batch", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "read_message_payloads",
+      "operator": "appsdk.collab_notification_consume.read_payloads",
+      "operator_version": "1",
+      "inputs": ["owned_mailbox_batch"],
+      "output": {"id": "read_payloads", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "commit_consume_receipt",
+      "operator": "appsdk.collab_notification_consume.commit_receipt",
+      "operator_version": "1",
+      "inputs": ["read_payloads"],
+      "output": {"id": "consumption_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "verify_message_owner", "to": "read_message_payloads", "arc_id": "owned_mailbox_batch"},
+    {"from": "read_message_payloads", "to": "commit_consume_receipt", "arc_id": "read_payloads"}
+  ],
+  "outputs": ["consumption_receipt"]
+}

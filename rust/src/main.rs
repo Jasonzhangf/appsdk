@@ -92,11 +92,6 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/communication/communication-capabilities.schema.json"),
     ),
     (
-        "contracts/dagpipe/manifest.json",
-        "contracts",
-        include_str!("../../contracts/dagpipe/manifest.json"),
-    ),
-    (
         "contracts/dagpipe/fix-lifecycle.graph.json",
         "contracts",
         include_str!("../../contracts/dagpipe/fix-lifecycle.graph.json"),

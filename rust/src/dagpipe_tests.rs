@@ -9,7 +9,7 @@ fn fix_and_notification_graphs_are_single_source_single_sink() {
 }
 
 #[test]
-fn graph_manifest_covers_every_embedded_graph_and_validate_reports_both() {
+fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs() {
     let result = validate_graph_contracts().unwrap();
     let graph_ids = result["graphs"]
         .as_array()
@@ -19,7 +19,56 @@ fn graph_manifest_covers_every_embedded_graph_and_validate_reports_both() {
         .collect::<Vec<_>>();
     assert!(graph_ids.contains(&"appsdk-fix-lifecycle"));
     assert!(graph_ids.contains(&"appsdk-notification-object"));
-    assert!(result["manifest"]["graphs"].as_array().unwrap().len() == 2);
+    assert!(graph_ids.contains(&"appsdk-collab-appserver-route-repair"));
+    assert!(graph_ids.contains(&"appsdk-collab-subscription-lifecycle"));
+    assert!(graph_ids.contains(&"appsdk-collab-notification-consumption"));
+    assert!(result["compiled_registry"].as_bool().unwrap());
+    assert!(
+        result["manifest"]["graphs"].as_array().unwrap().len() == embedded_graph_paths().len()
+    );
+}
+
+#[test]
+fn validate_graph_registry_rejects_design_operator_on_non_design_graph() {
+    let source = include_str!("../../docs/dagpipe/collab-context.graph.json");
+    let mut graph = parse_graph_json(source).unwrap();
+    graph.id = "appsdk-collab-unknown-design".to_owned();
+
+    let error = validate_graph_registry(&graph).unwrap_err();
+
+    assert!(
+        error.starts_with("DAGPIPE_DESIGN_OPERATOR_GRAPH_SCOPE_INVALID:appsdk-collab-unknown-design"),
+        "{error}"
+    );
+}
+
+#[test]
+fn validate_graph_contracts_detects_duplicate_manifest_entries() {
+    let mut manifest: Value = serde_json::from_str(DAGPIPE_GRAPH_MANIFEST).unwrap();
+    manifest["graphs"][1]["path"] = manifest["graphs"][0]["path"].clone();
+    let error = validate_graph_contracts_with_manifest(&manifest.to_string()).unwrap_err();
+    assert!(error.starts_with("DAGPIPE_GRAPH_MANIFEST_DUPLICATE_PATH:"), "{error}");
+
+    let mut manifest: Value = serde_json::from_str(DAGPIPE_GRAPH_MANIFEST).unwrap();
+    manifest["graphs"][1]["id"] = manifest["graphs"][0]["id"].clone();
+    let error = validate_graph_contracts_with_manifest(&manifest.to_string()).unwrap_err();
+    assert!(error.starts_with("DAGPIPE_GRAPH_MANIFEST_DUPLICATE_ID:"), "{error}");
+}
+
+#[test]
+fn validate_graph_contracts_rejects_embedded_path_mismatch() {
+    let mut manifest: Value = serde_json::from_str(DAGPIPE_GRAPH_MANIFEST).unwrap();
+    manifest["graphs"][0]["path"] = json!("docs/dagpipe/not-embedded.graph.json");
+    let error = validate_graph_contracts_with_manifest(&manifest.to_string()).unwrap_err();
+    assert!(error.starts_with("DAGPIPE_GRAPH_MANIFEST_MISSING_SOURCE:"), "{error}");
+}
+
+#[test]
+fn validate_graph_registry_rejects_design_operator_on_executable_graph() {
+    let mut graph = parse_graph_json(FIX_LIFECYCLE_GRAPH).unwrap();
+    graph.nodes[0].operator = design_graph_operator_names()[0].to_owned();
+    let error = validate_graph_registry(&graph).unwrap_err();
+    assert!(error.starts_with("DAGPIPE_DESIGN_OPERATOR_GRAPH_SCOPE_INVALID:appsdk-fix-lifecycle"), "{error}");
 }
 
 #[test]

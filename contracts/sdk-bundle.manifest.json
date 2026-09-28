@@ -10,7 +10,6 @@
       "contracts/communication/communication-request.schema.json",
       "contracts/communication/communication-event.schema.json",
       "contracts/communication/communication-capabilities.schema.json",
-      "contracts/dagpipe/manifest.json",
       "contracts/dagpipe/fix-lifecycle.graph.json",
       "contracts/dagpipe/notification.graph.json",
       "contracts/development-scenarios.manifest.json",

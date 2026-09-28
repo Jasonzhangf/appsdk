@@ -1,0 +1,59 @@
+{
+  "id": "appsdk-collab-subscription-lifecycle",
+  "version": "0.2.0",
+  "description": "SESE subscription lifecycle graph for registered workers. The daemon owns default lease creation, transport realignment, and durable active subscription state; explicit unsubscribe starts a later lifecycle epoch.",
+  "inputs": [
+    {
+      "id": "worker_transport_registration",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "select_registered_transport",
+      "operator": "appsdk.collab_subscription.select_transport",
+      "operator_version": "1",
+      "inputs": ["worker_transport_registration"],
+      "output": {"id": "transport_binding", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "upsert_default_direct_message_lease",
+      "operator": "appsdk.collab_subscription.upsert_default_lease",
+      "operator_version": "1",
+      "inputs": ["transport_binding"],
+      "output": {"id": "subscription_created", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_subscription_transport_alignment",
+      "operator": "appsdk.collab_subscription.verify_transport_alignment",
+      "operator_version": "1",
+      "inputs": ["subscription_created"],
+      "output": {"id": "aligned_lease", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "persist_active_subscription_state",
+      "operator": "appsdk.collab_subscription.persist_active_state",
+      "operator_version": "1",
+      "inputs": ["aligned_lease"],
+      "output": {"id": "active_subscription_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "select_registered_transport", "to": "upsert_default_direct_message_lease", "arc_id": "transport_binding"},
+    {"from": "upsert_default_direct_message_lease", "to": "verify_subscription_transport_alignment", "arc_id": "subscription_created"},
+    {"from": "verify_subscription_transport_alignment", "to": "persist_active_subscription_state", "arc_id": "aligned_lease"}
+  ],
+  "outputs": ["active_subscription_state"]
+}

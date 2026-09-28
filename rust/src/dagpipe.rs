@@ -4,8 +4,8 @@
 //! AppSDK record chain before the lifecycle state machine advances.
 
 use pipeline_runtime::{
-    compile, graph_topology, parse_graph_json, Cancellation, EffectReplay, Identity, Operator,
-    OperatorContext, Registry, Runtime, StateMachine, Transition, ValueType,
+    compile, graph_topology, parse_graph_json, Cancellation, EffectReplay, Graph, Identity,
+    Operator, OperatorContext, Registry, Runtime, StateMachine, Transition, ValueType,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -21,7 +21,7 @@ pub(super) const FIX_LIFECYCLE_GRAPH: &str =
     include_str!("../../contracts/dagpipe/fix-lifecycle.graph.json");
 pub(super) const NOTIFICATION_LIFECYCLE_GRAPH: &str =
     include_str!("../../contracts/dagpipe/notification.graph.json");
-const DAGPIPE_GRAPH_MANIFEST: &str = include_str!("../../contracts/dagpipe/manifest.json");
+const DAGPIPE_GRAPH_MANIFEST: &str = include_str!("../../docs/dagpipe/manifest.json");
 pub(super) const COMMUNICATION_EVENT_SCHEMA: &str =
     include_str!("../../contracts/communication/communication-event.schema.json");
 
@@ -156,7 +156,11 @@ fn run_fix_lifecycle(root: &Path, module_id: &str) -> Result<Value, String> {
 }
 
 fn validate_graph_contracts() -> Result<Value, String> {
-    let manifest: Value = serde_json::from_str(DAGPIPE_GRAPH_MANIFEST)
+    validate_graph_contracts_with_manifest(DAGPIPE_GRAPH_MANIFEST)
+}
+
+fn validate_graph_contracts_with_manifest(raw_manifest: &str) -> Result<Value, String> {
+    let manifest: Value = serde_json::from_str(raw_manifest)
         .map_err(|error| format!("DAGPIPE_GRAPH_MANIFEST_INVALID:{error}"))?;
     if manifest.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("DAGPIPE_GRAPH_MANIFEST_INVALID:schema_version".to_owned());
@@ -165,15 +169,31 @@ fn validate_graph_contracts() -> Result<Value, String> {
         .get("graphs")
         .and_then(Value::as_array)
         .ok_or_else(|| "DAGPIPE_GRAPH_MANIFEST_INVALID:graphs".to_owned())?;
-    let embedded = embedded_graph_sources();
-    if entries.len() != embedded.len() {
+    let embedded_paths = embedded_graph_paths();
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_paths = std::collections::HashSet::new();
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "DAGPIPE_GRAPH_MANIFEST_INVALID:id".to_owned())?;
+        let path = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "DAGPIPE_GRAPH_MANIFEST_INVALID:path".to_owned())?;
+        if !seen_ids.insert(id) {
+            return Err(format!("DAGPIPE_GRAPH_MANIFEST_DUPLICATE_ID:{id}"));
+        }
+        if !seen_paths.insert(path) {
+            return Err(format!("DAGPIPE_GRAPH_MANIFEST_DUPLICATE_PATH:{path}"));
+        }
+    }
+    if entries.len() != embedded_paths.len() {
         return Err(format!(
             "DAGPIPE_GRAPH_MANIFEST_MISMATCH:manifest={} embedded={}",
-            entries.len(),
-            embedded.len()
+            entries.len(), embedded_paths.len()
         ));
     }
-    let mut seen = std::collections::HashSet::new();
     let mut graphs = Vec::new();
     for entry in entries {
         let id = entry
@@ -184,43 +204,100 @@ fn validate_graph_contracts() -> Result<Value, String> {
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| "DAGPIPE_GRAPH_MANIFEST_INVALID:path".to_owned())?;
-        if !seen.insert(path.to_owned()) {
-            return Err(format!("DAGPIPE_GRAPH_MANIFEST_DUPLICATE_PATH:{path}"));
-        }
-        let source = embedded
+        let Some((_, source)) = embedded_paths
             .iter()
             .find(|(embedded_path, _)| *embedded_path == path)
-            .map(|(_, source)| *source)
-            .ok_or_else(|| format!("DAGPIPE_GRAPH_MANIFEST_MISSING_SOURCE:{path}"))?;
+        else {
+            return Err(format!("DAGPIPE_GRAPH_MANIFEST_MISSING_SOURCE:{path}"));
+        };
         let graph = parse_graph_json(source)
             .map_err(|error| format!("DAGPIPE_GRAPH_INVALID:{id}:{error}"))?;
         if graph.id != id {
             return Err(format!("DAGPIPE_GRAPH_ID_MISMATCH:{id}:{}", graph.id));
         }
         ensure_single_source_single_sink(&graph).map_err(|error| format!("{id}:{error}"))?;
+        validate_graph_registry(&graph)?;
         graphs.push(json!({
             "id": id,
             "version": graph.version,
             "single_source_single_sink": {"inputs": graph.inputs.len(), "outputs": graph.outputs.len()}
         }));
     }
-    for (path, _) in embedded {
-        if !seen.contains(path) {
+    for (path, _) in embedded_paths {
+        if !seen_paths.contains(path) {
             return Err(format!("DAGPIPE_GRAPH_MANIFEST_MISSING_PATH:{path}"));
         }
     }
     Ok(json!({
         "single_source_single_sink": true,
+        "compiled_registry": true,
         "graphs": graphs,
         "manifest": manifest,
     }))
 }
 
+fn validate_graph_registry(graph: &Graph) -> Result<(), String> {
+    let design_graph_ids = design_graph_ids();
+    let design_operators: Vec<&'static str> = if design_graph_ids.contains(&graph.id.as_str()) {
+        design_graph_operator_names().into()
+    } else {
+        Vec::new()
+    };
+    let mut registry = Registry::default();
+    register_fix_operators(&mut registry)?;
+    register_notification_operator(&mut registry)?;
+    for name in &design_operators {
+        registry
+            .register(DesignGraphOperator { name })
+            .map_err(|error| format!("DAGPIPE_OPERATOR_REGISTER_FAILED:{error}"))?;
+    }
+    ensure_graph_nodes_use_registered_operators(
+        graph,
+        &design_graph_ids,
+        design_operators.as_slice(),
+    )?;
+    let capabilities = BTreeSet::new();
+    compile(graph.clone(), &registry, &capabilities)
+        .map_err(|error| format!("DAGPIPE_COMPILE_FAILED:{error}"))?;
+    Ok(())
+}
+
+fn ensure_graph_nodes_use_registered_operators(
+    graph: &Graph,
+    design_graph_ids: &[&str],
+    registered_design_operators: &[&'static str],
+) -> Result<(), String> {
+    let requires_design_operators = design_graph_ids.contains(&graph.id.as_str());
+    let known_design_operators = design_graph_operator_names();
+    for node in &graph.nodes {
+        let is_design_operator = known_design_operators.contains(&node.operator.as_str());
+        if is_design_operator && !requires_design_operators {
+            return Err(format!(
+                "DAGPIPE_DESIGN_OPERATOR_GRAPH_SCOPE_INVALID:{}:{}:{}",
+                graph.id, node.id, node.operator
+            ));
+        }
+        if requires_design_operators && !registered_design_operators.contains(&node.operator.as_str()) {
+            return Err(format!(
+                "DAGPIPE_DESIGN_GRAPH_OPERATOR_SCOPE_INVALID:{}:{}:{}",
+                graph.id, node.id, node.operator
+            ));
+        }
+    }
+    if graph.nodes.is_empty() {
+        return Err(format!(
+            "DAGPIPE_GRAPH_MUST_HAVE_NODES:{}",
+            graph.id
+        ));
+    }
+    Ok(())
+}
+
 #[path = "dagpipe_notification.rs"]
 mod notification;
-use notification::validate_notification_objects;
+use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_sources() -> [(&'static str, &'static str); 2] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 7] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -230,7 +307,99 @@ fn embedded_graph_sources() -> [(&'static str, &'static str); 2] {
             "contracts/dagpipe/notification.graph.json",
             NOTIFICATION_LIFECYCLE_GRAPH,
         ),
+        (
+            "docs/dagpipe/collab-context.graph.json",
+            include_str!("../../docs/dagpipe/collab-context.graph.json"),
+        ),
+        (
+            "docs/dagpipe/appserver-route-repair.graph.json",
+            include_str!("../../docs/dagpipe/appserver-route-repair.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-subscription-lifecycle.graph.json",
+            include_str!("../../docs/dagpipe/collab-subscription-lifecycle.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-notification-consumption.graph.json",
+            include_str!("../../docs/dagpipe/collab-notification-consumption.graph.json"),
+        ),
+        (
+            "docs/dagpipe/merge-pending.graph.json",
+            include_str!("../../docs/dagpipe/merge-pending.graph.json"),
+        ),
     ]
+}
+
+fn design_graph_ids() -> [&'static str; 5] {
+    [
+        "appsdk-collab-context",
+        "appsdk-collab-appserver-route-repair",
+        "appsdk-collab-subscription-lifecycle",
+        "appsdk-collab-notification-consumption",
+        "appsdk-collab-merge-pending",
+    ]
+}
+
+fn design_graph_operator_names() -> [&'static str; 27] {
+    [
+        "appsdk.collab_context.resolve_root",
+        "appsdk.collab_context.ensure_baseline",
+        "appsdk.collab_context.ensure_daemon",
+        "appsdk.collab_context.load_identity",
+        "appsdk.collab_context.verify_token",
+        "appsdk.collab_context.ensure_registration",
+        "appsdk.collab_context.restore_default_lease",
+        "appsdk.collab_context.find_master",
+        "appsdk.collab_context.emit_snapshot",
+        "appsdk.collab_appserver_route.discover_live_thread",
+        "appsdk.collab_appserver_route.rebind_current_route",
+        "appsdk.collab_appserver_route.refresh_worker_transport_lease",
+        "appsdk.collab_appserver_route.retry_notification_once",
+        "appsdk.collab_appserver_route.emit_notification_result_receipt",
+        "appsdk.collab_subscription.select_transport",
+        "appsdk.collab_subscription.upsert_default_lease",
+        "appsdk.collab_subscription.verify_transport_alignment",
+        "appsdk.collab_subscription.persist_active_state",
+        "appsdk.collab_notification_consume.verify_owner",
+        "appsdk.collab_notification_consume.read_payloads",
+        "appsdk.collab_notification_consume.commit_receipt",
+        "appsdk.collab_merge.register_pending",
+        "appsdk.collab_merge.publish_obligation",
+        "appsdk.collab_merge.remind_master",
+        "appsdk.collab_merge.integrate_main",
+        "appsdk.collab_merge.resolve_pending",
+        "appsdk.collab_merge.close_task",
+    ]
+}
+
+struct DesignGraphOperator {
+    name: &'static str,
+}
+
+impl Operator for DesignGraphOperator {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn input_type(&self) -> ValueType {
+        ValueType::Any
+    }
+
+    fn output_type(&self) -> ValueType {
+        ValueType::Any
+    }
+
+    fn replay(&self) -> EffectReplay {
+        EffectReplay::NonReplayable
+    }
+
+    fn execute(&self, _input: Value, _context: &OperatorContext) -> Result<Value, String> {
+        Err("DAGPIPE_DESIGN_OPERATOR_NOT_EXECUTABLE".to_owned())
+    }
 }
 
 fn ensure_node_completed(
@@ -699,7 +868,7 @@ fn validate_promotion(root: &Path, module_id: &str, output: &mut Value) -> Resul
     if promotion
         .get("required_gate_results")
         .and_then(Value::as_array)
-        .is_none_or(|gates| {
+        .map_or(true, |gates| {
             gates
                 .iter()
                 .any(|gate| gate.get("result").and_then(Value::as_str) != Some("pass"))

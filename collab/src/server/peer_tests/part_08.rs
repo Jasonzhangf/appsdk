@@ -1130,7 +1130,7 @@ fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
 }
 
 #[test]
-fn explicit_send_reports_when_subscription_tmux_endpoint_mismatches() {
+fn explicit_send_reports_when_subscription_appserver_endpoint_mismatches() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
@@ -1156,12 +1156,14 @@ fn explicit_send_reports_when_subscription_tmux_endpoint_mismatches() {
     assert!(!response.ok);
     assert_eq!(
         response.error.as_deref(),
-        Some("TMUX_NOTIFICATION_REJECTED: subscription does not match the selected tmux transport")
+        Some(
+            "APPSERVER_NOTIFICATION_REJECTED: subscription does not match the selected appserver transport",
+        )
     );
     assert_eq!(response.data["notification"], "subscribed-not-sent");
     assert_eq!(
         response.data["notification_error"],
-        "subscription does not match the selected tmux transport"
+        "subscription does not match the selected appserver transport"
     );
     let message_id = response.data["msg_id"].as_str().unwrap();
     {
@@ -1170,12 +1172,12 @@ fn explicit_send_reports_when_subscription_tmux_endpoint_mismatches() {
         assert_eq!(failure.operation, "notification.not_attempted");
         assert_eq!(
             failure.error,
-            "subscription does not match the selected tmux transport"
+            "subscription does not match the selected appserver transport"
         );
     }
     assert_eq!(
         replay(&root).unwrap().notification_delivery_failures[message_id].error,
-        "subscription does not match the selected tmux transport"
+        "subscription does not match the selected appserver transport"
     );
     std::fs::remove_dir_all(root).ok();
 }

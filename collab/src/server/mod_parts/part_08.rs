@@ -447,10 +447,10 @@ pub(crate) fn handle_send_with_task(
                     "deduplicated": true,
                 }),
                 subscription.is_some(),
-                subscription
-                    .as_ref()
-                    .map(|subscription| subscription.method.as_str())
-                    .unwrap_or(""),
+                {
+                    let state = server.state.lock().unwrap();
+                    notification_method_for_worker(&state, &to)
+                },
                 &notification,
             );
         }
@@ -523,10 +523,10 @@ pub(crate) fn handle_send_with_task(
             "task_id": task_id,
         }),
         subscription.is_some(),
-        subscription
-            .as_ref()
-            .map(|subscription| subscription.method.as_str())
-            .unwrap_or(""),
+        {
+            let state = server.state.lock().unwrap();
+            notification_method_for_worker(&state, &to)
+        },
         &notification,
     )
 }
@@ -639,10 +639,10 @@ fn handle_live_closure_daemon_send(
             "restart_replay_pending": restart_replay_pending,
         }),
         subscription.is_some(),
-        subscription
-            .as_ref()
-            .map(|subscription| subscription.method.as_str())
-            .unwrap_or(""),
+        {
+            let state = server.state.lock().unwrap();
+            notification_method_for_worker(&state, &to)
+        },
         &notification,
     )
 }
@@ -748,10 +748,10 @@ fn handle_cross_project_send(
             "target_master": to,
         }),
         subscription.is_some(),
-        subscription
-            .as_ref()
-            .map(|subscription| subscription.method.as_str())
-            .unwrap_or(""),
+        {
+            let state = server.state.lock().unwrap();
+            notification_method_for_worker(&state, &to)
+        },
         &notification,
     )
 }

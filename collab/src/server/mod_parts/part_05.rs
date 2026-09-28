@@ -561,6 +561,22 @@ fn attempt_tmux_notification_with_at(
     )
 }
 
+fn notification_transport_method(transport: &SelectedTransport) -> &'static str {
+    match transport.kind {
+        TransportKind::Tmux => "tmux",
+        TransportKind::AppServer => "appserver",
+    }
+}
+
+fn notification_method_for_worker(state: &State, worker_id: &str) -> &'static str {
+    state
+        .workers
+        .get(worker_id)
+        .and_then(selected_transport_for_worker)
+        .map(|transport| notification_transport_method(&transport))
+        .unwrap_or("tmux")
+}
+
 fn attempt_tmux_notification_with_retry(
     server: &Server,
     message_id: &str,
@@ -606,7 +622,11 @@ fn attempt_tmux_notification_with_retry(
         || !subscription_matches_transport(subscription, transport)
     {
         return NotificationAttempt::NotAttempted(
-            "subscription does not match the selected tmux transport".into(),
+            format!(
+                "subscription does not match the selected {method} transport",
+                method = notification_transport_method(transport)
+            )
+            .into(),
         );
     }
     let delivery_mode = state
@@ -727,8 +747,11 @@ fn attempt_tmux_notification_with_retry(
             append_log(
                 &server.log_path(),
                 &format!(
-                    "TMUX_WAKE_SUBMITTED recipient={recipient} message={} explicit={explicit} receipt={receipt}",
-                    seed_id
+                    "{method_label}_WAKE_SUBMITTED recipient={recipient} message={seed_id} explicit={explicit} receipt={receipt}",
+                    method_label = match transport.kind {
+                        TransportKind::Tmux => "TMUX",
+                        TransportKind::AppServer => "APPSERVER",
+                    }
                 ),
             );
             let accepted_ms = now_ms();
@@ -750,8 +773,11 @@ fn attempt_tmux_notification_with_retry(
             append_log(
                 &server.log_path(),
                 &format!(
-                    "TMUX_WAKE_FAILED recipient={recipient} message={} error={error}",
-                    seed_id
+                    "{method_label}_WAKE_FAILED recipient={recipient} message={seed_id} error={error}",
+                    method_label = match transport.kind {
+                        TransportKind::Tmux => "TMUX",
+                        TransportKind::AppServer => "APPSERVER",
+                    }
                 ),
             );
             let mut state = server.state.lock().unwrap();
@@ -864,14 +890,22 @@ fn attempt_notification_detailed_with_mode_at(
                     Event::NotificationDeliveryFailed {
                         message_id: message_id.to_string(),
                         operation: "notification.not_attempted".into(),
-                        error: "subscription does not match the selected tmux transport".into(),
+                        error: format!(
+                            "subscription does not match the selected {method} transport",
+                            method = notification_transport_method(&transport)
+                        )
+                        .into(),
                         failed_ms: now,
                         retryable: true,
                     },
                 ],
             );
             return NotificationAttempt::NotAttempted(
-                "subscription does not match the selected tmux transport".into(),
+                format!(
+                    "subscription does not match the selected {method} transport",
+                    method = notification_transport_method(&transport)
+                )
+                .into(),
             );
         }
         let source_thread_id = state

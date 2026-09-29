@@ -548,6 +548,7 @@ pub(super) fn assert_sdk_source_registry(root: &Path) {
             continue;
         }
         let mut owners = Vec::new();
+        let mut source_line_limit = MAX_SOURCE_LINES;
         for module in modules {
             let module_id = record_str(module, "/module_id", "module-registry.json");
             if module.get("status").and_then(Value::as_str) != Some("active") {
@@ -562,6 +563,17 @@ pub(super) fn assert_sdk_source_registry(root: &Path) {
                 })
             {
                 owners.push(module_id);
+                source_line_limit = module
+                    .get("source_line_limit")
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .filter(|limit| *limit > 0)
+                            .unwrap_or_else(|| {
+                                fail(format!("INVALID_SOURCE_LINE_LIMIT:{module_id}"))
+                            })
+                    })
+                    .unwrap_or(MAX_SOURCE_LINES);
             }
             if record_array(module, "/forbidden_paths", module_id)
                 .iter()
@@ -585,10 +597,10 @@ pub(super) fn assert_sdk_source_registry(root: &Path) {
             let line_count = fs::read_to_string(root.join(path))
                 .map(|text| text.lines().count() as u64)
                 .unwrap_or_else(|_| fail(format!("SDK_SOURCE_READ_FAILED:{}", path)));
-            if line_count > MAX_SOURCE_LINES {
+            if line_count > source_line_limit {
                 fail(format!(
                     "SDK_SOURCE_LINE_LIMIT:{}:{}>{}",
-                    path, line_count, MAX_SOURCE_LINES
+                    path, line_count, source_line_limit
                 ));
             }
         }

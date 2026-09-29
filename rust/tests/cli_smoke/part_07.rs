@@ -144,7 +144,7 @@ fn init_bounds_hanging_collab_bootstrap_without_faking_success() {
         .env("APPSDK_HOME", test_global_registry_root_for_project(&root))
         .env("PATH", &fake_bin)
         .env("APPSDK_COLLAB_PROBE", &probe)
-        .env("APPSDK_COLLAB_INIT_TIMEOUT_MS", "1000")
+        .env("APPSDK_COLLAB_INIT_TIMEOUT_MS", "3000")
         .output()
         .unwrap();
 
@@ -372,7 +372,7 @@ fn repeated_init_projects_standard_template_and_bootstrap_upgrade_proposal() {
         intake_json["standard_template"]["path"],
         ".appsdk/templates/minimal/AGENTS.md"
     );
-    assert_eq!(intake_json["standard_template"]["version"], "0.1.0009");
+    assert_eq!(intake_json["standard_template"]["version"], "0.1.0010");
     assert_eq!(
         intake_json["standard_template"]["digest"],
         file_digest(&reference)

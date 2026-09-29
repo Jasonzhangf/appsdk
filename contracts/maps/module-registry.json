@@ -73,6 +73,20 @@
       ]
     },
     {
+      "module_id": "dagpipe-runtime",
+      "status": "active",
+      "owner": "pipeline_runtime",
+      "owned_paths": ["dagpipe/**"],
+      "entry_symbols": [
+        "pipeline_runtime::compile",
+        "pipeline_runtime::Runtime::run",
+        "dagpipe::main"
+      ],
+      "source_line_limit": 3500,
+      "forbidden_paths": ["active/lib/**", "protected/**"],
+      "verification_gates": ["dagpipe_runtime"]
+    },
+    {
       "module_id": "project-memory",
       "status": "active",
       "owner": "project-memory::index",

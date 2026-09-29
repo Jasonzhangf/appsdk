@@ -29,6 +29,12 @@ flowchart LR
 | 安装初始化 | `dagpipe/` 安装入口 | 从本仓库构建并安装同源 CLI/SDK/Skill；第二次执行保持同一归属和结果，不创建第二份真源 |
 | 发布与清理 | AppSDK 集成者 | 候选 SHA、产物哈希、review、主链和远端回执、worktree 不存在 |
 
+源码登记由 `contracts/maps/module-registry.json` 的 `dagpipe-runtime` 独占
+`dagpipe/**`。该独立模块从已发布源码一次性迁入，原 `src/lib.rs` 为 3159 行；
+模块合同将其源码行数上限固定为 3500，其他模块继续使用原有 1500 行上限。
+`verify-sdk-source-registry` 必须核对唯一 owner 和模块上限；DAGpipe
+独立测试是该模块的验证门禁。后续模块拆分可降低上限，但不得跳过登记门禁。
+
 ## 初始化及失败合同
 
 `appsdk init` 仍初始化项目治理与 Collab；DAGpipe 的项目图已经由 AppSDK bundle 提供，不在每次项目 init 时做全局软件安装。全局 `dagpipe` CLI、SDK 源码和 Skill 使用 AppSDK 仓库中的独立模块安装入口一次性安装或升级。安装入口必须使用本模块作为源码，不访问旧 DAGpipe checkout；已有安装位置只在确认归属后更新，冲突显式失败。重复安装不能叠加二进制或产生第二个 SDK 真源。安装不启停 Collab daemon，因为通用 DAGpipe 无常驻进程。

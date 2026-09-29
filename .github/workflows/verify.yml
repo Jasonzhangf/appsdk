@@ -11,6 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --manifest-path rust/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path dagpipe/Cargo.toml -- --check
 
   test:
     runs-on: ubuntu-latest
@@ -27,6 +28,7 @@ jobs:
       - run: test "$(jq -r '.sdk.version' templates/minimal/.appsdk/project.json)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: test "$(jq -r '.version' templates/minimal/.appsdk/sdk.lock)" = "$(jq -r '.version' contracts/sdk-bundle.manifest.json)"
       - run: cargo test --manifest-path rust/Cargo.toml
+      - run: cargo test --manifest-path dagpipe/Cargo.toml --locked --all-targets
 
   release:
     runs-on: ubuntu-latest

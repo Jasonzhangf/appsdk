@@ -22,23 +22,6 @@ collab context
 构建并安装两个独立 binary；安装不会自动重启 daemon，必须通过官方
 `collab down` → `collab up` 受控重启，再用 `collab context` 验证 live route。
 
-## DAGpipe runtime
-
-`dagpipe/` 是独立的 `pipeline_runtime` 库和 `dagpipe` CLI 的唯一源码。
-AppSDK 的 `rust/` crate 使用本仓库 path dependency；`appsdk dagpipe` 保留
-AppSDK 专用的图与 Operator 入口。迁入基线及职责见
-[`docs/design/dagpipe-internal-module.md`](docs/design/dagpipe-internal-module.md)。
-
-```bash
-cargo test --manifest-path dagpipe/Cargo.toml --all-targets
-scripts/install-global-dagpipe.sh
-dagpipe graph validate dagpipe/examples/governance_graph.json
-```
-
-安装脚本从本仓库独立模块构建和更新全局 CLI、SDK 副本与 Skill；普通
-`appsdk init` 只初始化项目合同，不重复安装全局 DAGpipe 软件。DAGpipe 没有
-daemon，也无需 Collab 重启。
-
 默认流程：明确目标/范围 → 实现 → 相关验证 → review → 授权交付。
 质量、安全和证据真实性门禁按适用范围强制。Collab 保持多 worker 自动注册、
 通信与任务/文件归属；仅协作不强制启用合并队列。Guidance、Memory 默认辅助，

@@ -67,6 +67,9 @@ reuse.
 - `RegressionReport`: freeze candidate's whitebox and blackbox regression result bound to source, scope, artifact, API, and declared regression inputs;
 - `FreezeRecord`: source tag, Active version, library/API hashes, Git clean, old Active immutability, and adapter owners.
 - `PlaygroundCleanupRecord`: experiment disposition, archived evidence path, removed Playground paths, cleanup actor, and timestamp.
+- `TestScenarioResultRecord`: optional black-box scenario result for a selected
+  AppSDK object, bound to the object, graph, candidate commit, scenario,
+  environment, entrypoint, cleanup result, effect authorization and producer.
 
 ## Cross-record graph rules
 
@@ -79,6 +82,15 @@ GoalClarificationRecord (confirmed/admitted)
   -> PromotionRecord
   -> RegressionReport
   -> FreezeRecord
+```
+
+Optional test governance adds a parallel project blackbox graph:
+
+```text
+TestGovernanceManifest (selected object/scenario/runner/authorization)
+  -> TestScenarioResultRecord
+  -> EvidenceRecord (candidate-bound, pass, matching environment/entrypoint, unexpired)
+  -> object test-admission
 ```
 
 No implementation claim, Playground mutation, formal red test, promotion, or issue closeout is admitted while the goal record is `received`, `parsed`, or `clarification_pending`.
@@ -95,6 +107,17 @@ Required checks:
 - `FreezeRecord.artifact_record_id` resolves to the published artifact evidence;
 - `FreezeRecord.regression_report_id/hash` resolves to the exact passing RegressionReport;
 - review verdict is `pass` for the referenced commit, scope, and artifact.
+
+For optional test governance, AppSDK owns scope/scenario/runner/effect
+authorization validation. A `TestScenarioResultRecord.status: "passed"` must
+reference an EvidenceRecord whose `source_commit` equals the current candidate
+commit, whose result is `pass`, whose environment and entrypoint match the
+scenario, and whose evidence is unexpired. Missing, forged, stale, expired, or
+identity-mismatched records fail the selected object admission. Ordinary
+`verify` reports blocked selected objects without requiring test passage;
+`verify --admission` requires selected object passage; `compile` does not read
+the optional test manifest. Governance records never contain executable shell
+strings; only stable `runner_ref` references bind scenarios to trusted runners.
 
 These checks belong to a record-reference gate. Individual schema validity is insufficient.
 

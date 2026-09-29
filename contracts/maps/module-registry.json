@@ -265,6 +265,29 @@
       ]
     },
     {
+      "module_id": "optional-test-governance",
+      "status": "active",
+      "owner": "appsdk::test_governance",
+      "owned_paths": [
+        "contracts/test-governance.schema.json",
+        "contracts/records/test-scenario-result-record.schema.json"
+      ],
+      "entry_symbols": [
+        "optional_test_governance_selection",
+        "validate_test_governance_manifest",
+        "test_governance_report",
+        "test_governance_object_status"
+      ],
+      "forbidden_paths": [
+        "active/lib/**",
+        "protected/**"
+      ],
+      "verification_gates": [
+        "optional_test_governance_contract",
+        "optional_test_governance_admission"
+      ]
+    },
+    {
       "module_id": "collaboration-contracts",
       "status": "active",
       "owner": "appsdk::collaboration",

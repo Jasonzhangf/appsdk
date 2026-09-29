@@ -370,6 +370,34 @@ If a required input changes, invalidate only that phase and its downstream
 dependants. A candidate, review PASS, merge, push, install, restart or cleanup
 receipt never implies any other state.
 
+### Optional black-box test governance
+
+AppSDK owns the optional black-box test governance selection, scope
+confirmation, scenario contracts, trusted runner registry, effect
+authorization, evidence binding and final object admission. Missing
+`project.json#/test_governance` or `mode: "off"` keeps existing compile and
+verify behavior unchanged. A selected project points to a committed
+`.appsdk/test-governance.json` manifest that conforms to
+`contracts/test-governance.schema.json`; its result records conform to
+`contracts/records/test-scenario-result-record.schema.json`. Object-level
+`invariants` / laws are descriptive governance assertions in that manifest;
+they are not proof language and are never compiled as DAGpipe business nodes.
+
+Governance records never carry executable shell strings. Scenarios refer only
+to stable `runner_ref` entries from the trusted runner registry; the actual
+project test entrypoint remains project-owned. `passed` result records must
+reference an EvidenceRecord bound to the candidate commit, result `pass`,
+matching environment/entrypoint and unexpired. `verify --test-admission` is a
+read-only report, not a test executor. `verify --admission` applies the object
+gate only when the project is selected; ordinary `verify` reports
+`not_selected`/`passed`/`blocked` without making test passage a delivery
+requirement, and `compile` does not depend on the optional manifest.
+
+DAGpipe CLI remains graph-only. It validates DAG topology and never substitutes
+for AppSDK test evidence or admission. Existing module whitebox, public-entry
+blackbox and runtime review gates are not weakened by optional test
+governance.
+
 ## Optional Guidance
 
 Use `appsdk guide status/init/plan/update/next/close` when the user/project

@@ -36,6 +36,10 @@ pub(super) fn historical_governance_map(version: &str, name: &str) -> &'static s
         ("0.1.6", "verification-map.json") => {
             include_str!("../../../contracts/migrations/0.1.6/governance-maps/verification-map.json")
         }
+        ("0.1.0007", "resource-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
+        ("0.1.0007", "function-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
+        ("0.1.0007", "mainline-call-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"),
+        ("0.1.0007", "verification-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"),
         _ => fail("UNKNOWN_GOVERNANCE_MAP"),
     }
 }
@@ -44,6 +48,7 @@ pub(super) fn sdk_map_migration_manifest(step: &str) -> Value {
     let (manifest_text, source_version, target_version) = match step {
         "0.1.5-to-0.1.6" => (SDK_MAP_MIGRATION_0_1_5_TO_0_1_6, "0.1.5", "0.1.6"),
         "0.1.6-to-0.1.0007" => (SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007, "0.1.6", "0.1.0007"),
+        "0.1.0007-to-0.1.0008" => (SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008, "0.1.0007", "0.1.0008"),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };
     let manifest: Value = serde_json::from_str(manifest_text)

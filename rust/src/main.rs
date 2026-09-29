@@ -33,7 +33,13 @@ const SDK_MAP_MIGRATION_0_1_5_TO_0_1_6: &str =
     include_str!("../../contracts/migrations/sdk-0.1.5-to-0.1.6.json");
 const SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007: &str =
     include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 2] = ["0.1.5-to-0.1.6", "0.1.6-to-0.1.0007"];
+const SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json");
+const SDK_MAP_MIGRATION_STEPS: [&str; 3] = [
+    "0.1.5-to-0.1.6",
+    "0.1.6-to-0.1.0007",
+    "0.1.0007-to-0.1.0008",
+];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
     include_str!("../../contracts/transitions/zone-transition.manifest.json");
@@ -76,6 +82,9 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts",
         include_str!("../../contracts/project.schema.json"),
     ),
+    ("contracts/test-governance.schema.json", "contracts", include_str!("../../contracts/test-governance.schema.json")),
+    ("contracts/records/test-scenario-result-record.schema.json", "contracts", include_str!("../../contracts/records/test-scenario-result-record.schema.json")),
+    ("docs/design/optional-test-governance.md", "docs", include_str!("../../docs/design/optional-test-governance.md")),
     (
         "contracts/communication/communication-request.schema.json",
         "contracts",
@@ -151,6 +160,7 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts",
         include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"),
     ),
+    ("contracts/migrations/sdk-0.1.0007-to-0.1.0008.json", "contracts", include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json")),
     (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
         "contracts",
@@ -191,6 +201,10 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts",
         include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
     ),
+    ("contracts/migrations/0.1.0007/governance-maps/resource-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/resource-map.json")),
+    ("contracts/migrations/0.1.0007/governance-maps/function-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/function-map.json")),
+    ("contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json")),
+    ("contracts/migrations/0.1.0007/governance-maps/verification-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/verification-map.json")),
     (
         "contracts/transitions/zone-transition.manifest.json",
         "contracts",
@@ -522,6 +536,9 @@ use goal::*;
 #[path = "main/cli.rs"]
 mod cli;
 use cli::*;
+#[path = "main/test_governance.rs"]
+mod test_governance;
+use test_governance::*;
 struct RetireRecordSnapshot {
     kind: &'static str,
     file_name: &'static str,
@@ -1026,6 +1043,9 @@ fn main() {
                     fail("USAGE: appsdk verify --admission [project]");
                 }
                 verify(&root, true);
+            } else if args.peek().is_some_and(|value| value == "--test-admission") {
+                args.next();
+                verify_test_admission_cli(&mut args);
             } else if args
                 .peek()
                 .is_some_and(|value| value == "--review-admission")

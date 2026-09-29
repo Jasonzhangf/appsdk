@@ -8,7 +8,10 @@ fn rehydrate_frozen_rebuilds_fresh_checkout_projections() {
     fs::write(root.join(".appsdk/goal.json"), r#"{"goal_id":"goal-1","raw_request":"change","understood_objective":"change","acceptance_criteria":["pass"],"non_goals":[],"assumptions":[],"ambiguities":[],"questions":[],"status":"confirmed","confirmed_by":"test","confirmed_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"}
     "#).unwrap();
     pin_test_lock(root_text);
-    fs::remove_dir_all(root.join(".appsdk/migrations/0.1.5-to-0.1.6")).unwrap();
+    let old_migration = root.join(".appsdk/migrations/0.1.5-to-0.1.6");
+    if old_migration.exists() {
+        fs::remove_dir_all(old_migration).unwrap();
+    }
     assert!(run(&["promote", root_text, "--to", "source_implemented"])
         .status
         .success());

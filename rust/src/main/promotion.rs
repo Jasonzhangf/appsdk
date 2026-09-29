@@ -877,6 +877,28 @@ pub(super) fn verify_internal(
     verify_sdk_migration_record(root, admission);
     assert_declared_contracts(root, &project);
     assert_project_contract(root, &project);
+    let test_governance = if emit_result {
+        match test_governance_report(root, &project, None, admission) {
+            Ok(report) => {
+                if admission && report.get("status").and_then(Value::as_str) == Some("blocked") {
+                    fail("TEST_GOVERNANCE_BLOCKED");
+                }
+                report
+            }
+            Err(error) => {
+                if admission {
+                    fail(error);
+                }
+                serde_json::json!({
+                    "mode": "selected",
+                    "status": "blocked",
+                    "error": error
+                })
+            }
+        }
+    } else {
+        Value::Null
+    };
     if project.get("schema_version").and_then(Value::as_u64) != Some(1) {
         fail("UNSUPPORTED_PROJECT_SCHEMA");
     }
@@ -1282,6 +1304,7 @@ pub(super) fn verify_internal(
             "development_ready": true,
             "delivery_verified": delivery_verified,
             "delivery_assessed": delivery_assessed,
+            "test_governance": test_governance,
             "baseline_status": final_baseline_status,
             "reason": if reset_epoch && !admission {
                 Value::String("baseline_required".into())

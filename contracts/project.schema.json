@@ -67,6 +67,26 @@
         }
       }
     },
+    "test_governance": {
+      "description": "Optional black-box test governance selection. Missing means off.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["off", "selected"]},
+        "manifest": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "selected"}}, "required": ["mode"]},
+          "then": {"required": ["manifest"]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "off"}}, "required": ["mode"]},
+          "then": {"not": {"required": ["manifest"]}}
+        }
+      ]
+    },
     "guidance": {
       "type": "object",
       "required": ["enforcement", "compiled_manifest", "rule_sources"],

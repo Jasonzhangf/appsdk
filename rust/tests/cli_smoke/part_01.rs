@@ -1183,11 +1183,11 @@ fn init_fresh_migrates_supported_legacy_sdk_pin_and_preserves_project_contract()
 
     let after: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
     let mut expected = project;
-    expected["sdk"]["version"] = Value::String("0.1.0007".into());
+    expected["sdk"]["version"] = Value::String("0.1.0008".into());
     assert_eq!(after, expected);
     let lock: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".appsdk/sdk.lock")).unwrap()).unwrap();
-    assert_eq!(lock["version"], "0.1.0007");
+    assert_eq!(lock["version"], "0.1.0008");
     let reset: Value = serde_json::from_str(
         &fs::read_to_string(root.join(".appsdk/records/reset-governance-record.json")).unwrap(),
     )
@@ -1245,7 +1245,7 @@ fn init_fresh_rebuilds_any_legacy_sdk_pin_without_legacy_migration_records() {
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
         assert_eq!(after["project_id"], project_id);
-        assert_eq!(after["sdk"]["version"], "0.1.0007");
+        assert_eq!(after["sdk"]["version"], "0.1.0008");
         assert_eq!(after["modules"][0]["module_id"], "legacy-module");
         assert_eq!(after["modules"][0]["source_owner"], "legacy-module");
         assert!(!root.join(".appsdk/migrations/0.1.5-to-0.1.6").exists());
@@ -1295,7 +1295,7 @@ fn project_creation_and_initialization_persist_host_registration() {
         first_receipt["project_root"],
         root.canonicalize().unwrap().to_str().unwrap()
     );
-    assert_eq!(first_receipt["sdk_version"], "0.1.0007");
+    assert_eq!(first_receipt["sdk_version"], "0.1.0008");
     assert_eq!(first_receipt["idempotent"], false);
 
     let initialized = Command::new(binary())

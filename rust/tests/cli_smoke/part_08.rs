@@ -409,7 +409,7 @@ fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
 
     assert_eq!(
         truth_store("sdk_bundle"),
-        "AppSDK 0.1.0007 embedded Bundle manifest/resources"
+        "AppSDK 0.1.0008 embedded Bundle manifest/resources"
     );
     assert_eq!(
         truth_store("historical_governance_maps"),
@@ -494,7 +494,7 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
 
     let lock_path = root.join(".appsdk/sdk.lock");
     let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
-    lock["version"] = Value::String("0.1.0007".into());
+    lock["version"] = Value::String("0.1.0008".into());
     lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
     lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
     fs::write(
@@ -1058,10 +1058,10 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
     let root_text = root.to_str().unwrap();
     assert!(run(&["new", root_text]).status.success());
     let (_, previous_bundle_digest) = install_previous_bundle_migration_record(&root);
-    let migration_root = root.join(".appsdk/migrations/0.1.6-to-0.1.0007");
+    let migration_root = root.join(".appsdk/migrations/0.1.0007-to-0.1.0008");
     fs::create_dir_all(migration_root.join("maps")).unwrap();
     let manifest: Value = serde_json::from_str(include_str!(
-        "../../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"
+        "../../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json"
     ))
     .unwrap();
     let mut maps = Vec::new();
@@ -1069,19 +1069,23 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
     for (name, source) in [
         (
             "resource-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/resource-map.json"),
+            include_str!("../../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
         ),
         (
             "function-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/function-map.json"),
+            include_str!("../../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
         ),
         (
             "mainline-call-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"
+            ),
         ),
         (
             "verification-map.json",
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
+            include_str!(
+                "../../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"
+            ),
         ),
     ] {
         let declared = manifest["maps"]
@@ -1101,15 +1105,15 @@ fn pin_lock_accepts_historical_custom_target_different_from_canonical_target() {
             "source_digest": digest(source),
             "target_digest": digest(&custom),
             "canonical_source_digest": declared["source_digest"].clone(),
-            "canonical_target_digest": format!("sha256:{}", "f".repeat(64)),
-            "snapshot_path": format!(".appsdk/migrations/0.1.6-to-0.1.0007/maps/{}", name)
+            "canonical_target_digest": declared["target_digest"].clone(),
+            "snapshot_path": format!(".appsdk/migrations/0.1.0007-to-0.1.0008/maps/{}", name)
         }));
     }
     let record = serde_json::json!({
         "schema_version": 1,
-        "migration_id": "appsdk-0.1.6-to-0.1.0007",
-        "source_version": "0.1.6",
-        "target_version": "0.1.0007",
+        "migration_id": "appsdk-0.1.0007-to-0.1.0008",
+        "source_version": "0.1.0007",
+        "target_version": "0.1.0008",
         "bundle_digest": previous_bundle_digest,
         "maps": maps,
         "frozen_reviews": [],
@@ -1321,7 +1325,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     ]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr)
-        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0007"));
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0008"));
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
 
     project["sdk"]["version"] = Value::String("0.1.5".into());
@@ -1360,8 +1364,8 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
         serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
     let migrated_lock: Value =
         serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
-    assert_eq!(migrated_project["sdk"]["version"], "0.1.0007");
-    assert_eq!(migrated_lock["version"], "0.1.0007");
+    assert_eq!(migrated_project["sdk"]["version"], "0.1.0008");
+    assert_eq!(migrated_lock["version"], "0.1.0008");
     assert!(run(&["verify", root_text]).status.success());
 
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");

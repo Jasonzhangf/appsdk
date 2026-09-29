@@ -9,7 +9,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT").to_string();
     if !matches!(
         project_version.as_str(),
-        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007"
+        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007" | "0.1.0008"
     ) {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:{}",
@@ -29,23 +29,40 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         fail("SDK_PIN_BINARY_BUNDLE_MISMATCH");
     }
     reconcile_authoring_bundle_manifest(root);
-    if matches!(project_version.as_str(), "0.1.3" | "0.1.4") {
+    let original_version = project_version.clone();
+    if matches!(original_version.as_str(), "0.1.3" | "0.1.4") {
         write_legacy_migration_step(root, &project_version);
         project["sdk"]["version"] = Value::String("0.1.5".into());
         write_project(root, &project);
     }
-    if matches!(project_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
+    if matches!(original_version.as_str(), "0.1.3" | "0.1.4" | "0.1.5") {
         let migrated_project = read_project(root);
         migrate_governance_maps(root, &migrated_project, "0.1.5-to-0.1.6");
         project = migrated_project;
         project["sdk"]["version"] = Value::String("0.1.6".into());
         write_project(root, &project);
-    } else {
-        let current_project = read_project(root);
-        migrate_governance_maps(root, &current_project, "0.1.5-to-0.1.6");
     }
+    for step in ["0.1.5-to-0.1.6", "0.1.6-to-0.1.0007"] {
+        let manifest = sdk_map_migration_manifest(step);
+        let source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
+            file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
+                == record_str(
+                    sdk_map_migration_entry(&manifest, name),
+                    "/source_digest",
+                    "sdk-map-migration",
+                )
+        });
+        let record_exists = sdk_map_migration_root(root, step)
+            .join("record.json")
+            .is_file();
+        if record_exists || source_matches {
+            let current_project = read_project(root);
+            migrate_governance_maps(root, &current_project, step);
+        }
+    }
+    let current_project = read_project(root);
+    migrate_governance_maps(root, &current_project, "0.1.0007-to-0.1.0008");
     let migrated_project = read_project(root);
-    migrate_governance_maps(root, &migrated_project, "0.1.6-to-0.1.0007");
     install_current_record_contracts(root);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());

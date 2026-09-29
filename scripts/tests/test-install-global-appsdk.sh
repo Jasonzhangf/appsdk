@@ -76,7 +76,7 @@ FAKE_CARGO
     echo 'migration Skill dependency missing' >&2
     exit 1
   }
-  [[ "$($fake_bin/appsdk version)" == 'appsdk 0.1.0007 (rust)' ]] || {
+  [[ "$($fake_bin/appsdk version)" == 'appsdk 0.1.0008 (rust)' ]] || {
     echo 'canonical version mismatch' >&2
     exit 1
   }

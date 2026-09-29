@@ -554,7 +554,7 @@ fn owner_completes_local_lifecycle_without_peer_reports() {
 
 #[test]
 fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "peer", "%peer");
     initialize_main(&root);
     let base = current_head(&root);
@@ -566,8 +566,7 @@ fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
     git_ok(&root, &["merge", "--ff-only", "codex/cleanup-live"]);
     let main_commit = rev_parse(&root, "refs/heads/main");
     git_ok(&root, &["checkout", "-q", "-b", "root-snapshot", &base]);
-    std::fs::create_dir_all(root.join("playground")).unwrap();
-    let worktree = root.join("playground/cleanup-live");
+    let worktree = configured_test_worktree(&mut server, &root, "cleanup-live");
     let worktree_string = worktree.display().to_string();
     git_ok(
         &root,
@@ -587,7 +586,7 @@ fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
         "cleanup-live".into(),
         None,
         Some("feature".into()),
-        Some("playground/cleanup-live".into()),
+        Some(worktree_string.clone()),
         Some("codex/cleanup-live".into()),
         Some(base),
         default_priority(),
@@ -668,12 +667,13 @@ fn owner_close_uses_integrated_main_not_daemon_head_for_cleanup() {
         crate::server::state::CleanupVerification::Verified
     );
     drop(state);
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn live_master_closes_merged_task_with_verified_cleanup() {
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approved master close test");
@@ -686,8 +686,7 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
     git_ok(&root, &["checkout", "-q", "main"]);
     git_ok(&root, &["merge", "--ff-only", "codex/master-cleanup"]);
     let main_commit = rev_parse(&root, "refs/heads/main");
-    std::fs::create_dir_all(root.join("playground")).unwrap();
-    let worktree = root.join("playground/master-cleanup");
+    let worktree = configured_test_worktree(&mut server, &root, "master-cleanup");
     let worktree_string = worktree.display().to_string();
     git_ok(
         &root,
@@ -707,7 +706,7 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
         "master-cleanup".into(),
         None,
         Some("feature".into()),
-        Some("playground/master-cleanup".into()),
+        Some(worktree_string.clone()),
         Some("codex/master-cleanup".into()),
         Some(base),
         default_priority(),
@@ -789,12 +788,13 @@ fn live_master_closes_merged_task_with_verified_cleanup() {
         crate::server::state::CleanupVerification::Verified
     );
     drop(state);
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "peer", "%peer");
     initialize_main(&root);
     let base = current_head(&root);
@@ -805,8 +805,7 @@ fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
     git_ok(&root, &["checkout", "-q", "main"]);
     git_ok(&root, &["merge", "--ff-only", "codex/already-clean"]);
     let main_commit = rev_parse(&root, "refs/heads/main");
-    std::fs::create_dir_all(root.join("playground")).unwrap();
-    let worktree = root.join("playground/already-clean");
+    let worktree = configured_test_worktree(&mut server, &root, "already-clean");
     let worktree_string = worktree.display().to_string();
     git_ok(
         &root,
@@ -826,7 +825,7 @@ fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
         "already-clean".into(),
         None,
         Some("feature".into()),
-        Some("playground/already-clean".into()),
+        Some(worktree_string.clone()),
         Some("codex/already-clean".into()),
         Some(base),
         default_priority(),
@@ -902,6 +901,7 @@ fn owner_close_records_verified_receipt_after_prior_safe_cleanup() {
         crate::server::state::CleanupVerification::Verified
     );
     drop(state);
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 

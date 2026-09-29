@@ -1,6 +1,6 @@
 #[test]
 fn context_is_read_only_and_does_not_consume_notifications() {
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "peer", "%peer");
     register(&server, "peer-two", "%peer-two");
     let expected_tmux_endpoint = server.state.lock().unwrap().workers["peer"]
@@ -10,7 +10,8 @@ fn context_is_read_only_and_does_not_consume_notifications() {
         .tmux_endpoint
         .clone()
         .unwrap();
-    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let worktree = configured_test_worktree(&mut server, &root, "peer-task");
+    let other_worktree = configured_test_worktree(&mut server, &root, "other-task");
     assert!(
         handle_task_register(
             &server,
@@ -19,7 +20,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
             "task".into(),
             None,
             Some("feature".into()),
-            Some("./playground/peer-task".into()),
+            Some(worktree.display().to_string()),
             Some("peer-branch".into()),
             Some("peer-base".into()),
             default_priority(),
@@ -34,7 +35,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
             "other-task".into(),
             None,
             Some("other-feature".into()),
-            Some("./playground/other-task".into()),
+            Some(other_worktree.display().to_string()),
             Some("other-branch".into()),
             Some("other-base".into()),
             default_priority(),
@@ -121,6 +122,7 @@ fn context_is_read_only_and_does_not_consume_notifications() {
     let state = server.state.lock().unwrap();
     assert_eq!(state.msgs[&message_id].state, "pending");
     drop(state);
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 

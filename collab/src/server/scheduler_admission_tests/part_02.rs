@@ -35,23 +35,22 @@
         let second = request(Arc::clone(&server), Arc::clone(&barrier));
         let first = first.join().unwrap();
         let second = second.join().unwrap();
-        let completed = [&first, &second].into_iter().filter(|resp| resp.ok).count();
+        let completed = [&first, &second].into_iter()
+            .filter(|resp| resp.ok && resp.data["decision"] == "use-registered-peer")
+            .count();
         assert_eq!(
             completed, 1,
             "one request must complete the assignment: {first:?} {second:?}"
         );
-        let in_flight = [&first, &second]
-            .into_iter()
-            .find(|resp| !resp.ok)
-            .expect("one request must observe the in-flight claim");
-        assert!(
-            in_flight
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("already in flight")),
-            "{in_flight:?}"
-        );
-        assert_eq!(in_flight.data["reservation"], true);
+        let repeated = [&first, &second].into_iter()
+            .find(|resp| !resp.ok || resp.data["decision"] == "deduplicated")
+            .expect("one request must observe the in-flight or completed claim");
+        if repeated.ok {
+            assert_eq!(repeated.data["deduplicated"], true);
+        } else {
+            assert!(repeated.error.as_deref().is_some_and(|error| error.contains("already in flight")), "{repeated:?}");
+            assert_eq!(repeated.data["reservation"], true);
+        }
         assert_eq!(first.data["task_id"], second.data["task_id"]);
         assert_eq!(first.data["message_id"], second.data["message_id"]);
         assert!(["use-registered-peer", "deduplicated"]

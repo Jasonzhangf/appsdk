@@ -134,8 +134,15 @@
             .append(true)
             .open(server_dir.join("journal.jsonl"))
             .unwrap();
+        let external_base = root.with_file_name(format!(
+            "{}-external",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&external_base).unwrap();
+        let mut config = crate::config::Config::default();
+        config.worktree.base = Some(external_base.clone());
         let server = Server {
-            config: crate::config::Config::default(),
+            config,
             root: root.clone(),
             storage_root: root.clone(),
             journal_path: root.join(".agent-collab/server/journal.jsonl"),
@@ -151,7 +158,9 @@
             mailbox_notify: tokio::sync::Notify::new(),
         };
         peer_tests::register(&server, "worker", "thread-worker");
-        let worktree = "playground/task-1".to_string();
+        let worktree = external_base.canonicalize().unwrap()
+            .join(crate::server::configured_project_key(&root).unwrap())
+            .join("task-1").display().to_string();
         let registered = handle_task_register(
             &server,
             "worker".into(),
@@ -165,13 +174,7 @@
             "p2".into(),
         );
         assert!(registered.ok, "{registered:?}");
-        let canonical_worktree = server
-            .root
-            .canonicalize()
-            .unwrap()
-            .join("playground/task-1")
-            .to_string_lossy()
-            .into_owned();
+        let canonical_worktree = worktree.clone();
         {
             let state = server.state.lock().unwrap();
             assert_eq!(
@@ -192,6 +195,7 @@
             replayed.worktree_bindings["binding-task-task-1"].worktree_root,
             canonical_worktree
         );
+        std::fs::remove_dir_all(external_base).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

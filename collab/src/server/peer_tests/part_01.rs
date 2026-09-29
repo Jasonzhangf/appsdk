@@ -607,6 +607,17 @@ pub(crate) fn test_server() -> (Server, PathBuf) {
     )
 }
 
+fn configured_test_worktree(server: &mut Server, root: &Path, slug: &str) -> PathBuf {
+    let base = root.with_file_name(format!(
+        "{}-external",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let path = base.join(configured_project_key(root).unwrap()).join(slug);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    server.config.worktree.base = Some(base);
+    path
+}
+
 pub(crate) fn test_appserver_transport(thread_id: &str) -> SelectedTransport {
     SelectedTransport {
         kind: TransportKind::AppServer,

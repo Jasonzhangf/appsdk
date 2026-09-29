@@ -1,6 +1,6 @@
 #[test]
 fn pending_merge_requires_the_delivered_candidate_on_main() {
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approved candidate merge test");
@@ -16,8 +16,7 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
     // The candidate must be delivered from a real worktree checked out on the
     // registered branch; a branch ref alone is not proof of the delivered
     // commit under the fail-closed binding rule.
-    let worktree_dir = root.join("playground/candidate");
-    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let worktree_dir = configured_test_worktree(&mut server, &root, "candidate");
     git_ok(
         &root,
         &[
@@ -37,7 +36,7 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
         "task".into(),
         None,
         Some("feature".into()),
-        Some("playground/candidate".into()),
+        Some(worktree_dir.display().to_string()),
         Some("codex/candidate".into()),
         Some(main_before_merge.clone()),
         default_priority(),
@@ -119,12 +118,13 @@ fn pending_merge_requires_the_delivered_candidate_on_main() {
     );
     assert!(merged.ok, "{merged:?}");
     assert!(!server.state.lock().unwrap().pending_merges.contains_key("task"));
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
-    let (server, root) = test_server();
+    let (mut server, root) = test_server();
     register(&server, "owner", "%owner");
     register(&server, "master", "%master");
     promote_master(&server, "master", "user approved worktree-head merge test");
@@ -133,8 +133,7 @@ fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
     // The worktree HEAD is the delivered commit. The registered branch ref is
     // main, deliberately stale relative to the delivered worktree HEAD, so the
     // binding must fail closed instead of trusting the branch ref.
-    let worktree_dir = root.join("playground/candidate-relative");
-    std::fs::create_dir_all(root.join("playground")).unwrap();
+    let worktree_dir = configured_test_worktree(&mut server, &root, "candidate-relative");
     git_ok(
         &root,
         &[
@@ -161,7 +160,7 @@ fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
         "task".into(),
         None,
         Some("feature".into()),
-        Some("playground/candidate-relative".into()),
+        Some(worktree_dir.display().to_string()),
         Some("main".into()),
         Some(main_before_merge.clone()),
         default_priority(),
@@ -202,6 +201,7 @@ fn pending_merge_binds_worktree_head_not_a_stale_branch_ref() {
         None,
         "a stale branch ref must fail closed rather than bind the branch ref"
     );
+    std::fs::remove_dir_all(server.config.worktree.base.as_ref().unwrap()).ok();
     std::fs::remove_dir_all(root).ok();
 }
 

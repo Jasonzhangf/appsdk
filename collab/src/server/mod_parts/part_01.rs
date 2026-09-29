@@ -418,6 +418,7 @@ fn resolve_worktree_path(
     root: &Path,
     config: &crate::config::Config,
     raw: &str,
+    stored_cleanup: bool,
 ) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
         return Err("worktree path must be non-empty".into());
@@ -439,6 +440,15 @@ fn resolve_worktree_path(
     let canonical_root = root
         .canonicalize()
         .map_err(|error| format!("project root cannot be canonicalized: {error}"))?;
+    let canonical_playground = canonical_root.join("playground");
+    if stored_cleanup
+        && canonical_candidate.starts_with(&canonical_playground)
+        && canonical_candidate != canonical_playground
+        && canonical_candidate.strip_prefix(&canonical_playground).is_ok_and(|relative|
+            relative.components().count() == 1)
+    {
+        return Ok(canonical_candidate);
+    }
     if let Some(base_result) = config.worktree.canonical_base() {
         let base = base_result?;
         if base.starts_with(&canonical_root) {
@@ -462,20 +472,10 @@ fn resolve_worktree_path(
         }
         return Err("worktree path must match the configured worktree base/layout".into());
     }
-    let canonical_playground = canonical_root.join("playground");
-    if canonical_candidate.starts_with(&canonical_playground)
-        && canonical_candidate != canonical_playground
-    {
-        return Ok(canonical_candidate);
-    }
-    Err("worktree path must be inside ./playground".into())
+    Err("new worktree requires a configured external worktree base".into())
 }
 
-fn validate_worktree_path(
-    root: &Path,
-    config: &crate::config::Config,
-    raw: &str,
-) -> Result<PathBuf, String> {
+fn validate_worktree_slug(raw: &str) -> Result<(), String> {
     let path = Path::new(raw);
     let leaf = path
         .file_name()
@@ -489,7 +489,16 @@ fn validate_worktree_path(
     {
         return Err("worktree basename must be a short slug (ASCII letters, digits, '.', '-' or '_'; max 32 chars)".into());
     }
-    resolve_worktree_path(root, config, raw)
+    Ok(())
+}
+
+fn validate_worktree_path(
+    root: &Path,
+    config: &crate::config::Config,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    validate_worktree_slug(raw)?;
+    resolve_worktree_path(root, config, raw, false)
 }
 
 fn cleanup_worktree_path(
@@ -497,7 +506,8 @@ fn cleanup_worktree_path(
     config: &crate::config::Config,
     raw: &str,
 ) -> Result<PathBuf, String> {
-    validate_worktree_path(root, config, raw)
+    validate_worktree_slug(raw)?;
+    resolve_worktree_path(root, config, raw, true)
 }
 
 fn task_claim_held(status: &str) -> bool {

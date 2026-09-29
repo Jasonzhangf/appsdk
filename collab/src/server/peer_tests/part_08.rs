@@ -345,7 +345,8 @@ fn worktree_path_budget_accepts_short_slug_and_rejects_escape() {
     ));
     std::fs::create_dir_all(root.join("playground")).unwrap();
     let config = crate::config::Config::default();
-    assert!(validate_worktree_path(&root, &config, "./playground/ar03-0828").is_ok());
+    assert!(validate_worktree_path(&root, &config, "./playground/ar03-0828").is_err());
+    assert!(cleanup_worktree_path(&root, &config, "./playground/ar03-0828").is_ok());
     assert!(validate_worktree_path(
         &root,
         &config,
@@ -397,6 +398,9 @@ fn worktree_path_accepts_configured_external_base_and_rejects_outside() {
     )
     .is_err());
     assert!(validate_worktree_path(&project, &config, "./playground/new-task").is_err());
+    std::fs::create_dir_all(project.join("playground")).unwrap();
+    assert!(cleanup_worktree_path(&project, &config, "./playground/old-task").is_ok());
+    assert!(cleanup_worktree_path(&project, &config, "./playground/nested/old-task").is_err());
     assert!(validate_worktree_path(
         &project,
         &config,

@@ -900,13 +900,16 @@ Live master dispatch uses `collab subagent dispatch --request-id <id>
 --subject <topic> "<body>"` with optional
 `--feature-id/--worktree-path/--branch/--base-commit/--priority/--next-step`.
 `--request-id` is ASCII `[A-Za-z0-9_-]`, max 80 bytes, and idempotent.
-`--worktree-path` must be `<project-main>/playground/<short-slug>` (leaf max 32
-ASCII bytes, no `..`). Only the live registered master can dispatch; the
-selected peer must be registered, present, non-managed, and inactive. Success
-returns `request_id`, `message_id`, `task_id`, `target`, `status: assigned`,
-`admission.*`, and `notification` (`sent` | `subscribed-not-sent` |
-`mailbox-only-no-subscription`). `sent` is not consumption; verify with
-`collab msg <id>` (`consumed_by_recv`) and `collab task status <task-id>`.
+`--worktree-path` must match the configured `[worktree].base` layout when set
+(for example `<base>/<project-key>/<short-slug>`); legacy
+`<project-main>/playground/<short-slug>` records stay valid during the
+transition. Leaf max 32 ASCII bytes, no `..`. Only the live registered master
+can dispatch; the selected peer must be registered, present, non-managed, and
+inactive. Success returns `request_id`, `message_id`, `task_id`, `target`,
+`status: assigned`, `admission.*`, and `notification` (`sent` |
+`subscribed-not-sent` | `mailbox-only-no-subscription`). `sent` is not
+consumption; verify with `collab msg <id>` (`consumed_by_recv`) and
+`collab task status <task-id>`.
 
 Peers never share worktrees. Each task owner starts from latest main in one
 declared clean `./playground/` worktree, implements and tests, commits the exact

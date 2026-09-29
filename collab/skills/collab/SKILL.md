@@ -395,10 +395,13 @@ Flag and body rules:
   Delivery iff, Tests (commands + expected + evidence path), Deliverables,
   Forbidden, and Flow. Ordinary peers receive only this body.
 - `--feature-id` is optional: stable feature slug.
-- `--worktree-path` is optional and must be `<project-main>/playground/<short-slug>`.
-  The leaf is at most 32 ASCII letters/digits/`.`/`-`/`_`, the whole path is at
-  most 80 bytes, and `..` is forbidden. The persisted field is `worktree`, not
-  `worktree_path`.
+- `--worktree-path` is optional. When `[worktree].base` is configured it must
+  be the rendered configured base path, for example
+  `<base>/<project-key>/<short-slug>`; otherwise legacy
+  `<project-main>/playground/<short-slug>` records remain valid while the
+  transition is active. The leaf is at most 32 ASCII
+  letters/digits/`.`/`-`/`_` and `..` is forbidden. The persisted field is
+  `worktree`, not `worktree_path`.
 - `--branch` is optional; prefer `codex/<short-slug>`.
 - `--base-commit` is optional; prefer the current `origin/main` SHA.
 - `--priority` defaults to `p2`; legal values are `p0|p1|p2|p3|p4`.

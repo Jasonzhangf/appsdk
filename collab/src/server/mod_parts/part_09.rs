@@ -664,6 +664,7 @@ fn handle_task_close(
     if !receipt_reusable {
         if let Err(e) = close_task_resources(
             &server.root,
+            &server.config,
             task.worktree_path.as_deref(),
             task.branch.as_deref(),
         ) {
@@ -970,6 +971,7 @@ fn handle_task_finalize_cleanup(
     // refused finalize leaves the obligation visible and retryable.
     if let Err(error) = close_task_resources(
         &server.root,
+        &server.config,
         task.worktree_path.as_deref(),
         task.branch.as_deref(),
     ) {

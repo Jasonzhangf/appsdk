@@ -38,6 +38,7 @@
         InspectOptions {
             source_path: Some(PathBuf::from("/repo/.agent-collab/server/journal.jsonl")),
             canonical_project_cwd: Some(PathBuf::from("/repo")),
+            configured_worktree_base: None,
         }
     }
 
@@ -255,6 +256,7 @@
         let options = InspectOptions {
             source_path: None,
             canonical_project_cwd: Some(PathBuf::from("repo")),
+            configured_worktree_base: None,
         };
         let report = inspect_jsonl_with_options(direct_line("one", 1).as_bytes(), &options);
         assert_eq!(report.classification, MappingClass::Unknown);

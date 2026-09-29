@@ -377,6 +377,7 @@ impl MappingClass {
 pub struct InspectOptions {
     pub source_path: Option<PathBuf>,
     pub canonical_project_cwd: Option<PathBuf>,
+    pub configured_worktree_base: Option<PathBuf>,
 }
 
 /// One deterministic issue found while inspecting a source or replay shape.
@@ -860,7 +861,11 @@ fn inspect_record(
                 }
             }
             if let Some(record_worktree) = worktree.as_deref() {
-                if !worktree_matches_project(canonical_cwd, record_worktree) {
+                if !worktree_matches_project(
+                    canonical_cwd,
+                    options.configured_worktree_base.as_deref(),
+                    record_worktree,
+                ) {
                     classification = MappingClass::Unknown;
                     exact_error = Some(scope_error(
                         "WORKTREE_OUTSIDE_PROJECT_SCOPE",
@@ -917,7 +922,11 @@ fn inspect_record(
             }
         }
         if let Some(record_worktree) = worktree.as_deref() {
-            if !worktree_matches_project(canonical_cwd, record_worktree) {
+            if !worktree_matches_project(
+                canonical_cwd,
+                options.configured_worktree_base.as_deref(),
+                record_worktree,
+            ) {
                 classification = MappingClass::Unknown;
                 exact_error = Some(scope_error(
                     "WORKTREE_OUTSIDE_PROJECT_SCOPE",
@@ -1278,7 +1287,11 @@ fn cwd_matches_project(canonical_cwd: &Path, record_cwd: &str) -> bool {
     record_cwd.is_absolute() && normalize_path(record_cwd) == normalize_path(canonical_cwd)
 }
 
-fn worktree_matches_project(canonical_cwd: &Path, record_worktree: &str) -> bool {
+fn worktree_matches_project(
+    canonical_cwd: &Path,
+    configured_base: Option<&Path>,
+    record_worktree: &str,
+) -> bool {
     let raw = Path::new(record_worktree);
     if raw
         .components()
@@ -1294,7 +1307,40 @@ fn worktree_matches_project(canonical_cwd: &Path, record_worktree: &str) -> bool
     };
     let candidate = normalize_path(&candidate);
     let playground = normalize_path(&canonical_cwd.join("playground"));
-    candidate.starts_with(&playground) && candidate != playground
+    if candidate.starts_with(&playground) && candidate != playground {
+        return true;
+    }
+    if let Some(base) = configured_base {
+        let base = normalize_path(base);
+        let key = sanitize_identifier(
+            canonical_cwd
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or_default(),
+        );
+        if let Ok(relative) = candidate.strip_prefix(&base) {
+            let mut components = relative.components();
+            if components.next().and_then(|c| c.as_os_str().to_str()) == Some(key.as_str())
+                && components.next().is_some()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

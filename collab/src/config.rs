@@ -14,6 +14,7 @@ pub struct Config {
     pub timers: Timers,
     pub subagent: Subagent,
     pub retention: Retention,
+    pub worktree: Worktree,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -23,6 +24,7 @@ impl Default for Config {
             timers: Timers::default(),
             subagent: Subagent::default(),
             retention: Retention::default(),
+            worktree: Worktree::default(),
         }
     }
 }
@@ -119,6 +121,76 @@ impl Retention {
         now_ms.saturating_sub((self.ttl_days as i64).saturating_mul(86_400_000))
     }
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Worktree {
+    /// Optional configured external playground base for new worktrees.
+    /// When absent, configured worktree creation is unavailable and legacy
+    /// `<project-root>/playground/<task-slug>` records remain valid.
+    pub base: Option<PathBuf>,
+    /// Exactly two segments: `{project-key}/{task-slug}`.
+    pub layout: String,
+}
+impl Default for Worktree {
+    fn default() -> Self {
+        Self {
+            base: None,
+            layout: "{project-key}/{task-slug}".into(),
+        }
+    }
+}
+
+impl Worktree {
+    pub fn canonical_base(&self) -> Option<Result<PathBuf, String>> {
+        let Some(base) = self.base.as_ref() else {
+            return None;
+        };
+        if !base.is_absolute() {
+            return Some(Err("worktree.base must be an absolute path".into()));
+        }
+        Some(
+            base.canonicalize()
+                .map_err(|error| format!("worktree.base cannot be canonicalized: {error}")),
+        )
+    }
+
+    pub fn validate_layout(&self) -> Result<(), String> {
+        let segments = self
+            .layout
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.len() != 2 {
+            return Err("worktree.layout must contain exactly two segments".into());
+        }
+        let has_project = segments
+            .iter()
+            .filter(|segment| **segment == "{project-key}")
+            .count();
+        let has_task = segments
+            .iter()
+            .filter(|segment| **segment == "{task-slug}")
+            .count();
+        if has_project != 1 || has_task != 1 {
+            return Err(
+                "worktree.layout must contain {project-key} and {task-slug} exactly once each"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn render_relative(&self, project_key: &str, task_slug: &str) -> Result<PathBuf, String> {
+        self.validate_layout()?;
+        let rendered = self
+            .layout
+            .replace("{project-key}", project_key)
+            .replace("{task-slug}", task_slug);
+        Ok(PathBuf::from(rendered))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Subagent {
@@ -400,6 +472,12 @@ impl Config {
             || !(1..=3).contains(&self.keepalive.max_unacked)
         {
             bail!("keepalive requires interval_seconds=900..86400 and max_unacked=1..3");
+        }
+        self.worktree
+            .validate_layout()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if let Some(Err(error)) = self.worktree.canonical_base() {
+            bail!(error);
         }
         let n = &self.notifications;
         if !matches!(n.mode.as_str(), "immediate" | "batch")

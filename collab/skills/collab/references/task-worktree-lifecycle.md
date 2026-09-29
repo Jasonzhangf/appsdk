@@ -13,7 +13,9 @@ to declare tested work delivered.
 
 ```text
 latest main
-  -> clean declared <project-main>/playground/<short-slug> worktree
+  -> clean declared configured worktree path (<base>/<project-key>/<short-slug>
+     when [worktree].base is configured; legacy
+     <project-main>/playground/<short-slug> remains valid during transition)
   -> register owned task
   -> implement and verify
   -> candidate commit
@@ -45,12 +47,12 @@ collab master status
 collab task status [task-id]
 collab task conflicts --feature <feature-id>
 collab task register <task-id> --feature <feature-id> \
-  --worktree ./playground/<short-slug> \
+  --worktree <configured-or-legacy-worktree> \
   --branch codex/<short-slug> --base-commit <sha> --priority p2
 collab task update <task-id> --status verifying --next "<next evidence gate>"
 collab task update <task-id> --status reviewed
 collab task deliver <task-id> --evidence "commit=<sha>; gates=pass" \
-  --worktree ./playground/<short-slug>
+  --worktree <configured-or-legacy-worktree>
 collab task review <task-id> --accept --evidence "review gates=pass"
 collab task integrated <task-id> --commit <main-sha> --evidence "main gates=pass"
 collab task close <task-id>
@@ -61,8 +63,10 @@ keepalive after the task is done is stopped by task close; a specific
 owner-scoped lease can be cancelled with
 `collab notify unsubscribe <subscription-id>`.
 
-- One issue owns one clean worktree under
-  `<project-main>/playground/<short-slug>`; the project ignores `playground/`.
+- One issue owns one clean worktree. New work must use the configured
+  `[worktree].base` when set, for example
+  `<base>/<project-key>/<short-slug>`; legacy paths under
+  `<project-main>/playground/<short-slug>` remain valid during the transition.
 - A worktree is only the task execution directory and has no identity context.
   Run `collab context`, `collab master status`, registration, and recovery
   from the canonical project main tree. Identity requires sessionID, threadID,

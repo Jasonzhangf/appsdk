@@ -344,19 +344,59 @@ fn worktree_path_budget_accepts_short_slug_and_rejects_escape() {
         now_ms()
     ));
     std::fs::create_dir_all(root.join("playground")).unwrap();
-    assert!(validate_worktree_path(&root, "./playground/ar03-0828").is_ok());
+    let config = crate::config::Config::default();
+    assert!(validate_worktree_path(&root, &config, "./playground/ar03-0828").is_ok());
     assert!(validate_worktree_path(
         &root,
+        &config,
         "./playground/v3-direct-sse-terminal-observability-20260827-long-run-id"
     )
     .is_err());
-    assert!(validate_worktree_path(&root, "./playground/../outside").is_err());
+    assert!(validate_worktree_path(&root, &config, "./playground/../outside").is_err());
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink("/tmp", root.join("playground/link")).unwrap();
-        assert!(validate_worktree_path(&root, "./playground/link/escape").is_err());
+        assert!(validate_worktree_path(&root, &config, "./playground/link/escape").is_err());
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worktree_path_accepts_configured_external_base_and_rejects_outside() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-configured-worktree-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let base = root.join("external-playground");
+    let project = root.join("repo-project");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let mut config = crate::config::Config::default();
+    config.worktree.base = Some(base.canonicalize().unwrap());
+    let path = base
+        .join("repo-project")
+        .join("short-slug");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        path.display().to_string().as_str()
+    )
+    .is_ok());
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        base.join("wrong-project").join("short-slug").display().to_string().as_str()
+    )
+    .is_err());
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        root.join("outside").display().to_string().as_str()
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

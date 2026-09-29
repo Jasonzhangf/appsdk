@@ -825,7 +825,7 @@ fn handle_task_register_with_next(
     }
     let task_owner = worker_id.clone();
     if let Some(path) = &worktree_path {
-        let canonical = match validate_worktree_path(&server.root, path) {
+        let canonical = match validate_worktree_path(&server.root, &server.config, path) {
             Ok(path) => path,
             Err(error) => return Resp::err(error),
         };
@@ -936,7 +936,7 @@ fn handle_task_relocate(
     if worker.token != token {
         return Resp::err("token mismatch: identity does not own this worker_id");
     }
-    let canonical_worktree = match validate_worktree_path(&server.root, &worktree_path) {
+    let canonical_worktree = match validate_worktree_path(&server.root, &server.config, &worktree_path) {
         Ok(path) => path,
         Err(error) => return Resp::err(error),
     };
@@ -1189,6 +1189,7 @@ fn stale_worker_views(
 
 fn close_task_resources(
     root: &Path,
+    config: &crate::config::Config,
     worktree_path: Option<&str>,
     branch: Option<&str>,
 ) -> Result<(), String> {
@@ -1214,7 +1215,7 @@ fn close_task_resources(
         }
     }
     if let Some(relative) = worktree_path {
-        let worktree = cleanup_worktree_path(root, relative)?;
+        let worktree = cleanup_worktree_path(root, config, relative)?;
         if worktree.exists() {
             let dirty = Command::new("git")
                 .arg("-C")

@@ -317,6 +317,12 @@ impl Server {
                         "migration commit evidence is not part of worker registration".into(),
                     ))
                 }
+                GlobalEvent::RuntimeBindingLedgerClassified { record } => {
+                    events.push(Event::GlobalRuntimeBindingLedgerClassified { record })
+                }
+                GlobalEvent::LedgerScanReceiptRecorded { receipt } => {
+                    events.push(Event::GlobalLedgerScanReceiptRecorded { receipt })
+                }
             }
         }
         events.push(Event::Registered {

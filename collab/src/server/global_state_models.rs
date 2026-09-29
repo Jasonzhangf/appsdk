@@ -26,6 +26,67 @@ pub type AppScopeId = AppServerId;
 pub const INITIAL_EPOCH: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeBindingLedgerState {
+    Live,
+    Cold,
+    Missing,
+    RepairRequired,
+}
+
+impl RuntimeBindingLedgerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Cold => "cold",
+            Self::Missing => "missing",
+            Self::RepairRequired => "repair_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBindingLedgerRecord {
+    pub project_scope: ProjectScopeId,
+    pub app_scope_id: AppServerId,
+    pub agent_id: AgentId,
+    pub runtime_id: RuntimeId,
+    pub binding_id: BindingId,
+    pub endpoint_generation: u64,
+    pub state: RuntimeBindingLedgerState,
+    pub probe_state: Option<RuntimeBindingLedgerState>,
+    pub reason: Option<String>,
+    pub classified_ms: i64,
+    pub operation_id: OperationId,
+    pub receipt_id: String,
+}
+
+impl RuntimeBindingLedgerRecord {
+    pub fn key(&self) -> String {
+        format!("{}/{}/{}:{}:{}", self.project_scope.as_str(), self.app_scope_id, self.binding_id, self.agent_id, self.endpoint_generation)
+    }
+
+    pub fn validate(&self) -> Result<(), StateError> {
+        validate_project_scope(&self.project_scope)?;
+        validate_app_scope(&self.app_scope_id)?;
+        validate_agent_id(&self.agent_id)?;
+        validate_runtime_id(&self.runtime_id)?;
+        validate_binding_id(&self.binding_id)?;
+        validate_operation_id(&self.operation_id)?;
+        if self.endpoint_generation == 0 {
+            return Err(StateError::invalid("runtime binding ledger endpoint_generation", "must be non-zero"));
+        }
+        if self.classified_ms < 0 {
+            return Err(StateError::invalid("runtime binding ledger classified_ms", "must be non-negative"));
+        }
+        if self.receipt_id.trim().is_empty() || self.receipt_id.len() > 128 {
+            return Err(StateError::invalid("runtime binding ledger receipt_id", "must be a non-empty short identifier"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateVersion {
     pub epoch: u64,
     pub sequence: u64,
@@ -567,6 +628,8 @@ pub struct ProjectState {
     pub runtime_bindings: BTreeMap<String, RuntimeBinding>,
     #[serde(default)]
     pub master_grants: BTreeMap<String, MasterGrant>,
+    #[serde(default)]
+    pub runtime_binding_ledger: BTreeMap<String, RuntimeBindingLedgerRecord>,
 }
 
 impl ProjectState {
@@ -577,6 +640,7 @@ impl ProjectState {
             registrations: BTreeMap::new(),
             runtime_bindings: BTreeMap::new(),
             master_grants: BTreeMap::new(),
+            runtime_binding_ledger: BTreeMap::new(),
         })
     }
 
@@ -656,6 +720,25 @@ impl ProjectState {
                 return Err(StateError::Invariant(format!(
                     "master grant {binding_key} is not bound to the current runtime generation"
                 )));
+            }
+        }
+
+        for (ledger_key, ledger) in &self.runtime_binding_ledger {
+            ledger.validate()?;
+            if *ledger_key != ledger.key() {
+                return Err(StateError::Invariant(format!("runtime binding ledger key does not match record")));
+            }
+            let Some(binding) = self.runtime_bindings.get(ledger.binding_id.as_str()) else {
+                return Err(StateError::Invariant(format!("runtime binding ledger references missing binding {}", ledger.binding_id)));
+            };
+            if binding.project_scope != ledger.project_scope
+                || binding.app_scope_id != ledger.app_scope_id
+                || binding.agent_id != ledger.agent_id
+                || binding.runtime_id != ledger.runtime_id
+                || binding.binding_id != ledger.binding_id
+                || binding.endpoint_generation != ledger.endpoint_generation
+            {
+                return Err(StateError::Invariant(format!("runtime binding ledger coordinates disagree for {}", ledger.binding_id)));
             }
         }
         Ok(())
@@ -1309,4 +1392,30 @@ pub struct GlobalState {
     pub command_receipts: BTreeMap<String, CommandReceipt>,
     #[serde(default)]
     pub migration_commit_evidence: BTreeMap<String, MigrationCommitEvidence>,
+    #[serde(default)]
+    pub ledger_scan_receipts: BTreeMap<String, LedgerScanReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerScanReceipt {
+    pub scan_id: String,
+    pub scanned_ms: i64,
+    pub classified: u32,
+    pub transitioned: u32,
+    pub unchanged: u32,
+    pub blocked: u32,
+    pub mailbox_messages_unchanged: bool,
+}
+
+impl LedgerScanReceipt {
+    pub fn validate(&self) -> Result<(), StateError> {
+        if self.scan_id.trim().is_empty() || self.scan_id.len() > 128 {
+            return Err(StateError::invalid("ledger scan receipt scan_id", "must be a non-empty short identifier"));
+        }
+        if self.scanned_ms < 0 {
+            return Err(StateError::invalid("ledger scan receipt scanned_ms", "must be non-negative"));
+        }
+        Ok(())
+    }
 }

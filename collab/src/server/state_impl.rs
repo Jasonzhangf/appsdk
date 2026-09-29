@@ -755,6 +755,12 @@ impl State {
                     evidence: evidence.clone(),
                 })?;
             }
+            Event::GlobalRuntimeBindingLedgerClassified { record } => {
+                self.apply_global_event(&GlobalEvent::RuntimeBindingLedgerClassified { record: record.clone() })?;
+            }
+            Event::GlobalLedgerScanReceiptRecorded { receipt } => {
+                self.apply_global_event(&GlobalEvent::LedgerScanReceiptRecorded { receipt: receipt.clone() })?;
+            }
         }
         Ok(())
     }

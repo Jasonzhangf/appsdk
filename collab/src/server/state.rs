@@ -112,6 +112,12 @@ pub enum GlobalEvent {
     MigrationCommitEvidence {
         evidence: super::global_state::MigrationCommitEvidence,
     },
+    RuntimeBindingLedgerClassified {
+        record: super::global_state::RuntimeBindingLedgerRecord,
+    },
+    LedgerScanReceiptRecorded {
+        receipt: super::global_state::LedgerScanReceipt,
+    },
 }
 
 impl GlobalEvent {
@@ -130,6 +136,12 @@ impl GlobalEvent {
                 .map(|_| ()),
             Self::MigrationCommitEvidence { evidence } => {
                 global.record_migration_commit_evidence(evidence)
+            }
+            Self::RuntimeBindingLedgerClassified { record } => {
+                global.classify_runtime_binding_ledger(record).map(|_| ())
+            }
+            Self::LedgerScanReceiptRecorded { receipt } => {
+                global.record_ledger_scan_receipt(receipt).map(|_| ())
             }
         }
     }
@@ -749,6 +761,12 @@ pub enum Event {
     },
     GlobalMigrationCommitEvidence {
         evidence: super::global_state::MigrationCommitEvidence,
+    },
+    GlobalRuntimeBindingLedgerClassified {
+        record: super::global_state::RuntimeBindingLedgerRecord,
+    },
+    GlobalLedgerScanReceiptRecorded {
+        receipt: super::global_state::LedgerScanReceipt,
     },
 }
 

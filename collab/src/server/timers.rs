@@ -1,4 +1,7 @@
 use crate::proto::SelectedTransport;
+use crate::server::global_state::{
+    LedgerScanReceipt, RuntimeBindingLedgerRecord, RuntimeBindingLedgerState,
+};
 use crate::server::state::{
     goal_deadline_key, is_goal_deadline, now_ms, Event, Message, MAX_WAKE_ATTEMPTS,
 };
@@ -15,6 +18,7 @@ pub fn tick(server: &Arc<Server>) {
 fn tick_at(server: &Arc<Server>, now: i64) {
     super::keepalive::tick_at(server, now);
     super::purge_expired_storage(server, now);
+    tick_ledger_maintenance_at(server, now);
     if server.state.lock().unwrap().admission_frozen() {
         return;
     }
@@ -375,6 +379,114 @@ fn tick_with_deadline_wake_at(server: &Arc<Server>, now: i64) {
     };
     for (message_id, subscription_id) in candidates {
         super::attempt_notification_with_at(server, &message_id, &subscription_id, now);
+    }
+}
+
+fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
+    if !server.config.timers.enabled {
+        return;
+    }
+    let bindings = {
+        let state = server.state.lock().unwrap();
+        state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut classified = 0u32;
+    let mut transitioned = 0u32;
+    let mut unchanged = 0u32;
+    let mut blocked = 0u32;
+    let mut events = Vec::new();
+    for binding in bindings {
+        let Some(worker) = server.state.lock().unwrap().workers.get(binding.agent_id.as_str()).cloned() else {
+            blocked = blocked.saturating_add(1);
+            continue;
+        };
+        let (state, reason) = match super::worker_presence(server, &worker) {
+            super::presence::IdentityPresence::Present => (RuntimeBindingLedgerState::Live, None),
+            super::presence::IdentityPresence::Cold => (RuntimeBindingLedgerState::Cold, None),
+            super::presence::IdentityPresence::Missing => (
+                RuntimeBindingLedgerState::Missing,
+                Some("registered transport probe returned missing; durable mailbox remains authoritative"),
+            ),
+            super::presence::IdentityPresence::Unknown => (
+                RuntimeBindingLedgerState::RepairRequired,
+                Some("transport probe returned unknown; preserving route and identity records"),
+            ),
+        };
+        let operation_id = crate::identity::OperationId::new(format!("ledger-{now}-{}", binding.binding_id)).ok();
+        let receipt_id = crate::identity::OperationId::new(format!("ledger-receipt-{now}-{}", binding.binding_id)).ok();
+        let (operation_id, receipt_id) = match (operation_id, receipt_id) {
+            (Some(operation_id), Some(receipt_id)) => (operation_id, receipt_id),
+            _ => {
+                blocked = blocked.saturating_add(1);
+                continue;
+            }
+        };
+        let existing = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_runtime_binding_ledger(
+            &binding.project_scope,
+            &binding.app_scope_id,
+            &binding.binding_id,
+            binding.endpoint_generation,
+            )
+            .cloned();
+        if existing
+            .map(|record| record.state == state && record.probe_state == Some(state))
+            .unwrap_or(false)
+        {
+            unchanged = unchanged.saturating_add(1);
+            continue;
+        }
+        classified = classified.saturating_add(1);
+        transitioned = transitioned.saturating_add(1);
+        events.push(Event::GlobalRuntimeBindingLedgerClassified {
+            record: RuntimeBindingLedgerRecord {
+                project_scope: binding.project_scope.clone(),
+                app_scope_id: binding.app_scope_id.clone(),
+                agent_id: binding.agent_id.clone(),
+                runtime_id: binding.runtime_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                endpoint_generation: binding.endpoint_generation,
+                state,
+                probe_state: Some(state),
+                reason: reason.map(str::to_owned),
+                classified_ms: now,
+                operation_id,
+                receipt_id: receipt_id.to_string(),
+            },
+        });
+    }
+    if classified > 0 || blocked > 0 {
+        let scan_id = format!("ledger-scan-{now}");
+        let scan_operation_id = crate::identity::OperationId::new(format!("ledger-scan-op-{now}")).ok();
+        let scan_receipt_id = crate::identity::OperationId::new(format!("ledger-scan-receipt-{now}")).ok();
+        if scan_operation_id.is_some() && scan_receipt_id.is_some() {
+            // Scan receipts are evidence, not delivery truth. The mailbox is not
+            // changed by classification, so the durable message count is unchanged.
+            events.push(Event::GlobalLedgerScanReceiptRecorded {
+                receipt: LedgerScanReceipt {
+                    scan_id,
+                    scanned_ms: now,
+                    classified,
+                    transitioned,
+                    unchanged,
+                    blocked,
+                    mailbox_messages_unchanged: true,
+                },
+            });
+        }
+    }
+    if !events.is_empty() {
+        server.commit(&events);
     }
 }
 

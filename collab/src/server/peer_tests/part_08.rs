@@ -1061,6 +1061,63 @@ fn explicit_peer_notification_accepts_arbitrary_durable_body() {
 }
 
 #[test]
+fn send_to_missing_endpoint_stays_durable_and_does_not_promise_delivery() {
+    let (mut server, root) = test_server();
+    register(&server, "sender", "%sender");
+    register(&server, "recipient", "%recipient");
+    server.appserver_notification_sink = default_appserver_notification_sink();
+    let sub_id = "sub-default-direct-message-recipient".to_owned();
+    assert!(server.state.lock().unwrap().notification_subscriptions.contains_key(&sub_id));
+    let mut state = server.state.lock().unwrap();
+    let worker = state.workers.get_mut("recipient").unwrap();
+    let Some(transport) = worker.transport.as_mut() else {
+        panic!("registered recipient should keep its transport record");
+    };
+    if let Some(endpoint) = transport.tmux_endpoint.as_mut() {
+        endpoint.socket_path = "/tmp/collab-missing-transport-socket.sock".into();
+        endpoint.pane_id = "%does-not-exist".into();
+    } else {
+        transport.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/collab-missing-transport-socket.sock".into(),
+            server_pid: 1,
+            tmux_session_id: "$missing".into(),
+            pane_id: "%does-not-exist".into(),
+            pane_pid: 1,
+            codex_session_id: None,
+            codex_thread_id: None,
+        });
+    }
+    drop(state);
+
+    let response = handle_send_with_task(
+        &server,
+        "sender".into(),
+        "recipient".into(),
+        "notify".into(),
+        Some("recover-me".into()),
+        "recipient endpoint disappeared after registration".into(),
+        None,
+        "immediate".into(),
+        false,
+        None,
+    );
+
+    let message_id = response.data["msg_id"].as_str().unwrap().to_owned();
+    assert!(response.data.get("durable").is_some_and(|value| value.as_bool() == Some(true)));
+    assert!(response.error.is_some(), "{response:?}");
+    assert_eq!(response.data["notification"], "subscribed-not-sent");
+    assert!(response.data["notification_error"].is_string());
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.msgs[&message_id].state, "pending");
+    assert!(state.notification_delivery_failures.contains_key(&message_id));
+    drop(state);
+    let replayed = replay(&root).unwrap();
+    assert!(replayed.msgs.contains_key(&message_id));
+    assert!(replayed.notification_delivery_failures.contains_key(&message_id));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn explicit_send_reports_tmux_wake_rejection_after_durable_commit() {
     let (mut server, root) = test_server();
     register(&server, "sender", "%sender");

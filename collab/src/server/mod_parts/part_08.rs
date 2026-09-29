@@ -353,7 +353,9 @@ pub(crate) fn handle_send_with_task(
     // the global state lock to avoid stalling unrelated daemon commands.
     drop(st);
     if worker_presence(server, &recipient) == IdentityPresence::Missing {
-        return Resp::err("recipient has no live server-verified transport");
+        // Missing is a transport failure, not a durable mailbox failure. The
+        // message is committed below and the attempted wake carries the exact
+        // missing endpoint error, so recovery can preserve and later receive it.
     }
     let mut st = server.state.lock().unwrap();
     // The presence probe runs outside the lock, so a concurrent

@@ -164,14 +164,22 @@ impl Server {
         .map_err(|error| error.to_string())?;
         binding.tmux_endpoint = transport.tmux_endpoint.clone();
         binding.validate().map_err(|error| error.to_string())?;
-        let command_id = CommandId::new(format!("register-{binding_text}-{generation}"))
-            .map_err(|error| error.to_string())?;
-        let operation_id = OperationId::new(format!("register-op-{binding_text}-{generation}"))
-            .map_err(|error| error.to_string())?;
         let expected_revision = {
             let st = self.state.lock().unwrap();
             st.revision
         };
+        let base_command = format!("register-{binding_text}-{generation}");
+        let prior_attempt = !reuse_existing && self.state.lock().unwrap().global
+            .lookup_command_receipt(&CommandId::new(base_command.clone()).map_err(|error| error.to_string())?)
+            .is_some();
+        let attempt_suffix = prior_attempt.then(|| format!("-retry-{expected_revision}"))
+            .unwrap_or_default();
+        let command_id = CommandId::new(format!("{base_command}{attempt_suffix}"))
+            .map_err(|error| error.to_string())?;
+        let operation_id = OperationId::new(format!(
+            "register-op-{binding_text}-{generation}{attempt_suffix}"
+        ))
+        .map_err(|error| error.to_string())?;
         let envelope = CommandEnvelope::new(
             command_id,
             operation_id,
@@ -213,6 +221,7 @@ impl Server {
         let mut st = self.state.lock().unwrap();
         self.validate_typed_register(&st, &typed)?;
         let mut events = Vec::new();
+        let TypedCommand::RegisterWorker { worker, .. } = &typed.command;
         for global_event in typed.command.global_events() {
             match global_event {
                 GlobalEvent::ProjectRegistered { registration } => {
@@ -226,6 +235,24 @@ impl Server {
                         current.same_principal(&binding)
                             && current.endpoint_generation < binding.endpoint_generation
                     });
+                    let same_pane_tmux_recovery = replaces_generation
+                        && st
+                            .global
+                            .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+                            .is_some()
+                        && previous.is_some_and(|current| {
+                            current.tmux_endpoint.as_ref().is_some_and(|old| {
+                                binding.tmux_endpoint.as_ref().is_some_and(|new| {
+                                    crate::client::adapters::tmux::same_pane_route(old, new)
+                                })
+                            })
+                        })
+                        && st.workers.get(&worker.id).is_some_and(|old| {
+                            selected_transport_for_worker(old)
+                                .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+                        })
+                        && selected_transport_for_worker(worker)
+                            .is_some_and(|transport| transport.kind == TransportKind::Tmux);
                     // A same-principal generation replacement is the
                     // reconnect/recovery path, so the capability fence must
                     // reissue the previous grant for the new generation in
@@ -265,9 +292,14 @@ impl Server {
                             });
                         }
                     }
-                    events.push(Event::GlobalRuntimeBound { binding });
+                    events.push(Event::GlobalRuntimeBound {
+                        binding: binding.clone(),
+                    });
                     if let Some(grant) = reissued_master_grant {
                         events.push(Event::GlobalMasterGranted { grant });
+                    }
+                    if same_pane_tmux_recovery {
+                        events.push(Event::GlobalCurrentThreadRouteSet { binding });
                     }
                 }
                 GlobalEvent::MasterGranted { grant } => {
@@ -287,7 +319,6 @@ impl Server {
                 }
             }
         }
-        let TypedCommand::RegisterWorker { worker, .. } = &typed.command;
         events.push(Event::Registered {
             worker: worker.clone(),
         });

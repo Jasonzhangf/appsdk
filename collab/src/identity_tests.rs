@@ -1114,6 +1114,75 @@ fn archive_dead_peers_moves_bytes_and_keeps_the_project_unblocked() {
     std::fs::remove_dir_all(root).ok();
 }
 
+#[test]
+fn archived_pane_credential_requires_exact_route_generation_and_scope() {
+    let root = test_root("ci-archive-pane-recovery");
+    std::fs::create_dir_all(&root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let endpoint = crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/archive-pane.sock".into(),
+        server_pid: 31,
+        tmux_session_id: "$7".into(),
+        pane_id: "%7".into(),
+        pane_pid: 41,
+        codex_session_id: Some("session-old".into()),
+        codex_thread_id: Some("thread-old".into()),
+    };
+    saved_identity(
+        &host_paths,
+        &scope,
+        "pane-worker",
+        Some("session-old"),
+        Some("thread-old"),
+        Some(endpoint.clone()),
+    );
+    let original = read_persisted(&host_paths, "pane-worker").unwrap().unwrap();
+    archive_dead_peers(&host_paths, std::slice::from_ref(&original)).unwrap();
+    let mut current = endpoint;
+    current.codex_session_id = Some("session-new".into());
+    current.codex_thread_id = Some("thread-new".into());
+    let candidate = crate::proto::TmuxCandidate {
+        endpoint: current,
+        cwd: root.display().to_string(),
+    };
+    let route = crate::proto::RouteResolution {
+        app_scope_id: AppServerId::new(CLI_APP_SERVER_ID).unwrap(),
+        project_scope: scope
+            .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+            .unwrap()
+            .project_scope_id,
+        canonical_root: root.display().to_string(),
+        storage_root: root.display().to_string(),
+        agent_id: AgentId::new("pane-worker").unwrap(),
+        binding_id: BindingId::new("binding-pane-worker").unwrap(),
+        endpoint_generation: 1,
+        session_id: SessionId::new("session-old").unwrap(),
+        native_thread_id: NativeThreadId::new("thread-old").unwrap(),
+    };
+    let selected = archived_pane_identity_at(&host_paths, &scope, &candidate, &route)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.token, original.token);
+    let mut committed = route.clone();
+    committed.endpoint_generation += 1;
+    committed.session_id = SessionId::new("session-new").unwrap();
+    committed.native_thread_id = NativeThreadId::new("thread-new").unwrap();
+    assert_eq!(
+        archived_pane_identity_at(&host_paths, &scope, &candidate, &committed)
+            .unwrap()
+            .unwrap()
+            .token,
+        original.token,
+    );
+    let mut wrong_generation = route.clone();
+    wrong_generation.endpoint_generation += 2;
+    assert!(archived_pane_identity_at(&host_paths, &scope, &candidate, &wrong_generation)
+        .unwrap()
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn runtime_identity(generation: u64, binding: &str) -> RuntimeIdentity {
     RuntimeIdentity {
         agent_id: AgentId::new("agent-1").unwrap(),

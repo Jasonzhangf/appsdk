@@ -771,7 +771,19 @@ fn validate_cli_register_rebind(
             "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned(),
         );
     };
-    let candidate_binding = state.global.lookup_tmux_route(&candidate.endpoint);
+    let candidate_binding = state.global.lookup_tmux_route(&candidate.endpoint).or_else(|| {
+        state
+            .global
+            .lookup_unique_tmux_pane_route(&candidate.endpoint)
+            .filter(|binding| {
+                binding.agent_id.as_str() == worker_id
+                    && state.workers.get(worker_id).is_some_and(|worker| {
+                        worker.token == token
+                            && selected_transport_for_worker(worker)
+                                .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+                    })
+            })
+    });
     let candidate_thread = candidate
         .endpoint
         .codex_thread_id

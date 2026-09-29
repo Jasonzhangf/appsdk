@@ -60,12 +60,13 @@ owners independently prove G. There is one success sink: the same worker and
 master grant at one new generation, current-thread route, armed default direct
 message lease, unchanged task/mailbox records, and a consumed message receipt.
 
-The host and project journals are distinct, so E cannot honestly be described
-as one existing durable transaction. Implement E as a **recoverable transition**
-with a stable operation ID and an explicit reconcile step. Before committing,
+The resident project uses one journal: its typed registration command includes
+the current thread route event alongside binding, grant, worker and lease. An
+external project has a separate host journal, so E is a **recoverable
+transition** with an explicit reconcile step. Before committing,
 capture the previous binding, grant, worker, subscriptions and host route.
-The project typed registration commits its binding, grant, worker and lease in
-one journal command. Publish the new host route next. A definite publish
+The project typed registration commits its binding, grant, worker, lease and
+project route in one journal command. Publish the external host route next. A definite publish
 failure commits the existing rollback event and verifies that project and host
 state equal the snapshot. An uncertain append/flush result is not rolled back
 blindly. On retry or daemon startup, compare the two journals against the
@@ -74,10 +75,11 @@ return the recorded result; if the project holds the new binding but the host
 does not, publish the missing host route after rechecking admission; if the
 host holds the new route but project does not, retire the uncommitted host
 route; if neither holds it, retry from the old state. Divergent owners or
-generations fail closed with both journals preserved. Do not expose the new
-grant until the route is reconciled. The same operation ID makes a lost client
-receipt a replay, not a second generation. No `WorkerClosed` cleanup event is
-valid for this transition.
+generations fail closed with both journals preserved. External project calls
+are fenced while host and project routes disagree. A definite rollback keeps
+its audit receipt; a retry uses a new attempt ID at the same generation. A
+lost client receipt with an already current binding reuses that generation.
+No `WorkerClosed` cleanup event is valid for this transition.
 
 ## Terminal states and evidence
 

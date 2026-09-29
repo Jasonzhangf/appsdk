@@ -689,6 +689,20 @@ impl State {
                     previous_grant.clone(),
                 )
                 .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                let failed_is_local_route = failed.session_id.as_ref().zip(
+                    failed.native_thread_id.as_ref(),
+                ).is_some_and(|(session, thread)| {
+                    next.lookup_current_thread_route(session, thread) == Some(failed)
+                });
+                if failed_is_local_route {
+                    next.retire_current_thread_route(failed.clone())
+                        .map_err(|error| format!("global reducer rejected route rollback: {error}"))?;
+                    if let Some(previous) = previous.as_ref() {
+                        next.set_current_thread_route(previous.clone()).map_err(|error| {
+                            format!("global reducer rejected route restoration: {error}")
+                        })?;
+                    }
+                }
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
                 if let Some(previous_worker) = previous_worker {

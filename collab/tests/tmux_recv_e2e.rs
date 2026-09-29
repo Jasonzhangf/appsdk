@@ -219,3 +219,84 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     assert_eq!(status["consumed_by_recv"], true);
     assert_eq!(status["state"], "read");
 }
+
+#[test]
+fn context_recovers_archived_master_in_the_same_live_pane() {
+    let root = unique_root();
+    let host_state = root.join("h");
+    let tmux_socket = root.join("t.sock");
+    std::fs::create_dir_all(&host_state).unwrap();
+    let mut fixture = Fixture {
+        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        root: root.clone(),
+        host_state,
+        tmux_socket: tmux_socket.clone(),
+        initialized: false,
+    };
+    tmux(&tmux_socket, &["new-session", "-d", "-s", "collab-pane-recovery", "sleep 600"]);
+    let server_pid = String::from_utf8(
+        tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout,
+    )
+    .unwrap()
+    .trim()
+    .parse::<u32>()
+    .unwrap();
+    let pane_id = String::from_utf8(
+        tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let worker_id = format!("codex-{pane_id}");
+    let old = Pane {
+        server_pid,
+        pane_id: pane_id.clone(),
+        session_anchor: "session-before-restart".into(),
+        thread_anchor: "thread-before-restart".into(),
+        worker_id: worker_id.clone(),
+    };
+    fixture.initialized = true;
+    fixture.run_ok(&["init"], Some(&old));
+    fixture.run_ok(
+        &["master", "promote", "--approval", "user approved isolated master"],
+        Some(&old),
+    );
+    let archive = fixture
+        .host_state
+        .join("archives/identities-retired-1")
+        .join(&worker_id);
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::rename(
+        fixture.host_state.join("identities").join(&worker_id),
+        &archive,
+    )
+    .unwrap();
+    let new = Pane {
+        session_anchor: "session-after-restart".into(),
+        thread_anchor: "thread-after-restart".into(),
+        ..old
+    };
+    let recovered = fixture.run_ok(&["context"], Some(&new));
+    assert_eq!(recovered["identity"]["worker_id"], worker_id);
+    assert_eq!(recovered["identity"]["role"], "master");
+    assert_eq!(recovered["bootstrap"]["identity"], "recovered");
+    let again = fixture.run_ok(&["context"], Some(&new));
+    assert_eq!(again["bootstrap"]["identity"], "reused");
+    assert_eq!(again["identity"]["endpoint_generation"], recovered["identity"]["endpoint_generation"]);
+
+    let sent = fixture.run_ok(
+        &["sendmessage", "--to", &worker_id, "--subject", "recovery", "consume me"],
+        Some(&new),
+    );
+    let message_id = sent["msg_id"]
+        .as_str()
+        .or_else(|| sent["message_id"].as_str())
+        .unwrap();
+    let received = fixture.run_ok(
+        &["recv", "--worker", &worker_id, "--timeout", "0", "--receive-id", "recovery-recv-1"],
+        Some(&new),
+    );
+    assert_eq!(received["messages"][0]["id"], message_id);
+    let status = fixture.run_ok(&["msg", message_id], Some(&new));
+    assert_eq!(status["consumed_by_recv"], true);
+}

@@ -617,6 +617,150 @@ fn read_identity(path: &std::path::Path) -> anyhow::Result<Option<Identity>> {
     Ok(Some(serde_json::from_str(&std::fs::read_to_string(path)?)?))
 }
 
+/// An archived credential is only a candidate. Registration must still prove
+/// its token against the daemon's authoritative worker record.
+fn archived_pane_identity_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    candidate: &crate::proto::TmuxCandidate,
+    route: &crate::proto::RouteResolution,
+) -> anyhow::Result<Option<Identity>> {
+    let expected_scope = scope
+        .route_scope(route.app_scope_id.clone())?
+        .project_scope_id;
+    if route.project_scope != expected_scope {
+        anyhow::bail!("IDENTITY_RESTORE_CROSS_PROJECT: pane route belongs to another project");
+    }
+    let root = host_paths.state_root().join("archives");
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let mut selected: Option<Identity> = None;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || !entry.file_name().to_string_lossy().starts_with("identities-retired-")
+        {
+            continue;
+        }
+        let path = entry.path().join(route.agent_id.as_str()).join("identity.json");
+        let Some(identity) = read_identity(&path)? else {
+            continue;
+        };
+        let matches = identity.worker_id == route.agent_id.as_str()
+            && identity.project_scope.as_ref() == Some(&route.project_scope)
+            && identity.runtime.as_ref().is_some_and(|runtime| {
+                let current_generation = runtime.endpoint_generation == route.endpoint_generation
+                    && runtime.session_id.as_ref() == Some(&route.session_id)
+                    && runtime.native_thread_id.as_ref() == Some(&route.native_thread_id);
+                let committed_recovery_predecessor = runtime
+                    .endpoint_generation
+                    .checked_add(1)
+                    == Some(route.endpoint_generation);
+                runtime.agent_id == route.agent_id
+                    && runtime.binding_id == route.binding_id
+                    && runtime.appserver_id == route.app_scope_id
+                    && (current_generation || committed_recovery_predecessor)
+            })
+            && identity.transport.as_ref().is_some_and(|transport| {
+                transport.kind == TransportKind::Tmux
+                    && transport.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                        crate::client::adapters::tmux::same_pane_route(
+                            endpoint,
+                            &candidate.endpoint,
+                        )
+                    })
+            });
+        if !matches {
+            continue;
+        }
+        let selected_generation = selected
+            .as_ref()
+            .and_then(|previous| previous.runtime.as_ref())
+            .map(|runtime| runtime.endpoint_generation)
+            .unwrap_or(0);
+        let observed_generation = identity.runtime.as_ref().unwrap().endpoint_generation;
+        if observed_generation < selected_generation {
+            continue;
+        }
+        if observed_generation == selected_generation && selected.as_ref().is_some_and(|previous| {
+            previous.token != identity.token || previous.runtime != identity.runtime
+        }) {
+            anyhow::bail!(
+                "IDENTITY_RESTORE_AMBIGUOUS: archived pane credentials disagree for registered worker"
+            );
+        }
+        selected = Some(identity);
+    }
+    Ok(selected)
+}
+
+fn recover_archived_pane_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    worker_id: &str,
+    candidate: &crate::proto::TmuxCandidate,
+) -> anyhow::Result<Option<Identity>> {
+    if candidate.endpoint.codex_session_id.is_none()
+        || candidate.endpoint.codex_thread_id.is_none()
+    {
+        return Ok(None);
+    }
+    let archives = host_paths.state_root().join("archives");
+    if !archives.is_dir() {
+        return Ok(None);
+    }
+    let scope_id = scope
+        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+        .project_scope_id;
+    let mut has_candidate = false;
+    for entry in std::fs::read_dir(&archives)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || !entry.file_name().to_string_lossy().starts_with("identities-retired-")
+        {
+            continue;
+        }
+        let Some(identity) = read_identity(&entry.path().join(worker_id).join("identity.json"))?
+        else {
+            continue;
+        };
+        has_candidate |= identity.project_scope.as_ref() == Some(&scope_id)
+            && identity.transport.as_ref().is_some_and(|transport| {
+                transport.kind == TransportKind::Tmux
+                    && transport.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                        crate::client::adapters::tmux::same_pane_route(
+                            endpoint,
+                            &candidate.endpoint,
+                        )
+                    })
+            });
+    }
+    if !has_candidate {
+        return Ok(None);
+    }
+    let mut pane_only = candidate.endpoint.clone();
+    pane_only.codex_session_id = None;
+    pane_only.codex_thread_id = None;
+    let route: Result<crate::proto::RouteResolution, _> = crate::client::call(
+        &scope.sock_path(),
+        &crate::proto::Req::RouteResolve {
+            tmux_endpoint: pane_only,
+        },
+    );
+    match route {
+        Ok(route) => {
+            route.validate()?;
+            if route.agent_id.as_str() != worker_id {
+                anyhow::bail!("IDENTITY_RESTORE_CONFLICT: pane route belongs to another worker");
+            }
+            archived_pane_identity_at(host_paths, scope, candidate, &route)
+        }
+        Err(error) if error.to_string().contains("ROUTE_RESOLVE_NOT_FOUND") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn identities_by_runtime_key_at(
     host_paths: &HostPaths,
     session_id: &str,
@@ -1213,7 +1357,25 @@ fn load_or_create_resolved_full_at(
             anyhow::anyhow!("collab identity requires TMUX_PANE or an explicit worker id")
         })?;
     if let Some(ident) = read_identity(&identity_path_at(host_paths, &worker_id)?)? {
+        if allow_fresh_registration && ident.runtime.is_none() {
+            if let Some(candidate) = tmux_candidate.as_ref() {
+                if let Some(archived) =
+                    recover_archived_pane_at(host_paths, scope, &worker_id, candidate)?
+                {
+                    return Ok(archived);
+                }
+            }
+        }
         return Ok(ident);
+    }
+    if allow_fresh_registration {
+        if let Some(candidate) = tmux_candidate.as_ref() {
+            if let Some(archived) =
+                recover_archived_pane_at(host_paths, scope, &worker_id, candidate)?
+            {
+                return Ok(archived);
+            }
+        }
     }
     let ident = Identity {
         worker_id,

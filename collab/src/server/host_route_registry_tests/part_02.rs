@@ -752,6 +752,209 @@
     }
 
     #[tokio::test]
+    async fn live_tmux_master_rebinds_same_pane_without_new_promotion() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let worker = "same-pane-master";
+        let token = "token-same-pane-master";
+        let context = context_with_app(&root, app);
+        let old_candidates = test_candidates("same-pane-old").unwrap();
+        let (_, registered) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register(
+                worker.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(old_candidates.clone()),
+            ),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let promoted = super::handle_master_promote(
+            &server,
+            worker.into(),
+            token.into(),
+            "user approved same-pane-master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let old = runtime_for_registered(&server, &root, worker, app);
+        let mut new_candidates = old_candidates;
+        let endpoint = &mut new_candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-same-pane-new".into());
+        endpoint.codex_thread_id = Some("same-pane-new".into());
+        let (_, denied) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &old)),
+            Req::register(
+                worker.into(),
+                "wrong-token".into(),
+                root.display().to_string(),
+                Some(new_candidates.clone()),
+            ),
+        );
+        assert!(!denied.ok, "{denied:?}");
+        assert_eq!(
+            runtime_for_registered(&server, &root, worker, app).endpoint_generation,
+            old.endpoint_generation,
+        );
+        manager
+            .fail_current_thread_route_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, recovered) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &old)),
+            Req::register(
+                worker.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(new_candidates.clone()),
+            ),
+        );
+        assert!(recovered.ok, "{recovered:?}");
+        let current = runtime_for_registered(&server, &root, worker, app);
+        assert_eq!(current.endpoint_generation, old.endpoint_generation + 1);
+        let (_, repeated) = manager.dispatch_sync(
+            Some(context_with_runtime(&root, app, &current)),
+            Req::register(
+                worker.into(),
+                token.into(),
+                root.display().to_string(),
+                Some(new_candidates),
+            ),
+        );
+        assert!(repeated.ok, "{repeated:?}");
+        assert_eq!(
+            runtime_for_registered(&server, &root, worker, app).endpoint_generation,
+            current.endpoint_generation,
+        );
+        assert_eq!(
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .role_for_route(
+                    &crate::server::global_state::RouteScope {
+                        app_scope_id: current.appserver_id.clone(),
+                        project_scope_id: GlobalState::canonical_project_scope(&root).unwrap(),
+                    },
+                    &current.binding_id,
+                ),
+            crate::server::global_state::PeerRole::Master,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn split_journal_same_pane_master_is_fenced_until_host_reconcile() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let worker = "split-pane-master";
+        let token = "token-split-pane-master";
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let old_candidates = test_candidates("split-pane-old").unwrap();
+        let first = handle_register_with_app_scope(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(old_candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = super::handle_master_promote(
+            &runtime,
+            worker.into(),
+            token.into(),
+            "user approved split-pane-master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let old = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+                },
+                &BindingId::new("binding-split-pane-master").unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: old.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(
+                app.as_str().to_owned(),
+                old.project_scope.as_str().to_owned(),
+            ),
+            runtime.clone(),
+            None,
+        );
+        let mut new_candidates = old_candidates;
+        let endpoint = &mut new_candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-split-pane-new".into());
+        endpoint.codex_thread_id = Some("split-pane-new".into());
+        let context = context_with_app(&project_root, crate::identity::CLI_APP_SERVER_ID);
+        let previous = manager
+            .registration_rollback_state(&runtime, &context, worker)
+            .unwrap();
+        let second = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(new_candidates.clone()),
+        );
+        assert!(second.ok, "{second:?}");
+        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
+        manager
+            .fail_current_thread_route_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failed = manager.commit_current_thread_route(
+            &runtime,
+            &context,
+            worker,
+            previous.0.as_ref(),
+            previous.1.as_ref(),
+            previous.2.as_ref(),
+            &previous.3,
+        );
+        assert!(failed.is_err());
+        assert_eq!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_binding_for(&old.route_scope(), &old.binding_id)
+                .unwrap(),
+            &old,
+        );
+        let retry = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app),
+            Some(new_candidates),
+        );
+        assert!(retry.ok, "{retry:?}");
+        assert_eq!(retry.data["command"]["binding"]["endpoint_generation"], old.endpoint_generation + 1);
+        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
+        manager.reconcile_same_pane_master_routes().unwrap();
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_first_registration_route_commit_removes_unpublished_worker() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();

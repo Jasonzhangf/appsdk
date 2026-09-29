@@ -253,6 +253,15 @@ fn register_with_runtime(
     context_runtime: RuntimeIdentity,
 ) -> anyhow::Result<serde_json::Value> {
     let cwd = scope.root.display().to_string();
+    let appserver_candidate = if ident
+        .transport
+        .as_ref()
+        .is_some_and(|transport| transport.kind == proto::TransportKind::Tmux)
+    {
+        None
+    } else {
+        crate::client::adapters::candidate_from_env().map_err(anyhow::Error::msg)?
+    };
     let response: serde_json::Value = client::call_with_runtime_identity_at_root_daemon(
         &scope.sock_path(),
         &Req::Register {
@@ -260,8 +269,7 @@ fn register_with_runtime(
             token: ident.token.clone(),
             cwd,
             candidates: Some(proto::TransportCandidates {
-                appserver: crate::client::adapters::candidate_from_env()
-                    .map_err(anyhow::Error::msg)?,
+                appserver: appserver_candidate,
                 tmux: crate::client::adapters::tmux::candidate_from_env().ok(),
             }),
             retire_cross_project_anchor: context_registration_requested(),
@@ -321,7 +329,22 @@ fn ensure_registration_with_outcome(
     } else if !persisted_runtime_matches_scope(scope, ident)? {
         match register_recovery(scope, ident) {
             Ok(value) => Ok((value, RegistrationOutcome::Recovered)),
-            Err(_error) => {
+            Err(error) => {
+                if ident.transport.as_ref().is_some_and(|transport| {
+                    transport.kind == TransportKind::Tmux
+                        && transport.tmux_endpoint.as_ref().is_some_and(|old| {
+                            crate::client::adapters::tmux::candidate_from_env()
+                                .ok()
+                                .is_some_and(|current| {
+                                    crate::client::adapters::tmux::same_pane_route(
+                                        old,
+                                        &current.endpoint,
+                                    )
+                                })
+                        })
+                }) {
+                    return Err(error);
+                }
                 // A stale binding that can no longer be recovered in place.
                 // Re-register fresh with the same worker token so the server
                 // supersedes the old transport; the previous identity is
@@ -356,6 +379,13 @@ fn persisted_runtime_matches_scope(scope: &Scope, ident: &Identity) -> anyhow::R
             return Ok(false);
         };
         if !crate::client::adapters::tmux::same_pane_route(&current.endpoint, persisted_endpoint) {
+            return Ok(false);
+        }
+        if current.endpoint.codex_session_id.as_deref()
+            != persisted_endpoint.codex_session_id.as_deref()
+            || current.endpoint.codex_thread_id.as_deref()
+                != persisted_endpoint.codex_thread_id.as_deref()
+        {
             return Ok(false);
         }
     } else if runtime.native_thread_id.is_some() {

@@ -530,6 +530,21 @@ impl GlobalState {
         None
     }
 
+    /// Recovery-only lookup of the complete pane address. The caller still
+    /// authenticates the returned binding and checks its selected transport.
+    pub fn lookup_unique_tmux_pane_route(
+        &self,
+        endpoint: &TmuxEndpoint,
+    ) -> Option<&RuntimeBinding> {
+        let mut matches = self.current_thread_routes.values().filter(|binding| {
+            binding.tmux_endpoint.as_ref().is_some_and(|persisted| {
+                crate::client::adapters::tmux::same_pane_route(persisted, endpoint)
+            })
+        });
+        let binding = matches.next()?;
+        matches.next().is_none().then_some(binding)
+    }
+
     pub fn lookup_tmux_route_tombstone(
         &self,
         endpoint: &TmuxEndpoint,

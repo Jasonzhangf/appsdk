@@ -1113,7 +1113,24 @@ fn handle_register_with_app_scope_inner(
                     .lookup_master_grant_for(route, &binding_id)
                     .is_some()
             });
-            if is_master_binding {
+            let same_pane_tmux_recovery = existing.token == token
+                && selected.kind == TransportKind::Tmux
+                && selected.session_id.is_some()
+                && selected.thread_id.is_some()
+                && selected.tmux_endpoint.as_ref().is_some_and(|candidate| {
+                    selected_transport_for_worker(&existing).is_some_and(|old| {
+                        old.kind == TransportKind::Tmux
+                            && old.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                                crate::client::adapters::tmux::same_pane_route(endpoint, candidate)
+                            })
+                    }) && st.global.lookup_unique_tmux_pane_route(candidate).is_some_and(
+                        |binding| {
+                            binding.agent_id.as_str() == worker_id
+                                && binding.binding_id == binding_id
+                        },
+                    )
+                });
+            if is_master_binding && !same_pane_tmux_recovery {
                 match live_master_id(server, &st) {
                     Ok(None) => {}
                     Ok(Some(live_master)) => {

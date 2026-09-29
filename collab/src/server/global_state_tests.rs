@@ -1003,6 +1003,16 @@ include!("global_state_tests_part2.rs");
             Some(&strict),
             "pane-only lookup must find the App Server route's persisted pane recovery anchor"
         );
+        let changed_thread = crate::proto::TmuxEndpoint {
+            codex_session_id: Some("session-new".into()),
+            codex_thread_id: Some("thread-new".into()),
+            ..pane_only
+        };
+        assert_eq!(
+            state.lookup_unique_tmux_pane_route(&changed_thread),
+            Some(&strict),
+            "recovery must resolve a unique complete pane independent of Codex IDs"
+        );
         state.validate().unwrap();
     }
 

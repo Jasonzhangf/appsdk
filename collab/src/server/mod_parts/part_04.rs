@@ -187,7 +187,119 @@ impl ProjectRuntimeManager {
         for (key, root, storage_root) in pending {
             let _ = manager.ensure_runtime(&key, &root, &storage_root);
         }
+        manager.reconcile_same_pane_master_routes()?;
         Ok(manager)
+    }
+
+    fn pending_same_pane_master_bindings(&self, runtime: &Server) -> Vec<RuntimeBinding> {
+        let state = runtime.state.lock().unwrap();
+        state
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .filter(|binding| {
+                let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+                    return false;
+                };
+                let binding_text = binding.binding_id.as_str();
+                let command_prefix = format!(
+                    "register-{binding_text}-{}",
+                    binding.endpoint_generation
+                );
+                let operation_prefix = format!(
+                    "register-op-{binding_text}-{}",
+                    binding.endpoint_generation
+                );
+                let recorded_operation = state.global.command_receipts.values().any(|receipt| {
+                    let command = receipt.command_id.as_str();
+                    let operation = receipt.operation_id.as_str();
+                    let suffix = command.strip_prefix(&command_prefix);
+                    suffix.is_some_and(|suffix| {
+                        (suffix.is_empty() || suffix.starts_with("-retry-"))
+                            && operation.strip_prefix(&operation_prefix) == Some(suffix)
+                    })
+                });
+                recorded_operation
+                    &&
+                state
+                    .global
+                    .lookup_master_grant_for(&binding.route_scope(), &binding.binding_id)
+                    .is_some_and(|grant| grant.endpoint_generation == binding.endpoint_generation)
+                    && state.workers.get(binding.agent_id.as_str()).is_some_and(|worker| {
+                        selected_transport_for_worker(worker)
+                            .is_some_and(|transport| transport.kind == TransportKind::Tmux)
+                    })
+                    && state.global.lookup_unique_tmux_pane_route(endpoint) == Some(*binding)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn same_pane_master_route_ready(&self, runtime: &Arc<Server>) -> Result<(), String> {
+        if Arc::ptr_eq(runtime, &self.host) {
+            return Ok(());
+        }
+        for binding in self.pending_same_pane_master_bindings(runtime) {
+            let host = self.host.state.lock().unwrap();
+            let route = binding
+                .tmux_endpoint
+                .as_ref()
+                .and_then(|endpoint| host.global.lookup_unique_tmux_pane_route(endpoint));
+            if route != Some(&binding) {
+                return Err(format!(
+                    "RECOVERY_RECONCILE_REQUIRED: host route for {} is not at project generation {}",
+                    binding.agent_id, binding.endpoint_generation
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_same_pane_master_routes(&self) -> Result<(), String> {
+        for runtime in self.runtimes() {
+            if Arc::ptr_eq(&runtime, &self.host) {
+                continue;
+            }
+            for binding in self.pending_same_pane_master_bindings(&runtime) {
+                let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+                    continue;
+                };
+                let host_route = self
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_unique_tmux_pane_route(endpoint)
+                    .cloned();
+                if host_route.as_ref() == Some(&binding) {
+                    continue;
+                }
+                let Some(old) = host_route else {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: host pane route for {} is missing",
+                        binding.agent_id
+                    ));
+                };
+                let valid_previous = old.same_principal(&binding)
+                    && old.endpoint_generation.checked_add(1)
+                        == Some(binding.endpoint_generation)
+                    && old.tmux_endpoint.as_ref().is_some_and(|previous| {
+                        crate::client::adapters::tmux::same_pane_route(previous, endpoint)
+                    });
+                if !valid_previous {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: host and project pane routes disagree for {}",
+                        binding.agent_id
+                    ));
+                }
+                self.host
+                    .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
+                    .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
+            }
+        }
+        Ok(())
     }
 
     fn restore_resident_route_record(
@@ -1331,6 +1443,11 @@ impl ProjectRuntimeManager {
                 .as_ref()
                 .map(|runtime| (runtime.clone(), false))
         }) {
+            if !is_register {
+                if let Err(error) = self.same_pane_master_route_ready(&runtime) {
+                    return (runtime, Resp::err(error));
+                }
+            }
             let rollback_state = match register_worker_id.as_deref() {
                 Some(worker_id) => {
                     match self.registration_rollback_state(&runtime, &context, worker_id) {
@@ -1369,6 +1486,11 @@ impl ProjectRuntimeManager {
                 Ok(runtime) => runtime,
                 Err(error) => return (self.host.clone(), Resp::err(error)),
             };
+            if !is_register {
+                if let Err(error) = self.same_pane_master_route_ready(&runtime) {
+                    return (runtime, Resp::err(error));
+                }
+            }
             let rollback_state = match register_worker_id.as_deref() {
                 Some(worker_id) => {
                     match self.registration_rollback_state(&runtime, &context, worker_id) {

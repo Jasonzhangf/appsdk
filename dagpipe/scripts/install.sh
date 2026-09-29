@@ -55,10 +55,13 @@ cargo_install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-"$user_home/.cargo"}}
 sdk_parent=$(dirname -- "$sdk_target")
 mkdir -p "$sdk_parent"
 sdk_stage=$(mktemp -d "$sdk_parent/.sdk-stage.XXXXXX")
+sdk_inventory=$(mktemp "$sdk_parent/.sdk-inventory.XXXXXX")
+sdk_expected=$(mktemp "$sdk_parent/.sdk-expected.XXXXXX")
 cleanup_stage() {
     if [ -n "$sdk_stage" ] && [ -d "$sdk_stage" ]; then
         rm -rf -- "$sdk_stage"
     fi
+    rm -f -- "$sdk_inventory" "$sdk_expected"
 }
 trap cleanup_stage EXIT HUP INT TERM
 mkdir -p "$sdk_stage/.agents/skills/dagpipe-runtime"
@@ -68,6 +71,27 @@ cp "$skill_source" "$sdk_stage/.agents/skills/dagpipe-runtime/SKILL.md"
 cmp -s "$repo_dir/Cargo.toml" "$sdk_stage/Cargo.toml"
 diff -qr "$repo_dir/src" "$sdk_stage/src"
 cmp -s "$skill_source" "$sdk_stage/.agents/skills/dagpipe-runtime/SKILL.md"
+if [ -e "$sdk_target" ]; then
+    if find "$sdk_target" -type l -print -quit | grep -q .; then
+        echo "existing SDK contains a symlink; refusing to replace it" >&2
+        exit 1
+    fi
+    if [ -f "$sdk_target/.installed-files" ]; then
+        (cd "$sdk_target" && find . -type f ! -name .installed-files -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_inventory"
+        if ! cmp -s "$sdk_target/.installed-files" "$sdk_inventory"; then
+            echo "existing SDK differs from the last installed file manifest; refusing to replace it" >&2
+            exit 1
+        fi
+    else
+        (cd "$sdk_target" && find . -type f | LC_ALL=C sort) > "$sdk_inventory"
+        (cd "$sdk_stage" && find . -type f | LC_ALL=C sort) > "$sdk_expected"
+        if ! cmp -s "$sdk_expected" "$sdk_inventory" || ! diff -qr "$repo_dir/src" "$sdk_target/src"; then
+            echo "legacy SDK contains extra or modified source; refusing to replace it" >&2
+            exit 1
+        fi
+    fi
+fi
+(cd "$sdk_stage" && find . -type f ! -name .installed-files -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_stage/.installed-files"
 cargo install --path "$repo_dir" --locked --force --root "$cargo_install_root"
 "$cargo_install_root/bin/dagpipe" skill install
 sdk_previous=''

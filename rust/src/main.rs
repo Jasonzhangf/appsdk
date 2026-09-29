@@ -82,9 +82,21 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts",
         include_str!("../../contracts/project.schema.json"),
     ),
-    ("contracts/test-governance.schema.json", "contracts", include_str!("../../contracts/test-governance.schema.json")),
-    ("contracts/records/test-scenario-result-record.schema.json", "contracts", include_str!("../../contracts/records/test-scenario-result-record.schema.json")),
-    ("docs/design/optional-test-governance.md", "docs", include_str!("../../docs/design/optional-test-governance.md")),
+    (
+        "contracts/test-governance.schema.json",
+        "contracts",
+        include_str!("../../contracts/test-governance.schema.json"),
+    ),
+    (
+        "contracts/records/test-scenario-result-record.schema.json",
+        "contracts",
+        include_str!("../../contracts/records/test-scenario-result-record.schema.json"),
+    ),
+    (
+        "docs/design/optional-test-governance.md",
+        "docs",
+        include_str!("../../docs/design/optional-test-governance.md"),
+    ),
     (
         "contracts/communication/communication-request.schema.json",
         "contracts",
@@ -160,7 +172,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts",
         include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json"),
     ),
-    ("contracts/migrations/sdk-0.1.0007-to-0.1.0008.json", "contracts", include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json")),
+    (
+        "contracts/migrations/sdk-0.1.0007-to-0.1.0008.json",
+        "contracts",
+        include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json"),
+    ),
     (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
         "contracts",
@@ -201,10 +217,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts",
         include_str!("../../contracts/migrations/0.1.6/governance-maps/verification-map.json"),
     ),
-    ("contracts/migrations/0.1.0007/governance-maps/resource-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/resource-map.json")),
-    ("contracts/migrations/0.1.0007/governance-maps/function-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/function-map.json")),
-    ("contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json")),
-    ("contracts/migrations/0.1.0007/governance-maps/verification-map.json", "contracts", include_str!("../../contracts/migrations/0.1.0007/governance-maps/verification-map.json")),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0007/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"),
+    ),
     (
         "contracts/transitions/zone-transition.manifest.json",
         "contracts",
@@ -1035,41 +1067,7 @@ fn main() {
         Some("verify-sdk-source-registry") => {
             assert_sdk_source_registry(Path::new(&args.next().unwrap_or_else(|| ".".into())))
         }
-        Some("verify") => {
-            if args.peek().is_some_and(|value| value == "--admission") {
-                args.next();
-                let root = project_root_or_cwd(&mut args);
-                if args.next().is_some() {
-                    fail("USAGE: appsdk verify --admission [project]");
-                }
-                verify(&root, true);
-            } else if args.peek().is_some_and(|value| value == "--test-admission") {
-                args.next();
-                verify_test_admission_cli(&mut args);
-            } else if args
-                .peek()
-                .is_some_and(|value| value == "--review-admission")
-            {
-                args.next();
-                let root = project_root_or_cwd(&mut args);
-                if args.next().as_deref() != Some("--module") {
-                    fail("USAGE: appsdk verify --review-admission [project] --module <id>");
-                }
-                let module_id = args.next().unwrap_or_else(|| {
-                    fail("USAGE: appsdk verify --review-admission [project] --module <id>")
-                });
-                if args.next().is_some() {
-                    fail("USAGE: appsdk verify --review-admission [project] --module <id>");
-                }
-                verify_review_admission(&root, &module_id);
-            } else {
-                let root = project_root_or_cwd(&mut args);
-                if args.next().is_some() {
-                    fail("USAGE: appsdk verify [project]");
-                }
-                verify(&root, false);
-            }
-        }
+        Some("verify") => verify_cli(&mut args),
         Some("guide") => guidance::run(&mut args),
         Some("memory") | Some("project-memory") => memory::run(&mut args),
         Some("bug") => {

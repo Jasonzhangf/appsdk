@@ -538,7 +538,12 @@ pub(super) fn bug_intake_input_bytes(root: &Path, input: &str) -> Vec<u8> {
     }
 }
 
-pub(super) fn bug_intake(git_bug: &Path, root: &Path, input_arg: &str, ensure_identity: &dyn Fn(&Path)) {
+pub(super) fn bug_intake(
+    git_bug: &Path,
+    root: &Path,
+    input_arg: &str,
+    ensure_identity: &dyn Fn(&Path),
+) {
     let input: Value = serde_json::from_slice(&bug_intake_input_bytes(root, input_arg))
         .unwrap_or_else(|_| fail("BUG_INTAKE_INPUT_INVALID_JSON"));
     if input.get("execution_bound").and_then(Value::as_bool) != Some(true) {

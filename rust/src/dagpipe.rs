@@ -191,7 +191,8 @@ fn validate_graph_contracts_with_manifest(raw_manifest: &str) -> Result<Value, S
     if entries.len() != embedded_paths.len() {
         return Err(format!(
             "DAGPIPE_GRAPH_MANIFEST_MISMATCH:manifest={} embedded={}",
-            entries.len(), embedded_paths.len()
+            entries.len(),
+            embedded_paths.len()
         ));
     }
     let mut graphs = Vec::new();
@@ -277,7 +278,9 @@ fn ensure_graph_nodes_use_registered_operators(
                 graph.id, node.id, node.operator
             ));
         }
-        if requires_design_operators && !registered_design_operators.contains(&node.operator.as_str()) {
+        if requires_design_operators
+            && !registered_design_operators.contains(&node.operator.as_str())
+        {
             return Err(format!(
                 "DAGPIPE_DESIGN_GRAPH_OPERATOR_SCOPE_INVALID:{}:{}:{}",
                 graph.id, node.id, node.operator
@@ -285,10 +288,7 @@ fn ensure_graph_nodes_use_registered_operators(
         }
     }
     if graph.nodes.is_empty() {
-        return Err(format!(
-            "DAGPIPE_GRAPH_MUST_HAVE_NODES:{}",
-            graph.id
-        ));
+        return Err(format!("DAGPIPE_GRAPH_MUST_HAVE_NODES:{}", graph.id));
     }
     Ok(())
 }

@@ -300,7 +300,12 @@ pub(super) fn producer_durable_json(target: &Path, value: &Value, error: &str) {
     }
 }
 
-pub(super) fn producer_replace_target_from_staging(root: &Path, staging: &Path, target: &Path, error: &str) {
+pub(super) fn producer_replace_target_from_staging(
+    root: &Path,
+    staging: &Path,
+    target: &Path,
+    error: &str,
+) {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| fail("STAGING_NONCE_FAILED"))
@@ -406,7 +411,11 @@ pub(super) fn producer_commit_records(
         .unwrap_or_else(|_| fail("PRODUCER_TRANSACTION_CLEANUP_FAILED"));
 }
 
-pub(super) fn assert_produced_record_shapes(root: &Path, targets: &[(PathBuf, Value)], module_id: &str) {
+pub(super) fn assert_produced_record_shapes(
+    root: &Path,
+    targets: &[(PathBuf, Value)],
+    module_id: &str,
+) {
     if targets.len() != 3 {
         fail("PRODUCER_RECORD_SET_INVALID");
     }
@@ -714,7 +723,10 @@ pub(super) fn producer_read_record_if_present(target: &Path, error: &str) -> Opt
     )
 }
 
-pub(super) fn producer_read_record_bytes_if_present(target: &Path, error: &str) -> Option<(Value, String)> {
+pub(super) fn producer_read_record_bytes_if_present(
+    target: &Path,
+    error: &str,
+) -> Option<(Value, String)> {
     let metadata = match fs::symlink_metadata(target) {
         Ok(metadata) => metadata,
         Err(error_value) if error_value.kind() == ErrorKind::NotFound => return None,

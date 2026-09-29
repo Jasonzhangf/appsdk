@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::validation::*;
+use super::*;
 
 impl CommunicationStore {
     pub(super) fn apply_event(&mut self, event: &EventRecord) -> CommResult<()> {

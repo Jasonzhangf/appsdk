@@ -14,7 +14,11 @@ pub(super) fn finish_rehydrate_transaction(root: &Path, module_id: &str) {
         .unwrap_or_else(|_| fail("FROZEN_REHYDRATE_TRANSACTION_CLEANUP_FAILED"));
 }
 
-pub(super) fn protected_archive_needs_version_restore(root: &Path, archive: &Path, artifact: &Value) -> bool {
+pub(super) fn protected_archive_needs_version_restore(
+    root: &Path,
+    archive: &Path,
+    artifact: &Value,
+) -> bool {
     assert_no_symlink_components(root, archive, "protected_archive");
     let current = archive.join("module-artifact.json");
     let Ok(contents) = fs::read_to_string(current) else {

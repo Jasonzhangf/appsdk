@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::validation::*;
+use super::*;
 
 impl CommunicationStore {
     pub fn tick(&mut self, at: Option<&str>) -> CommResult<Value> {
@@ -561,7 +561,11 @@ impl CommunicationStore {
         }))
     }
 
-    pub(super) fn recover_bug_loop(&mut self, bug: &BugRecord, owner: &Address) -> CommResult<LoopRecord> {
+    pub(super) fn recover_bug_loop(
+        &mut self,
+        bug: &BugRecord,
+        owner: &Address,
+    ) -> CommResult<LoopRecord> {
         if let Some(existing) = self.projection.loops.get(&bug.loop_id).cloned() {
             if !bug_loop_matches(&existing, owner) {
                 return Err(CommError::new(
@@ -594,7 +598,11 @@ impl CommunicationStore {
         Ok(loop_record)
     }
 
-    pub(super) fn recover_bug_notification(&mut self, bug: &BugRecord, owner: &Address) -> CommResult<Value> {
+    pub(super) fn recover_bug_notification(
+        &mut self,
+        bug: &BugRecord,
+        owner: &Address,
+    ) -> CommResult<Value> {
         if let Some(notification) = self
             .projection
             .notifications

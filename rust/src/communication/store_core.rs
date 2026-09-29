@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::validation::*;
+use super::*;
 
 impl CommunicationStore {
     pub fn open(root: &Path) -> CommResult<Self> {
@@ -54,7 +54,10 @@ impl CommunicationStore {
         Ok(store)
     }
 
-    pub(super) fn open_mailbox_at(mailbox_path: PathBuf, project_root: PathBuf) -> CommResult<Self> {
+    pub(super) fn open_mailbox_at(
+        mailbox_path: PathBuf,
+        project_root: PathBuf,
+    ) -> CommResult<Self> {
         reject_symlink_components(&mailbox_path, "communication_mailbox")?;
         if let Some(parent) = mailbox_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -271,7 +274,10 @@ impl CommunicationStore {
             .map_err(|error| CommError::new("runtime_registration_required", error))
     }
 
-    pub(super) fn runtime_for_agent(&self, agent: &AgentRecord) -> CommResult<global_registry::RuntimeRecord> {
+    pub(super) fn runtime_for_agent(
+        &self,
+        agent: &AgentRecord,
+    ) -> CommResult<global_registry::RuntimeRecord> {
         let runtime_id = agent.runtime_id.as_deref().ok_or_else(|| {
             CommError::new(
                 "runtime_registration_required",
@@ -522,7 +528,9 @@ impl CommunicationStore {
         )
     }
 
-    pub(super) fn target_mailbox_root(target: &global_registry::CommunicationTarget) -> CommResult<PathBuf> {
+    pub(super) fn target_mailbox_root(
+        target: &global_registry::CommunicationTarget,
+    ) -> CommResult<PathBuf> {
         let mailbox = target
             .project_root
             .join(".appsdk-control/communication/mailbox.jsonl");

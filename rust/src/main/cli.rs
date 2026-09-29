@@ -1,5 +1,41 @@
 use super::*;
 
+pub(super) fn verify_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>) {
+    if args.peek().is_some_and(|value| value == "--admission") {
+        args.next();
+        let root = project_root_or_cwd(args);
+        if args.next().is_some() {
+            fail("USAGE: appsdk verify --admission [project]");
+        }
+        verify(&root, true);
+    } else if args.peek().is_some_and(|value| value == "--test-admission") {
+        args.next();
+        verify_test_admission_cli(args);
+    } else if args
+        .peek()
+        .is_some_and(|value| value == "--review-admission")
+    {
+        args.next();
+        let root = project_root_or_cwd(args);
+        if args.next().as_deref() != Some("--module") {
+            fail("USAGE: appsdk verify --review-admission [project] --module <id>");
+        }
+        let module_id = args.next().unwrap_or_else(|| {
+            fail("USAGE: appsdk verify --review-admission [project] --module <id>")
+        });
+        if args.next().is_some() {
+            fail("USAGE: appsdk verify --review-admission [project] --module <id>");
+        }
+        verify_review_admission(&root, &module_id);
+    } else {
+        let root = project_root_or_cwd(args);
+        if args.next().is_some() {
+            fail("USAGE: appsdk verify [project]");
+        }
+        verify(&root, false);
+    }
+}
+
 pub(super) fn is_help(value: &str) -> bool {
     matches!(value, "help" | "--help" | "-h")
 }

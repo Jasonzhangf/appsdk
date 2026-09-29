@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::validation::*;
+use super::*;
 
 impl CommunicationStore {
     pub(super) fn commit(&mut self, kind: &str, data: Value) -> CommResult<String> {
@@ -600,7 +600,11 @@ impl CommunicationStore {
         result
     }
 
-    pub(super) fn migrate_rebound_references(&mut self, from: &Address, to: &Address) -> CommResult<()> {
+    pub(super) fn migrate_rebound_references(
+        &mut self,
+        from: &Address,
+        to: &Address,
+    ) -> CommResult<()> {
         for agent in self.projection.agents.values_mut() {
             if agent.parent.as_ref() == Some(from) {
                 agent.parent = Some(to.clone());

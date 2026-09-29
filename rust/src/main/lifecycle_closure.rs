@@ -403,7 +403,11 @@ pub(super) fn assert_collab_live_closure(
     }
 }
 
-pub(super) fn lifecycle_chain_promotion_id(issue_id: &str, module_id: &str, candidate_id: &str) -> String {
+pub(super) fn lifecycle_chain_promotion_id(
+    issue_id: &str,
+    module_id: &str,
+    candidate_id: &str,
+) -> String {
     producer_stable_id(
         "promotion",
         &serde_json::json!({

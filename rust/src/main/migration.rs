@@ -624,7 +624,11 @@ pub(super) fn sdk_historical_review_map_binding(
         })
 }
 
-pub(super) fn assert_sdk_migration_record(root: &Path, step: &str, check_live_target: bool) -> Option<Value> {
+pub(super) fn assert_sdk_migration_record(
+    root: &Path,
+    step: &str,
+    check_live_target: bool,
+) -> Option<Value> {
     let migration_root = sdk_map_migration_root(root, step);
     let record_path = migration_root.join("record.json");
     if !record_path.exists() {
@@ -1241,7 +1245,11 @@ pub(super) fn install_current_project_contract(
     true
 }
 
-pub(super) fn install_current_project_contracts(root: &Path, prefixes: &[&str], replace_legacy: bool) -> bool {
+pub(super) fn install_current_project_contracts(
+    root: &Path,
+    prefixes: &[&str],
+    replace_legacy: bool,
+) -> bool {
     let mut changed = false;
     for &(relative, _, canonical) in SDK_BUNDLE_RESOURCES
         .iter()

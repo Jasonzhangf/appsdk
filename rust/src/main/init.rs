@@ -282,7 +282,10 @@ pub(super) fn resolve_init_target(workspace: &Path, project_root: Option<&str>) 
     workspace.join(relative)
 }
 
-pub(super) fn existing_init_target(workspace: &Path, project_root: Option<&str>) -> Option<PathBuf> {
+pub(super) fn existing_init_target(
+    workspace: &Path,
+    project_root: Option<&str>,
+) -> Option<PathBuf> {
     let relative = project_root.unwrap_or(".");
     let relative_path = Path::new(relative);
     if relative.is_empty()
@@ -309,7 +312,10 @@ pub(super) fn existing_init_target(workspace: &Path, project_root: Option<&str>)
     Some(root)
 }
 
-pub(super) fn existing_collab_control_target(workspace: &Path, project_root: Option<&str>) -> Option<PathBuf> {
+pub(super) fn existing_collab_control_target(
+    workspace: &Path,
+    project_root: Option<&str>,
+) -> Option<PathBuf> {
     let relative = project_root.unwrap_or(".");
     let relative_path = Path::new(relative);
     if relative.is_empty()
@@ -898,7 +904,9 @@ pub(super) fn try_register_global_project(root: &Path) {
     }
 }
 
-pub(super) fn reserve_global_project(root: &Path) -> global_registry::ProjectRegistrationReservation {
+pub(super) fn reserve_global_project(
+    root: &Path,
+) -> global_registry::ProjectRegistrationReservation {
     // Project initialization is a short host-wide transaction, but several
     // projects may initialize at once.  Wait with bounded backoff for the
     // expected writer contention; malformed registry state and lock I/O

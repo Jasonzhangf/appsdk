@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::validation::*;
+use super::*;
 
 impl CommunicationStore {
     pub(super) fn enqueue_message(
@@ -89,7 +89,10 @@ impl CommunicationStore {
         }))
     }
 
-    pub(super) fn recover_idempotent_message(&mut self, existing: MessageRecord) -> CommResult<Value> {
+    pub(super) fn recover_idempotent_message(
+        &mut self,
+        existing: MessageRecord,
+    ) -> CommResult<Value> {
         let current = self.recover_message_state(existing)?;
         let delivery_attempt = self.ensure_message_delivery_attempt(&current)?;
         let notification = self.recover_message_notification(&current)?;
@@ -106,7 +109,10 @@ impl CommunicationStore {
         }))
     }
 
-    pub(super) fn recover_message_state(&mut self, existing: MessageRecord) -> CommResult<MessageRecord> {
+    pub(super) fn recover_message_state(
+        &mut self,
+        existing: MessageRecord,
+    ) -> CommResult<MessageRecord> {
         if existing.state == "created"
             && !existing
                 .evidence
@@ -499,7 +505,10 @@ impl CommunicationStore {
         Ok(parse_time(&notification.created_at)? >= idle_since)
     }
 
-    pub(super) fn prepare_wakeup_message(&mut self, expected: MessageRecord) -> CommResult<MessageRecord> {
+    pub(super) fn prepare_wakeup_message(
+        &mut self,
+        expected: MessageRecord,
+    ) -> CommResult<MessageRecord> {
         if let Some(existing) = self.projection.messages.get(&expected.message_id).cloned() {
             if !wakeup_message_matches(&existing, &expected) {
                 return Err(CommError::new(
@@ -847,7 +856,11 @@ impl CommunicationStore {
         self.require_live_agent_at(address, &at)
     }
 
-    pub(super) fn require_live_agent_at(&self, address: &Address, at: &str) -> CommResult<&AgentRecord> {
+    pub(super) fn require_live_agent_at(
+        &self,
+        address: &Address,
+        at: &str,
+    ) -> CommResult<&AgentRecord> {
         let agent = self.require_agent(address)?;
         if !agent.live_at(at) {
             return Err(CommError::new(
@@ -886,7 +899,11 @@ impl CommunicationStore {
         Ok(address)
     }
 
-    pub(super) fn resolve_route(&self, source: &AgentRecord, target: &AgentRecord) -> CommResult<RouteRecord> {
+    pub(super) fn resolve_route(
+        &self,
+        source: &AgentRecord,
+        target: &AgentRecord,
+    ) -> CommResult<RouteRecord> {
         let source_scope = self.require_scope(&source.scope_id)?;
         let target_scope = self.resolve_scope_for_agent(target)?;
         let same_scope = source.scope_id == target.scope_id;

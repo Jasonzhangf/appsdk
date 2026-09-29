@@ -1161,7 +1161,9 @@ pub(super) fn test_governance_report(
     }))
 }
 
-pub(super) fn verify_test_admission_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>) {
+pub(super) fn verify_test_admission_cli(
+    args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+) {
     let root = project_root_or_cwd(args);
     let mut object_id: Option<String> = None;
     while let Some(arg) = args.next() {

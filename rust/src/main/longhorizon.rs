@@ -284,7 +284,10 @@ pub(super) fn drain_goal_output_readers(
 
 // Collab may queue a command behind an active daemon batch. Keep every goal
 // lifecycle call within one declared 120-second batch budget.
-pub(super) fn run_goal_collab_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
+pub(super) fn run_goal_collab_command(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<Output, String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -440,7 +443,10 @@ pub(super) fn parse_goal_subscription_response(stdout: &[u8]) -> Result<(Value, 
     Ok((response, subscription_id))
 }
 
-pub(super) fn parse_goal_cancel_response(stdout: &[u8], expected_id: &str) -> Result<Value, String> {
+pub(super) fn parse_goal_cancel_response(
+    stdout: &[u8],
+    expected_id: &str,
+) -> Result<Value, String> {
     let response: Value = serde_json::from_slice(stdout)
         .map_err(|error| format!("GOAL_CANCEL_RESPONSE_INVALID:{}", error))?;
     let response_id = response
@@ -467,7 +473,10 @@ pub(super) fn parse_goal_cancel_response(stdout: &[u8], expected_id: &str) -> Re
     Ok(response)
 }
 
-pub(super) fn goal_cancel_subscription(root: &Path, subscription_id: &str) -> Result<Value, String> {
+pub(super) fn goal_cancel_subscription(
+    root: &Path,
+    subscription_id: &str,
+) -> Result<Value, String> {
     let mut command = Command::new("collab");
     command
         .args(["notify", "unsubscribe", subscription_id])
@@ -493,7 +502,10 @@ pub(super) fn goal_cancel_subscription(root: &Path, subscription_id: &str) -> Re
     parse_goal_cancel_response(&out.stdout, subscription_id)
 }
 
-pub(super) fn goal_subscription_status(root: &Path, subscription_id: &str) -> Result<(String, Value), String> {
+pub(super) fn goal_subscription_status(
+    root: &Path,
+    subscription_id: &str,
+) -> Result<(String, Value), String> {
     let mut command = Command::new("collab");
     command.args(["notify", "status"]).current_dir(root);
     let out = run_goal_collab_command(command, GOAL_COLLAB_READ_TIMEOUT)
@@ -581,7 +593,10 @@ pub(super) fn goal_subscription_by_subject(
     Ok(matches.into_iter().next())
 }
 
-pub(super) fn goal_subject_candidates(record: Option<&Value>, canonical_subject: &str) -> Vec<String> {
+pub(super) fn goal_subject_candidates(
+    record: Option<&Value>,
+    canonical_subject: &str,
+) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut push_unique = |subject: String| {
         if !subject.trim().is_empty() && !candidates.iter().any(|item| item == &subject) {
@@ -738,7 +753,11 @@ pub(super) fn open_bugs_json(root: &Path) -> Result<Vec<Value>, String> {
 
 /// Pull the first meaningful prose out of the goal document so one read shows
 /// what the project is for, without shipping the whole file into a wake.
-pub(super) fn goal_objective_excerpt(goal_path: &Path, max_lines: usize, max_chars: usize) -> String {
+pub(super) fn goal_objective_excerpt(
+    goal_path: &Path,
+    max_lines: usize,
+    max_chars: usize,
+) -> String {
     let content = match fs::read_to_string(goal_path) {
         Ok(text) => text,
         Err(err) => return format!("(无法读取目标文档: {})", err),

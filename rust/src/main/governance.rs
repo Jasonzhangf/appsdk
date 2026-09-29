@@ -19,10 +19,14 @@ pub(super) fn historical_governance_map(version: &str, name: &str) -> &'static s
             include_str!("../../../contracts/migrations/0.1.5/governance-maps/function-map.json")
         }
         ("0.1.5", "mainline-call-map.json") => {
-            include_str!("../../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json")
+            include_str!(
+                "../../../contracts/migrations/0.1.5/governance-maps/mainline-call-map.json"
+            )
         }
         ("0.1.5", "verification-map.json") => {
-            include_str!("../../../contracts/migrations/0.1.5/governance-maps/verification-map.json")
+            include_str!(
+                "../../../contracts/migrations/0.1.5/governance-maps/verification-map.json"
+            )
         }
         ("0.1.6", "resource-map.json") => {
             include_str!("../../../contracts/migrations/0.1.6/governance-maps/resource-map.json")
@@ -31,15 +35,27 @@ pub(super) fn historical_governance_map(version: &str, name: &str) -> &'static s
             include_str!("../../../contracts/migrations/0.1.6/governance-maps/function-map.json")
         }
         ("0.1.6", "mainline-call-map.json") => {
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json")
+            include_str!(
+                "../../../contracts/migrations/0.1.6/governance-maps/mainline-call-map.json"
+            )
         }
         ("0.1.6", "verification-map.json") => {
-            include_str!("../../../contracts/migrations/0.1.6/governance-maps/verification-map.json")
+            include_str!(
+                "../../../contracts/migrations/0.1.6/governance-maps/verification-map.json"
+            )
         }
-        ("0.1.0007", "resource-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/resource-map.json"),
-        ("0.1.0007", "function-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/function-map.json"),
-        ("0.1.0007", "mainline-call-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"),
-        ("0.1.0007", "verification-map.json") => include_str!("../../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"),
+        ("0.1.0007", "resource-map.json") => {
+            include_str!("../../../contracts/migrations/0.1.0007/governance-maps/resource-map.json")
+        }
+        ("0.1.0007", "function-map.json") => {
+            include_str!("../../../contracts/migrations/0.1.0007/governance-maps/function-map.json")
+        }
+        ("0.1.0007", "mainline-call-map.json") => include_str!(
+            "../../../contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json"
+        ),
+        ("0.1.0007", "verification-map.json") => include_str!(
+            "../../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"
+        ),
         _ => fail("UNKNOWN_GOVERNANCE_MAP"),
     }
 }
@@ -48,7 +64,11 @@ pub(super) fn sdk_map_migration_manifest(step: &str) -> Value {
     let (manifest_text, source_version, target_version) = match step {
         "0.1.5-to-0.1.6" => (SDK_MAP_MIGRATION_0_1_5_TO_0_1_6, "0.1.5", "0.1.6"),
         "0.1.6-to-0.1.0007" => (SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007, "0.1.6", "0.1.0007"),
-        "0.1.0007-to-0.1.0008" => (SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008, "0.1.0007", "0.1.0008"),
+        "0.1.0007-to-0.1.0008" => (
+            SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008,
+            "0.1.0007",
+            "0.1.0008",
+        ),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };
     let manifest: Value = serde_json::from_str(manifest_text)
@@ -491,7 +511,11 @@ pub(super) fn retire_validate_reentry_worktree(root: &Path, allowed: &[PathBuf])
     }
 }
 
-pub(super) fn retire_verify_candidate_identity(root: &Path, candidate_commit: &str, candidate_tree: &str) {
+pub(super) fn retire_verify_candidate_identity(
+    root: &Path,
+    candidate_commit: &str,
+    candidate_tree: &str,
+) {
     let resolved_commit = git_value(
         root,
         &[
@@ -751,7 +775,10 @@ pub(super) fn retire_find_existing_archive(
     matches.into_iter().next()
 }
 
-pub(super) fn retire_remove_matching_sources(snapshots: &[RetireRecordSnapshot], archived_bytes: &[Vec<u8>]) {
+pub(super) fn retire_remove_matching_sources(
+    snapshots: &[RetireRecordSnapshot],
+    archived_bytes: &[Vec<u8>],
+) {
     for (snapshot, archived) in snapshots.iter().zip(archived_bytes.iter()) {
         match fs::symlink_metadata(&snapshot.source) {
             Ok(metadata) => {
@@ -1438,53 +1465,5 @@ pub(super) fn assert_declared_contracts(root: &Path, project: &Value) {
             fail("INVALID_DECLARED_RECORD_CONTRACT");
         }
         assert_record_schema_minimum(relative, &value);
-    }
-}
-
-pub(super) fn assert_governance_maps(root: &Path) {
-    for (name, key) in [
-        ("resource-map.json", "resources"),
-        ("module-registry.json", "modules"),
-        ("function-map.json", "functions"),
-        ("mainline-call-map.json", "edges"),
-        ("verification-map.json", "gates"),
-    ] {
-        let file = root.join(".appsdk/maps").join(name);
-        let value: Value = serde_json::from_str(
-            &fs::read_to_string(&file)
-                .unwrap_or_else(|_| fail(format!("MISSING_GOVERNANCE_MAP:{}", name))),
-        )
-        .unwrap_or_else(|_| fail(format!("INVALID_GOVERNANCE_MAP:{}", name)));
-        // Governance maps are project-owned projections. The SDK bundle
-        // supplies schema/validation rules, but must not require byte-for-byte
-        // equality with a generic SDK map; project modules may add or evolve
-        // entries while retaining the same machine-readable contract.
-        if value.get("schema_version").and_then(Value::as_u64) != Some(1)
-            || value
-                .get(key)
-                .and_then(Value::as_array)
-                .map(|items| items.is_empty())
-                .unwrap_or(true)
-        {
-            fail(format!("INVALID_GOVERNANCE_MAP:{}", name));
-        }
-        if name == "mainline-call-map.json" {
-            for edge in record_array(&value, "/edges", name) {
-                for field in [
-                    "/chain_id",
-                    "/owner",
-                    "/caller",
-                    "/callee",
-                    "/path",
-                    "/input_resource_id",
-                    "/output_resource_id",
-                    "/error_resource_id",
-                ] {
-                    if record_str(edge, field, name).is_empty() {
-                        fail("UNBOUND_MAINLINE_EDGE");
-                    }
-                }
-            }
-        }
     }
 }

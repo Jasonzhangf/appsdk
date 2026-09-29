@@ -767,7 +767,12 @@ pub(super) fn stage_protected_archive(
     );
 }
 
-pub(super) fn assert_protected_archive_matches(root: &Path, module: &Value, artifact: &Value, archive: &Path) {
+pub(super) fn assert_protected_archive_matches(
+    root: &Path,
+    module: &Value,
+    artifact: &Value,
+    archive: &Path,
+) {
     assert_no_symlink_components(root, archive, "protected_archive");
     let archived: Value = serde_json::from_str(
         &fs::read_to_string(archive.join("module-artifact.json"))

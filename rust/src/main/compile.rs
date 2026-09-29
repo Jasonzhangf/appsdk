@@ -431,7 +431,12 @@ pub(super) fn hash_tree(root: &Path, prefix: &Path, label: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-pub(super) fn collect_files(root: &Path, prefix: &Path, label: &str, files: &mut Vec<(PathBuf, String)>) {
+pub(super) fn collect_files(
+    root: &Path,
+    prefix: &Path,
+    label: &str,
+    files: &mut Vec<(PathBuf, String)>,
+) {
     let entries =
         fs::read_dir(root).unwrap_or_else(|_| fail(format!("HASH_TREE_READ_FAILED:{}", label)));
     let mut entries = entries.collect::<Vec<_>>();
@@ -822,7 +827,12 @@ pub(super) fn assert_module_regression_contract(module: &Value, stage: &str, mod
     }
 }
 
-pub(super) fn build_module_artifact(root: &Path, project: &Value, module: &Value, module_id: &str) -> Value {
+pub(super) fn build_module_artifact(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+) -> Value {
     let source_hash = hash_module_paths(root, project, module, module_id, "owned_paths");
     let contract_hash = hash_module_paths(root, project, module, module_id, "contract_paths");
     let dependency_hashes = module_dependency_hashes(root, project, module, module_id);
@@ -984,7 +994,12 @@ pub(super) fn read_historical_module_artifact(
     }
 }
 
-pub(super) fn write_module_artifact_value(root: &Path, project: &Value, module_id: &str, artifact: &Value) {
+pub(super) fn write_module_artifact_value(
+    root: &Path,
+    project: &Value,
+    module_id: &str,
+    artifact: &Value,
+) {
     let dir = module_generated_dir(root, project, module_id);
     fs::create_dir_all(&dir).unwrap_or_else(|_| fail("MODULE_ARTIFACT_WRITE_FAILED"));
     let target = dir.join("module.compiled.json");
@@ -1306,7 +1321,11 @@ pub(super) fn assert_artifact_matches(project: &Value, artifact: &Value) {
     }
 }
 
-pub(super) fn assert_compile_preconditions(root: &Path, project: &Value, changing_module: Option<&str>) {
+pub(super) fn assert_compile_preconditions(
+    root: &Path,
+    project: &Value,
+    changing_module: Option<&str>,
+) {
     assert_project_contract(root, project);
     assert_goal_confirmed(root);
     assert_sdk_lock(root, project);

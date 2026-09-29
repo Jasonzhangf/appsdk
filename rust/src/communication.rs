@@ -935,14 +935,14 @@ impl CommunicationLock {
 mod store_core;
 #[path = "communication/store_delivery.rs"]
 mod store_delivery;
-#[path = "communication/store_runtime.rs"]
-mod store_runtime;
-#[path = "communication/store_messaging.rs"]
-mod store_messaging;
-#[path = "communication/store_journal.rs"]
-mod store_journal;
 #[path = "communication/store_events.rs"]
 mod store_events;
+#[path = "communication/store_journal.rs"]
+mod store_journal;
+#[path = "communication/store_messaging.rs"]
+mod store_messaging;
+#[path = "communication/store_runtime.rs"]
+mod store_runtime;
 #[path = "communication/validation.rs"]
 mod validation;
 use validation::*;

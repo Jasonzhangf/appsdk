@@ -161,7 +161,12 @@ pub(super) fn explain_review_admission_preflight(root: &Path, module_id: &str, m
     std::process::exit(1);
 }
 
-pub(super) fn assert_review_map_bindings(root: &Path, module_id: &str, review: &Value, review_name: &str) {
+pub(super) fn assert_review_map_bindings(
+    root: &Path,
+    module_id: &str,
+    review: &Value,
+    review_name: &str,
+) {
     let bindings = [
         ("resource-map.json", "/resource_map_hash"),
         ("function-map.json", "/function_map_hash"),
@@ -508,7 +513,11 @@ pub(super) fn assert_parallel_merge_gate(root: &Path, module_id: &str) {
     assert_parallel_merge_gate_for_promotion(root, module_id, &promotion);
 }
 
-pub(super) fn assert_parallel_merge_gate_for_promotion(root: &Path, module_id: &str, promotion: &Value) {
+pub(super) fn assert_parallel_merge_gate_for_promotion(
+    root: &Path,
+    module_id: &str,
+    promotion: &Value,
+) {
     let worktree_name = module_record_name("worktree-record", module_id);
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let effectiveness_name = module_record_name("effectiveness-record", module_id);

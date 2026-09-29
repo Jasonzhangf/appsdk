@@ -112,7 +112,10 @@ pub(super) fn reset_transaction_expected_target_kind(
     }
 }
 
-pub(super) fn reset_transaction_allowed_target_relative(relative: &str, generated_roots: &[String]) -> bool {
+pub(super) fn reset_transaction_allowed_target_relative(
+    relative: &str,
+    generated_roots: &[String],
+) -> bool {
     reset_transaction_expected_target_kind(relative, generated_roots).is_some()
 }
 

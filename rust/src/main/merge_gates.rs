@@ -421,7 +421,11 @@ pub(super) fn assert_record_graph(
 // must validate the immutable record graph and freeze bindings, but it must
 // not re-run delivery-only gates (including current bug-triage evidence) that
 // were introduced after the historical producer ran.
-pub(super) fn assert_historical_frozen_record_graph(root: &Path, module_id: &str, artifact: &Value) {
+pub(super) fn assert_historical_frozen_record_graph(
+    root: &Path,
+    module_id: &str,
+    artifact: &Value,
+) {
     // Frozen modules are immutable historical publications. Their legacy
     // predecessor binding is not the current development/promotion contract;
     // validate the publication graph without requiring that old Active

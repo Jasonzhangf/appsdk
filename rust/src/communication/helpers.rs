@@ -139,7 +139,10 @@ pub(super) fn bug_wake_signal(bug: &BugRecord, direct_dispatched: bool) -> Maste
     }
 }
 
-pub(super) fn loop_error_wake_signal(loop_record: &LoopRecord, error: &ErrorRecord) -> MasterWakeSignal {
+pub(super) fn loop_error_wake_signal(
+    loop_record: &LoopRecord,
+    error: &ErrorRecord,
+) -> MasterWakeSignal {
     MasterWakeSignal {
         signal_id: format!("loop-error:{}:{}", loop_record.loop_id, error.at),
         key: format!("loop-error:{}", loop_record.loop_id),
@@ -156,7 +159,9 @@ pub(super) fn loop_error_wake_signal(loop_record: &LoopRecord, error: &ErrorReco
     }
 }
 
-pub(super) fn validate_master_wake_signal_request(request: &MasterWakeSignalRequest) -> CommResult<()> {
+pub(super) fn validate_master_wake_signal_request(
+    request: &MasterWakeSignalRequest,
+) -> CommResult<()> {
     validate_non_empty(&request.key, "key")?;
     validate_non_empty(&request.kind, "kind")?;
     validate_non_empty(&request.title, "title")?;
@@ -179,12 +184,18 @@ pub(super) fn validate_master_wake_signal_request(request: &MasterWakeSignalRequ
     Ok(())
 }
 
-pub(super) fn master_wake_signal_matches(left: &MasterWakeSignal, right: &MasterWakeSignal) -> bool {
+pub(super) fn master_wake_signal_matches(
+    left: &MasterWakeSignal,
+    right: &MasterWakeSignal,
+) -> bool {
     master_wake_signal_identity_matches(left, right)
         && left.direct_dispatched == right.direct_dispatched
 }
 
-pub(super) fn master_wake_signal_identity_matches(left: &MasterWakeSignal, right: &MasterWakeSignal) -> bool {
+pub(super) fn master_wake_signal_identity_matches(
+    left: &MasterWakeSignal,
+    right: &MasterWakeSignal,
+) -> bool {
     left.signal_id == right.signal_id
         && left.key == right.key
         && left.kind == right.kind
@@ -572,7 +583,9 @@ pub(super) fn require_event_field<'a>(data: &'a Value, field: &str) -> CommResul
     })
 }
 
-pub(super) fn decode_master_wake_accumulator_event(data: &Value) -> CommResult<MasterWakeAccumulator> {
+pub(super) fn decode_master_wake_accumulator_event(
+    data: &Value,
+) -> CommResult<MasterWakeAccumulator> {
     for field in [
         "address",
         "generation",
@@ -749,7 +762,11 @@ pub(super) fn adapter_error(error: &CommError, adapter_id: &str, operation: &str
     enriched
 }
 
-pub(super) fn with_secondary_error(mut primary: CommError, secondary: CommError, stage: &str) -> CommError {
+pub(super) fn with_secondary_error(
+    mut primary: CommError,
+    secondary: CommError,
+    stage: &str,
+) -> CommError {
     primary.context = json!({
         "cause": primary.context,
         "stage": stage,
@@ -762,7 +779,11 @@ pub(super) fn with_secondary_error(mut primary: CommError, secondary: CommError,
     primary
 }
 
-pub(super) fn adapter_error_record(error: &CommError, adapter_id: &str, operation: &str) -> ErrorRecord {
+pub(super) fn adapter_error_record(
+    error: &CommError,
+    adapter_id: &str,
+    operation: &str,
+) -> ErrorRecord {
     ErrorRecord {
         code: error.code.clone(),
         message: error.message.clone(),

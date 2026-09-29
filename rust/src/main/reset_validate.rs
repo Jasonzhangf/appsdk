@@ -230,7 +230,9 @@ pub(super) fn reset_transaction_validate_quarantine_entries(
     Ok(())
 }
 
-pub(super) fn reset_transaction_validate_cleanup_layout(transaction_dir: &Path) -> Result<(), String> {
+pub(super) fn reset_transaction_validate_cleanup_layout(
+    transaction_dir: &Path,
+) -> Result<(), String> {
     let mut entries = fs::read_dir(transaction_dir).map_err(|error| {
         format!(
             "GOVERNANCE_RESET_CLEANUP_FAILED:transaction read {}:{error}",
@@ -341,7 +343,9 @@ pub(super) fn reset_transaction_cleanup_committed(transaction_dir: &Path) -> Res
     }
 }
 
-pub(super) fn reset_transaction_recover_unmarked(transaction_dir: &Path) -> Result<Option<bool>, String> {
+pub(super) fn reset_transaction_recover_unmarked(
+    transaction_dir: &Path,
+) -> Result<Option<bool>, String> {
     let mut entries = fs::read_dir(transaction_dir).map_err(|error| {
         format!(
             "GOVERNANCE_RESET_RECOVERY_REQUIRED:transaction read {}:{error}",
@@ -632,7 +636,9 @@ pub(super) fn reset_transaction_fresh_project_targets() -> Vec<String> {
     targets
 }
 
-pub(super) fn reset_transaction_expected_target_relatives(generated_roots: &[String]) -> BTreeSet<String> {
+pub(super) fn reset_transaction_expected_target_relatives(
+    generated_roots: &[String],
+) -> BTreeSet<String> {
     let mut expected = BTreeSet::new();
     expected.insert(".appsdk".to_string());
     expected.insert(".appsdk-control".to_string());
@@ -752,7 +758,9 @@ pub(super) fn reset_transaction_build_targets(
     Ok(targets)
 }
 
-pub(super) fn reset_transaction_quarantine_generated_roots(generated_roots: &[String]) -> Vec<String> {
+pub(super) fn reset_transaction_quarantine_generated_roots(
+    generated_roots: &[String],
+) -> Vec<String> {
     let mut roots: Vec<String> = Vec::new();
     for relative in generated_roots {
         let normalized = relative.trim_end_matches('/').to_string();

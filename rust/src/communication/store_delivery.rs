@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::validation::*;
+use super::*;
 
 impl CommunicationStore {
     pub(super) fn send(&mut self, request: MessageRequest) -> CommResult<Value> {

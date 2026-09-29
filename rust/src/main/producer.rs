@@ -358,7 +358,10 @@ pub(super) fn remove_producer_baseline_worktree(root: &Path, path: &Path) {
     }
 }
 
-pub(super) fn producer_baseline_git_value(root: &Path, args: &[&str]) -> Result<String, &'static str> {
+pub(super) fn producer_baseline_git_value(
+    root: &Path,
+    args: &[&str],
+) -> Result<String, &'static str> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -410,7 +413,12 @@ pub(super) fn producer_lock(root: &Path) -> fs::File {
     file
 }
 
-pub(super) fn producer_scope_hash(root: &Path, project: &Value, module: &Value, module_id: &str) -> String {
+pub(super) fn producer_scope_hash(
+    root: &Path,
+    project: &Value,
+    module: &Value,
+    module_id: &str,
+) -> String {
     let source_hash = hash_module_paths(root, project, module, module_id, "owned_paths");
     let contract_hash = hash_module_paths(root, project, module, module_id, "contract_paths");
     let registry_binding = normalized_registry_binding(module, module_id);

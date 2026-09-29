@@ -572,7 +572,11 @@ pub(super) fn lifecycle_chain_input(root: &Path, input_path: &str, phase: &str) 
         })
 }
 
-pub(super) fn lifecycle_chain_required_array(value: &Value, path: &str, error: &str) -> Vec<String> {
+pub(super) fn lifecycle_chain_required_array(
+    value: &Value,
+    path: &str,
+    error: &str,
+) -> Vec<String> {
     let values = value
         .pointer(path)
         .and_then(Value::as_array)
@@ -589,7 +593,10 @@ pub(super) fn lifecycle_chain_required_array(value: &Value, path: &str, error: &
     result
 }
 
-pub(super) fn lifecycle_chain_candidate(root: &Path, module_id: &str) -> (Value, Value, Value, Value) {
+pub(super) fn lifecycle_chain_candidate(
+    root: &Path,
+    module_id: &str,
+) -> (Value, Value, Value, Value) {
     let candidate_name = module_record_name("fix-candidate-record", module_id);
     let candidate = read_record(root, &candidate_name);
     let validation = read_record(
@@ -662,7 +669,11 @@ pub(super) fn lifecycle_chain_record_is_pass(kind: &str, record: &Value) -> bool
     }
 }
 
-pub(super) fn lifecycle_chain_attempt_identity(module_id: &str, kind: &str, record_hash: &str) -> String {
+pub(super) fn lifecycle_chain_attempt_identity(
+    module_id: &str,
+    kind: &str,
+    record_hash: &str,
+) -> String {
     producer_stable_id(
         "lifecycle-attempt",
         &serde_json::json!({
@@ -868,7 +879,12 @@ pub(super) fn lifecycle_chain_output(record: &Value, reused: bool) {
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
-pub(super) fn lifecycle_chain_write_record(root: &Path, module_id: &str, kind: &str, record: &Value) -> bool {
+pub(super) fn lifecycle_chain_write_record(
+    root: &Path,
+    module_id: &str,
+    kind: &str,
+    record: &Value,
+) -> bool {
     let target = lifecycle_chain_record_path(root, module_id, kind);
     assert_no_symlink_components(root, &target, "lifecycle_chain_record");
     if !target.exists() {

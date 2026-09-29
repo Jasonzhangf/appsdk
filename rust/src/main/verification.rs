@@ -391,7 +391,11 @@ pub(super) fn assert_mutation_worktree(root: &Path) {
     }
 }
 
-pub(super) fn assert_candidate_source_identity(root: &Path, module: &Value, candidate_commit: &str) {
+pub(super) fn assert_candidate_source_identity(
+    root: &Path,
+    module: &Value,
+    candidate_commit: &str,
+) {
     let mut controlled_paths = Vec::new();
     for key in ["owned_paths", "contract_paths"] {
         for value in record_array(module, &format!("/{}", key), "module") {
@@ -424,7 +428,11 @@ pub(super) fn assert_candidate_source_identity(root: &Path, module: &Value, cand
     }
 }
 
-pub(super) fn assert_worktree_candidate_ancestry(root: &Path, worktree_head: &str, candidate_commit: &str) {
+pub(super) fn assert_worktree_candidate_ancestry(
+    root: &Path,
+    worktree_head: &str,
+    candidate_commit: &str,
+) {
     if !Command::new("git")
         .arg("-C")
         .arg(root)
@@ -547,7 +555,11 @@ pub(super) fn record_datetime(record: &Value, path: &str, name: &str) -> DateTim
         .with_timezone(&Utc)
 }
 
-pub(super) fn assert_evidence_record(evidence: &Value, name: &str, validation: EvidenceValidationMode) {
+pub(super) fn assert_evidence_record(
+    evidence: &Value,
+    name: &str,
+    validation: EvidenceValidationMode,
+) {
     for path in [
         "/evidence_id",
         "/issue_id",

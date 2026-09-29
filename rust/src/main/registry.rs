@@ -1,6 +1,57 @@
 use super::*;
 
-pub(super) fn assert_registry_binding_contract<'a>(module: &'a Value, module_id: &str) -> RegistryBinding<'a> {
+pub(super) fn assert_governance_maps(root: &Path) {
+    for (name, key) in [
+        ("resource-map.json", "resources"),
+        ("module-registry.json", "modules"),
+        ("function-map.json", "functions"),
+        ("mainline-call-map.json", "edges"),
+        ("verification-map.json", "gates"),
+    ] {
+        let file = root.join(".appsdk/maps").join(name);
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(&file)
+                .unwrap_or_else(|_| fail(format!("MISSING_GOVERNANCE_MAP:{}", name))),
+        )
+        .unwrap_or_else(|_| fail(format!("INVALID_GOVERNANCE_MAP:{}", name)));
+        // Governance maps are project-owned projections. The SDK bundle
+        // supplies schema/validation rules, but must not require byte-for-byte
+        // equality with a generic SDK map; project modules may add or evolve
+        // entries while retaining the same machine-readable contract.
+        if value.get("schema_version").and_then(Value::as_u64) != Some(1)
+            || value
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|items| items.is_empty())
+                .unwrap_or(true)
+        {
+            fail(format!("INVALID_GOVERNANCE_MAP:{}", name));
+        }
+        if name == "mainline-call-map.json" {
+            for edge in record_array(&value, "/edges", name) {
+                for field in [
+                    "/chain_id",
+                    "/owner",
+                    "/caller",
+                    "/callee",
+                    "/path",
+                    "/input_resource_id",
+                    "/output_resource_id",
+                    "/error_resource_id",
+                ] {
+                    if record_str(edge, field, name).is_empty() {
+                        fail("UNBOUND_MAINLINE_EDGE");
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn assert_registry_binding_contract<'a>(
+    module: &'a Value,
+    module_id: &str,
+) -> RegistryBinding<'a> {
     let Some(binding) = module.get("registry_binding") else {
         return RegistryBinding::Exact;
     };

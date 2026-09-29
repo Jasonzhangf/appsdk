@@ -1,5 +1,5 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 pub(super) fn validate_communication_root_input(root: &Path) -> CommResult<()> {
     if !is_lexically_canonical_absolute(root) {
         return Err(CommError::new(

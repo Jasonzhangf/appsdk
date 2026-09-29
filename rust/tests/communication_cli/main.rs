@@ -281,9 +281,9 @@ fn after(timestamp: &str, seconds: i64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-mod runtime_identity;
-mod routing_discovery;
-mod idle_wakeup;
 mod delivery_retry;
+mod idle_wakeup;
 mod master_wake;
 mod rebind_loops;
+mod routing_discovery;
+mod runtime_identity;

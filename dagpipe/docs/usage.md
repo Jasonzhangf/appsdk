@@ -7,10 +7,10 @@ execution, and the global `dagpipe` CLI for framework governance of graph
 design. The CLI contains a fixed set of built-in governance modules; it does
 not load project plugins or execute project Operators.
 
-Install the binary and its bundled Skill from a DAGpipe checkout:
+Install the binary and its bundled Skill from the AppSDK checkout:
 
 ```sh
-./scripts/install.sh
+scripts/install-global-dagpipe.sh
 ```
 
 The installer runs `cargo install --path . --locked --force`, copies the crate
@@ -31,8 +31,8 @@ Use the CLI against the same graph JSON consumed by the SDK:
 ```sh
 dagpipe modules list
 dagpipe sdk path
-dagpipe graph validate examples/governance_graph.json
-dagpipe graph inspect examples/governance_graph.json
+dagpipe graph validate dagpipe/examples/governance_graph.json
+dagpipe graph inspect dagpipe/examples/governance_graph.json
 ```
 
 `validate` checks the external dependency DAG is acyclic, every node can reach
@@ -52,19 +52,13 @@ The project owns its operators and graph; DAGpipe compiles the graph, enforces
 its ARC grants and capabilities, schedules eligible nodes, and returns outputs
 plus an execution journal.
 
-## Release builds and version bumping
+## Release ownership
 
-The first release stays at `0.1.0`:
-
-```sh
-./scripts/release.sh initial
-```
-
-Subsequent release builds bump patch by default before compiling and installing
-the global CLI, SDK source, and Skill. Pass `minor` or `major` for those SemVer
-increments. This release entrypoint requires Cargo Edit's `cargo set-version`
-command (`cargo install cargo-edit --locked`). Normal development builds/tests
-do not change package versions.
+The AppSDK main branch owns DAGpipe version changes and releases. Update
+`dagpipe/Cargo.toml` and its lockfile in the reviewed AppSDK candidate, run
+the module tests and `scripts/install-global-dagpipe.sh`, then use the AppSDK
+mainline review, merge and push flow. The former standalone release command
+is retired. Normal development builds and tests do not change package versions.
 
 ## Implement and register an operator
 

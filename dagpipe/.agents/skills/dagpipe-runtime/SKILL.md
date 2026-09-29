@@ -146,7 +146,7 @@ The crate is installed at `$HOME/.local/share/dagpipe/sdk` (the installer's
 fixed per-user SDK directory):
 
 ```sh
-./scripts/install.sh
+scripts/install-global-dagpipe.sh
 dagpipe --help
 dagpipe modules list
 dagpipe sdk path

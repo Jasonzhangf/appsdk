@@ -415,84 +415,84 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
     (
         "skills/appsdk-project-governance/SKILL.md",
         "rules",
-        include_str!("../../skills/appsdk-project-governance/SKILL.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/SKILL.md"),
     ),
     (
         "skills/appsdk-project-governance/SKILL.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/SKILL.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/SKILL.md"),
     ),
     (
         "skills/appsdk-project-governance/appsdk-guidance.json",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/appsdk-guidance.json"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/appsdk-guidance.json"),
     ),
     (
         "skills/appsdk-project-governance/agents/openai.yaml",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/agents/openai.yaml"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/agents/openai.yaml"),
     ),
     (
         "skills/appsdk-project-governance/references/bootstrap-migration.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/bootstrap-migration.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/bootstrap-migration.md"),
     ),
     (
         "skills/appsdk-project-governance/references/command-surface.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/command-surface.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/command-surface.md"),
     ),
     (
         "skills/appsdk-project-governance/references/contracts-and-failures.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/contracts-and-failures.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/contracts-and-failures.md"),
     ),
     (
         "skills/appsdk-project-governance/references/development-debug.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/development-debug.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/development-debug.md"),
     ),
     (
         "skills/appsdk-project-governance/references/goal-prompt.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/goal-prompt.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/goal-prompt.md"),
     ),
     (
         "skills/appsdk-project-governance/references/init-prompts.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/init-prompts.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/init-prompts.md"),
     ),
     (
         "skills/appsdk-project-governance/references/process-control-harness.md",
         "skills",
         include_str!(
-            "../../skills/appsdk-project-governance/references/process-control-harness.md"
+            "../../sdk-skill-sources/appsdk-project-governance/references/process-control-harness.md"
         ),
     ),
     (
         "skills/appsdk-project-governance/references/review-delivery.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/review-delivery.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/review-delivery.md"),
     ),
     (
         "skills/appsdk-project-governance/references/state-paths.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/state-paths.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/state-paths.md"),
     ),
     (
         "skills/appsdk-project-governance/references/subagents-config.md",
         "skills",
-        include_str!("../../skills/appsdk-project-governance/references/subagents-config.md"),
+        include_str!("../../sdk-skill-sources/appsdk-project-governance/references/subagents-config.md"),
     ),
     (
         "skills/appsdk-migration/SKILL.md",
         "skills",
-        include_str!("../../skills/appsdk-migration/SKILL.md"),
+        include_str!("../../sdk-skill-sources/appsdk-migration/SKILL.md"),
     ),
     (
         "skills/project-memory/SKILL.md",
         "skills",
-        include_str!("../../skills/project-memory/SKILL.md"),
+        include_str!("../../sdk-skill-sources/project-memory/SKILL.md"),
     ),
 ];
 

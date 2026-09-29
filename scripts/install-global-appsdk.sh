@@ -89,7 +89,7 @@ cleanup_install() {
 trap cleanup_install EXIT
 
 for skill in "${skills[@]}"; do
-  source="$repo_root/skills/$skill"
+  source="$repo_root/sdk-skill-sources/$skill"
   if [[ ! -s "$source/SKILL.md" ]]; then
     echo "error: AppSDK Skill source is missing: $source/SKILL.md" >&2
     exit 1
@@ -99,7 +99,7 @@ done
 mkdir -p "$skills_root"
 skills_stage="$(mktemp -d "$skills_root/.appsdk-skills.stage.XXXXXX")"
 for skill in "${skills[@]}"; do
-  cp -R "$repo_root/skills/$skill" "$skills_stage/$skill"
+  cp -R "$repo_root/sdk-skill-sources/$skill" "$skills_stage/$skill"
   if [[ ! -s "$skills_stage/$skill/SKILL.md" ]]; then
     echo "error: staged AppSDK Skill is invalid: $skills_stage/$skill" >&2
     exit 1

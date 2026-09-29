@@ -7,6 +7,17 @@ repo_root="$(cd "$script_dir/../.." && pwd -P)"
 installer="$repo_root/scripts/install-global-appsdk.sh"
 fixture="$repo_root/rust/target/release/appsdk"
 
+for skill in appsdk-migration appsdk-project-governance project-memory; do
+  [[ ! -e "$repo_root/skills/$skill" ]] || {
+    echo "project-local duplicate Skill remains discoverable: $skill" >&2
+    exit 1
+  }
+  [[ -s "$repo_root/sdk-skill-sources/$skill/SKILL.md" ]] || {
+    echo "AppSDK Skill source is missing: $skill" >&2
+    exit 1
+  }
+done
+
 if [[ ! -x "$fixture" ]]; then
   echo "build the release binary before running installer tests" >&2
   exit 1
@@ -70,7 +81,7 @@ FAKE_CARGO
   [[ -x "$fake_bin/project-memory" ]] || { echo 'memory install missing' >&2; exit 1; }
   [[ "$(readlink "$test_root/home/.local/bin/project-memory")" == "$fake_bin/project-memory" ]] || exit 1
   for skill in appsdk-project-governance appsdk-migration project-memory; do
-    diff -qr "$repo_root/skills/$skill" "$test_root/home/.agents/skills/$skill"
+    diff -qr "$repo_root/sdk-skill-sources/$skill" "$test_root/home/.agents/skills/$skill"
   done
   [[ -s "$test_root/home/.agents/skills/appsdk-migration/SKILL.md" ]] || {
     echo 'migration Skill dependency missing' >&2
@@ -144,8 +155,8 @@ run_missing_skill_source_test() {
   local fake_repo="$test_root/repo"
   mkdir -p "$fake_bin" "$test_root/home" "$fake_repo"
   cp -R "$repo_root/scripts" "$fake_repo/scripts"
-  cp -R "$repo_root/skills" "$fake_repo/skills"
-  rm -f "$fake_repo/skills/appsdk-migration/SKILL.md"
+  cp -R "$repo_root/sdk-skill-sources" "$fake_repo/sdk-skill-sources"
+  rm -f "$fake_repo/sdk-skill-sources/appsdk-migration/SKILL.md"
   mkdir -p "$fake_repo/rust/target/release"
   cp "$fixture" "$fake_repo/rust/target/release/appsdk"
   cp "$repo_root/rust/target/release/project-memory" "$fake_repo/rust/target/release/project-memory"

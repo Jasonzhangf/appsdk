@@ -542,7 +542,7 @@ fn repeated_init_refreshes_sdk_bundle_without_overwriting_project_truth() {
     );
     assert_eq!(
         fs::read_to_string(stale_skill).unwrap(),
-        include_str!("../../../skills/appsdk-project-governance/SKILL.md")
+        include_str!("../../../sdk-skill-sources/appsdk-project-governance/SKILL.md")
     );
     assert!(run(&["verify", root_text]).status.success());
     fs::remove_dir_all(root).unwrap();

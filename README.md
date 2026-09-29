@@ -135,9 +135,9 @@ fresh init 只接受已有 `.appsdk/project.json` 的 clean 非 `main`/`master` 
 - [Harness Detailed Design](./docs/design/appsdk-guidance-framework.md)
 - [Rust Binary Delivery](./docs/design/rust-binary-delivery.md)
 
-目标提示词：收到一个新开发/debug目标时，先澄清并确认目标；只有目标确实需要持久化执行真源时才写 `docs/goals/<feature-name>-plan.md`，最后输出短 `/goal`。固定规范见 [`skills/appsdk-project-governance/references/goal-prompt.md`](./skills/appsdk-project-governance/references/goal-prompt.md)。
+目标提示词：收到一个新开发/debug目标时，先澄清并确认目标；只有目标确实需要持久化执行真源时才写 `docs/goals/<feature-name>-plan.md`，最后输出短 `/goal`。固定规范见 [`sdk-skill-sources/appsdk-project-governance/references/goal-prompt.md`](./sdk-skill-sources/appsdk-project-governance/references/goal-prompt.md)。
 
-可复用 Skill：[`skills/appsdk-project-governance/SKILL.md`](./skills/appsdk-project-governance/SKILL.md) 与 [`skills/appsdk-migration/SKILL.md`](./skills/appsdk-migration/SKILL.md)。前者定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze；后者定义 preserve/migrate 或 fresh-init/reset 的迁移闭环。
+可复用 Skill：[`sdk-skill-sources/appsdk-project-governance/SKILL.md`](./sdk-skill-sources/appsdk-project-governance/SKILL.md) 与 [`sdk-skill-sources/appsdk-migration/SKILL.md`](./sdk-skill-sources/appsdk-migration/SKILL.md)。前者定义新项目如何引用外部 AppSDK、提交 `.appsdk/` 项目治理合同、忽略 `.appsdk-control/` 本地运行态，并执行 clarification → Playground → review → promotion → freeze；后者定义 preserve/migrate 或 fresh-init/reset 的迁移闭环。
 
 内部通信接口：[`docs/design/apps-sdk-communication.md`](./docs/design/apps-sdk-communication.md)。
 `appsdk communication <project> --json '<request>'` 提供稳定的 `appsdk-comm/v1`

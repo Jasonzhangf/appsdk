@@ -37,11 +37,14 @@ const SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008: &str =
     include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json");
 const SDK_MAP_MIGRATION_0_1_0008_TO_0_1_0009: &str =
     include_str!("../../contracts/migrations/sdk-0.1.0008-to-0.1.0009.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 4] = [
+const SDK_MAP_MIGRATION_0_1_0009_TO_0_1_0010: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.0009-to-0.1.0010.json");
+const SDK_MAP_MIGRATION_STEPS: [&str; 5] = [
     "0.1.5-to-0.1.6",
     "0.1.6-to-0.1.0007",
     "0.1.0007-to-0.1.0008",
     "0.1.0008-to-0.1.0009",
+    "0.1.0009-to-0.1.0010",
 ];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
@@ -186,6 +189,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/migrations/sdk-0.1.0008-to-0.1.0009.json"),
     ),
     (
+        "contracts/migrations/sdk-0.1.0009-to-0.1.0010.json",
+        "contracts",
+        include_str!("../../contracts/migrations/sdk-0.1.0009-to-0.1.0010.json"),
+    ),
+    (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
@@ -264,6 +272,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/0.1.0008/governance-maps/verification-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.0008/governance-maps/verification-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0009/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0009/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0009/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0009/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0009/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0009/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0009/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0009/governance-maps/verification-map.json"),
     ),
     (
         "contracts/transitions/zone-transition.manifest.json",
@@ -942,120 +970,8 @@ const GOAL_COLLAB_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 const GOAL_MIN_INTERVAL_MS: u64 = GOAL_COLLAB_WRITE_TIMEOUT.as_secs() * 1000;
 
 #[cfg(test)]
-mod goal_collab_command_tests {
-    use super::*;
-
-    #[test]
-    fn injected_timeout_returns_explicit_error_without_long_wait() {
-        let started = Instant::now();
-        let mut command = Command::new("/bin/sleep");
-        command.arg("1");
-        let result = run_goal_collab_command(command, Duration::from_millis(100));
-
-        assert!(matches!(
-            result,
-            Err(error) if error == "GOAL_COLLAB_COMMAND_TIMEOUT"
-        ));
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn injected_timeout_bounds_output_pipe_drain_without_false_success() {
-        let started = Instant::now();
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "/bin/sleep 5 & printf inherited-pipe"]);
-
-        let result = run_goal_collab_command(command, Duration::from_millis(100));
-
-        assert!(matches!(
-            result,
-            Err(error) if error == "GOAL_COLLAB_OUTPUT_DRAIN_TIMEOUT"
-        ));
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn goal_owner_context_requires_a_live_tmux_endpoint() {
-        let tmux_context = serde_json::json!({
-            "identity": {"transport": {
-                "kind": "tmux",
-                "endpoint": "/tmp/collab.sock",
-                "tmux_endpoint": {
-                    "socket_path": "/tmp/collab.sock",
-                    "server_pid": 123,
-                    "tmux_session_id": "$1",
-                    "pane_id": "%1",
-                    "pane_pid": 456
-                }
-            }},
-            "liveness": {
-                "live": true,
-                "presence": "present",
-                "transport_kind": "tmux",
-                "endpoint": "/tmp/collab.sock"
-            }
-        });
-        assert!(context_has_live_tmux_transport(&tmux_context));
-
-        let appserver_context = serde_json::json!({
-            "identity": {"transport": {"kind": "appserver", "thread_id": "thread-1"}},
-            "liveness": {"live": true, "transport_kind": "appserver"}
-        });
-        assert!(!context_has_live_tmux_transport(&appserver_context));
-
-        let mut unknown = tmux_context;
-        unknown["liveness"]["presence"] = Value::String("unknown".into());
-        assert!(!context_has_live_tmux_transport(&unknown));
-    }
-
-    #[test]
-    fn collab_tmux_init_requires_selected_endpoint_and_identity_anchor_match() {
-        let response = serde_json::json!({
-            "runtime": {
-                "runtimeId": "runtime-1",
-                "appserverId": "appserver-cli",
-                "transport": "tmux",
-                "tmuxEndpoint": {
-                    "socket_path": "/tmp/collab.sock",
-                    "server_pid": 123,
-                    "tmux_session_id": "$1",
-                    "pane_id": "%1",
-                    "pane_pid": 456,
-                    "codex_session_id": "session-1",
-                    "codex_thread_id": "thread-1"
-                },
-                "projectRoot": "/repo",
-                "capabilities": ["send_message_to_pane"],
-                "processId": 123
-            },
-            "transport_selected": {
-                "kind": "tmux",
-                "endpoint": "/tmp/collab.sock",
-                "namespace": "$1",
-                "session_id": "session-1",
-                "thread_id": "thread-1",
-                "tmux_endpoint": {
-                    "socket_path": "/tmp/collab.sock",
-                    "server_pid": 123,
-                    "tmux_session_id": "$1",
-                    "pane_id": "%1",
-                    "pane_pid": 456,
-                    "codex_session_id": "session-1",
-                    "codex_thread_id": "thread-1"
-                },
-                "capabilities": ["send_message_to_pane"]
-            }
-        });
-        assert!(validate_collab_tmux_init(&response, "/repo").is_ok());
-
-        let mut mismatched = response;
-        mismatched["transport_selected"]["endpoint"] = Value::String("/tmp/other.sock".into());
-        assert_eq!(
-            validate_collab_tmux_init(&mismatched, "/repo").unwrap_err(),
-            "COLLAB_INIT_TMUX_RUNTIME_BINDING_INVALID"
-        );
-    }
-}
+#[path = "main/goal_collab_command_tests.rs"]
+mod goal_collab_command_tests;
 
 const CLI_USAGE: &str = "Usage: appsdk <command> [project] [options]\n\nProject-scoped commands default to the current working directory. An explicit project path remains optional.\nManaged child compatibility entry: appsdk subworker <start|list|status|snapshot|send|close> ...";
 

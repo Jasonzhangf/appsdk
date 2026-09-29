@@ -5,13 +5,13 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
-fn pin_lock_accepts_current_0009_without_creating_migration_record() {
+fn pin_lock_accepts_current_0010_without_creating_migration_record() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "appsdk-current-0009-{}-{nonce}",
+        "appsdk-current-0010-{}-{nonce}",
         std::process::id()
     ));
     let project = root.join("project");
@@ -40,9 +40,9 @@ fn pin_lock_accepts_current_0009_without_creating_migration_record() {
     );
     let lock: Value =
         serde_json::from_slice(&fs::read(project.join(".appsdk/sdk.lock")).unwrap()).unwrap();
-    assert_eq!(lock["version"], "0.1.0009");
+    assert_eq!(lock["version"], "0.1.0010");
     assert!(!project
-        .join(".appsdk/migrations/0.1.0008-to-0.1.0009/record.json")
+        .join(".appsdk/migrations/0.1.0009-to-0.1.0010/record.json")
         .exists());
     fs::remove_dir_all(root).unwrap();
 }

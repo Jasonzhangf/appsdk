@@ -1,14 +1,7 @@
 use super::*;
 
-pub(super) fn canonical_governance_map(name: &str) -> &'static str {
-    match name {
-        "resource-map.json" => include_str!("../../../contracts/maps/resource-map.json"),
-        "function-map.json" => include_str!("../../../contracts/maps/function-map.json"),
-        "mainline-call-map.json" => include_str!("../../../contracts/maps/mainline-call-map.json"),
-        "verification-map.json" => include_str!("../../../contracts/maps/verification-map.json"),
-        _ => fail("UNKNOWN_GOVERNANCE_MAP"),
-    }
-}
+mod canonical_map;
+pub(super) use canonical_map::canonical_governance_map;
 
 pub(super) fn historical_governance_map(version: &str, name: &str) -> &'static str {
     match (version, name) {
@@ -68,6 +61,18 @@ pub(super) fn historical_governance_map(version: &str, name: &str) -> &'static s
         ("0.1.0008", "verification-map.json") => include_str!(
             "../../../contracts/migrations/0.1.0008/governance-maps/verification-map.json"
         ),
+        ("0.1.0009", "resource-map.json") => {
+            include_str!("../../../contracts/migrations/0.1.0009/governance-maps/resource-map.json")
+        }
+        ("0.1.0009", "function-map.json") => {
+            include_str!("../../../contracts/migrations/0.1.0009/governance-maps/function-map.json")
+        }
+        ("0.1.0009", "mainline-call-map.json") => include_str!(
+            "../../../contracts/migrations/0.1.0009/governance-maps/mainline-call-map.json"
+        ),
+        ("0.1.0009", "verification-map.json") => include_str!(
+            "../../../contracts/migrations/0.1.0009/governance-maps/verification-map.json"
+        ),
         _ => fail("UNKNOWN_GOVERNANCE_MAP"),
     }
 }
@@ -85,6 +90,11 @@ pub(super) fn sdk_map_migration_manifest(step: &str) -> Value {
             SDK_MAP_MIGRATION_0_1_0008_TO_0_1_0009,
             "0.1.0008",
             "0.1.0009",
+        ),
+        "0.1.0009-to-0.1.0010" => (
+            SDK_MAP_MIGRATION_0_1_0009_TO_0_1_0010,
+            "0.1.0009",
+            "0.1.0010",
         ),
         _ => fail("UNKNOWN_SDK_MAP_MIGRATION_STEP"),
     };

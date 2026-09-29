@@ -79,6 +79,11 @@ if [ -e "$sdk_target" ]; then
         echo "existing SDK contains a symlink or special entry; refusing to replace it" >&2
         exit 1
     fi
+    if { [ -e "$sdk_target/.installed-files" ] && [ ! -f "$sdk_target/.installed-files" ]; } ||
+       { [ -e "$sdk_target/.installed-tree" ] && [ ! -f "$sdk_target/.installed-tree" ]; }; then
+        echo "existing SDK install manifest has the wrong type; refusing to replace it" >&2
+        exit 1
+    fi
     (cd "$sdk_target" && find . ! -path './.installed-files' ! -path './.installed-tree' -print | LC_ALL=C sort) > "$sdk_tree"
     if [ -f "$sdk_target/.installed-files" ]; then
         (cd "$sdk_target" && find . -type f ! -path './.installed-files' ! -path './.installed-tree' -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_inventory"

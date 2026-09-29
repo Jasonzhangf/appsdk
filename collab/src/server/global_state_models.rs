@@ -63,7 +63,7 @@ pub struct RuntimeBindingLedgerRecord {
 
 impl RuntimeBindingLedgerRecord {
     pub fn key(&self) -> String {
-        format!("{}/{}/{}:{}:{}", self.project_scope.as_str(), self.app_scope_id, self.binding_id, self.agent_id, self.endpoint_generation)
+        self.binding_id.as_str().to_owned()
     }
 
     pub fn validate(&self) -> Result<(), StateError> {
@@ -736,7 +736,6 @@ impl ProjectState {
                 || binding.agent_id != ledger.agent_id
                 || binding.runtime_id != ledger.runtime_id
                 || binding.binding_id != ledger.binding_id
-                || binding.endpoint_generation != ledger.endpoint_generation
             {
                 return Err(StateError::Invariant(format!("runtime binding ledger coordinates disagree for {}", ledger.binding_id)));
             }

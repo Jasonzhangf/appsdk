@@ -1169,6 +1169,78 @@ include!("global_state_tests_part2.rs");
     }
 
     #[test]
+    fn runtime_binding_ledger_replaces_stale_generation_for_the_same_binding() {
+        let scope = project_scope();
+        let mut state = GlobalState::default();
+        state
+            .register_project(registration(&scope, "app-one"))
+            .unwrap();
+        let first = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-one",
+            "binding-one",
+            1,
+        );
+        let second = binding(
+            &scope,
+            "app-one",
+            "agent-one",
+            "runtime-one",
+            "binding-one",
+            2,
+        );
+        state.bind_runtime(first).unwrap();
+        let old_record = RuntimeBindingLedgerRecord {
+            project_scope: scope.clone(),
+            app_scope_id: app_scope("app-one"),
+            agent_id: AgentId::new("agent-one").unwrap(),
+            runtime_id: RuntimeId::new("runtime-one").unwrap(),
+            binding_id: BindingId::new("binding-one").unwrap(),
+            endpoint_generation: 1,
+            state: RuntimeBindingLedgerState::Missing,
+            probe_state: Some(RuntimeBindingLedgerState::Missing),
+            reason: Some("stale generation".into()),
+            classified_ms: 1,
+            operation_id: OperationId::new("ledger-op-old").unwrap(),
+            receipt_id: "ledger-receipt-old".into(),
+        };
+        state.classify_runtime_binding_ledger(old_record).unwrap();
+        state.validate().unwrap();
+
+        state.bind_runtime(second).unwrap();
+        let current = RuntimeBindingLedgerRecord {
+            project_scope: scope.clone(),
+            app_scope_id: app_scope("app-one"),
+            agent_id: AgentId::new("agent-one").unwrap(),
+            runtime_id: RuntimeId::new("runtime-one").unwrap(),
+            binding_id: BindingId::new("binding-one").unwrap(),
+            endpoint_generation: 2,
+            state: RuntimeBindingLedgerState::Live,
+            probe_state: Some(RuntimeBindingLedgerState::Live),
+            reason: None,
+            classified_ms: 2,
+            operation_id: OperationId::new("ledger-op-current").unwrap(),
+            receipt_id: "ledger-receipt-current".into(),
+        };
+        state.classify_runtime_binding_ledger(current.clone()).unwrap();
+        state.validate().unwrap();
+        assert_eq!(
+            state
+                .lookup_runtime_binding_ledger(
+                    &current.project_scope,
+                    &current.app_scope_id,
+                    &current.binding_id,
+                )
+                .unwrap()
+                .endpoint_generation,
+            2
+        );
+        assert_eq!(state.projects[scope.as_str()].runtime_binding_ledger.len(), 1);
+    }
+
+    #[test]
     fn command_receipts_are_host_wide_and_idempotent() {
         let mut state = GlobalState::default();
         let first = state

@@ -390,9 +390,8 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
         let state = server.state.lock().unwrap();
         state
             .global
-            .projects
+            .current_thread_routes
             .values()
-            .flat_map(|project| project.runtime_bindings.values())
             .cloned()
             .collect::<Vec<_>>()
     };
@@ -433,14 +432,17 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
             .unwrap()
             .global
             .lookup_runtime_binding_ledger(
-            &binding.project_scope,
-            &binding.app_scope_id,
-            &binding.binding_id,
-            binding.endpoint_generation,
+                &binding.project_scope,
+                &binding.app_scope_id,
+                &binding.binding_id,
             )
             .cloned();
         if existing
-            .map(|record| record.state == state && record.probe_state == Some(state))
+            .map(|record| {
+                record.endpoint_generation == binding.endpoint_generation
+                    && record.state == state
+                    && record.probe_state == Some(state)
+            })
             .unwrap_or(false)
         {
             unchanged = unchanged.saturating_add(1);

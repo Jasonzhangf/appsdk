@@ -946,38 +946,36 @@ impl GlobalState {
         })
     }
 
-    pub fn classify_runtime_binding_ledger(&mut self, record: RuntimeBindingLedgerRecord) -> Result<StateVersion, StateError> {
-        record.validate()?;
-        let project_scope = record.project_scope.clone();
-        let app_scope_id = record.app_scope_id.clone();
-        let binding_id = record.binding_id.clone();
-        if self.lookup_registration(&project_scope, &app_scope_id).is_none() {
-            return Err(StateError::ProjectNotRegistered(format!("{} (app scope {})", project_scope.as_str(), app_scope_id)));
-        }
-        let route = RouteScope { project_scope_id: project_scope.clone(), app_scope_id: app_scope_id.clone() };
-        if self.lookup_binding_for(&route, &binding_id).is_none() {
-            return Err(StateError::BindingNotFound(binding_id.as_str().to_owned()));
-        }
-        self.mutate(|next| {
-            let project = next.projects.get_mut(project_scope.as_str()).ok_or_else(|| StateError::ProjectNotRegistered(project_scope.as_str().to_owned()))?;
-            let binding = project.lookup_binding(&binding_id).ok_or_else(|| StateError::BindingNotFound(binding_id.as_str().to_owned()))?;
-            if binding.project_scope != record.project_scope
-                || binding.app_scope_id != record.app_scope_id
-                || binding.agent_id != record.agent_id
-                || binding.runtime_id != record.runtime_id
-                || binding.endpoint_generation != record.endpoint_generation
-            {
-                return Err(StateError::Invariant(format!("runtime binding ledger coordinates disagree for {}", record.binding_id)));
-            }
-            project.runtime_binding_ledger.insert(record.key(), record);
-            Ok(())
-        })
+pub fn classify_runtime_binding_ledger(&mut self, record: RuntimeBindingLedgerRecord) -> Result<StateVersion, StateError> {
+    record.validate()?;
+    let project_scope = record.project_scope.clone();
+    let app_scope_id = record.app_scope_id.clone();
+    let binding_id = record.binding_id.clone();
+    if self.lookup_registration(&project_scope, &app_scope_id).is_none() {
+        return Err(StateError::ProjectNotRegistered(format!("{} (app scope {})", project_scope.as_str(), app_scope_id)));
     }
+    if self.lookup_binding(&binding_id).is_none() {
+        return Err(StateError::BindingNotFound(binding_id.as_str().to_owned()));
+    }
+    self.mutate(|next| {
+        let project = next.projects.get_mut(project_scope.as_str()).ok_or_else(|| StateError::ProjectNotRegistered(project_scope.as_str().to_owned()))?;
+        let binding = project.lookup_binding(&binding_id).ok_or_else(|| StateError::BindingNotFound(binding_id.as_str().to_owned()))?;
+        if binding.project_scope != record.project_scope
+            || binding.app_scope_id != record.app_scope_id
+            || binding.agent_id != record.agent_id
+            || binding.runtime_id != record.runtime_id
+        {
+            return Err(StateError::Invariant(format!("runtime binding ledger principal coordinates disagree for {}", record.binding_id)));
+        }
+        project.runtime_binding_ledger.insert(record.key(), record);
+        Ok(())
+    })
+}
 
-    pub fn lookup_runtime_binding_ledger(&self, project_scope: &ProjectScopeId, app_scope_id: &AppServerId, binding_id: &BindingId, endpoint_generation: u64) -> Option<&RuntimeBindingLedgerRecord> {
+    pub fn lookup_runtime_binding_ledger(&self, project_scope: &ProjectScopeId, app_scope_id: &AppServerId, binding_id: &BindingId) -> Option<&RuntimeBindingLedgerRecord> {
         self.lookup_project(project_scope)
             .and_then(|project| project.lookup_registration(app_scope_id).map(|_| project))
-            .and_then(|project| project.runtime_binding_ledger.values().find(|record| record.project_scope == *project_scope && record.app_scope_id == *app_scope_id && record.binding_id == *binding_id && record.endpoint_generation == endpoint_generation))
+            .and_then(|project| project.runtime_binding_ledger.get(binding_id.as_str()))
     }
 
     /// A new registration advances the host version exactly once.  Repeating

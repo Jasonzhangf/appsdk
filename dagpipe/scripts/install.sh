@@ -52,9 +52,37 @@ if [ -e "$skill_target" ]; then
     fi
 fi
 cargo_install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-"$user_home/.cargo"}}
+sdk_parent=$(dirname -- "$sdk_target")
+mkdir -p "$sdk_parent"
+sdk_stage=$(mktemp -d "$sdk_parent/.sdk-stage.XXXXXX")
+cleanup_stage() {
+    if [ -n "$sdk_stage" ] && [ -d "$sdk_stage" ]; then
+        rm -rf -- "$sdk_stage"
+    fi
+}
+trap cleanup_stage EXIT HUP INT TERM
+mkdir -p "$sdk_stage/.agents/skills/dagpipe-runtime"
+cp "$repo_dir/Cargo.toml" "$sdk_stage/Cargo.toml"
+cp -R "$repo_dir/src" "$sdk_stage/src"
+cp "$skill_source" "$sdk_stage/.agents/skills/dagpipe-runtime/SKILL.md"
+cmp -s "$repo_dir/Cargo.toml" "$sdk_stage/Cargo.toml"
+diff -qr "$repo_dir/src" "$sdk_stage/src"
+cmp -s "$skill_source" "$sdk_stage/.agents/skills/dagpipe-runtime/SKILL.md"
 cargo install --path "$repo_dir" --locked --force --root "$cargo_install_root"
-mkdir -p "$sdk_target/src" "$sdk_target/.agents/skills/dagpipe-runtime"
-cp "$repo_dir/Cargo.toml" "$sdk_target/Cargo.toml"
-cp -R "$repo_dir/src/." "$sdk_target/src/"
-cp "$skill_source" "$sdk_target/.agents/skills/dagpipe-runtime/SKILL.md"
 "$cargo_install_root/bin/dagpipe" skill install
+sdk_previous=''
+if [ -e "$sdk_target" ]; then
+    sdk_previous=$(mktemp -d "$sdk_parent/.sdk-previous.XXXXXX")
+    rmdir -- "$sdk_previous"
+    mv -- "$sdk_target" "$sdk_previous"
+fi
+if ! mv -- "$sdk_stage" "$sdk_target"; then
+    if [ -n "$sdk_previous" ]; then
+        mv -- "$sdk_previous" "$sdk_target"
+    fi
+    exit 1
+fi
+sdk_stage=''
+if [ -n "$sdk_previous" ]; then
+    rm -rf -- "$sdk_previous"
+fi

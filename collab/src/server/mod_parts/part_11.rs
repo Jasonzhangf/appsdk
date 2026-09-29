@@ -276,7 +276,7 @@ fn dispatch_with_route_context(
             Resp::data(json!({"unread": items.len(), "messages": items}))
         }
         Req::Context { worker_id, token } => handle_context(server, worker_id, token),
-        Req::RouteResolve { .. } | Req::RouteResolveNative { .. } => {
+        Req::RouteResolve { .. } | Req::RouteResolvePaneRecovery { .. } | Req::RouteResolveNative { .. } => {
             Resp::err("RouteResolve/RouteResolveNative are only handled by the host daemon connection path")
         }
         Req::MsgStatus { msg_id } => {
@@ -747,7 +747,7 @@ fn dispatch(server: &Arc<Server>, req: Req) -> Resp {
 fn request_requires_project_context(req: &Req) -> bool {
     !matches!(
         req,
-        Req::Ping | Req::RouteResolve { .. } | Req::RouteResolveNative { .. }
+        Req::Ping | Req::RouteResolve { .. } | Req::RouteResolvePaneRecovery { .. } | Req::RouteResolveNative { .. }
     )
 }
 

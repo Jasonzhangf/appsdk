@@ -439,14 +439,11 @@ fn resolve_worktree_path(
     let canonical_root = root
         .canonicalize()
         .map_err(|error| format!("project root cannot be canonicalized: {error}"))?;
-    let canonical_playground = canonical_root.join("playground");
-    if canonical_candidate.starts_with(&canonical_playground)
-        && canonical_candidate != canonical_playground
-    {
-        return Ok(canonical_candidate);
-    }
     if let Some(base_result) = config.worktree.canonical_base() {
         let base = base_result?;
+        if base.starts_with(&canonical_root) {
+            return Err("configured worktree base must be outside the project root".into());
+        }
         let project_key = configured_project_key(&canonical_root)?;
         let task_slug = path.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
             "worktree path must end in a valid UTF-8 task slug".to_string()
@@ -464,6 +461,12 @@ fn resolve_worktree_path(
             return Ok(canonical_candidate);
         }
         return Err("worktree path must match the configured worktree base/layout".into());
+    }
+    let canonical_playground = canonical_root.join("playground");
+    if canonical_candidate.starts_with(&canonical_playground)
+        && canonical_candidate != canonical_playground
+    {
+        return Ok(canonical_candidate);
     }
     Err("worktree path must be inside ./playground".into())
 }

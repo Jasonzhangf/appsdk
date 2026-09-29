@@ -410,6 +410,7 @@ fn mutation_blocked_during_migration(req: &Req) -> bool {
         | Req::ResetBindings { .. } => true,
         Req::Register { .. }
         | Req::RouteResolve { .. }
+        | Req::RouteResolvePaneRecovery { .. }
         | Req::RouteResolveNative { .. }
         | Req::NotificationMethods
         | Req::NotificationStatus { .. }

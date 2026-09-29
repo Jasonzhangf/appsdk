@@ -1322,6 +1322,7 @@ fn worktree_matches_project(
             let mut components = relative.components();
             if components.next().and_then(|c| c.as_os_str().to_str()) == Some(key.as_str())
                 && components.next().is_some()
+                && components.next().is_none()
             {
                 return true;
             }

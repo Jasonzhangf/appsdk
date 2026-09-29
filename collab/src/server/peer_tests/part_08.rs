@@ -396,12 +396,20 @@ fn worktree_path_accepts_configured_external_base_and_rejects_outside() {
         root.join("outside").display().to_string().as_str()
     )
     .is_err());
+    assert!(validate_worktree_path(&project, &config, "./playground/new-task").is_err());
     assert!(validate_worktree_path(
         &project,
         &config,
         base.join("repo-project").join("bad/slug").display().to_string().as_str()
     )
     .is_err());
+    config.worktree.base = Some(project.join("playground"));
+    std::fs::create_dir_all(project.join("playground")).unwrap();
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        project.join("playground/repo-project/short-slug").display().to_string().as_str()
+    ).is_err());
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -434,7 +442,10 @@ fn configured_worktree_path_rejects_expected_parent_escape() {
 #[test]
 fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_base() {
     let (mut server, root) = test_server();
-    let base = root.join("external-playground");
+    let base = root.with_file_name(format!(
+        "{}-external-playground",
+        root.file_name().unwrap().to_string_lossy()
+    ));
     let project_key = crate::server::configured_project_key(&root).unwrap();
     let project_dir = base.join(&project_key);
     let target = project_dir.join("configured-feature");
@@ -565,6 +576,7 @@ fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_ba
             .status
             .success()
     );
+    std::fs::remove_dir_all(base).ok();
     std::fs::remove_dir_all(root).ok();
 }
 

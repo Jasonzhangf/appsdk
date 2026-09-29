@@ -943,12 +943,36 @@
             token.into(),
             project_root.display().to_string(),
             Some(app),
-            Some(new_candidates),
+            Some(new_candidates.clone()),
         );
         assert!(retry.ok, "{retry:?}");
         assert_eq!(retry.data["command"]["binding"]["endpoint_generation"], old.endpoint_generation + 1);
         assert!(manager.same_pane_master_route_ready(&runtime).is_err());
-        manager.reconcile_same_pane_master_routes().unwrap();
+        let pane = old.tmux_endpoint.as_ref().unwrap();
+        assert!(manager.resolve_route_by_tmux_endpoint(pane).is_err());
+        assert!(manager.resolve_staged_pane_recovery(pane, worker, "wrong-token").is_err());
+        let mut wrong_pane = pane.clone();
+        wrong_pane.pane_pid += 1;
+        assert!(manager.resolve_staged_pane_recovery(&wrong_pane, worker, token).is_err());
+        let recovered = manager.resolve_staged_pane_recovery(pane, worker, token).unwrap();
+        assert_eq!(recovered.endpoint_generation, old.endpoint_generation);
+        assert_eq!(recovered.agent_id, old.agent_id);
+        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
+        let previous_runtime = crate::identity::RuntimeIdentity {
+            agent_id: old.agent_id.clone(),
+            runtime_id: old.runtime_id.clone(),
+            appserver_id: old.app_scope_id.clone(),
+            endpoint_generation: old.endpoint_generation,
+            binding_id: old.binding_id.clone(),
+            session_id: old.session_id.clone(),
+            native_thread_id: old.native_thread_id.clone(),
+        };
+        let (_, completed) = manager.dispatch_sync(
+            Some(context_with_runtime(&project_root, crate::identity::CLI_APP_SERVER_ID, &previous_runtime)),
+            Req::register(worker.into(), token.into(), project_root.display().to_string(), Some(new_candidates)),
+        );
+        assert!(completed.ok, "{completed:?}");
+        assert_eq!(completed.data["command"]["binding"]["endpoint_generation"], old.endpoint_generation + 1);
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();

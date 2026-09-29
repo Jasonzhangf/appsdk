@@ -537,6 +537,121 @@ impl ProjectRuntimeManager {
         self.resolve_route_by_address(&endpoint.tmux_session_id, &endpoint.pane_id, Some(endpoint))
     }
 
+    fn resolve_staged_pane_recovery(
+        &self,
+        endpoint: &crate::proto::TmuxEndpoint,
+        worker_id: &str,
+        token: &str,
+    ) -> Result<RouteResolution, String> {
+        crate::client::adapters::tmux::validate_endpoint(endpoint)?;
+        let old = self.host.state.lock().unwrap().global
+            .lookup_unique_tmux_pane_route(endpoint).cloned()
+            .ok_or_else(|| "RECOVERY_RECONCILE_REQUIRED: no unique host pane route".to_owned())?;
+        if old.agent_id.as_str() != worker_id || old.tmux_endpoint.as_ref()
+            .is_none_or(|bound| !crate::client::adapters::tmux::same_pane_route(bound, endpoint))
+        {
+            return Err("IDENTITY_RESTORE_CONFLICT: pane route belongs to another worker".into());
+        }
+        let key = (old.app_scope_id.as_str().to_owned(), old.project_scope.as_str().to_owned());
+        let (runtime, storage_root) = {
+            let routes = self.routes.lock().unwrap();
+            let route = routes.get(&key)
+                .ok_or_else(|| "RECOVERY_RECONCILE_REQUIRED: project route is missing".to_owned())?;
+            (route.runtime.clone().ok_or_else(|| "RECOVERY_RECONCILE_REQUIRED: project runtime is not loaded".to_owned())?, route.storage_root.clone())
+        };
+        if Arc::ptr_eq(&runtime, &self.host) {
+            return Err("RECOVERY_RECONCILE_REQUIRED: resident route has no split journal".into());
+        }
+        let pending = self.pending_same_pane_master_bindings(&runtime);
+        let staged = pending.iter().any(|binding| {
+            binding.same_principal(&old)
+                && old.endpoint_generation.checked_add(1) == Some(binding.endpoint_generation)
+                && binding.tmux_endpoint.as_ref().is_some_and(|new_endpoint|
+                    crate::client::adapters::tmux::same_pane_route(new_endpoint, endpoint))
+        });
+        if !staged {
+            return Err("RECOVERY_RECONCILE_REQUIRED: no authenticated adjacent project transition".into());
+        }
+        if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
+            return Err("TOKEN_MISMATCH: pane recovery credential does not own worker".into());
+        }
+        match crate::client::adapters::tmux::probe(endpoint)
+            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))? {
+            crate::client::adapters::tmux::PanePresence::Present => {}
+            crate::client::adapters::tmux::PanePresence::Missing => return Err("ROUTE_RESOLVE_NOT_FOUND: tmux pane is gone".into()),
+            crate::client::adapters::tmux::PanePresence::Unknown => return Err("ROUTE_RESOLVE_UNKNOWN: tmux pane liveness is uncertain".into()),
+        }
+        let route = RouteResolution {
+            app_scope_id: old.app_scope_id,
+            project_scope: old.project_scope.clone(),
+            canonical_root: old.project_scope.as_str().to_owned(),
+            storage_root: storage_root.to_string_lossy().into_owned(),
+            agent_id: old.agent_id,
+            binding_id: old.binding_id,
+            endpoint_generation: old.endpoint_generation,
+            session_id: old.session_id.ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no session".to_owned())?,
+            native_thread_id: old.native_thread_id.ok_or_else(|| "ROUTE_RESOLVE_INVALID: old route has no thread".to_owned())?,
+        };
+        route.validate().map_err(|error| format!("ROUTE_RESOLVE_INVALID: {error}"))?;
+        Ok(route)
+    }
+
+    fn admit_committed_pane_register_retry(
+        &self,
+        context: &mut ProjectContext,
+        req: &Req,
+    ) -> Result<(), String> {
+        let (Req::Register { worker_id, token, candidates: Some(candidates), .. }, Some(previous)) =
+            (req, context.runtime_context.as_ref()) else { return Ok(()); };
+        if candidates.appserver.is_some() { return Ok(()); }
+        let Some(candidate) = candidates.tmux.as_ref() else { return Ok(()); };
+        let key = Self::route_key(context);
+        let Some(runtime) = self.routes.lock().unwrap().get(&key).and_then(|route| route.runtime.clone()) else {
+            return Ok(());
+        };
+        let pending = self.pending_same_pane_master_bindings(&runtime);
+        let Some(binding) = pending.into_iter().find(|binding| {
+            binding.agent_id.as_str() == worker_id
+                && binding.project_scope == context.project_scope
+                && binding.app_scope_id == previous.appserver_id
+                && binding.agent_id == previous.agent_id
+                && binding.runtime_id == previous.runtime_id
+                && binding.binding_id == previous.binding_id
+                && previous.endpoint_generation.checked_add(1) == Some(binding.endpoint_generation)
+                && binding.tmux_endpoint.as_ref().is_some_and(|endpoint|
+                    crate::client::adapters::tmux::same_pane_route(endpoint, &candidate.endpoint))
+        }) else { return Ok(()); };
+        if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
+            return Err("TOKEN_MISMATCH: pane register retry credential does not own worker".into());
+        }
+        let host_route = self.host.state.lock().unwrap().global
+            .lookup_unique_tmux_pane_route(&candidate.endpoint).cloned();
+        let host_matches = host_route.as_ref().is_some_and(|host|
+            host == &binding ||
+            (host.same_principal(&binding)
+                && host.endpoint_generation == previous.endpoint_generation
+                && host.session_id == previous.session_id
+                && host.native_thread_id == previous.native_thread_id));
+        if !host_matches {
+            return Err("RECOVERY_RECONCILE_REQUIRED: host pane route does not match retry transition".into());
+        }
+        match crate::client::adapters::tmux::probe(&candidate.endpoint)
+            .map_err(|error| format!("ROUTE_RESOLVE_UNKNOWN: {error}"))? {
+            crate::client::adapters::tmux::PanePresence::Present => {}
+            _ => return Err("ROUTE_RESOLVE_UNKNOWN: pane is not present for register retry".into()),
+        }
+        context.runtime_context = Some(crate::identity::RuntimeIdentity {
+            agent_id: binding.agent_id,
+            runtime_id: binding.runtime_id,
+            appserver_id: binding.app_scope_id,
+            endpoint_generation: binding.endpoint_generation,
+            binding_id: binding.binding_id,
+            session_id: binding.session_id,
+            native_thread_id: binding.native_thread_id,
+        });
+        Ok(())
+    }
+
     fn resolve_route_by_address(
         &self,
         session_id: &str,
@@ -1405,7 +1520,7 @@ impl ProjectRuntimeManager {
         project_context: Option<ProjectContext>,
         req: Req,
     ) -> (Arc<Server>, Resp) {
-        let Some(context) = project_context else {
+        let Some(mut context) = project_context else {
             if matches!(req, Req::Ping) {
                 let response = dispatch_with_route_context(&self.host, req, None);
                 return (self.host.clone(), response);
@@ -1430,6 +1545,9 @@ impl ProjectRuntimeManager {
             _ => None,
         };
         let _register_guard = is_register.then(|| self.register_gate.lock().unwrap());
+        if let Err(error) = self.admit_committed_pane_register_retry(&mut context, &req) {
+            return (self.host.clone(), Resp::err(error));
+        }
         if let Err(error) = self.validate_current_thread_candidate(&context, &req) {
             return (self.host.clone(), Resp::err(error));
         }

@@ -119,6 +119,16 @@ async fn dispatch_wire_routed(
             };
             (manager.host.clone(), response)
         }
+        Req::RouteResolvePaneRecovery { tmux_endpoint, worker_id, token } => {
+            let response = match manager.resolve_staged_pane_recovery(&tmux_endpoint, &worker_id, &token) {
+                Ok(route) => match serde_json::to_value(route) {
+                    Ok(value) => Resp::data(value),
+                    Err(error) => Resp::err(format!("ROUTE_RESOLVE_INVALID: serialize route: {error}")),
+                },
+                Err(error) => Resp::err(error),
+            };
+            (manager.host.clone(), response)
+        }
         Req::RouteResolveNative {
             session_id,
             native_thread_id,

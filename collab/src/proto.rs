@@ -421,6 +421,13 @@ pub enum Req {
     RouteResolve {
         tmux_endpoint: TmuxEndpoint,
     },
+    /// Inspect a committed same-pane master transition whose project journal
+    /// is one generation ahead of the host route. Requires the worker token.
+    RouteResolvePaneRecovery {
+        tmux_endpoint: TmuxEndpoint,
+        worker_id: String,
+        token: String,
+    },
     /// Resolve the unique registered project route for one native App Server
     /// session/thread pair. This is the live counterpart to `RouteResolve` for
     /// native TUI peers that do not carry a tmux pane anchor.

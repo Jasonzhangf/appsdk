@@ -81,6 +81,16 @@ its audit receipt; a retry uses a new attempt ID at the same generation. A
 lost client receipt with an already current binding reuses that generation.
 No `WorkerClosed` cleanup event is valid for this transition.
 
+In the split-journal window, ordinary `RouteResolve` remains strict and rejects
+the mismatched binding. `RouteResolvePaneRecovery` is a read-only admission
+query for the exact pane and worker token. It returns the old host route only
+when the project has a committed master registration receipt, selected tmux
+transport, same principal and adjacent generation. The next `Register` carries
+the archived old runtime; under the register gate the daemon verifies that
+credential and pane again, admits the committed project generation, and
+publishes the host route. The same retry also handles a lost success receipt
+when both journals already hold the new generation.
+
 ## Terminal states and evidence
 
 | Event | Terminal state and retry condition |

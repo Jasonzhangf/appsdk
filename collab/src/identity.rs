@@ -713,7 +713,7 @@ fn recover_archived_pane_at(
     let scope_id = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
-    let mut has_candidate = false;
+    let mut credential: Option<Identity> = None;
     for entry in std::fs::read_dir(&archives)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir()
@@ -725,7 +725,7 @@ fn recover_archived_pane_at(
         else {
             continue;
         };
-        has_candidate |= identity.project_scope.as_ref() == Some(&scope_id)
+        let matches = identity.project_scope.as_ref() == Some(&scope_id)
             && identity.transport.as_ref().is_some_and(|transport| {
                 transport.kind == TransportKind::Tmux
                     && transport.tmux_endpoint.as_ref().is_some_and(|endpoint| {
@@ -735,10 +735,22 @@ fn recover_archived_pane_at(
                         )
                     })
             });
+        if matches {
+            let generation = identity.runtime.as_ref().map(|runtime| runtime.endpoint_generation).unwrap_or(0);
+            let previous_generation = credential.as_ref().and_then(|previous| previous.runtime.as_ref())
+                .map(|runtime| runtime.endpoint_generation).unwrap_or(0);
+            if generation == previous_generation && credential.as_ref().is_some_and(|previous|
+                previous.token != identity.token || previous.runtime != identity.runtime) {
+                anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: archived pane credentials disagree for registered worker");
+            }
+            if credential.is_none() || generation > previous_generation {
+                credential = Some(identity);
+            }
+        }
     }
-    if !has_candidate {
+    let Some(credential) = credential else {
         return Ok(None);
-    }
+    };
     let mut pane_only = candidate.endpoint.clone();
     pane_only.codex_session_id = None;
     pane_only.codex_thread_id = None;
@@ -754,6 +766,18 @@ fn recover_archived_pane_at(
             if route.agent_id.as_str() != worker_id {
                 anyhow::bail!("IDENTITY_RESTORE_CONFLICT: pane route belongs to another worker");
             }
+            archived_pane_identity_at(host_paths, scope, candidate, &route)
+        }
+        Err(error) if error.to_string().contains("conflicts with its runtime binding") => {
+            let route: crate::proto::RouteResolution = crate::client::call(
+                &scope.sock_path(),
+                &crate::proto::Req::RouteResolvePaneRecovery {
+                    tmux_endpoint: candidate.endpoint.clone(),
+                    worker_id: worker_id.to_owned(),
+                    token: credential.token,
+                },
+            )?;
+            route.validate()?;
             archived_pane_identity_at(host_paths, scope, candidate, &route)
         }
         Err(error) if error.to_string().contains("ROUTE_RESOLVE_NOT_FOUND") => Ok(None),

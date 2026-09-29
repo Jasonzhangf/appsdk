@@ -5,6 +5,49 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn pin_lock_accepts_current_0009_without_creating_migration_record() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "appsdk-current-0009-{}-{nonce}",
+        std::process::id()
+    ));
+    let project = root.join("project");
+    let registry = root.join("registry");
+    let binary = env!("CARGO_BIN_EXE_appsdk");
+    let created = Command::new(binary)
+        .args(["new", project.to_str().unwrap()])
+        .env("APPSDK_HOME", &registry)
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let pinned = Command::new(binary)
+        .args(["pin-lock", project.to_str().unwrap(), "--binary", binary])
+        .env("APPSDK_HOME", &registry)
+        .output()
+        .unwrap();
+    assert!(
+        pinned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let lock: Value =
+        serde_json::from_slice(&fs::read(project.join(".appsdk/sdk.lock")).unwrap()).unwrap();
+    assert_eq!(lock["version"], "0.1.0009");
+    assert!(!project
+        .join(".appsdk/migrations/0.1.0008-to-0.1.0009/record.json")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pin_lock_preserves_0008_maps_when_upgrading_to_0009() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

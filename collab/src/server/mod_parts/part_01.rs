@@ -100,7 +100,6 @@ const TASK_STATUSES: [&str; 12] = [
     "closed",
     "cancelled",
 ];
-const MAX_WORKTREE_PATH_BYTES: usize = 80;
 /// Lock used by releases before the host-scoped state directory existed.
 /// A new daemon must fence this writer before it replays the project journal;
 /// otherwise an old binary could append concurrently under the new socket.
@@ -375,7 +374,51 @@ impl std::fmt::Display for NotificationDeliveryError {
 
 impl std::error::Error for NotificationDeliveryError {}
 
-fn validate_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+fn canonicalize_with_existing_suffix(candidate: &Path) -> Result<PathBuf, String> {
+    let mut existing = candidate;
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| "worktree path has no existing parent".to_string())?;
+    }
+    let canonical_existing = existing
+        .canonicalize()
+        .map_err(|error| format!("worktree path cannot be canonicalized: {error}"))?;
+    let suffix = candidate
+        .strip_prefix(existing)
+        .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
+    Ok(normalize_trailing_separator(canonical_existing.join(suffix)))
+}
+
+fn normalize_trailing_separator(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if text.ends_with('/') && text != "/" {
+        PathBuf::from(&text[..text.len() - 1])
+    } else {
+        path
+    }
+}
+
+pub(crate) fn configured_project_key(root: &Path) -> Result<String, String> {
+    let name = root
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Err("cannot derive project key from empty project root".into());
+    }
+    let key = sanitize_identifier(name);
+    if key.is_empty() || key.len() > 32 {
+        return Err("project key must be a non-empty slug of at most 32 bytes".into());
+    }
+    Ok(key)
+}
+
+fn resolve_worktree_path(
+    root: &Path,
+    config: &crate::config::Config,
+    raw: &str,
+) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
         return Err("worktree path must be non-empty".into());
     }
@@ -392,32 +435,45 @@ fn validate_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
         let relative = raw.strip_prefix("./").unwrap_or(raw);
         root.join(relative)
     };
+    let canonical_candidate = canonicalize_with_existing_suffix(&candidate)?;
     let canonical_root = root
         .canonicalize()
         .map_err(|error| format!("project root cannot be canonicalized: {error}"))?;
     let canonical_playground = canonical_root.join("playground");
-    let mut existing = candidate.as_path();
-    while !existing.exists() {
-        existing = existing
-            .parent()
-            .ok_or_else(|| "worktree path has no existing parent".to_string())?;
+    if canonical_candidate.starts_with(&canonical_playground)
+        && canonical_candidate != canonical_playground
+    {
+        return Ok(canonical_candidate);
     }
-    let canonical_existing = existing
-        .canonicalize()
-        .map_err(|error| format!("worktree path cannot be canonicalized: {error}"))?;
-    let suffix = candidate
-        .strip_prefix(existing)
-        .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
-    let canonical_candidate = canonical_existing.join(suffix);
-    if !canonical_candidate.starts_with(&canonical_playground) {
-        return Err("worktree path must be inside ./playground".into());
+    if let Some(base_result) = config.worktree.canonical_base() {
+        let base = base_result?;
+        let project_key = configured_project_key(&canonical_root)?;
+        let task_slug = path.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
+            "worktree path must end in a valid UTF-8 task slug".to_string()
+        })?;
+        let relative = config.worktree.render_relative(&project_key, task_slug)?;
+        let expected = base.join(&relative);
+        if !expected.starts_with(&base) {
+            return Err("worktree path must match the configured worktree base/layout".into());
+        }
+        let canonical_expected = canonicalize_with_existing_suffix(&expected)?;
+        if canonical_candidate == canonical_expected
+            && canonical_candidate.starts_with(&base)
+            && expected.starts_with(&base)
+        {
+            return Ok(canonical_candidate);
+        }
+        return Err("worktree path must match the configured worktree base/layout".into());
     }
-    if raw.as_bytes().len() > MAX_WORKTREE_PATH_BYTES {
-        return Err(format!(
-            "worktree path exceeds {} bytes; use a short slug under ./playground",
-            MAX_WORKTREE_PATH_BYTES
-        ));
-    }
+    Err("worktree path must be inside ./playground".into())
+}
+
+fn validate_worktree_path(
+    root: &Path,
+    config: &crate::config::Config,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    let path = Path::new(raw);
     let leaf = path
         .file_name()
         .and_then(|v| v.to_str())
@@ -430,47 +486,15 @@ fn validate_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     {
         return Err("worktree basename must be a short slug (ASCII letters, digits, '.', '-' or '_'; max 32 chars)".into());
     }
-    Ok(canonical_candidate)
+    resolve_worktree_path(root, config, raw)
 }
 
-fn cleanup_worktree_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
-    if raw.trim().is_empty() {
-        return Err("worktree path must be non-empty".into());
-    }
-    let path = Path::new(raw);
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err("worktree path may not contain '..'".into());
-    }
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        let relative = raw.strip_prefix("./").unwrap_or(raw);
-        root.join(relative)
-    };
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|error| format!("project root cannot be canonicalized: {error}"))?;
-    let canonical_playground = canonical_root.join("playground");
-    let mut existing = candidate.as_path();
-    while !existing.exists() {
-        existing = existing
-            .parent()
-            .ok_or_else(|| "worktree path has no existing parent".to_string())?;
-    }
-    let canonical_existing = existing
-        .canonicalize()
-        .map_err(|error| format!("worktree path cannot be canonicalized: {error}"))?;
-    let suffix = candidate
-        .strip_prefix(existing)
-        .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
-    let canonical_candidate = canonical_existing.join(suffix);
-    if !canonical_candidate.starts_with(&canonical_playground) {
-        return Err("worktree path must be inside ./playground".into());
-    }
-    Ok(canonical_candidate)
+fn cleanup_worktree_path(
+    root: &Path,
+    config: &crate::config::Config,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    validate_worktree_path(root, config, raw)
 }
 
 fn task_claim_held(status: &str) -> bool {

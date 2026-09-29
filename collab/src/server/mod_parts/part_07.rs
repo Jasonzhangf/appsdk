@@ -919,7 +919,7 @@ pub(crate) fn handle_scheduler_dispatch(
         ));
     }
     if let Some(path) = &worktree_path {
-        let canonical = match validate_worktree_path(&server.root, path) {
+        let canonical = match validate_worktree_path(&server.root, &server.config, path) {
             Ok(path) => path,
             Err(error) => return Resp::err(error),
         };

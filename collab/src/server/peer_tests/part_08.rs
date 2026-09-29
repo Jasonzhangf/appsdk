@@ -344,19 +344,257 @@ fn worktree_path_budget_accepts_short_slug_and_rejects_escape() {
         now_ms()
     ));
     std::fs::create_dir_all(root.join("playground")).unwrap();
-    assert!(validate_worktree_path(&root, "./playground/ar03-0828").is_ok());
+    let config = crate::config::Config::default();
+    assert!(validate_worktree_path(&root, &config, "./playground/ar03-0828").is_ok());
     assert!(validate_worktree_path(
         &root,
+        &config,
         "./playground/v3-direct-sse-terminal-observability-20260827-long-run-id"
     )
     .is_err());
-    assert!(validate_worktree_path(&root, "./playground/../outside").is_err());
+    assert!(validate_worktree_path(&root, &config, "./playground/../outside").is_err());
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink("/tmp", root.join("playground/link")).unwrap();
-        assert!(validate_worktree_path(&root, "./playground/link/escape").is_err());
+        assert!(validate_worktree_path(&root, &config, "./playground/link/escape").is_err());
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worktree_path_accepts_configured_external_base_and_rejects_outside() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-configured-worktree-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let base = root.join("external-playground");
+    let project = root.join("repo-project");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let mut config = crate::config::Config::default();
+    config.worktree.base = Some(base.canonicalize().unwrap());
+    let path = base
+        .join("repo-project")
+        .join("short-slug");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        path.display().to_string().as_str()
+    )
+    .is_ok());
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        base.join("wrong-project").join("short-slug").display().to_string().as_str()
+    )
+    .is_err());
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        root.join("outside").display().to_string().as_str()
+    )
+    .is_err());
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        base.join("repo-project").join("bad/slug").display().to_string().as_str()
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn configured_worktree_path_rejects_expected_parent_escape() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-configured-parent-escape-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let base = root.join("external-playground");
+    let project = root.join("repo-project");
+    std::fs::create_dir_all(base.join("repo-project")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let mut config = crate::config::Config::default();
+    config.worktree.base = Some(base.canonicalize().unwrap());
+    let escaped = base
+        .join("repo-project")
+        .join("../outside/short-slug");
+    std::fs::create_dir_all(root.join("outside")).unwrap();
+    assert!(validate_worktree_path(
+        &project,
+        &config,
+        escaped.display().to_string().as_str()
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn configured_worktree_lifecycle_register_relocate_and_cleanup_use_configured_base() {
+    let (mut server, root) = test_server();
+    let base = root.join("external-playground");
+    let project_key = crate::server::configured_project_key(&root).unwrap();
+    let project_dir = base.join(&project_key);
+    let target = project_dir.join("configured-feature");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(git(&["config", "user.email", "test@example.com"]).status.success());
+    assert!(git(&["config", "user.name", "collab test"]).status.success());
+    std::fs::write(root.join("README.md"), "base\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "base"]).status.success());
+    assert!(git(&["branch", "-M", "main"]).status.success());
+    assert!(git(&["worktree", "add", "-q", "-b", "configured", target.to_str().unwrap()]).status.success());
+    std::fs::write(target.join("feature.txt"), "work\n").unwrap();
+    assert!(git(&["-C", target.to_str().unwrap(), "add", "feature.txt"]).status.success());
+    assert!(git(&["-C", target.to_str().unwrap(), "commit", "-q", "-m", "feature"]).status.success());
+    assert!(git(&["merge", "-q", "configured"]).status.success());
+
+    server.config.worktree.base = Some(base.canonicalize().unwrap());
+    register(&server, "owner", "%owner");
+    let registered = handle_task_register(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        None,
+        Some("configured-feature".into()),
+        Some(target.display().to_string()),
+        Some("configured".into()),
+        None,
+        default_priority(),
+    );
+    assert!(registered.ok, "{registered:?}");
+    let registered_path = server.state.lock().unwrap().tasks["configured-task"].worktree_path.clone().unwrap();
+    assert_eq!(
+        registered_path,
+        target.canonicalize().unwrap().display().to_string()
+    );
+
+    let refused_relocate = handle_task_relocate(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        root.join("outside").display().to_string(),
+        None,
+        None,
+    );
+    assert!(
+        refused_relocate
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("configured worktree base/layout"))
+    );
+
+    let relocated = handle_task_relocate(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        target.display().to_string(),
+        None,
+        None,
+    );
+    assert!(relocated.ok, "{relocated:?}");
+    assert_eq!(relocated.data["worktree"], registered_path);
+
+    let delivered = handle_task_deliver(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        Some("configured external worktree lifecycle".into()),
+        Some(registered_path.clone()),
+    );
+    assert!(delivered.ok, "{delivered:?}");
+    let reviewed = handle_task_review(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        true,
+        false,
+        "configured external worktree lifecycle review pass".into(),
+    );
+    assert!(reviewed.ok, "{reviewed:?}");
+    let main_tip = git(&["rev-parse", "HEAD"])
+        .stdout
+        .into_iter()
+        .take_while(|byte| *byte != b'\n')
+        .map(|byte| byte as char)
+        .collect::<String>();
+    let integrated = handle_task_integrated(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        main_tip,
+        "configured external worktree lifecycle integrated".into(),
+    );
+    assert!(integrated.ok, "{integrated:?}");
+
+    let closed = handle_task_close(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+        false,
+        None,
+    );
+    assert!(closed.ok, "{closed:?}");
+    let finalized = handle_task_finalize_cleanup(
+        &server,
+        "owner".into(),
+        "token-owner".into(),
+        "configured-task".into(),
+    );
+    assert!(finalized.ok, "{finalized:?}");
+    assert!(!target.exists());
+    assert!(
+        !git(&["rev-parse", "--verify", "refs/heads/configured"])
+            .status
+            .success()
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn cleanup_rejects_symlink_escape_even_for_configured_worktree() {
+    let root = std::env::temp_dir().join(format!(
+        "collab-configured-symlink-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let base = root.join("external-playground");
+    let project = root.join("repo-project");
+    std::fs::create_dir_all(base.join("repo-project")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let mut config = crate::config::Config::default();
+    config.worktree.base = Some(base.canonicalize().unwrap());
+    std::os::unix::fs::symlink("/tmp", base.join("repo-project/link")).unwrap();
+    assert!(cleanup_worktree_path(
+        &project,
+        &config,
+        base.join("repo-project/link/escape").display().to_string().as_str()
+    )
+    .is_err());
+    assert!(cleanup_worktree_path(
+        &project,
+        &config,
+        root.join("outside").display().to_string().as_str()
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

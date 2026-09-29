@@ -373,12 +373,12 @@ fn cleanup_rejects_unmerged_then_removes_only_merged_clean_worktree() {
             .success()
     );
 
-    let refused = close_task_resources(&root, Some("playground/wt"), Some("feature"));
+    let refused = close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature"));
     assert!(refused.unwrap_err().contains("not merged"));
     assert!(playground.join("wt").is_dir());
 
     assert!(git(&["merge", "-q", "feature"]).status.success());
-    assert!(close_task_resources(&root, Some("playground/wt"), Some("feature")).is_ok());
+    assert!(close_task_resources(&root, &crate::config::Config::default(), Some("playground/wt"), Some("feature")).is_ok());
     assert!(!playground.join("wt").exists());
     assert!(!git(&["rev-parse", "--verify", "feature"]).status.success());
     std::fs::remove_dir_all(root).ok();

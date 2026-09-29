@@ -115,7 +115,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_relocate",
-            "Relocate the calling peer's task to a short ./playground worktree.",
+            "Relocate the calling peer's task to the configured project worktree path.",
             json!({"id":{"type":"string"},"worktree":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"}}),
             &["id", "worktree"]
         ),

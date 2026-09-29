@@ -277,10 +277,12 @@ impl ProjectRuntimeManager {
                     continue;
                 }
                 let Some(old) = host_route else {
-                    return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: host pane route for {} is missing",
-                        binding.agent_id
-                    ));
+                    self.host
+                        .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
+                        .map_err(|error| {
+                            format!("RECOVERY_RECONCILE_REQUIRED: {error}")
+                        })?;
+                    continue;
                 };
                 let valid_previous = old.same_principal(&binding)
                     && old.endpoint_generation.checked_add(1)

@@ -387,10 +387,19 @@ fn canonicalize_with_existing_suffix(candidate: &Path) -> Result<PathBuf, String
     let suffix = candidate
         .strip_prefix(existing)
         .map_err(|_| "worktree path cannot be resolved under project root".to_string())?;
-    Ok(canonical_existing.join(suffix))
+    Ok(normalize_trailing_separator(canonical_existing.join(suffix)))
 }
 
-fn configured_project_key(root: &Path) -> Result<String, String> {
+fn normalize_trailing_separator(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if text.ends_with('/') && text != "/" {
+        PathBuf::from(&text[..text.len() - 1])
+    } else {
+        path
+    }
+}
+
+pub(crate) fn configured_project_key(root: &Path) -> Result<String, String> {
     let name = root
         .file_name()
         .and_then(|v| v.to_str())
@@ -439,13 +448,19 @@ fn resolve_worktree_path(
     if let Some(base_result) = config.worktree.canonical_base() {
         let base = base_result?;
         let project_key = configured_project_key(&canonical_root)?;
-        let task_slug = path
-            .file_name()
-            .and_then(|v| v.to_str())
-            .ok_or_else(|| "worktree path must end in a valid task slug".to_string())?;
+        let task_slug = path.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
+            "worktree path must end in a valid UTF-8 task slug".to_string()
+        })?;
         let relative = config.worktree.render_relative(&project_key, task_slug)?;
         let expected = base.join(&relative);
-        if canonical_candidate == canonicalize_with_existing_suffix(&expected)? {
+        if !expected.starts_with(&base) {
+            return Err("worktree path must match the configured worktree base/layout".into());
+        }
+        let canonical_expected = canonicalize_with_existing_suffix(&expected)?;
+        if canonical_candidate == canonical_expected
+            && canonical_candidate.starts_with(&base)
+            && expected.starts_with(&base)
+        {
             return Ok(canonical_candidate);
         }
         return Err("worktree path must match the configured worktree base/layout".into());
@@ -479,7 +494,7 @@ fn cleanup_worktree_path(
     config: &crate::config::Config,
     raw: &str,
 ) -> Result<PathBuf, String> {
-    resolve_worktree_path(root, config, raw)
+    validate_worktree_path(root, config, raw)
 }
 
 fn task_claim_held(status: &str) -> bool {

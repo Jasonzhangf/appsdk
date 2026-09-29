@@ -149,6 +149,12 @@ impl Worktree {
         if !base.is_absolute() {
             return Some(Err("worktree.base must be an absolute path".into()));
         }
+        let base_text = base.to_string_lossy();
+        if base_text.contains("{project-key}") || base_text.contains("{task-slug}") {
+            return Some(Err(
+                "worktree.base may not contain layout placeholders".into()
+            ));
+        }
         Some(
             base.canonicalize()
                 .map_err(|error| format!("worktree.base cannot be canonicalized: {error}")),
@@ -187,8 +193,36 @@ impl Worktree {
             .layout
             .replace("{project-key}", project_key)
             .replace("{task-slug}", task_slug);
+        let rendered_path = Path::new(&rendered);
+        if rendered_path
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(
+                "worktree.layout rendered path must contain exactly two normal segments".into(),
+            );
+        }
+        validate_slug(project_key, "project key")?;
+        validate_slug(task_slug, "task slug")?;
+        if task_slug.len() > 32 {
+            return Err("task slug must be at most 32 bytes".into());
+        }
         Ok(PathBuf::from(rendered))
     }
+}
+
+fn validate_slug(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 32
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+    {
+        return Err(format!(
+            "{label} must be a short slug (ASCII letters, digits, '.', '-' or '_'; max 32 chars)"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -715,5 +749,47 @@ projects = [
             parsed["projects"][0]["subagent"]["runtime"].as_str(),
             Some("codex")
         );
+    }
+
+    #[test]
+    fn worktree_base_requires_absolute_path_without_layout_placeholders() {
+        let mut config = Config::default();
+        config.worktree.base = Some("relative/playground".into());
+        assert!(
+            config
+                .worktree
+                .canonical_base()
+                .unwrap()
+                .is_err(),
+            "relative base must be rejected"
+        );
+        config.worktree.base = Some("/tmp/{project-key}/playground".into());
+        assert!(
+            config
+                .worktree
+                .canonical_base()
+                .unwrap()
+                .is_err(),
+            "base must not contain layout placeholders"
+        );
+    }
+
+    #[test]
+    fn worktree_layout_renders_exactly_project_and_task_slugs() {
+        let config = Config::default();
+        assert_eq!(
+            config
+                .worktree
+                .render_relative("project-a", "task-slug-1")
+                .unwrap()
+                .to_string_lossy(),
+            "project-a/task-slug-1"
+        );
+        assert!(config.worktree.render_relative("", "task-slug").is_err());
+        assert!(config.worktree.render_relative("project-a", "").is_err());
+        assert!(config
+            .worktree
+            .render_relative("project-a", "bad/slug")
+            .is_err());
     }
 }

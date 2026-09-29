@@ -912,7 +912,9 @@ consumption; verify with `collab msg <id>` (`consumed_by_recv`) and
 `collab task status <task-id>`.
 
 Peers never share worktrees. Each task owner starts from latest main in one
-declared clean `./playground/` worktree, implements and tests, commits the exact
+declared clean configured worktree path (`<base>/<project-key>/<short-slug>`
+when `[worktree].base` is set; legacy `<project-main>/playground/<short-slug>`
+during transition), implements and tests, commits the exact
 change set, syncs latest main again, verifies the candidate, acquires a short
 integration lease, merges the exact commit to main, verifies and pushes main,
 then closes the task to remove only its clean merged worktree/branch and persist

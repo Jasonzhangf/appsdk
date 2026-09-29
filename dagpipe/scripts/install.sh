@@ -57,11 +57,12 @@ mkdir -p "$sdk_parent"
 sdk_stage=$(mktemp -d "$sdk_parent/.sdk-stage.XXXXXX")
 sdk_inventory=$(mktemp "$sdk_parent/.sdk-inventory.XXXXXX")
 sdk_expected=$(mktemp "$sdk_parent/.sdk-expected.XXXXXX")
+sdk_tree=$(mktemp "$sdk_parent/.sdk-tree.XXXXXX")
 cleanup_stage() {
     if [ -n "$sdk_stage" ] && [ -d "$sdk_stage" ]; then
         rm -rf -- "$sdk_stage"
     fi
-    rm -f -- "$sdk_inventory" "$sdk_expected"
+    rm -f -- "$sdk_inventory" "$sdk_expected" "$sdk_tree"
 }
 trap cleanup_stage EXIT HUP INT TERM
 mkdir -p "$sdk_stage/.agents/skills/dagpipe-runtime"
@@ -71,27 +72,38 @@ cp "$skill_source" "$sdk_stage/.agents/skills/dagpipe-runtime/SKILL.md"
 cmp -s "$repo_dir/Cargo.toml" "$sdk_stage/Cargo.toml"
 diff -qr "$repo_dir/src" "$sdk_stage/src"
 cmp -s "$skill_source" "$sdk_stage/.agents/skills/dagpipe-runtime/SKILL.md"
+(cd "$sdk_stage" && find . -type f ! -path './.installed-files' ! -path './.installed-tree' -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_stage/.installed-files"
+(cd "$sdk_stage" && find . ! -path './.installed-files' ! -path './.installed-tree' -print | LC_ALL=C sort) > "$sdk_stage/.installed-tree"
 if [ -e "$sdk_target" ]; then
-    if find "$sdk_target" -type l -print -quit | grep -q .; then
-        echo "existing SDK contains a symlink; refusing to replace it" >&2
+    if find "$sdk_target" ! -type f ! -type d -print -quit | grep -q .; then
+        echo "existing SDK contains a symlink or special entry; refusing to replace it" >&2
         exit 1
     fi
+    (cd "$sdk_target" && find . ! -path './.installed-files' ! -path './.installed-tree' -print | LC_ALL=C sort) > "$sdk_tree"
     if [ -f "$sdk_target/.installed-files" ]; then
-        (cd "$sdk_target" && find . -type f ! -name .installed-files -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_inventory"
+        (cd "$sdk_target" && find . -type f ! -path './.installed-files' ! -path './.installed-tree' -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_inventory"
         if ! cmp -s "$sdk_target/.installed-files" "$sdk_inventory"; then
             echo "existing SDK differs from the last installed file manifest; refusing to replace it" >&2
             exit 1
         fi
+        if [ -f "$sdk_target/.installed-tree" ]; then
+            tree_reference="$sdk_target/.installed-tree"
+        else
+            tree_reference="$sdk_stage/.installed-tree"
+        fi
+        if ! cmp -s "$tree_reference" "$sdk_tree"; then
+            echo "existing SDK tree differs from the last installed tree; refusing to replace it" >&2
+            exit 1
+        fi
     else
         (cd "$sdk_target" && find . -type f | LC_ALL=C sort) > "$sdk_inventory"
-        (cd "$sdk_stage" && find . -type f | LC_ALL=C sort) > "$sdk_expected"
-        if ! cmp -s "$sdk_expected" "$sdk_inventory" || ! diff -qr "$repo_dir/src" "$sdk_target/src"; then
+        (cd "$sdk_stage" && find . -type f ! -path './.installed-files' ! -path './.installed-tree' | LC_ALL=C sort) > "$sdk_expected"
+        if ! cmp -s "$sdk_expected" "$sdk_inventory" || ! cmp -s "$sdk_stage/.installed-tree" "$sdk_tree" || ! diff -qr "$repo_dir/src" "$sdk_target/src"; then
             echo "legacy SDK contains extra or modified source; refusing to replace it" >&2
             exit 1
         fi
     fi
 fi
-(cd "$sdk_stage" && find . -type f ! -name .installed-files -exec shasum -a 256 {} + | LC_ALL=C sort) > "$sdk_stage/.installed-files"
 cargo install --path "$repo_dir" --locked --force --root "$cargo_install_root"
 "$cargo_install_root/bin/dagpipe" skill install
 sdk_previous=''

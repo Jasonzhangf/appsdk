@@ -409,7 +409,7 @@ fn current_resource_map_owns_the_current_bundle_and_generic_migration_paths() {
 
     assert_eq!(
         truth_store("sdk_bundle"),
-        "AppSDK 0.1.0008 embedded Bundle manifest/resources"
+        "AppSDK 0.1.0009 embedded Bundle manifest/resources"
     );
     assert_eq!(
         truth_store("historical_governance_maps"),
@@ -494,7 +494,7 @@ fn install_previous_bundle_migration_record(root: &Path) -> (String, String) {
 
     let lock_path = root.join(".appsdk/sdk.lock");
     let mut lock: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
-    lock["version"] = Value::String("0.1.0008".into());
+    lock["version"] = Value::String("0.1.0009".into());
     lock["bundle_digest"] = Value::String(previous_bundle_digest.clone());
     lock["bundle_manifest_digest"] = Value::String(previous_manifest_digest);
     fs::write(
@@ -1325,7 +1325,7 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
     ]);
     assert!(!unsupported.status.success());
     assert!(String::from_utf8_lossy(&unsupported.stderr)
-        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0008"));
+        .contains("UNSUPPORTED_SDK_MIGRATION:0.1.2:0.1.0009"));
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), original_lock);
 
     project["sdk"]["version"] = Value::String("0.1.5".into());
@@ -1364,8 +1364,8 @@ fn pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary() {
         serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
     let migrated_lock: Value =
         serde_json::from_str(&fs::read_to_string(&lock_file).unwrap()).unwrap();
-    assert_eq!(migrated_project["sdk"]["version"], "0.1.0008");
-    assert_eq!(migrated_lock["version"], "0.1.0008");
+    assert_eq!(migrated_project["sdk"]["version"], "0.1.0009");
+    assert_eq!(migrated_lock["version"], "0.1.0009");
     assert!(run(&["verify", root_text]).status.success());
 
     let migration_root = root.join(".appsdk/migrations/0.1.5-to-0.1.6");

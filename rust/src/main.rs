@@ -35,10 +35,13 @@ const SDK_MAP_MIGRATION_0_1_6_TO_0_1_0007: &str =
     include_str!("../../contracts/migrations/sdk-0.1.6-to-0.1.0007.json");
 const SDK_MAP_MIGRATION_0_1_0007_TO_0_1_0008: &str =
     include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json");
-const SDK_MAP_MIGRATION_STEPS: [&str; 3] = [
+const SDK_MAP_MIGRATION_0_1_0008_TO_0_1_0009: &str =
+    include_str!("../../contracts/migrations/sdk-0.1.0008-to-0.1.0009.json");
+const SDK_MAP_MIGRATION_STEPS: [&str; 4] = [
     "0.1.5-to-0.1.6",
     "0.1.6-to-0.1.0007",
     "0.1.0007-to-0.1.0008",
+    "0.1.0008-to-0.1.0009",
 ];
 const PROJECT_AGENTS_TEMPLATE: &str = include_str!("../../templates/minimal/AGENTS.md");
 const CANONICAL_ZONE_TRANSITION_CONTRACT: &str =
@@ -178,6 +181,11 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         include_str!("../../contracts/migrations/sdk-0.1.0007-to-0.1.0008.json"),
     ),
     (
+        "contracts/migrations/sdk-0.1.0008-to-0.1.0009.json",
+        "contracts",
+        include_str!("../../contracts/migrations/sdk-0.1.0008-to-0.1.0009.json"),
+    ),
+    (
         "contracts/migrations/0.1.5/governance-maps/resource-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.5/governance-maps/resource-map.json"),
@@ -236,6 +244,26 @@ const SDK_BUNDLE_RESOURCES: &[(&str, &str, &str)] = &[
         "contracts/migrations/0.1.0007/governance-maps/verification-map.json",
         "contracts",
         include_str!("../../contracts/migrations/0.1.0007/governance-maps/verification-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0008/governance-maps/resource-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0008/governance-maps/resource-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0008/governance-maps/function-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0008/governance-maps/function-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0008/governance-maps/mainline-call-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0008/governance-maps/mainline-call-map.json"),
+    ),
+    (
+        "contracts/migrations/0.1.0008/governance-maps/verification-map.json",
+        "contracts",
+        include_str!("../../contracts/migrations/0.1.0008/governance-maps/verification-map.json"),
     ),
     (
         "contracts/transitions/zone-transition.manifest.json",
@@ -1070,28 +1098,7 @@ fn main() {
         Some("verify") => verify_cli(&mut args),
         Some("guide") => guidance::run(&mut args),
         Some("memory") | Some("project-memory") => memory::run(&mut args),
-        Some("bug") => {
-            let mut root = PathBuf::from(".");
-            if let Some(first) = args.peek() {
-                if !matches!(
-                    first.as_str(),
-                    "intake"
-                        | "new"
-                        | "list"
-                        | "show"
-                        | "comment"
-                        | "close"
-                        | "webui"
-                        | "help"
-                        | "--help"
-                        | "-h"
-                ) && !first.starts_with('-')
-                {
-                    root = PathBuf::from(args.next().unwrap());
-                }
-            }
-            handle_bug_command(&root, args);
-        }
+        Some("bug") => bug_cli(&mut args),
         Some("setup-deps") => {
             let check_only = args.peek().is_some_and(|a| a == "--check");
             setup_deps(check_only);

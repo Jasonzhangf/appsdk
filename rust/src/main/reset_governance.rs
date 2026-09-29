@@ -9,7 +9,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         required_str(&project, "/sdk/version", "INVALID_SDK_CONTRACT").to_string();
     if !matches!(
         project_version.as_str(),
-        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007" | "0.1.0008"
+        "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.0007" | "0.1.0008" | "0.1.0009"
     ) {
         fail(format!(
             "UNSUPPORTED_SDK_MIGRATION:{}:{}",
@@ -42,7 +42,11 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         project["sdk"]["version"] = Value::String("0.1.6".into());
         write_project(root, &project);
     }
-    for step in ["0.1.5-to-0.1.6", "0.1.6-to-0.1.0007"] {
+    for step in [
+        "0.1.5-to-0.1.6",
+        "0.1.6-to-0.1.0007",
+        "0.1.0007-to-0.1.0008",
+    ] {
         let manifest = sdk_map_migration_manifest(step);
         let source_matches = GOVERNANCE_MAP_NAMES.iter().all(|name| {
             file_sha256(&root.join(".appsdk/maps").join(name), "governance_map")
@@ -61,7 +65,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
         }
     }
     let current_project = read_project(root);
-    migrate_governance_maps(root, &current_project, "0.1.0007-to-0.1.0008");
+    migrate_governance_maps(root, &current_project, "0.1.0008-to-0.1.0009");
     let migrated_project = read_project(root);
     install_current_record_contracts(root);
     project = migrated_project;

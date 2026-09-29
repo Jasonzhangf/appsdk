@@ -1,5 +1,28 @@
 use super::*;
 
+pub(super) fn bug_cli(args: &mut std::iter::Peekable<std::vec::IntoIter<String>>) {
+    let mut root = PathBuf::from(".");
+    if let Some(first) = args.peek() {
+        if !matches!(
+            first.as_str(),
+            "intake"
+                | "new"
+                | "list"
+                | "show"
+                | "comment"
+                | "close"
+                | "webui"
+                | "help"
+                | "--help"
+                | "-h"
+        ) && !first.starts_with('-')
+        {
+            root = PathBuf::from(args.next().unwrap());
+        }
+    }
+    handle_bug_command(&root, args.to_owned());
+}
+
 pub(super) fn setup_deps(check_only: bool) {
     if check_only {
         match locate_git_bug_binary() {

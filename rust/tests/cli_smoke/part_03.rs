@@ -604,7 +604,7 @@ fn init_upgrades_legacy_placeholder_lock_without_pin_lock() {
     assert!(run(&["new", root_text]).status.success());
     fs::write(
         root.join(".appsdk/sdk.lock"),
-        r#"{"sdk":"appsdk","version":"0.1.0008","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
+        r#"{"sdk":"appsdk","version":"0.1.0009","digest":"sha256:replace-with-compiled-sdk-digest","compiler_digest":"sha256:replace-with-compiler-digest","bundle_digest":"sha256:replace-with-sdk-bundle-digest","bundle_manifest_digest":"sha256:replace-with-bundle-manifest-digest","contract_schema":1}
 "#,
     )
     .unwrap();

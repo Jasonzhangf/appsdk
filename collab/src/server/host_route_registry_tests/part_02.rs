@@ -913,7 +913,6 @@
             Some(new_candidates.clone()),
         );
         assert!(second.ok, "{second:?}");
-        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
         manager
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -927,6 +926,7 @@
             &previous.3,
         );
         assert!(failed.is_err());
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
         assert_eq!(
             runtime
                 .state
@@ -937,6 +937,9 @@
                 .unwrap(),
             &old,
         );
+        manager
+            .fail_current_thread_route_publish
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let retry = handle_register_with_app_scope_unfinalized(
             &runtime,
             worker.into(),
@@ -974,6 +977,222 @@
         assert!(completed.ok, "{completed:?}");
         assert_eq!(completed.data["command"]["binding"]["endpoint_generation"], old.endpoint_generation + 1);
         assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_a_lagged_same_pane_master_route() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let worker = "lagged-startup-pane-master";
+        let token = "token-lagged-startup-pane-master";
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let candidates = test_candidates("lagged-startup-pane-master").unwrap();
+        let first = handle_register_with_app_scope(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            worker.into(),
+            token.into(),
+            "user approved lagged startup pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let mut binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+                },
+                &BindingId::new("binding-lagged-startup-pane-master").unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: binding.clone(),
+        }])
+        .unwrap();
+        binding.endpoint_generation += 4;
+        manager
+            .install_runtime(
+                &(
+                    app.as_str().to_owned(),
+                    binding.project_scope.as_str().to_owned(),
+                ),
+                runtime.clone(),
+                None,
+            );
+        manager.reconcile_same_pane_master_routes().unwrap();
+        let endpoint = binding.tmux_endpoint.as_ref().expect("same-pane binding has a pane route");
+        let reconciled = host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_unique_tmux_pane_route(endpoint)
+            .unwrap()
+            .clone();
+        assert_eq!(reconciled.endpoint_generation, binding.endpoint_generation - 4);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_publishes_a_missing_current_thread_route_from_the_project_owner() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let worker = "startup-thread-route-recovery";
+        let token = "token-startup-thread-route-recovery";
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let candidates = test_candidates("startup-thread-route-recovery").unwrap();
+        let registered = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let mut binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+                },
+                &BindingId::new("binding-startup-thread-route-recovery").unwrap(),
+            )
+            .unwrap()
+            .clone();
+        assert!(host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&binding.session_id.clone().unwrap(), &binding.native_thread_id.clone().unwrap())
+            .is_none());
+        manager
+            .install_runtime(
+                &(
+                    app.as_str().to_owned(),
+                    binding.project_scope.as_str().to_owned(),
+                ),
+                runtime.clone(),
+                None,
+            );
+
+        manager.reconcile_started_thread_routes().unwrap();
+
+        let published = host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&binding.session_id.clone().unwrap(), &binding.native_thread_id.clone().unwrap())
+            .unwrap()
+            .clone();
+        assert_eq!(published, binding);
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_a_lagged_current_thread_route_before_request_delivery() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let worker = "startup-stale-thread-route-recovery";
+        let token = "token-startup-stale-thread-route-recovery";
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let candidates = test_candidates("startup-stale-thread-route-recovery").unwrap();
+        let registered = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            worker.into(),
+            token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let mut binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &crate::server::global_state::RouteScope {
+                    app_scope_id: app.clone(),
+                    project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+                },
+                &BindingId::new("binding-startup-stale-thread-route-recovery").unwrap(),
+            )
+            .unwrap()
+            .clone();
+        let lagged_binding = RuntimeBinding::new_with_session(
+            binding.project_scope.clone(),
+            binding.app_scope_id.clone(),
+            binding.agent_id.clone(),
+            binding.runtime_id.clone(),
+            binding.binding_id.clone(),
+            1,
+            binding.session_id.clone(),
+            binding.native_thread_id.clone(),
+        )
+        .unwrap();
+        let mut current_binding = binding.clone();
+        current_binding.endpoint_generation = 4;
+        runtime
+            .commit_checked(&[Event::GlobalRuntimeBound {
+                binding: current_binding.clone(),
+            }])
+            .map_err(|error| error.to_string())
+            .unwrap();
+        binding = current_binding;
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: lagged_binding,
+        }])
+        .unwrap();
+        manager
+            .install_runtime(
+                &(
+                    app.as_str().to_owned(),
+                    binding.project_scope.as_str().to_owned(),
+                ),
+                runtime.clone(),
+                None,
+            );
+
+        manager.reconcile_started_thread_routes().unwrap();
+
+        let published = host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_current_thread_route(&binding.session_id.clone().unwrap(), &binding.native_thread_id.clone().unwrap())
+            .unwrap()
+            .clone();
+        assert_eq!(published, binding);
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }

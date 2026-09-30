@@ -1223,12 +1223,19 @@ fn archive_dead_peers(host_paths: &HostPaths, dead: &[Identity]) -> anyhow::Resu
     Ok(())
 }
 
-/// Find a persisted identity matching one current pane, session, or thread
-/// anchor. Project membership alone is not authorization; ambiguity, cross-
-/// project matches, and mismatched anchors fail closed.
+/// Resolve one persisted same-scope identity to the current process.
+///
+/// Recovery is single-source (persisted identities + current project scope +
+/// daemon liveness) and single-sink. Normal session/thread/pane drift adopts
+/// the unique durable candidate even when current anchors no longer match.
+/// Only a LIVE conflict denies recovery; provably dead records are archived.
+/// The explicit user override (selected_worker) may supersede a live
+/// conflict (and any ambiguous unknown set) before the selected durable
+/// identity is adopted, or clear the field for a fresh selected registration.
 fn identity_for_scope_rebind_at(
     host_paths: &HostPaths,
     scope: &Scope,
+    selected_worker: Option<&str>,
 ) -> anyhow::Result<ScopeRebindOutcome> {
     let project_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
@@ -1238,17 +1245,20 @@ fn identity_for_scope_rebind_at(
     } else {
         None
     };
-    if let Some(identity) =
-        identity_by_current_anchors_same_scope_at(host_paths, scope, candidate.as_ref())?
-    {
-        return Ok(ScopeRebindOutcome::Adopted(identity));
+    if selected_worker.is_none() {
+        if let Some(identity) =
+            identity_by_current_anchors_same_scope_at(host_paths, scope, candidate.as_ref())?
+        {
+            return Ok(ScopeRebindOutcome::Adopted(identity));
+        }
     }
     let identities_root = host_paths.state_root().join("identities");
     if !identities_root.is_dir() {
         return Ok(ScopeRebindOutcome::NoCandidate);
     }
-    let mut persisted = Vec::new();
     let mut dead = Vec::new();
+    let mut live = Vec::new();
+    let mut unknown = Vec::new();
     for entry in std::fs::read_dir(identities_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -1262,20 +1272,50 @@ fn identity_for_scope_rebind_at(
         }
         match persisted_peer_liveness(&identity) {
             PeerLiveness::Dead => dead.push(identity),
-            PeerLiveness::Live | PeerLiveness::Unknown => persisted.push(identity.worker_id),
+            PeerLiveness::Live => live.push(identity),
+            PeerLiveness::Unknown => unknown.push(identity),
         }
     }
-    match persisted.len() {
-        0 => {
-            // Every persisted peer in this project is provably gone, so the
-            // record is an orphan that would otherwise deadlock registration
-            // forever. Archive it and let the caller mint a fresh identity.
-            archive_dead_peers(host_paths, &dead)?;
-            Ok(ScopeRebindOutcome::NoCandidate)
-        }
+    if let Some(selected) = selected_worker {
+        // Explicit user override: retire live conflicts and ambiguous unknown
+        // records, then recover the named durable identity (or return
+        // NoCandidate so the caller may mint it fresh).
+        let selected_persisted = live
+            .iter()
+            .chain(unknown.iter())
+            .chain(dead.iter())
+            .find(|identity| identity.worker_id == selected)
+            .cloned();
+        return Ok(match selected_persisted {
+            Some(identity) => ScopeRebindOutcome::Adopted(identity),
+            None => ScopeRebindOutcome::NoCandidate,
+        });
+    }
+
+    // Provably dead same-scope records never block recovery.
+    archive_dead_peers(host_paths, &dead)?;
+
+    if !live.is_empty() {
+        let conflict_ids = live
+            .iter()
+            .map(|identity| identity.worker_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(ScopeRebindOutcome::Unproven(format!(
+            "persisted live peers exist in this project ({conflict_ids}); pass --worker to explicitly override the live conflict before recovery"
+        )));
+    }
+
+    match unknown.len() {
+        0 => Ok(ScopeRebindOutcome::NoCandidate),
+        1 => Ok(ScopeRebindOutcome::Adopted(unknown.remove(0))),
         _ => Ok(ScopeRebindOutcome::Unproven(format!(
-            "persisted peers exist in this project ({}) but none matches the current pane, Codex session, or Codex thread; a reachable or unverifiable peer cannot be displaced",
-            persisted.join(", ")
+            "persisted same-scope peers are ambiguous ({}); pass --worker to explicitly select one before recovery",
+            unknown
+                .iter()
+                .map(|identity| identity.worker_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
     }
 }
@@ -1313,7 +1353,10 @@ fn load_or_create_resolved_full_at(
             .ok()
             .filter(|value| !value.trim().is_empty())
     });
-    let appserver_worker = current_appserver_worker_id()?;
+    let project_scope = scope
+        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+        .project_scope_id;
+    let appserver_worker = current_appserver_worker_id(&project_scope)?;
     let candidate = tmux_candidate.as_ref().ok_or_else(|| {
         anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane, a valid App Server endpoint, or an explicit worker_id")
     });
@@ -1342,32 +1385,29 @@ fn load_or_create_resolved_full_at(
         }
         None => None,
     };
-    if let (Some(explicit_worker), Some(identity)) =
-        (explicit_worker.as_deref(), anchored_identity.as_ref())
-    {
-        if explicit_worker != identity.worker_id {
+    if let Some(identity) = anchored_identity {
+        if explicit_worker.as_ref().is_some_and(|worker| worker.as_str() != identity.worker_id) {
             anyhow::bail!(
-                "IDENTITY_RESTORE_CONFLICT: explicit worker {explicit_worker} conflicts with the current tmux/Codex anchors for {}",
+                "IDENTITY_RESTORE_CONFLICT: explicit worker {:?} conflicts with the current tmux/Codex anchors for {}",
+                explicit_worker,
                 identity.worker_id
             );
         }
+        return Ok(identity);
     }
-    if explicit_worker.is_none() {
-        if let Some(identity) = anchored_identity {
-            return Ok(identity);
-        }
-        if allow_scope_rebind && !retired_cross_project && !allow_fresh_registration {
-            match identity_for_scope_rebind_at(host_paths, scope)? {
-                ScopeRebindOutcome::Adopted(identity) => return Ok(identity),
-                ScopeRebindOutcome::NoCandidate => {}
-                ScopeRebindOutcome::Unproven(detail) => {
-                    anyhow::bail!("IDENTITY_REBIND_UNPROVEN: {detail}")
-                }
+
+    if allow_scope_rebind && !retired_cross_project {
+        match identity_for_scope_rebind_at(host_paths, scope, explicit_worker.as_deref())? {
+            ScopeRebindOutcome::Adopted(identity) => return Ok(identity),
+            ScopeRebindOutcome::NoCandidate => {}
+            ScopeRebindOutcome::Unproven(detail) => {
+                anyhow::bail!("IDENTITY_REBIND_UNPROVEN: {detail}")
             }
         }
-        if tmux_candidate.is_none() && appserver_worker.is_none() {
-            candidate?;
-        }
+    }
+
+    if tmux_candidate.is_none() && appserver_worker.is_none() {
+        candidate?;
     }
     let worker_id = explicit_worker
         .clone()
@@ -1404,7 +1444,7 @@ fn load_or_create_resolved_full_at(
     let ident = Identity {
         worker_id,
         token: hex(16),
-        project_scope: None,
+        project_scope: Some(project_scope),
         runtime: None,
         transport: None,
     };
@@ -1416,18 +1456,35 @@ fn load_or_create_resolved_full_at(
 /// when the project has no persisted peer identity yet. In an existing
 /// project, callers must explicitly supply `worker_id` when no prior runtime
 /// anchor matches so identity recovery remains fail-closed.
-fn current_appserver_worker_id() -> anyhow::Result<Option<String>> {
+/// Prefer an already-known Collab worker for this native Codex thread.
+///
+/// A Tmux-hosted Codex TUI and a Codex-native peer can share the same
+/// CODEX_THREAD_ID while living under different workers. Use the exact
+/// session/thread match first; otherwise preserve the legacy fallback used
+/// for first registration and explicit worker selection.
+fn current_appserver_worker_id(
+    project_scope: &crate::scope::ProjectScopeId,
+) -> anyhow::Result<Option<String>> {
     if std::env::var_os("CODEX_THREAD_ID").is_none()
         || std::env::var_os("CODEX_SESSION_ID").is_none()
     {
         return Ok(None);
     }
-    let Some(candidate) =
-        crate::client::adapters::candidate_from_env().map_err(anyhow::Error::msg)?
-    else {
+    let Ok(Some(candidate)) = crate::client::adapters::candidate_from_env() else {
         return Ok(None);
     };
-    SessionId::new(candidate.session_id)?;
+    let session_id = SessionId::new(candidate.session_id)?;
+    if let Ok(host_paths) = HostPaths::resolve() {
+        let mut matches = identities_by_runtime_key_at(
+            &host_paths,
+            session_id.as_str(),
+            candidate.thread_id.as_str(),
+        )?;
+        matches.retain(|identity| identity.project_scope.as_ref() == Some(project_scope));
+        if matches.len() == 1 {
+            return Ok(Some(matches.remove(0).worker_id));
+        }
+    }
     let mut encoded = String::with_capacity(candidate.thread_id.len() * 2);
     for byte in candidate.thread_id.as_bytes() {
         use std::fmt::Write as _;

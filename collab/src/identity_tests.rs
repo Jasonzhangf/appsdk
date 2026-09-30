@@ -413,14 +413,20 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
     // `collab context` recovers without agent judgement or manual steps.
     let recovered = load_or_create_resolved_at(&host_paths, &scope, None, true).unwrap();
     assert_eq!(recovered.worker_id, "codex-%5");
-    assert_eq!(recovered.project_scope, None);
+    assert_eq!(
+        recovered.project_scope.as_ref().map(|s| s.as_str()).as_deref(),
+        Some(canonical_test_scope(&scope).as_str())
+    );
 
     // The live identity path now holds a fresh current-project identity.
     let current = read_identity(&identity_path_at(&host_paths, "codex-%5").unwrap())
         .unwrap()
         .expect("current identity exists");
     assert_eq!(current.worker_id, "codex-%5");
-    assert_eq!(current.project_scope, None);
+    assert_eq!(
+        current.project_scope.as_ref().map(|s| s.as_str()).as_deref(),
+        Some(canonical_test_scope(&scope).as_str())
+    );
 
     // The stale cross-project peer was archived intact for audit.
     let archives = host_paths.state_root().join("archives");
@@ -456,7 +462,7 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
 }
 
 #[test]
-fn tmux_identity_rebind_refuses_unknown_pane_when_project_identity_exists() {
+fn tmux_identity_rebind_adopts_single_unknown_peer_without_anchor() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = test_root("ci-tmux-unknown");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -472,12 +478,12 @@ fn tmux_identity_rebind_refuses_unknown_pane_when_project_identity_exists() {
     );
     let previous_pane = std::env::var_os("TMUX_PANE");
     std::env::remove_var("TMUX_PANE");
-    let result = identity_for_scope_rebind_at(&host_paths, &scope);
+    let result = identity_for_scope_rebind_at(&host_paths, &scope, None);
     match previous_pane {
         Some(value) => std::env::set_var("TMUX_PANE", value),
         None => std::env::remove_var("TMUX_PANE"),
     }
-    assert!(matches!(result, Ok(ScopeRebindOutcome::Unproven(_))));
+    assert!(matches!(result, Ok(ScopeRebindOutcome::Adopted(identity)) if identity.worker_id == "known-peer"));
     assert_eq!(
         std::fs::read_dir(host_paths.state_root().join("identities"))
             .unwrap()
@@ -964,7 +970,7 @@ fn first_appserver_peer_uses_thread_identity_without_a_tmux_pane() {
 }
 
 #[test]
-fn desktop_peer_requires_explicit_worker_when_no_persisted_anchor_matches() {
+fn desktop_peer_rebinds_a_unique_prior_identity_when_no_anchor_matches() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = test_root("desktop-thread-without-pane");
     std::fs::create_dir_all(root.join(".agent-collab/runs")).unwrap();
@@ -997,19 +1003,12 @@ fn desktop_peer_requires_explicit_worker_when_no_persisted_anchor_matches() {
     std::env::remove_var("TMUX_PANE");
     std::env::remove_var("COLLAB_WORKER");
 
+    let recovered = identity_for_scope_rebind_at(&host_paths, &scope, None);
     assert!(matches!(
-        identity_for_scope_rebind_at(&host_paths, &scope),
-        Ok(ScopeRebindOutcome::Unproven(_))
+        recovered,
+        Ok(ScopeRebindOutcome::Adopted(identity)) if identity.worker_id == "prior-peer"
     ));
-    let init_error = load_or_create_for_init_at(&host_paths, &scope, None)
-        .unwrap_err()
-        .to_string();
-    assert!(init_error.contains("IDENTITY_REBIND_UNPROVEN"));
-    let result = load_or_create_for_init_at(
-        &host_paths,
-        &scope,
-        Some("codex-thread-6465736b746f702d746872656164".into()),
-    );
+    let result = load_or_create_for_init_at(&host_paths, &scope, None);
 
     match previous_thread {
         Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
@@ -1028,10 +1027,7 @@ fn desktop_peer_requires_explicit_worker_when_no_persisted_anchor_matches() {
         None => std::env::remove_var("COLLAB_WORKER"),
     }
     let identity = result.unwrap();
-    assert_eq!(
-        identity.worker_id,
-        "codex-thread-6465736b746f702d746872656164"
-    );
+    assert_eq!(identity.worker_id, "prior-peer");
     assert!(identity_path_at(&host_paths, &identity.worker_id)
         .unwrap()
         .is_file());

@@ -60,7 +60,7 @@
 
     fn register_and_subscribe(server: &Server, worker_id: &str) -> String {
         let now = now_ms();
-        let subscription_id = format!("sub-{worker_id}");
+        let subscription_id = super::mailbox::default_direct_message_id(worker_id);
         server.commit(&[
             Event::Registered {
                 worker: WorkerRec {
@@ -599,3 +599,56 @@
         ));
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn wake_rebinds_a_stale_default_direct_message_binding() {
+        let (mut server, root) = test_server();
+        let subscription_id = register_and_subscribe(&server, "recipient");
+        let now = now_ms();
+        {
+            let mut state = server.state.lock().unwrap();
+            state
+                .notification_subscriptions
+                .get_mut(&subscription_id)
+                .unwrap()
+                .target = "thread-stale".into();
+        }
+        queue_message(
+            &server,
+            "recipient",
+            &subscription_id,
+            "stale-default",
+            now - 120_001,
+        );
+        let observed = Arc::new(Mutex::new(false));
+        {
+            let observed = Arc::clone(&observed);
+            Arc::get_mut(&mut server)
+                .expect("unique test server")
+                .appserver_notification_sink = Arc::new(move |_, _, _, _, _, _mode| {
+                    *observed.lock().unwrap() = true;
+                    Ok(json!({"accepted": true}))
+                });
+        }
+
+        assert!(attempt_notification_with_at(
+            &server,
+            "stale-default",
+            &subscription_id,
+            now,
+        ));
+        assert!(*observed.lock().unwrap());
+        let state = server.state.lock().unwrap();
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].target,
+            "thread-recipient"
+        );
+        assert_eq!(
+            state.notification_subscriptions[&subscription_id].status,
+            "armed"
+        );
+        assert_eq!(state.wake_bindings["stale-default"], subscription_id);
+        assert_eq!(state.msgs["stale-default"].state, "pending");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+

@@ -187,6 +187,7 @@ impl ProjectRuntimeManager {
         for (key, root, storage_root) in pending {
             let _ = manager.ensure_runtime(&key, &root, &storage_root);
         }
+        manager.reconcile_started_thread_routes()?;
         manager.reconcile_same_pane_master_routes()?;
         Ok(manager)
     }
@@ -230,7 +231,6 @@ impl ProjectRuntimeManager {
                         selected_transport_for_worker(worker)
                             .is_some_and(|transport| transport.kind == TransportKind::Tmux)
                     })
-                    && state.global.lookup_unique_tmux_pane_route(endpoint) == Some(*binding)
             })
             .cloned()
             .collect()
@@ -284,16 +284,24 @@ impl ProjectRuntimeManager {
                         })?;
                     continue;
                 };
-                let valid_previous = old.same_principal(&binding)
-                    && old.endpoint_generation.checked_add(1)
-                        == Some(binding.endpoint_generation)
+                let is_same_durable_route = old.same_principal(&binding)
+                    && old.binding_id == binding.binding_id
+                    && old.runtime_id == binding.runtime_id
+                    && old.session_id == binding.session_id
+                    && old.native_thread_id == binding.native_thread_id
                     && old.tmux_endpoint.as_ref().is_some_and(|previous| {
                         crate::client::adapters::tmux::same_pane_route(previous, endpoint)
                     });
-                if !valid_previous {
+                if !is_same_durable_route {
                     return Err(format!(
                         "RECOVERY_RECONCILE_REQUIRED: host and project pane routes disagree for {}",
                         binding.agent_id
+                    ));
+                }
+                if old.endpoint_generation >= binding.endpoint_generation {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}",
+                        binding.binding_id, old.endpoint_generation, binding.endpoint_generation
                     ));
                 }
                 self.host
@@ -302,6 +310,83 @@ impl ProjectRuntimeManager {
             }
         }
         Ok(())
+    }
+
+    /// Replay-only publication of the authoritative project route.
+    ///
+    /// The project journal owns the latest runtime binding. The host journal
+    /// owns the addressable current-thread index. When those indices disagree
+    /// only because the host index was lagged, startup converges the host index
+    /// to the project owner instead of waiting for a later send to discover a
+    /// stale endpoint.
+    fn reconcile_started_thread_routes(&self) -> Result<(), String> {
+        let runtimes = self.runtimes();
+        let bindings = runtimes.into_iter().flat_map(|runtime| {
+            let bindings = runtime
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values().cloned())
+                .collect::<Vec<_>>();
+            bindings.into_iter()
+        });
+        for binding in bindings {
+            if binding.session_id.is_none() || binding.native_thread_id.is_none() {
+                continue;
+            }
+            let session_id = binding.session_id.clone().unwrap();
+            let native_thread_id = binding.native_thread_id.clone().unwrap();
+            let current = self
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_current_thread_route(&session_id, &native_thread_id)
+                .cloned();
+            if current.as_ref() == Some(&binding) {
+                continue;
+            }
+            let Some(old) = current else {
+                self.publish_current_thread_route(&binding)
+                    .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
+                continue;
+            };
+            let same_durable_route = old.same_principal(&binding)
+                && old.binding_id == binding.binding_id
+                && old.runtime_id == binding.runtime_id
+                && old.project_scope == binding.project_scope
+                && old.app_scope_id == binding.app_scope_id
+                && old.session_id == binding.session_id
+                && old.native_thread_id == binding.native_thread_id;
+            if !same_durable_route {
+                return Err(format!(
+                    "RECOVERY_RECONCILE_REQUIRED: current thread route for {} belongs to {}",
+                    native_thread_id, old.binding_id
+                ));
+            }
+            if old.endpoint_generation >= binding.endpoint_generation {
+                return Err(format!(
+                    "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}",
+                    binding.binding_id, old.endpoint_generation, binding.endpoint_generation
+                ));
+            }
+            self.publish_current_thread_route(&binding)
+                .map_err(|error| format!("RECOVERY_RECONCILE_REQUIRED: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn publish_current_thread_route(&self, binding: &RuntimeBinding) -> Result<(), String> {
+        self.host
+            .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            }])
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn restore_resident_route_record(
@@ -567,6 +652,8 @@ impl ProjectRuntimeManager {
         let pending = self.pending_same_pane_master_bindings(&runtime);
         let staged = pending.iter().any(|binding| {
             binding.same_principal(&old)
+                && old.binding_id == binding.binding_id
+                && old.runtime_id == binding.runtime_id
                 && old.endpoint_generation.checked_add(1) == Some(binding.endpoint_generation)
                 && binding.tmux_endpoint.as_ref().is_some_and(|new_endpoint|
                     crate::client::adapters::tmux::same_pane_route(new_endpoint, endpoint))

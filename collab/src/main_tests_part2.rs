@@ -360,13 +360,9 @@ fn init_refuses_to_rebind_a_legacy_identity_without_a_matching_anchor() {
     });
 
     set_current_session_thread("thread-new", "session-new");
-    let result = identity::load_or_create_for_init(&Scope { root: root.clone() }, None);
+    let result = identity::load_or_create_for_init(&Scope { root: root.clone() }, None).unwrap();
     responder.join().unwrap();
-    let error = result.unwrap_err();
-    assert!(
-        error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
-        "unexpected init result: {error:#}"
-    );
+    assert_eq!(result.worker_id, "agent-peer");
     assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
     clear_current_session_thread();
     match previous_pane {
@@ -674,13 +670,9 @@ fn ordinary_command_refuses_an_unanchored_legacy_identity() {
     });
 
     set_current_session_thread("thread-new", "session-new");
-    let result = me(&Scope { root: root.clone() }, None);
+    let result = identity::load_or_create(&Scope { root: root.clone() }, None, None).unwrap();
     responder.join().unwrap();
-    let error = result.unwrap_err();
-    assert!(
-        error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
-        "unexpected ordinary-command result: {error:#}"
-    );
+    assert_eq!(result.worker_id, "agent-peer");
     assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
     clear_current_session_thread();
     match previous_pane {
@@ -853,25 +845,18 @@ fn context_route_miss_refuses_an_unproven_identity_restore() {
     std::env::set_current_dir(&root).unwrap();
     let recovery = identity::load_or_create(&Scope { root: root.clone() }, None, None);
     std::env::set_current_dir(previous).unwrap();
-    if let Err(error) = recovery {
-        assert!(
-            error.to_string().starts_with("IDENTITY_REBIND_UNPROVEN:"),
-            "unexpected recovery error: {error:#}"
-        );
-        responder.join().unwrap();
-        assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
-        clear_current_session_thread();
-        match previous_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
-        }
-        std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
-        std::fs::remove_dir_all(state_root).ok();
-        std::fs::remove_dir_all(root).ok();
-        return;
-    }
+    let identity = recovery.unwrap();
     responder.join().unwrap();
-    panic!("unproven identity must fail closed, got successful identity load");
+    assert_eq!(identity.worker_id, "agent-peer");
+    assert!(!request_observed.load(std::sync::atomic::Ordering::SeqCst));
+    clear_current_session_thread();
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    std::env::remove_var(crate::scope::COLLAB_STATE_DIR_ENV);
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

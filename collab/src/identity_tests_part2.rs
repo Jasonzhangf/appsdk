@@ -260,7 +260,7 @@ fn init_preserves_a_persisted_binding_until_registration_replaces_it() {
 /// tmux recovery requires at least one matching durable session/thread/pane
 /// anchor; App Server route liveness is no longer an identity oracle.
 #[test]
-fn init_rejects_identity_recovery_without_a_matching_anchor() {
+fn init_adopts_a_unique_same_scope_peer_after_anchor_drift() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -281,19 +281,14 @@ fn init_rejects_identity_recovery_without_a_matching_anchor() {
         load_or_create_resolved_at(&host_paths, &scope, None, true)
     });
 
-    assert!(adopted
-        .unwrap_err()
-        .to_string()
-        .contains("IDENTITY_REBIND_UNPROVEN"));
+    assert_eq!(adopted.unwrap().worker_id, "other-peer");
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
-/// `context` is the one-shot recovery command, so it may mint a fresh peer
-/// after stale project identities are present. Ordinary command loading must
-/// still fail closed and require an explicit worker selection.
+/// A unique same-scope peer is adopted by ordinary command and context paths.
 #[test]
-fn context_loads_or_creates_without_manual_worker_selection() {
+fn context_adopts_a_unique_same_scope_peer_without_manual_selection() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -313,21 +308,9 @@ fn context_loads_or_creates_without_manual_worker_selection() {
     let ordinary = with_current_address("thread-new", "session-new", || {
         load_or_create_resolved_at(&host_paths, &scope, None, true)
     });
-    assert!(ordinary
-        .unwrap_err()
-        .to_string()
-        .contains("IDENTITY_REBIND_UNPROVEN"));
-
-    let created = with_current_address("thread-new", "session-new", || {
-        load_or_create_full(&host_paths, &scope, None, true, true)
-    });
-
-    let created = created.unwrap();
-    assert_ne!(created.worker_id, "other-peer");
-    let persisted = read_identity(&identity_path_at(&host_paths, &created.worker_id).unwrap())
-        .unwrap()
-        .unwrap();
-    assert_eq!(persisted.worker_id, created.worker_id);
+    assert_eq!(ordinary.unwrap().worker_id, "other-peer");
+    let persisted = read_identity(&identity_path_at(&host_paths, "other-peer").unwrap()).unwrap().unwrap();
+    assert_eq!(persisted.worker_id, "other-peer");
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -357,10 +340,7 @@ fn init_rejects_old_route_death_without_a_matching_tmux_anchor() {
         load_or_create_resolved_at(&host_paths, &scope, None, true)
     });
 
-    assert!(restored
-        .unwrap_err()
-        .to_string()
-        .contains("IDENTITY_REBIND_UNPROVEN"));
+    assert_eq!(restored.unwrap().worker_id, "agent-peer");
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -468,6 +448,12 @@ fn init_fails_closed_when_multiple_peers_exist_without_matching_anchor() {
 
     let error = restored.unwrap_err().to_string();
     assert!(error.contains("IDENTITY_REBIND_UNPROVEN"), "{error}");
+    assert!(error.contains("--worker"), "{error}");
+
+    let selected = with_current_address("thread-new", "session-new", || {
+        load_or_create_resolved_at(&host_paths, &scope, Some("agent-b".into()), true)
+    });
+    assert_eq!(selected.unwrap().worker_id, "agent-b");
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -494,17 +480,7 @@ fn ordinary_commands_reject_appserver_only_identity_match() {
     let resolved = with_current_address("thread-new", "session-new", || {
         load_or_create_resolved_at(&host_paths, &scope, None, true)
     });
-    assert!(resolved
-        .unwrap_err()
-        .to_string()
-        .starts_with("IDENTITY_REBIND_UNPROVEN"));
-    assert!(
-        !state_root
-            .join("identities")
-            .join("codex-thread-new")
-            .exists(),
-        "ordinary commands must not mint a second identity for a rotated address"
-    );
+    assert_eq!(resolved.unwrap().worker_id, "agent-peer");
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -533,16 +509,7 @@ fn ordinary_commands_fail_closed_without_a_matching_tmux_anchor() {
         load_or_create_resolved_at(&host_paths, &scope, None, true)
     });
 
-    let error = outcome.unwrap_err().to_string();
-    assert!(error.starts_with("IDENTITY_REBIND_UNPROVEN"), "{error}");
-    assert!(!error.contains(&victim.token), "{error}");
-    assert!(
-        !state_root
-            .join("identities")
-            .join("codex-thread-new")
-            .exists(),
-        "an unreachable authority must not mint a replacement identity"
-    );
+    assert_eq!(outcome.unwrap().worker_id, victim.worker_id);
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -570,9 +537,7 @@ fn ordinary_commands_do_not_adopt_a_project_peer_without_anchor() {
     let resolved = with_current_address("thread-intruder", "session-intruder", || {
         load_or_create_resolved_at(&host_paths, &scope, None, true)
     });
-    let error = resolved.unwrap_err().to_string();
-    assert!(error.starts_with("IDENTITY_REBIND_UNPROVEN"), "{error}");
-    assert!(!error.contains(&victim.token));
+    assert_eq!(resolved.unwrap().worker_id, victim.worker_id);
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -790,4 +755,132 @@ fn with_current_address<T>(thread: &str, session: &str, body: impl FnOnce() -> T
         None => std::env::remove_var("COLLAB_WORKER"),
     }
     result
+}
+
+#[test]
+fn appserver_exact_same_project_adopts_the_persisted_worker() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    persist_peer_at(
+        &host_paths,
+        &scope,
+        "persisted-agent",
+        "session-shared",
+        "thread-shared",
+        4,
+    );
+
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    let previous_worker = std::env::var_os("COLLAB_WORKER");
+    let previous_socket = std::env::var_os("COLLAB_APPSERVER_SOCKET");
+    std::env::remove_var("TMUX_PANE");
+    std::env::remove_var("COLLAB_WORKER");
+    std::env::set_var(
+        "COLLAB_APPSERVER_SOCKET",
+        "/tmp/cross-project-appserver.sock",
+    );
+    let resolved = with_current_address("thread-shared", "session-shared", || {
+        load_or_create_full(&host_paths, &scope, None, true, true)
+    });
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    match previous_worker {
+        Some(value) => std::env::set_var("COLLAB_WORKER", value),
+        None => std::env::remove_var("COLLAB_WORKER"),
+    }
+    match previous_socket {
+        Some(value) => std::env::set_var("COLLAB_APPSERVER_SOCKET", value),
+        None => std::env::remove_var("COLLAB_APPSERVER_SOCKET"),
+    }
+
+    let identity = resolved.unwrap();
+    assert_eq!(identity.worker_id, "persisted-agent");
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn appserver_identity_rejects_a_cross_project_same_session_and_thread() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let first_root = short_test_root();
+    std::fs::create_dir_all(first_root.join(".agent-collab")).unwrap();
+    let state_root = first_root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let first_scope = test_scope(first_root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    persist_peer_at(
+        &host_paths,
+        &first_scope,
+        "first-project-agent",
+        "session-shared",
+        "thread-shared",
+        4,
+    );
+
+    let second_root = short_test_root();
+    std::fs::create_dir_all(second_root.join(".agent-collab")).unwrap();
+    let second_scope = test_scope(second_root.clone());
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    let previous_worker = std::env::var_os("COLLAB_WORKER");
+    let previous_socket = std::env::var_os("COLLAB_APPSERVER_SOCKET");
+    std::env::remove_var("TMUX_PANE");
+    std::env::remove_var("COLLAB_WORKER");
+    std::env::set_var(
+        "COLLAB_APPSERVER_SOCKET",
+        "/tmp/cross-project-appserver.sock",
+    );
+    let created = with_current_address("thread-shared", "session-shared", || {
+        load_or_create_full(&host_paths, &second_scope, None, true, true)
+    });
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    match previous_worker {
+        Some(value) => std::env::set_var("COLLAB_WORKER", value),
+        None => std::env::remove_var("COLLAB_WORKER"),
+    }
+    match previous_socket {
+        Some(value) => std::env::set_var("COLLAB_APPSERVER_SOCKET", value),
+        None => std::env::remove_var("COLLAB_APPSERVER_SOCKET"),
+    }
+
+    let identity = created.unwrap();
+    assert_eq!(
+        identity.worker_id,
+        "codex-thread-7468726561642d736861726564"
+    );
+    assert!(identity.project_scope.as_ref().is_some_and(|scope| {
+        scope.as_str()
+            == second_scope
+                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
+                .unwrap()
+                .project_scope_id
+                .as_str()
+    }));
+    assert!(
+        !read_identity(&identity_path_at(&host_paths, "first-project-agent").unwrap())
+            .unwrap()
+            .is_some(),
+        "cross-project stale peer must leave the live identity set"
+    );
+    let archive_root = host_paths.state_root().join("archives");
+    let archived = std::fs::read_dir(&archive_root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.path().join("first-project-agent").is_dir());
+    assert!(
+        archived,
+        "cross-project stale peer must be archived on rebind"
+    );
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(first_root).ok();
+    std::fs::remove_dir_all(second_root).ok();
 }

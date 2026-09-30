@@ -231,7 +231,6 @@ impl ProjectRuntimeManager {
                         selected_transport_for_worker(worker)
                             .is_some_and(|transport| transport.kind == TransportKind::Tmux)
                     })
-                    && state.global.lookup_unique_tmux_pane_route(endpoint) == Some(*binding)
             })
             .cloned()
             .collect()
@@ -293,10 +292,16 @@ impl ProjectRuntimeManager {
                     && old.tmux_endpoint.as_ref().is_some_and(|previous| {
                         crate::client::adapters::tmux::same_pane_route(previous, endpoint)
                     });
-                if !is_same_durable_route || old.endpoint_generation >= binding.endpoint_generation {
+                if !is_same_durable_route {
                     return Err(format!(
                         "RECOVERY_RECONCILE_REQUIRED: host and project pane routes disagree for {}",
                         binding.agent_id
+                    ));
+                }
+                if old.endpoint_generation >= binding.endpoint_generation {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: host route for {} is at generation {} and project route is at generation {}",
+                        binding.binding_id, old.endpoint_generation, binding.endpoint_generation
                     ));
                 }
                 self.host
@@ -647,6 +652,8 @@ impl ProjectRuntimeManager {
         let pending = self.pending_same_pane_master_bindings(&runtime);
         let staged = pending.iter().any(|binding| {
             binding.same_principal(&old)
+                && old.binding_id == binding.binding_id
+                && old.runtime_id == binding.runtime_id
                 && old.endpoint_generation.checked_add(1) == Some(binding.endpoint_generation)
                 && binding.tmux_endpoint.as_ref().is_some_and(|new_endpoint|
                     crate::client::adapters::tmux::same_pane_route(new_endpoint, endpoint))

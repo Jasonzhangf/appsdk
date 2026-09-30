@@ -913,7 +913,6 @@
             Some(new_candidates.clone()),
         );
         assert!(second.ok, "{second:?}");
-        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
         manager
             .fail_current_thread_route_publish
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -927,6 +926,7 @@
             &previous.3,
         );
         assert!(failed.is_err());
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
         assert_eq!(
             runtime
                 .state
@@ -937,6 +937,9 @@
                 .unwrap(),
             &old,
         );
+        manager
+            .fail_current_thread_route_publish
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let retry = handle_register_with_app_scope_unfinalized(
             &runtime,
             worker.into(),

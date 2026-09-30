@@ -1441,7 +1441,7 @@ fn reregistration_replaces_a_stale_default_target_with_current_tmux_route() {
 }
 
 #[test]
-fn explicit_send_reports_when_subscription_appserver_endpoint_mismatches() {
+fn explicit_send_repairs_stale_default_direct_message_before_wake() {
     let (server, root) = test_server();
     register(&server, "sender", "%sender");
     register(&server, "recipient", "%recipient");
@@ -1464,31 +1464,27 @@ fn explicit_send_reports_when_subscription_appserver_endpoint_mismatches() {
         None,
         "immediate".into(),
     );
-    assert!(!response.ok);
-    assert_eq!(
-        response.error.as_deref(),
-        Some(
-            "APPSERVER_NOTIFICATION_REJECTED: subscription does not match the selected appserver transport",
-        )
-    );
-    assert_eq!(response.data["notification"], "subscribed-not-sent");
-    assert_eq!(
-        response.data["notification_error"],
-        "subscription does not match the selected appserver transport"
-    );
+    assert!(response.ok);
+    assert_eq!(response.data["notification"], "appserver-input-submitted");
     let message_id = response.data["msg_id"].as_str().unwrap();
     {
         let state = server.state.lock().unwrap();
-        let failure = &state.notification_delivery_failures[message_id];
-        assert_eq!(failure.operation, "notification.not_attempted");
         assert_eq!(
-            failure.error,
-            "subscription does not match the selected appserver transport"
+            state.notification_subscriptions["sub-default-direct-message-recipient"].target,
+            "mismatched-thread-recipient"
         );
+        assert_eq!(
+            state.notification_subscriptions["sub-default-direct-message-recipient"].status,
+            "armed"
+        );
+        assert_eq!(state.msgs[message_id].wake_attempt_count, 1);
     }
     assert_eq!(
-        replay(&root).unwrap().notification_delivery_failures[message_id].error,
-        "subscription does not match the selected appserver transport"
+        replay(&root)
+            .unwrap()
+            .notification_subscriptions["sub-default-direct-message-recipient"]
+            .target,
+        "mismatched-thread-recipient"
     );
     std::fs::remove_dir_all(root).ok();
 }

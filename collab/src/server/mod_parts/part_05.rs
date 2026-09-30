@@ -343,6 +343,7 @@ fn default_direct_message_events(
 ) -> Vec<Event> {
     let mut events = Vec::new();
     let default_id = default_direct_message_id(worker_id);
+    let mut pending_direct_message_ids = std::collections::BTreeSet::new();
     // Only an explicit owner unsubscribe is a durable stop for the
     // system-owned default lease. Any other `cancelled` state (for example a
     // legacy automatic cancel, or an untyped status write) is recoverable and
@@ -357,6 +358,25 @@ fn default_direct_message_events(
         })
     {
         return events;
+    }
+    for message in state.msgs.values() {
+        if message.to != worker_id || message.mtype != "notify" || message.state != "pending" {
+            continue;
+        }
+        let Some(binding_id) = state.wake_bindings.get(&message.id) else {
+            continue;
+        };
+        let Some(binding) = state.notification_subscriptions.get(binding_id) else {
+            continue;
+        };
+        if binding.worker_id == worker_id
+            && binding.event == "direct-message"
+            && binding.status == "armed"
+            && binding.expires_ms > now
+            && binding.id != default_id
+        {
+            pending_direct_message_ids.insert(message.id.clone());
+        }
     }
     let refresh_after_ms = DEFAULT_DIRECT_MESSAGE_TTL_SECONDS as i64 * 1000 / 2;
     let mut current_is_fresh = false;
@@ -378,6 +398,9 @@ fn default_direct_message_events(
             status: "rebound".into(),
             updated_ms: now,
         });
+        if let Some(message_id) = state.wake_bindings.get(&subscription.id) {
+            pending_direct_message_ids.insert(message_id.clone());
+        }
     }
     if current_is_fresh {
         if refresh_due {
@@ -386,7 +409,7 @@ fn default_direct_message_events(
             };
             events.push(Event::NotificationSubscribed {
                 subscription: NotificationSubscription {
-                    id: default_id,
+                    id: default_id.clone(),
                     worker_id: worker_id.into(),
                     event: "direct-message".into(),
                     subject: None,
@@ -422,7 +445,7 @@ fn default_direct_message_events(
         });
         events.push(Event::NotificationSubscribed {
             subscription: NotificationSubscription {
-                id: default_id,
+                id: default_id.clone(),
                 worker_id: worker_id.into(),
                 event: "direct-message".into(),
                 subject: None,
@@ -440,6 +463,12 @@ fn default_direct_message_events(
                 status_reason: None,
             },
         });
+        for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
+            events.push(Event::WakeBound {
+                message_id,
+                subscription_id: default_id.clone(),
+            });
+        }
         return events;
     }
     let Some(thread_id) = transport.thread_id.as_deref() else {
@@ -447,7 +476,7 @@ fn default_direct_message_events(
     };
     events.push(Event::NotificationSubscribed {
         subscription: NotificationSubscription {
-            id: default_id,
+            id: default_id.clone(),
             worker_id: worker_id.into(),
             event: "direct-message".into(),
             subject: None,
@@ -465,6 +494,12 @@ fn default_direct_message_events(
             status_reason: None,
         },
     });
+    for message_id in std::mem::take(&mut pending_direct_message_ids).into_iter() {
+        events.push(Event::WakeBound {
+            message_id,
+            subscription_id: default_id.clone(),
+        });
+    }
     events
 }
 
@@ -844,7 +879,7 @@ fn attempt_notification_detailed_with_mode_at(
     if !server.config.notifications.enabled {
         return NotificationAttempt::NotAttempted("notifications are disabled".into());
     }
-    let (recipient, transport, source_thread_id, delay, explicit) = {
+    let (recipient, transport, source_thread_id, delay, explicit, binding_subscription_id) = {
         let mut state = server.state.lock().unwrap();
         let Some(seed) = state.msgs.get(message_id) else {
             return NotificationAttempt::NotAttempted("durable message not found".into());
@@ -878,36 +913,6 @@ fn attempt_notification_detailed_with_mode_at(
                 "registered worker has no server-selected transport".into(),
             );
         };
-        if !subscription_matches_transport(subscription, &transport) {
-            server.commit_locked(
-                &mut state,
-                &[
-                    Event::NotificationStatus {
-                        subscription_id: subscription_id.to_string(),
-                        status: "transport-lost".into(),
-                        updated_ms: now,
-                    },
-                    Event::NotificationDeliveryFailed {
-                        message_id: message_id.to_string(),
-                        operation: "notification.not_attempted".into(),
-                        error: format!(
-                            "subscription does not match the selected {method} transport",
-                            method = notification_transport_method(&transport)
-                        )
-                        .into(),
-                        failed_ms: now,
-                        retryable: true,
-                    },
-                ],
-            );
-            return NotificationAttempt::NotAttempted(
-                format!(
-                    "subscription does not match the selected {method} transport",
-                    method = notification_transport_method(&transport)
-                )
-                .into(),
-            );
-        }
         let source_thread_id = state
             .delivery_source_threads
             .get(message_id)
@@ -920,12 +925,54 @@ fn attempt_notification_detailed_with_mode_at(
                     .and_then(|transport| transport.thread_id)
             });
         let explicit = is_explicit_notification(&state, seed);
-        (recipient, transport, source_thread_id, delay, explicit)
+        let default_id = default_direct_message_id(&recipient);
+        let mut binding_subscription_id = subscription.id.clone();
+        let is_default_direct_message =
+            binding_subscription_id == default_id && subscription.event == "direct-message";
+        let should_repair_default =
+            is_default_direct_message && !subscription_matches_transport(subscription, &transport);
+        if should_repair_default {
+            let repair_events = default_direct_message_events(&state, &recipient, &transport, now);
+            if repair_events.is_empty() {
+                let error = format!(
+                    "subscription does not match the selected {method} transport",
+                    method = notification_transport_method(&transport)
+                );
+                server.commit_locked(
+                    &mut state,
+                    &[
+                        Event::NotificationStatus {
+                            subscription_id: subscription_id.to_string(),
+                            status: "transport-lost".into(),
+                            updated_ms: now,
+                        },
+                        Event::NotificationDeliveryFailed {
+                            message_id: message_id.to_string(),
+                            operation: "notification.not_attempted".into(),
+                            error: error.clone().into(),
+                            failed_ms: now,
+                            retryable: true,
+                        },
+                    ],
+                );
+                return NotificationAttempt::NotAttempted(error);
+            }
+            server.commit_locked(&mut state, &repair_events);
+            binding_subscription_id.clone_from(&default_id);
+        }
+        (
+            recipient,
+            transport,
+            source_thread_id,
+            delay,
+            explicit,
+            binding_subscription_id,
+        )
     };
     let attempt = attempt_tmux_notification_with_at(
         server,
         message_id,
-        subscription_id,
+        &binding_subscription_id,
         &recipient,
         &transport,
         source_thread_id.as_deref(),

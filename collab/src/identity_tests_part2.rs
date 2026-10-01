@@ -1080,6 +1080,49 @@ fn identity_anchor_conflict_checks_overlap_not_project_residency() {
     assert!(identity_anchor_conflicts_with_candidate(&same_pane, Some(&candidate("%902"))));
 }
 
+#[test]
+fn appserver_pane_recovery_anchor_does_not_hide_a_distinct_live_thread() {
+    let pane = tmux_candidate(Some("old-session"), Some("old-thread"), "%910");
+    let base = Identity {
+        worker_id: "appserver-with-pane-anchor".into(),
+        token: "appserver-with-pane-anchor-token".into(),
+        project_scope: None,
+        runtime: Some(RuntimeIdentity::cli_adapter("appserver-with-pane-anchor").unwrap()),
+        transport: Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("old-session".into()),
+            thread_id: Some("old-thread".into()),
+            tmux_endpoint: Some(pane.endpoint.clone()),
+            capabilities: vec![],
+            self_check: "ok".into(),
+        }),
+    };
+
+    // A different App Server thread in the shared pane is a different peer: the
+    // pane is only this peer's recovery anchor, not its identity.
+    let other_thread = tmux_candidate(Some("new-session"), Some("new-thread"), "%910");
+    assert!(!identity_anchor_conflicts_with_candidate(
+        &base,
+        Some(&other_thread)
+    ));
+
+    // The same thread still overlaps wherever it runs.
+    let same_thread = tmux_candidate(Some("new-session"), Some("old-thread"), "%911");
+    assert!(identity_anchor_conflicts_with_candidate(
+        &base,
+        Some(&same_thread)
+    ));
+
+    // A pane-only candidate carries no Codex IDs, so the recovery anchor decides.
+    let pane_only = tmux_candidate(None, None, "%910");
+    assert!(identity_anchor_conflicts_with_candidate(
+        &base,
+        Some(&pane_only)
+    ));
+}
+
 /// A short temp project root: the fake route-authority socket lives under the
 /// state root, so the combined path must stay under `sockaddr_un`'s limit.
 fn short_test_root() -> PathBuf {

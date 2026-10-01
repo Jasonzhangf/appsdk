@@ -1304,6 +1304,12 @@ fn choose_anchor_peer(
 /// overlaps this anchor can block recovery; a live peer on an unrelated pane
 /// or thread must not gate a fresh pane or an anchor-drift recovery.
 ///
+/// A tmux peer is addressed by its pane, but an App Server peer is addressed by
+/// its Codex session/thread and may keep a tmux recovery anchor. The pane is
+/// therefore only an anchor for a tmux transport, or when the current process
+/// carries no Codex IDs and the pane is its only anchor; otherwise a shared
+/// pane would hide a distinct live App Server thread.
+///
 /// Since a non-live overlap may be a peer we could not reach, this predicate
 /// reports candidate overlap only; the caller pairs it with liveness to decide
 /// whether the overlap is a blocking conflict.
@@ -1311,18 +1317,6 @@ fn identity_anchor_conflicts_with_candidate(
     identity: &Identity,
     candidate: Option<&crate::proto::TmuxCandidate>,
 ) -> bool {
-    if let Some(candidate) = candidate {
-        if let Some(endpoint) = identity
-            .transport
-            .as_ref()
-            .and_then(|transport| transport.tmux_endpoint.as_ref())
-        {
-            if crate::client::adapters::tmux::same_pane_route(endpoint, &candidate.endpoint) {
-                return true;
-            }
-        }
-    }
-
     let current_session = candidate
         .and_then(|candidate| candidate.endpoint.codex_session_id.clone())
         .or_else(|| std::env::var("CODEX_SESSION_ID").ok());
@@ -1345,6 +1339,20 @@ fn identity_anchor_conflicts_with_candidate(
                 .and_then(|runtime| runtime.native_thread_id.as_ref())
                 .map(|thread| thread.as_str())
         });
+
+    let pane_is_anchor = transport.is_some_and(|transport| transport.kind == TransportKind::Tmux)
+        || (current_session.is_none() && current_thread.is_none());
+    if pane_is_anchor {
+        if let Some(candidate) = candidate {
+            if let Some(endpoint) = transport.and_then(|transport| transport.tmux_endpoint.as_ref())
+            {
+                if crate::client::adapters::tmux::same_pane_route(endpoint, &candidate.endpoint) {
+                    return true;
+                }
+            }
+        }
+    }
+
     if let (Some(left), Some(right)) = (persisted_session, current_session.as_deref()) {
         if left == right {
             return true;

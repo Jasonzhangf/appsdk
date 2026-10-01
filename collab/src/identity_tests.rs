@@ -336,19 +336,19 @@ fn tmux_identity_recovery_rejects_anchor_conflict_and_cross_project() {
         None,
         None,
     );
-    // Two App Server records claim the same anchor and their liveness cannot be
-    // established (the probe cannot reach the fake endpoint), so recovery is
-    // fail-closed instead of silently adopting one credential over the other.
-    let ambiguous = identity_by_tmux_anchor_at(
+    // Two App Server records claim the same anchor but neither is live (the
+    // probe cannot reach the fake endpoint), so this is the peer's own drifted
+    // registration: recovery adopts one deterministically instead of failing.
+    let adopted = identity_by_tmux_anchor_at(
         &host_paths,
         &scope,
         &tmux_candidate(Some("session-duplicate"), None, "%6"),
     )
-    .unwrap_err()
-    .to_string();
+    .unwrap()
+    .expect("non-live anchor duplicates must auto-adopt");
     assert!(
-        ambiguous.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{ambiguous}"
+        adopted.worker_id == "duplicate-peer-a" || adopted.worker_id == "duplicate-peer-b",
+        "{adopted:?}"
     );
     std::fs::remove_dir_all(root).ok();
 }

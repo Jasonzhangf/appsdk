@@ -427,12 +427,11 @@ fn explicit_worker_selection_rejects_conflicting_identity_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// Multiple persisted peers that cannot be proven dead must not be silently
-/// replaced by a fresh identity (which would orphan them) and must not be
-/// claimed by an unrelated pane. Recovery fails closed with an explicit
-/// `--worker` override instead of minting a new credential.
+/// Several persisted peers that are not live must not block recovery: none is a
+/// live conflict, so the current pane adopts the newest one instead of failing
+/// closed with a manual `--worker` requirement.
 #[test]
-fn multiple_non_dead_peers_fail_closed_without_anchor_evidence() {
+fn multiple_non_dead_peers_auto_adopt_without_anchor_evidence() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -441,34 +440,32 @@ fn multiple_non_dead_peers_fail_closed_without_anchor_evidence() {
     let scope = test_scope(root.clone());
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     persist_peer_at(&host_paths, &scope, "agent-a", "session-a", "thread-a", 1);
+    std::thread::sleep(std::time::Duration::from_millis(20));
     persist_peer_at(&host_paths, &scope, "agent-b", "session-b", "thread-b", 1);
 
-    // Two records on unrelated anchors cannot be proven dead, so recovery must
-    // not mint a fresh credential over them without explicit selection.
+    // No live peer claims this anchor, so recovery adopts the most recently
+    // registered non-live record instead of erroring.
     let outcome = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
     match outcome {
-        ScopeRebindOutcome::Unproven(detail) => {
-            assert!(detail.contains("agent-a") && detail.contains("agent-b"), "{detail}");
-        }
-        other => panic!("multiple non-dead peers must fail closed: {other:?}"),
+        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-b"),
+        other => panic!("non-live peers must auto-adopt: {other:?}"),
     }
 
     // The explicit --worker override still selects the named durable identity.
-    let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-b")).unwrap();
+    let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-a")).unwrap();
     match selected {
-        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-b"),
+        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-a"),
         other => panic!("--worker override must adopt the named identity: {other:?}"),
     }
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
 
-/// When several records claim the same drifted anchor and none can be proven
-/// dead, recovery must stay fail-closed rather than silently adopting one
-/// credential over its cold/unproven peer. The explicit `--worker` override is
-/// the single escape hatch.
+/// When several records claim the same drifted anchor and none is live, they
+/// are this peer's own registrations: recovery adopts one deterministically and
+/// the explicit `--worker` override can still pick a specific one.
 #[test]
-fn overlapping_unproven_peers_fail_closed_and_require_explicit_worker() {
+fn overlapping_non_live_peers_auto_adopt_and_keep_explicit_worker() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -477,28 +474,32 @@ fn overlapping_unproven_peers_fail_closed_and_require_explicit_worker() {
     let scope = test_scope(root.clone());
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
     persist_peer_at(&host_paths, &scope, "agent-a", "session-x", "thread-x", 1);
+    std::thread::sleep(std::time::Duration::from_millis(20));
     persist_peer_at(&host_paths, &scope, "agent-b", "session-x", "thread-x", 3);
 
-    let ambiguous = identity_by_tmux_anchor_at(
+    let adopted = identity_by_tmux_anchor_at(
         &host_paths,
         &scope,
         &tmux_candidate(Some("session-x"), Some("thread-x"), "%7"),
     )
-    .unwrap_err()
-    .to_string();
+    .unwrap()
+    .expect("non-live anchor duplicates must auto-adopt");
     assert!(
-        ambiguous.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{ambiguous}"
+        adopted.worker_id == "agent-a" || adopted.worker_id == "agent-b",
+        "{adopted:?}"
     );
 
     let rebind = with_current_address("thread-x", "session-x", || {
         identity_for_scope_rebind_at(&host_paths, &scope, None)
     });
-    let detail = rebind.unwrap_err().to_string();
-    assert!(
-        detail.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{detail}"
-    );
+    match rebind.unwrap() {
+        ScopeRebindOutcome::Adopted(identity) => assert!(
+            identity.worker_id == "agent-a" || identity.worker_id == "agent-b",
+            "{}",
+            identity.worker_id
+        ),
+        other => panic!("non-live overlapping peers must auto-adopt: {other:?}"),
+    }
 
     let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-b")).unwrap();
     match selected {
@@ -554,8 +555,8 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
     .unwrap();
     assert_eq!(chosen.worker_id, "current-older");
 
-    // Live, cold, or unproven duplicates block; only a provably dead set is
-    // adopted.
+    // Only a *live* duplicate blocks; a cold or unproven one is not live, so
+    // the anchor resolves deterministically instead of failing closed.
     let live_blocks = choose_anchor_peer(
         &host_paths,
         None,
@@ -574,7 +575,7 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
         },
     );
     assert!(live_blocks.is_err());
-    let unknown_blocks = choose_anchor_peer(
+    let unknown_adopts = choose_anchor_peer(
         &host_paths,
         None,
         &scope,
@@ -590,9 +591,10 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
                 PeerLiveness::Dead
             }
         },
-    );
-    assert!(unknown_blocks.is_err());
-    let cold_blocks = choose_anchor_peer(
+    )
+    .unwrap();
+    assert_eq!(unknown_adopts.worker_id, "cold-peer");
+    let cold_adopts = choose_anchor_peer(
         &host_paths,
         None,
         &scope,
@@ -608,8 +610,9 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
                 PeerLiveness::Dead
             }
         },
-    );
-    assert!(cold_blocks.is_err());
+    )
+    .unwrap();
+    assert_eq!(cold_adopts.worker_id, "cold-peer");
 
     // A provably dead set is adopted by durable recency, not the higher
     // per-binding generation of the older record.

@@ -1189,7 +1189,8 @@ fn persisted_peer_liveness(identity: &Identity) -> PeerLiveness {
 
 /// Only an explicitly dead signal retires the record. A `notLoaded` thread is
 /// cold, not gone: the AppServer contract can resume it through `turn/start`,
-/// so it must keep blocking rebind instead of being archived.
+/// so it is classified as non-live and stays recoverable instead of being
+/// archived.
 fn classify_thread_status(raw: &serde_json::Value) -> PeerLiveness {
     match raw
         .pointer("/thread/status/type")

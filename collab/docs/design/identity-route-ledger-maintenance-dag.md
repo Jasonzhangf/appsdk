@@ -182,7 +182,7 @@ Required tests:
 - host/project adjacent split-journal mismatch reconciles through the route registry and emits a receipt.
 - non-adjacent or cross-worker mismatch becomes `repair_required`, no mutation.
 - two stale peers with one live peer block fresh identity creation and do not archive the live peer.
-- two cold/unproven peers on the same anchor stay ambiguous and require `--worker`; neither is adopted or archived.
+- two cold/unproven peers on the same anchor are both non-live, so neither blocks: the current pane adopts the deterministic non-live winner (anchor overlap, then pane-derived id, then durable recency) and archives nothing.
 - scope partition prefers the current-scope record over a newer foreign record on the same anchor.
 - among provably dead duplicates the durable recency order wins over a larger per-binding generation.
 - all peers provably dead permits retirement, then fresh registration.

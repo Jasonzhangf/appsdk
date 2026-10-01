@@ -349,24 +349,26 @@ fn wait_for_server_with_budgets(
     start_wait: Duration,
     starting_wait: Duration,
 ) -> anyhow::Result<()> {
-    // A cold daemon start on a loaded host can take longer than the
-    // historical 4s window before the socket accepts a typed Ping. Keep the
-    // window bounded but large enough that a starting daemon is not reported
-    // as DAEMON_UNAVAILABLE while it is still coming up.
+    // A cold daemon start on a loaded host can take longer than the short
+    // window before the socket accepts a typed Ping, so a daemon that still
+    // holds its start lock gets the longer window.
     let started = Instant::now();
-    let mut deadline = started + start_wait;
+    let start_deadline = started + start_wait;
     let starting_deadline = started + starting_wait;
     loop {
         let status = daemon_status(sock);
         if status == DaemonAvailability::Alive {
             return Ok(());
         }
-        // A daemon that still holds the start lock is making progress, so it
-        // keeps the longer window instead of being reported as unavailable
-        // while its startup work is still running.
-        if status == DaemonAvailability::Starting {
-            deadline = deadline.max(starting_deadline);
-        }
+        // Only a daemon that still holds the start lock earns the longer
+        // window. Once it stops starting, the short window applies again, so a
+        // definitive startup failure is reported promptly instead of being
+        // hidden behind the extended window.
+        let deadline = if status == DaemonAvailability::Starting {
+            starting_deadline
+        } else {
+            start_deadline
+        };
         if Instant::now() >= deadline {
             break;
         }
@@ -1059,6 +1061,35 @@ mod tests {
             started.elapsed()
         );
         drop(lock);
+    }
+
+    #[test]
+    fn ensure_server_drops_the_extended_window_once_the_start_lock_is_released() {
+        let fixture = TempServerDir::new("abandoned-daemon");
+        let lock = hold_start_lock(&fixture);
+        assert_eq!(daemon_status(&fixture.socket()), DaemonAvailability::Starting);
+
+        // The daemon gives up and releases the start lock without ever binding
+        // its socket. The waiter must fall back to the short window instead of
+        // waiting out the extended starting window.
+        let released = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            drop(lock);
+        });
+        let started = Instant::now();
+        let error = wait_for_server_with_budgets(
+            &fixture.socket(),
+            Duration::from_millis(400),
+            Duration::from_secs(10),
+        )
+        .expect_err("a released start lock without a socket must fail closed");
+        let elapsed = started.elapsed();
+        assert!(error.to_string().contains("DAEMON_UNAVAILABLE"), "{error}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the extended window must not outlive the start lock: {elapsed:?}"
+        );
+        released.join().expect("start lock release fixture");
     }
 
     #[test]

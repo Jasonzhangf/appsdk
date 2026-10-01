@@ -333,15 +333,42 @@ fn spawn_server(sock: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reachability window for a daemon that is not visibly starting yet.
+const START_WAIT: Duration = Duration::from_secs(30);
+/// Reachability window for a daemon that still holds the start lock.  A cold
+/// daemon builds a runtime for every registered route before it binds its
+/// socket, which outlasts [`START_WAIT`] on a host with many routes.
+const STARTING_WAIT: Duration = Duration::from_secs(300);
+
 fn wait_for_server(sock: &Path) -> anyhow::Result<()> {
+    wait_for_server_with_budgets(sock, START_WAIT, STARTING_WAIT)
+}
+
+fn wait_for_server_with_budgets(
+    sock: &Path,
+    start_wait: Duration,
+    starting_wait: Duration,
+) -> anyhow::Result<()> {
     // A cold daemon start on a loaded host can take longer than the
     // historical 4s window before the socket accepts a typed Ping. Keep the
     // window bounded but large enough that a starting daemon is not reported
     // as DAEMON_UNAVAILABLE while it is still coming up.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if daemon_status(sock) == DaemonAvailability::Alive {
+    let started = Instant::now();
+    let mut deadline = started + start_wait;
+    let starting_deadline = started + starting_wait;
+    loop {
+        let status = daemon_status(sock);
+        if status == DaemonAvailability::Alive {
             return Ok(());
+        }
+        // A daemon that still holds the start lock is making progress, so it
+        // keeps the longer window instead of being reported as unavailable
+        // while its startup work is still running.
+        if status == DaemonAvailability::Starting {
+            deadline = deadline.max(starting_deadline);
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -968,6 +995,70 @@ mod tests {
         ensure_server_with_launcher(&fixture.socket(), move |_sock| Ok(()))
             .expect("readiness after the previous deadline should still succeed");
         delayed.join().expect("delayed readiness fixture");
+    }
+
+    fn hold_start_lock(fixture: &TempServerDir) -> File {
+        use std::os::unix::io::AsRawFd;
+        let lock = File::create(fixture.path().join("daemon.lock")).expect("create start lock");
+        let held = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(held, 0, "hold the daemon start lock");
+        lock
+    }
+
+    #[test]
+    fn ensure_server_keeps_waiting_while_the_daemon_holds_the_start_lock() {
+        let fixture = TempServerDir::new("starting-daemon");
+        let socket = fixture.socket();
+        let lock = hold_start_lock(&fixture);
+        assert_eq!(daemon_status(&socket), DaemonAvailability::Starting);
+
+        // A cold daemon is still building its project runtimes when the short
+        // reachability window expires; it must not be reported as unavailable
+        // while the start lock is still held.
+        let delayed_socket = socket.clone();
+        let delayed = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(600));
+            let bound = UnixListener::bind(&delayed_socket).expect("bind delayed socket");
+            let responder = bound.try_clone().expect("clone delayed listener");
+            thread::spawn(move || {
+                let (mut stream, _) = responder.accept().expect("accept readiness probe");
+                let mut request = String::new();
+                std::io::BufReader::new(&mut stream)
+                    .read_line(&mut request)
+                    .expect("read readiness request");
+                stream
+                    .write_all(
+                        b"{\"ok\":true,\"workers\":0,\"messages\":0,\"tasks\":0,\"now\":\"now\"}\n",
+                    )
+                    .expect("write readiness response");
+            });
+            bound
+        });
+
+        wait_for_server_with_budgets(&socket, Duration::from_millis(200), Duration::from_secs(5))
+            .expect("a daemon that still holds the start lock must not be reported as unavailable");
+        delayed.join().expect("delayed readiness fixture");
+        drop(lock);
+    }
+
+    #[test]
+    fn ensure_server_still_fails_closed_when_a_start_never_becomes_reachable() {
+        let fixture = TempServerDir::new("stuck-daemon");
+        let lock = hold_start_lock(&fixture);
+        let started = Instant::now();
+        let error = wait_for_server_with_budgets(
+            &fixture.socket(),
+            Duration::from_millis(200),
+            Duration::from_millis(700),
+        )
+        .expect_err("a daemon that never binds must still fail closed");
+        assert!(error.to_string().contains("DAEMON_STARTING"), "{error}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(600),
+            "the starting window must be awaited: {:?}",
+            started.elapsed()
+        );
+        drop(lock);
     }
 
     #[test]

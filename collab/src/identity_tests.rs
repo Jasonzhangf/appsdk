@@ -457,10 +457,12 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A caller without any anchor stays unauthenticated: a persisted non-live
+/// peer is never auto-adopted from the ledger alone.
 #[test]
-fn tmux_identity_rebind_adopts_single_unknown_peer_without_anchor() {
+fn tmux_identity_rebind_does_not_adopt_without_anchor() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let root = test_root("ci-tmux-unknown");
+    let root = test_root("ci-tmux-no-anchor");
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
     let scope = test_scope(root.clone());
     let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
@@ -473,13 +475,28 @@ fn tmux_identity_rebind_adopts_single_unknown_peer_without_anchor() {
         None,
     );
     let previous_pane = std::env::var_os("TMUX_PANE");
+    let previous_session = std::env::var_os("CODEX_SESSION_ID");
+    let previous_thread = std::env::var_os("CODEX_THREAD_ID");
     std::env::remove_var("TMUX_PANE");
+    std::env::remove_var("CODEX_SESSION_ID");
+    std::env::remove_var("CODEX_THREAD_ID");
     let result = identity_for_scope_rebind_at(&host_paths, &scope, None);
     match previous_pane {
         Some(value) => std::env::set_var("TMUX_PANE", value),
         None => std::env::remove_var("TMUX_PANE"),
     }
-    assert!(matches!(result, Ok(ScopeRebindOutcome::Adopted(identity)) if identity.worker_id == "known-peer"));
+    match previous_session {
+        Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+        None => std::env::remove_var("CODEX_SESSION_ID"),
+    }
+    match previous_thread {
+        Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+        None => std::env::remove_var("CODEX_THREAD_ID"),
+    }
+    assert!(
+        matches!(&result, Ok(ScopeRebindOutcome::Unproven(detail)) if detail.contains("no current anchor")),
+        "{result:?}"
+    );
     assert_eq!(
         std::fs::read_dir(host_paths.state_root().join("identities"))
             .unwrap()
@@ -1064,6 +1081,29 @@ fn appserver_thread_status_retires_only_proven_dead() {
     assert!(matches!(
         classify_probe_error("no rollout found for thread id deadbeef"),
         PeerLiveness::Dead
+    ));
+    assert!(matches!(
+        classify_probe_error("thread not found"),
+        PeerLiveness::Dead
+    ));
+    // A malformed App Server response reports a missing field but proves the
+    // endpoint answers; it must stay unproven so it can never authorize a
+    // credential retirement.
+    assert!(matches!(
+        classify_probe_error("response is missing thread.status.type"),
+        PeerLiveness::Unknown
+    ));
+    assert!(matches!(
+        classify_probe_error("response is missing thread"),
+        PeerLiveness::Unknown
+    ));
+    assert!(matches!(
+        classify_probe_error("response is missing thread.id"),
+        PeerLiveness::Unknown
+    ));
+    assert!(matches!(
+        classify_probe_error("no such field"),
+        PeerLiveness::Unknown
     ));
     assert!(matches!(
         classify_probe_error("connection refused"),

@@ -858,11 +858,11 @@ fn cross_project_retirement_unions_every_anchor_group() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// Several persisted peers that are not live must not block recovery: none is a
-/// live conflict, so the current pane adopts the newest one instead of failing
-/// closed with a manual `--worker` requirement.
+/// With no current anchor a caller stays unauthenticated: persisted non-live
+/// peers are never auto-adopted, and only the explicit `--worker` override may
+/// name a durable identity.
 #[test]
-fn multiple_non_dead_peers_auto_adopt_without_anchor_evidence() {
+fn multiple_non_dead_peers_never_auto_adopt_without_anchor_evidence() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -873,20 +873,39 @@ fn multiple_non_dead_peers_auto_adopt_without_anchor_evidence() {
     persist_peer_at(&host_paths, &scope, "agent-a", "session-a", "thread-a", 1);
     std::thread::sleep(std::time::Duration::from_millis(20));
     persist_peer_at(&host_paths, &scope, "agent-b", "session-b", "thread-b", 1);
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    let previous_session = std::env::var_os("CODEX_SESSION_ID");
+    let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+    std::env::remove_var("TMUX_PANE");
+    std::env::remove_var("CODEX_SESSION_ID");
+    std::env::remove_var("CODEX_THREAD_ID");
 
-    // No live peer claims this anchor, so recovery adopts the most recently
-    // registered non-live record instead of erroring.
-    let outcome = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
-    match outcome {
-        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-b"),
-        other => panic!("non-live peers must auto-adopt: {other:?}"),
-    }
+    // With no anchor there is nothing to re-anchor onto, so no persisted peer
+    // is adopted.
+    let blocked = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
+    assert!(
+        matches!(&blocked, ScopeRebindOutcome::Unproven(detail) if detail.contains("no current anchor")),
+        "{blocked:?}"
+    );
 
     // The explicit --worker override still selects the named durable identity.
     let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-a")).unwrap();
     match selected {
         ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-a"),
         other => panic!("--worker override must adopt the named identity: {other:?}"),
+    }
+
+    match previous_pane {
+        Some(value) => std::env::set_var("TMUX_PANE", value),
+        None => std::env::remove_var("TMUX_PANE"),
+    }
+    match previous_session {
+        Some(value) => std::env::set_var("CODEX_SESSION_ID", value),
+        None => std::env::remove_var("CODEX_SESSION_ID"),
+    }
+    match previous_thread {
+        Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
+        None => std::env::remove_var("CODEX_THREAD_ID"),
     }
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();

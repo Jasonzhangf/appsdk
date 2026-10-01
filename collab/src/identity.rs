@@ -1233,12 +1233,16 @@ fn classify_thread_status(raw: &serde_json::Value) -> PeerLiveness {
     }
 }
 
+/// Only an explicitly dead signal retires the record. A malformed App Server
+/// response (a missing field, a decode failure) is unproven, not dead: the
+/// endpoint answered, so the thread may still be live and must not authorize a
+/// credential retirement. `notLoaded` is reported by `classify_thread_status`,
+/// not here.
 fn classify_probe_error(detail: &str) -> PeerLiveness {
     let lowered = detail.to_ascii_lowercase();
-    if lowered.contains("not found")
-        || lowered.contains("no rollout")
-        || lowered.contains("missing")
-        || lowered.contains("gone")
+    if lowered.contains("no rollout")
+        || lowered.contains("thread not found")
+        || lowered.contains("tmux_pane_missing")
     {
         PeerLiveness::Dead
     } else {
@@ -1459,6 +1463,18 @@ fn identity_for_scope_rebind_at(
     let project_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
+    // Adopting a persisted peer only re-anchors it, so a caller must hold a
+    // current anchor to ask for one. Without any pane, Codex session or thread
+    // address the caller stays unauthenticated and only an explicit `--worker`
+    // may name a durable identity.
+    if std::env::var_os("TMUX_PANE").is_none()
+        && std::env::var_os("CODEX_SESSION_ID").is_none()
+        && std::env::var_os("CODEX_THREAD_ID").is_none()
+    {
+        return Ok(ScopeRebindOutcome::Unproven(
+            "no current anchor; pass --worker to explicitly recover a durable identity".into(),
+        ));
+    }
     let candidate = if std::env::var_os("TMUX_PANE").is_some() {
         Some(crate::client::adapters::tmux::candidate_from_env().map_err(anyhow::Error::msg)?)
     } else {

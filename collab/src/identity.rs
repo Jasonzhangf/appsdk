@@ -1485,13 +1485,24 @@ fn identity_for_scope_rebind_at(
 
     // No record on the current anchor survived, so this is normal drift. A
     // unique recoverable record is this project's only remaining candidate and
-    // is adopted (its stale anchor is refreshed on registration). When several
-    // non-overlapping stale records exist they must not be claimed by this
-    // pane, so a fresh identity is minted for the current anchor instead.
+    // is adopted (its stale anchor is refreshed on registration). Several
+    // non-overlapping non-dead records are ambiguous: none can be proven dead,
+    // so minting a fresh identity would silently orphan them. Keep them in
+    // place and require the explicit `--worker` selection instead.
     if recoverable.len() == 1 {
         return Ok(ScopeRebindOutcome::Adopted(recoverable.into_iter().next().unwrap()));
     }
-    Ok(ScopeRebindOutcome::NoCandidate)
+    if recoverable.is_empty() {
+        return Ok(ScopeRebindOutcome::NoCandidate);
+    }
+    let ambiguous_ids = recoverable
+        .iter()
+        .map(|identity| identity.worker_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(ScopeRebindOutcome::Unproven(format!(
+        "persisted same-scope peers cannot be proven dead ({ambiguous_ids}); pass --worker to explicitly select one before recovery"
+    )))
 }
 
 fn now_ms() -> u128 {
@@ -1544,13 +1555,21 @@ fn load_or_create_resolved_full_at(
         Some(AnchorResolution::CrossProject(identity)) => {
             if allow_scope_rebind {
                 // The same pane/thread previously registered in another
-                // project. The pane can only belong to one live Collab peer,
-                // so archive the stale cross-project record and let the
-                // current project mint a fresh peer instead of leaving the
-                // agent stuck in a manual recovery loop.
-                archive_dead_peers(host_paths, std::slice::from_ref(&identity))?;
-                retired_cross_project = true;
-                None
+                // project. A pane/thread can only belong to one live peer, so
+                // a *provably dead* foreign record is retired and the current
+                // project mints a fresh peer. A live, cold, or unproven
+                // foreign record may still be the live owner of this anchor,
+                // so it stays fail-closed and needs the explicit --worker
+                // override instead of being archived on scope mismatch alone.
+                if matches!(persisted_peer_liveness(&identity), PeerLiveness::Dead) {
+                    archive_dead_peers(host_paths, std::slice::from_ref(&identity))?;
+                    retired_cross_project = true;
+                    None
+                } else {
+                    anyhow::bail!(
+                        "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project and its persisted peer is not provably dead; pass --worker to explicitly recover it"
+                    );
+                }
             } else {
                 anyhow::bail!(
                     "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"

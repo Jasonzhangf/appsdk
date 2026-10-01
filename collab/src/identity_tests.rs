@@ -392,8 +392,8 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
         "{hard_fail_error}"
     );
 
-    // Another unverifiable peer in the current project must not block the
-    // same-pane re-registration after the stale cross-project peer is retired.
+    // Another unverifiable peer in the current project must not cause the
+    // cross-project record to be claimed or archived.
     let blocker_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
         .unwrap()
@@ -411,39 +411,32 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
     )
     .unwrap();
 
-    // Ordinary command path (allow_scope_rebind=true) retires the stale
-    // cross-project peer and mints a fresh peer for the current project, so
-    // `collab context` recovers without agent judgement or manual steps.
-    let recovered = load_or_create_resolved_at(&host_paths, &scope, None, true).unwrap();
-    assert_eq!(recovered.worker_id, "codex-%5");
-    assert_eq!(
-        recovered.project_scope.as_ref().map(|s| s.as_str()).as_deref(),
-        Some(canonical_test_scope(&scope).as_str())
+    // Ordinary command path (allow_scope_rebind=true) still fails closed: the
+    // cross-project record cannot be proven dead, so it must not be archived
+    // (or claimed) by scope mismatch alone.
+    let rebound = load_or_create_resolved_at(&host_paths, &scope, None, true);
+    let rebound_error = rebound.as_ref().unwrap_err().to_string();
+    assert!(
+        rebound_error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
+        "{rebound_error}"
     );
 
-    // The live identity path now holds a fresh current-project identity.
-    let current = read_identity(&identity_path_at(&host_paths, "codex-%5").unwrap())
-        .unwrap()
-        .expect("current identity exists");
-    assert_eq!(current.worker_id, "codex-%5");
-    assert_eq!(
-        current.project_scope.as_ref().map(|s| s.as_str()).as_deref(),
-        Some(canonical_test_scope(&scope).as_str())
+    // The foreign peer stays in place and is never archived.
+    assert!(
+        read_identity(&identity_path_at(&host_paths, "codex-%5").unwrap())
+            .unwrap()
+            .is_some(),
+        "non-dead cross-project peer must remain in the live identity set"
     );
-
-    // The stale cross-project peer was archived intact for audit.
     let archives = host_paths.state_root().join("archives");
-    let mut archived_old_peer = None;
-    for archive in std::fs::read_dir(&archives).unwrap() {
-        let archive_path = archive.unwrap().path().join("codex-%5/identity.json");
-        if let Some(old) = read_identity(&archive_path).unwrap() {
-            archived_old_peer = Some(old);
-            break;
-        }
-    }
-    let old = archived_old_peer.expect("cross-project peer was archived");
-    assert_eq!(old.project_scope.as_ref().map(|v| v.as_str()), Some(canonical_test_scope(&other_scope).as_str()));
-    assert_eq!(old.token, "token-codex-%5");
+    let archived_foreign = std::fs::read_dir(&archives)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.path().join("codex-%5").is_dir())
+        })
+        .unwrap_or(false);
+    assert!(!archived_foreign, "non-dead cross-project peer must not be archived");
 
     match previous_thread {
         Some(value) => std::env::set_var("CODEX_THREAD_ID", value),

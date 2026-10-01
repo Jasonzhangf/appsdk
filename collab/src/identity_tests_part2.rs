@@ -427,13 +427,12 @@ fn explicit_worker_selection_rejects_conflicting_identity_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// Multiple persisted peers that cannot be proven live never gate recovery:
-/// only a *live* peer whose durable anchor overlaps the current pane/session/
-/// thread may block.  Unknown peers on unrelated anchors are not conflicts, so
-/// recovery adopts a concrete candidate instead of failing with
-/// IDENTITY_REBIND_UNPROVEN.
+/// Multiple persisted peers that cannot be proven dead must not be silently
+/// replaced by a fresh identity (which would orphan them) and must not be
+/// claimed by an unrelated pane. Recovery fails closed with an explicit
+/// `--worker` override instead of minting a new credential.
 #[test]
-fn unknown_peers_on_unrelated_anchors_do_not_block_scope_rebind() {
+fn multiple_non_dead_peers_fail_closed_without_anchor_evidence() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -444,14 +443,15 @@ fn unknown_peers_on_unrelated_anchors_do_not_block_scope_rebind() {
     persist_peer_at(&host_paths, &scope, "agent-a", "session-a", "thread-a", 1);
     persist_peer_at(&host_paths, &scope, "agent-b", "session-b", "thread-b", 1);
 
-    // With no current anchor there is nothing to conflict with, so recovery
-    // must not refuse the whole project because several peers cannot be proven
-    // live.
-    let adopted = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
-    assert!(
-        matches!(adopted, ScopeRebindOutcome::NoCandidate),
-        "unrelated unknown peers must not be claimed by this pane: {adopted:?}"
-    );
+    // Two records on unrelated anchors cannot be proven dead, so recovery must
+    // not mint a fresh credential over them without explicit selection.
+    let outcome = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
+    match outcome {
+        ScopeRebindOutcome::Unproven(detail) => {
+            assert!(detail.contains("agent-a") && detail.contains("agent-b"), "{detail}");
+        }
+        other => panic!("multiple non-dead peers must fail closed: {other:?}"),
+    }
 
     // The explicit --worker override still selects the named durable identity.
     let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-b")).unwrap();
@@ -1075,33 +1075,31 @@ fn appserver_identity_rejects_a_cross_project_same_session_and_thread() {
         None => std::env::remove_var("COLLAB_APPSERVER_SOCKET"),
     }
 
-    let identity = created.unwrap();
-    assert_eq!(
-        identity.worker_id,
-        "codex-thread-7468726561642d736861726564"
-    );
-    assert!(identity.project_scope.as_ref().is_some_and(|scope| {
-        scope.as_str()
-            == second_scope
-                .route_scope(AppServerId::new(CLI_APP_SERVER_ID).unwrap())
-                .unwrap()
-                .project_scope_id
-                .as_str()
-    }));
+    // The foreign AppServer peer cannot be proven dead (its probe endpoint is
+    // unreachable), so rebind must fail closed instead of archiving it on scope
+    // mismatch alone. It stays in place and remains recoverable via --worker.
+    let error = created.unwrap_err().to_string();
     assert!(
-        !read_identity(&identity_path_at(&host_paths, "first-project-agent").unwrap())
+        error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
+        "{error}"
+    );
+    assert!(
+        read_identity(&identity_path_at(&host_paths, "first-project-agent").unwrap())
             .unwrap()
             .is_some(),
-        "cross-project stale peer must leave the live identity set"
+        "non-dead cross-project peer must remain in the live identity set"
     );
     let archive_root = host_paths.state_root().join("archives");
     let archived = std::fs::read_dir(&archive_root)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .any(|entry| entry.path().join("first-project-agent").is_dir());
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.path().join("first-project-agent").is_dir())
+        })
+        .unwrap_or(false);
     assert!(
-        archived,
-        "cross-project stale peer must be archived on rebind"
+        !archived,
+        "non-dead cross-project peer must not be archived"
     );
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(first_root).ok();

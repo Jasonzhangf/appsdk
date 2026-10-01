@@ -336,17 +336,20 @@ fn tmux_identity_recovery_rejects_anchor_conflict_and_cross_project() {
         None,
         None,
     );
-    // Two records claiming the same anchor and neither provably live are this
-    // peer's own drifted identities, not a live conflict: the newest durable
-    // registration is adopted automatically.
-    let recovered = identity_by_tmux_anchor_at(
+    // Two App Server records claim the same anchor and their liveness cannot be
+    // established (the probe cannot reach the fake endpoint), so recovery is
+    // fail-closed instead of silently adopting one credential over the other.
+    let ambiguous = identity_by_tmux_anchor_at(
         &host_paths,
         &scope,
         &tmux_candidate(Some("session-duplicate"), None, "%6"),
     )
-    .unwrap()
-    .unwrap();
-    assert_eq!(recovered.worker_id, "duplicate-peer-a");
+    .unwrap_err()
+    .to_string();
+    assert!(
+        ambiguous.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
+        "{ambiguous}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -1037,13 +1040,13 @@ fn desktop_peer_rebinds_a_unique_prior_identity_when_no_anchor_matches() {
 
 #[test]
 fn appserver_thread_status_retires_only_proven_dead() {
-    // A cold thread can still be resumed through turn/start, so it must
-    // keep blocking rebind rather than being archived.
+    // A cold thread can still be resumed through turn/start, so it is `Cold`,
+    // not `Dead`: it is preserved and never archived.
     assert!(matches!(
         classify_thread_status(&serde_json::json!({
             "thread": {"status": {"type": "notLoaded"}}
         })),
-        PeerLiveness::Unknown
+        PeerLiveness::Cold
     ));
     assert!(matches!(
         classify_thread_status(&serde_json::json!({

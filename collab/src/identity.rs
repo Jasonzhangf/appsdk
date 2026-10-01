@@ -982,35 +982,20 @@ fn identity_by_current_anchors_at(
         }
     }
     let mut matched_workers = BTreeMap::<String, Identity>::new();
+    let expected_scope = scope
+        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+        .project_scope_id;
     for (anchor, identities) in matches {
         if identities.len() > 1 {
-            let mut candidates = identities.into_values().collect::<Vec<_>>();
-            candidates.sort_by(|left, right| {
-                let left_generation = left
-                    .runtime
-                    .as_ref()
-                    .map(|runtime| runtime.endpoint_generation)
-                    .unwrap_or(0);
-                let right_generation = right
-                    .runtime
-                    .as_ref()
-                    .map(|runtime| runtime.endpoint_generation)
-                    .unwrap_or(0);
-                right_generation
-                    .cmp(&left_generation)
-                    .then_with(|| left.worker_id.cmp(&right.worker_id))
-            });
-            if candidates
-                .iter()
-                .any(|identity| matches!(persisted_peer_liveness(identity), PeerLiveness::Live))
-            {
-                anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted peers");
-            }
-            // Multiple records all claim the same anchor and none is provably
-            // live, so the newest durable registration is this peer's own
-            // drifted identity and is adopted automatically.
-            let newest = candidates.remove(0);
-            matched_workers.insert(newest.worker_id.clone(), newest);
+            let chosen = choose_anchor_peer(
+                host_paths,
+                candidate,
+                &expected_scope,
+                &anchor,
+                identities.into_values().collect(),
+                persisted_peer_liveness,
+            )?;
+            matched_workers.insert(chosen.worker_id.clone(), chosen);
         } else {
             matched_workers.extend(identities);
         }
@@ -1019,9 +1004,6 @@ fn identity_by_current_anchors_at(
         0 => Ok(None),
         1 => {
             let identity = matched_workers.into_values().next().unwrap();
-            let expected_scope = scope
-                .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
-                .project_scope_id;
             Ok(Some(
                 if identity.project_scope.as_ref() == Some(&expected_scope) {
                     AnchorResolution::CurrentScope(identity)
@@ -1151,11 +1133,25 @@ enum ScopeRebindOutcome {
 }
 
 /// Whether a persisted peer can still be reached. Only `Dead` authorizes
-/// retiring the record: a probe that merely failed is `Unknown` and must keep
-/// blocking, because "cannot prove it is gone" is not "it is gone".
+/// retiring the record and must never be treated as a live conflict. A probe
+/// that merely failed is `Unknown`, and a cold-but-resumable record is `Cold`:
+/// "cannot prove it is gone" and "not currently loaded" are both distinct from
+/// "it is gone" and from "it is live", so neither may silently orphan the
+/// record. Only a *live* overlap is a hard conflict; `Cold`/`Unknown` overlaps
+/// are unproven and require the explicit `--worker` override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PeerLiveness {
+    /// Actively reachable: a live tmux pane or a loaded AppServer thread.
     Live,
+    /// Provably gone: a missing pane, an errored thread, or an explicit
+    /// not-found/rolled-out probe result. Only this authorizes retirement.
     Dead,
+    /// Not currently live but resumable: an AppServer thread that is not
+    /// loaded. It is preserved (never archived) and is not a live conflict.
+    Cold,
+    /// Liveness could not be established (probe error, malformed address, or
+    /// a missing transport). A record that overlaps the current anchor must
+    /// keep blocking, because an unreachable authority is not proof of death.
     Unknown,
 }
 
@@ -1202,7 +1198,9 @@ fn classify_thread_status(raw: &serde_json::Value) -> PeerLiveness {
         .and_then(serde_json::Value::as_str)
     {
         Some("systemError") => PeerLiveness::Dead,
-        Some("notLoaded") => PeerLiveness::Unknown,
+        // A successful read that reports `notLoaded` is a definitive "not
+        // currently live, but resumable" answer, not an unproven one.
+        Some("notLoaded") => PeerLiveness::Cold,
         Some(_) => PeerLiveness::Live,
         None => PeerLiveness::Unknown,
     }
@@ -1221,10 +1219,87 @@ fn classify_probe_error(detail: &str) -> PeerLiveness {
     }
 }
 
+/// Durable registration recency for one persisted identity. The identity file
+/// is rewritten atomically on every registration, so its last write time is a
+/// globally ordered "when was this record last refreshed" signal that stays
+/// valid across different worker/binding ids. A per-binding
+/// `endpoint_generation` restarts at 1 for a new binding and is therefore not
+/// a global order.
+fn identity_recency_at(host_paths: &HostPaths, worker_id: &str) -> std::time::SystemTime {
+    let path = host_paths
+        .state_root()
+        .join("identities")
+        .join(worker_id)
+        .join("identity.json");
+    std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// Deterministic preference between two records that both match the current
+/// anchor and are not live. Prefer the record this pane derives its own id
+/// from (`codex-<pane>`), then the most recently registered record, then the
+/// lowest worker id so the outcome is stable even on an exact timestamp tie.
+fn non_live_candidate_order(
+    host_paths: &HostPaths,
+    candidate: Option<&crate::proto::TmuxCandidate>,
+    left: &Identity,
+    right: &Identity,
+) -> std::cmp::Ordering {
+    let derived = candidate.map(|candidate| format!("codex-{}", candidate.endpoint.pane_id));
+    let left_own = derived.as_deref() == Some(left.worker_id.as_str());
+    let right_own = derived.as_deref() == Some(right.worker_id.as_str());
+    right_own
+        .cmp(&left_own)
+        .then_with(|| {
+            identity_recency_at(host_paths, &right.worker_id)
+                .cmp(&identity_recency_at(host_paths, &left.worker_id))
+        })
+        .then_with(|| left.worker_id.cmp(&right.worker_id))
+}
+
+/// Resolve one anchor that several persisted records claim.
+///
+/// Project scope is applied first: a record registered under another project
+/// can never be the current project's peer for the same anchor, so a foreign
+/// duplicate can neither shadow nor be retired in place of a current-scope
+/// match. Only a *live* or *unproven* member is a blocking conflict; a set
+/// that is entirely provably dead or cold is this peer's own drifted
+/// registration and the deterministic winner is adopted.
+fn choose_anchor_peer(
+    host_paths: &HostPaths,
+    candidate: Option<&crate::proto::TmuxCandidate>,
+    expected_scope: &crate::scope::ProjectScopeId,
+    anchor: &str,
+    mut candidates: Vec<Identity>,
+    liveness: impl Fn(&Identity) -> PeerLiveness,
+) -> anyhow::Result<Identity> {
+    let in_scope = candidates
+        .iter()
+        .filter(|identity| identity.project_scope.as_ref() == Some(expected_scope))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !in_scope.is_empty() {
+        candidates = in_scope;
+    }
+    if candidates
+        .iter()
+        .any(|identity| matches!(liveness(identity), PeerLiveness::Live | PeerLiveness::Unknown))
+    {
+        anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted peers");
+    }
+    candidates.sort_by(|left, right| non_live_candidate_order(host_paths, candidate, left, right));
+    Ok(candidates.remove(0))
+}
+
 /// Whether a persisted peer's durable anchor overlaps the current pane or the
 /// Codex session/thread being recovered. Only a peer that is *live* AND
 /// overlaps this anchor can block recovery; a live peer on an unrelated pane
 /// or thread must not gate a fresh pane or an anchor-drift recovery.
+///
+/// Since a non-live overlap may be a peer we could not reach, this predicate
+/// reports candidate overlap only; the caller pairs it with liveness to decide
+/// whether the overlap is a blocking conflict.
 fn identity_anchor_conflicts_with_candidate(
     identity: &Identity,
     candidate: Option<&crate::proto::TmuxCandidate>,
@@ -1309,12 +1384,13 @@ fn archive_dead_peers(host_paths: &HostPaths, dead: &[Identity]) -> anyhow::Resu
 /// Resolve one persisted same-scope identity to the current process.
 ///
 /// Recovery is single-source (persisted identities + current project scope +
-/// daemon liveness) and single-sink. Normal session/thread/pane drift adopts
-/// the unique durable candidate even when current anchors no longer match.
-/// Only a LIVE conflict denies recovery; provably dead records are archived.
-/// The explicit user override (selected_worker) may supersede a live
-/// conflict (and any ambiguous unknown set) before the selected durable
-/// identity is adopted, or clear the field for a fresh selected registration.
+/// transport liveness) and single-sink. Normal session/thread/pane drift
+/// adopts the unique durable candidate even when current anchors no longer
+/// match, and provably dead records are archived. Only records that overlap
+/// the current anchor are conflicts: a live one is a hard conflict, and a
+/// cold/unproven one is a conflict because it cannot be shown to be gone.
+/// The explicit user override (selected_worker) supersedes either conflict so
+/// the named durable identity is always recoverable on request.
 fn identity_for_scope_rebind_at(
     host_paths: &HostPaths,
     scope: &Scope,
@@ -1339,11 +1415,11 @@ fn identity_for_scope_rebind_at(
     if !identities_root.is_dir() {
         return Ok(ScopeRebindOutcome::NoCandidate);
     }
+    // Every same-scope record lands in exactly one bucket: provably dead,
+    // overlapping conflict (live or unproven), or non-live non-overlapping.
     let mut dead = Vec::new();
-    let mut live_peers = Vec::new();
-    let mut live_conflicts = Vec::new();
+    let mut conflict = Vec::new();
     let mut recoverable = Vec::new();
-    let mut recoverable_overlap = Vec::new();
     for entry in std::fs::read_dir(identities_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -1355,33 +1431,28 @@ fn identity_for_scope_rebind_at(
         if identity.project_scope.as_ref() != Some(&project_scope) {
             continue;
         }
-        let conflict = identity_anchor_conflicts_with_candidate(&identity, candidate.as_ref());
+        let overlaps = identity_anchor_conflicts_with_candidate(&identity, candidate.as_ref());
         match persisted_peer_liveness(&identity) {
             PeerLiveness::Dead => dead.push(identity),
-            PeerLiveness::Live => {
-                live_peers.push(identity.clone());
-                if conflict {
-                    live_conflicts.push(identity);
-                }
-            }
-            PeerLiveness::Unknown => {
-                // A record whose liveness cannot be proven is not a live
-                // conflict.  Only a recoverable record that still claims the
-                // same pane/session/thread can be this peer's own drifted
-                // identity; unrelated stale records (finished subagents,
-                // replaced panes) never gate a fresh registration.
-                recoverable.push(identity.clone());
-                if conflict {
-                    recoverable_overlap.push(identity);
+            // Cold and Unknown records are not live, so an unrelated one never
+            // gates a fresh registration. But one that still claims the
+            // current pane/session/thread may be this peer's own record (or a
+            // live peer we could not reach), so it is fail-closed and needs the
+            // explicit --worker override instead of being silently superseded.
+            PeerLiveness::Live | PeerLiveness::Cold | PeerLiveness::Unknown => {
+                if overlaps {
+                    conflict.push(identity);
+                } else {
+                    recoverable.push(identity);
                 }
             }
         }
     }
     if let Some(selected) = selected_worker {
-        // Explicit user override: retire live conflicts and ambiguous unknown
-        // records, then recover the named durable identity (or return
-        // NoCandidate so the caller may mint it fresh).
-        let selected_persisted = live_peers
+        // Explicit user override: recover any durable identity, including one
+        // that is live or unproven, or return NoCandidate so the caller may
+        // mint it fresh.
+        let selected_persisted = conflict
             .iter()
             .chain(recoverable.iter())
             .chain(dead.iter())
@@ -1396,47 +1467,30 @@ fn identity_for_scope_rebind_at(
     // Provably dead same-scope records never block recovery.
     archive_dead_peers(host_paths, &dead)?;
 
-    if !live_conflicts.is_empty() {
-        let conflict_ids = live_conflicts
+    // A live or unproven record that overlaps the current anchor is a blocking
+    // conflict: it may be a live peer for this exact pane/session/thread, so
+    // recovery must not silently substitute another identity for it. A record
+    // on an unrelated anchor is a stale leftover and never gates a fresh one.
+    if !conflict.is_empty() {
+        let conflict_ids = conflict
             .iter()
             .map(|identity| identity.worker_id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         return Ok(ScopeRebindOutcome::Unproven(format!(
-            "persisted live peers conflict with the current anchor ({conflict_ids}); pass --worker to explicitly override the live conflict before recovery"
+            "peers that overlap the current anchor are live or not provably dead ({conflict_ids}); pass --worker to explicitly override before recovery"
         )));
     }
 
-    // Only a *live* overlap blocks recovery.  A unique recoverable record is
-    // this project's only remaining candidate and is adopted (its stale anchor
-    // is refreshed on registration).  When several non-live records exist, an
-    // unrelated batch of stale peers must not be claimed by this pane: adopt
-    // only a record that overlaps the current anchor, and if several do, the
-    // newest durable registration is this peer's own identity.  If none
-    // overlaps, mint a fresh identity for the current anchor instead.
+    // No record on the current anchor survived, so this is normal drift. A
+    // unique recoverable record is this project's only remaining candidate and
+    // is adopted (its stale anchor is refreshed on registration). When several
+    // non-overlapping stale records exist they must not be claimed by this
+    // pane, so a fresh identity is minted for the current anchor instead.
     if recoverable.len() == 1 {
         return Ok(ScopeRebindOutcome::Adopted(recoverable.into_iter().next().unwrap()));
     }
-    let mut overlaps = recoverable_overlap;
-    overlaps.sort_by(|left, right| {
-        let left_generation = left
-            .runtime
-            .as_ref()
-            .map(|runtime| runtime.endpoint_generation)
-            .unwrap_or(0);
-        let right_generation = right
-            .runtime
-            .as_ref()
-            .map(|runtime| runtime.endpoint_generation)
-            .unwrap_or(0);
-        right_generation
-            .cmp(&left_generation)
-            .then_with(|| left.worker_id.cmp(&right.worker_id))
-    });
-    match overlaps.first() {
-        Some(identity) => Ok(ScopeRebindOutcome::Adopted(identity.clone())),
-        None => Ok(ScopeRebindOutcome::NoCandidate),
-    }
+    Ok(ScopeRebindOutcome::NoCandidate)
 }
 
 fn now_ms() -> u128 {

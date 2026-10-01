@@ -463,11 +463,12 @@ fn unknown_peers_on_unrelated_anchors_do_not_block_scope_rebind() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// When several non-live records all claim the same drifted anchor, the newest
-/// durable registration is this peer's own identity and is adopted
-/// automatically; liveness is the only conflict, not repeat registrations.
+/// When several records claim the same drifted anchor and none can be proven
+/// dead, recovery must stay fail-closed rather than silently adopting one
+/// credential over its cold/unproven peer. The explicit `--worker` override is
+/// the single escape hatch.
 #[test]
-fn overlapping_unknown_peers_adopt_the_newest_durable_registration() {
+fn overlapping_unproven_peers_fail_closed_and_require_explicit_worker() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -478,17 +479,147 @@ fn overlapping_unknown_peers_adopt_the_newest_durable_registration() {
     persist_peer_at(&host_paths, &scope, "agent-a", "session-x", "thread-x", 1);
     persist_peer_at(&host_paths, &scope, "agent-b", "session-x", "thread-x", 3);
 
-    let outcome = with_current_address("thread-x", "session-x", || {
-        identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap()
+    let ambiguous = identity_by_tmux_anchor_at(
+        &host_paths,
+        &scope,
+        &tmux_candidate(Some("session-x"), Some("thread-x"), "%7"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        ambiguous.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
+        "{ambiguous}"
+    );
+
+    let rebind = with_current_address("thread-x", "session-x", || {
+        identity_for_scope_rebind_at(&host_paths, &scope, None)
     });
-    match outcome {
-        ScopeRebindOutcome::Adopted(identity) => assert_eq!(
-            identity.worker_id, "agent-b",
-            "the newest registration must win"
-        ),
-        other => panic!("overlapping unknown peers must auto-adopt: {other:?}"),
+    let detail = rebind.unwrap_err().to_string();
+    assert!(
+        detail.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
+        "{detail}"
+    );
+
+    let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-b")).unwrap();
+    match selected {
+        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-b"),
+        other => panic!("--worker override must adopt the named identity: {other:?}"),
     }
     std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn identity_with_scope(
+    worker: &str,
+    scope: crate::scope::ProjectScopeId,
+    generation: u64,
+) -> Identity {
+    let mut runtime = runtime_identity(generation, &format!("binding-{worker}"));
+    runtime.agent_id = AgentId::new(worker).unwrap();
+    Identity {
+        worker_id: worker.into(),
+        token: format!("token-{worker}"),
+        project_scope: Some(scope),
+        runtime: Some(runtime),
+        transport: None,
+    }
+}
+
+/// One anchor that several records claim is resolved by scope, liveness, and a
+/// durable global recency order rather than a per-binding generation.
+#[test]
+fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
+    let root = short_test_root();
+    std::fs::create_dir_all(&root).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let scope = crate::scope::ProjectScopeId::new("/tmp/project-current").unwrap();
+    let other = crate::scope::ProjectScopeId::new("/tmp/project-foreign").unwrap();
+
+    // Liveness is injected so the decision is tested without a live transport.
+    let all_dead = |_: &Identity| PeerLiveness::Dead;
+
+    // Scope wins: a foreign record can never shadow a current-scope match for
+    // the same anchor.
+    let chosen = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![
+            identity_with_scope("foreign-newest", other.clone(), 9),
+            identity_with_scope("current-older", scope.clone(), 1),
+        ],
+        all_dead,
+    )
+    .unwrap();
+    assert_eq!(chosen.worker_id, "current-older");
+
+    // Live or unproven duplicates block; only a provably dead set is adopted.
+    let live_blocks = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![
+            identity_with_scope("dead-peer", scope.clone(), 1),
+            identity_with_scope("live-peer", scope.clone(), 9),
+        ],
+        |identity| {
+            if identity.worker_id == "live-peer" {
+                PeerLiveness::Live
+            } else {
+                PeerLiveness::Dead
+            }
+        },
+    );
+    assert!(live_blocks.is_err());
+    let unknown_blocks = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![
+            identity_with_scope("dead-peer", scope.clone(), 1),
+            identity_with_scope("cold-peer", scope.clone(), 9),
+        ],
+        |identity| {
+            if identity.worker_id == "cold-peer" {
+                PeerLiveness::Unknown
+            } else {
+                PeerLiveness::Dead
+            }
+        },
+    );
+    assert!(unknown_blocks.is_err());
+
+    // A provably dead set is adopted by durable recency, not the higher
+    // per-binding generation of the older record.
+    let current = identity_with_scope("current-peer", scope.clone(), 1);
+    let stale = identity_with_scope("stale-peer", scope.clone(), 9);
+    write_identity(
+        &identity_path_at(&host_paths, "stale-peer").unwrap(),
+        &stale,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write_identity(
+        &identity_path_at(&host_paths, "current-peer").unwrap(),
+        &current,
+    )
+    .unwrap();
+    let chosen = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![stale, current],
+        |_| PeerLiveness::Dead,
+    )
+    .unwrap();
+    assert_eq!(
+        chosen.worker_id, "current-peer",
+        "the most recently registered record wins, not the larger generation"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

@@ -58,7 +58,7 @@ flowchart LR
 | G1 no background ledger owner | Lost records are only seen on `collab who`, `context`, or registration. | Add one scheduled/manual ledger maintenance entry that scans identity/route/projection records. |
 | G2 no typed ledger state | Status shows boolean/live strings but has no durable lifecycle classification. | Persist `LedgerPeerState`: `live`, `cold`, `missing`, `repair_required`, `retired`. |
 | G3 pane missing cannot close peer lifecycle | A vanished tmux peer can remain registered with `TMUX_PANE_MISSING`; direct delivery has no durable fence. | If pane probe is `Missing`, transition peer to `missing`, fence further direct delivery, retain mailbox/durable notifications, and mark repair/retire eligibility. |
-| G4 cold AppServer thread is not recoverable from ledger alone | `notLoaded` is `Unknown`, not dead. | Keep blocked unless an AppServer-specific recovery operation can load/resume the exact thread; do not archive cold threads. |
+| G4 cold AppServer thread is not recoverable from ledger alone | A successful `thread/read` that returns `notLoaded` is a definitive "not currently live, but resumable" answer, not a probe failure. | Classify it `cold`: preserve it (never archive), and never let it deny recovery on its own. A cold record that still overlaps the current pane/session/thread is fail-closed because it may be this peer, so it needs the explicit `--worker` override rather than silent substitution. |
 | G5 host/project split-journal reconciliation is request/startup scoped | Existing reconciliation covers same-pane master generation mismatch, not all ledger records. | Promote reconciliation to the same ledger maintenance DAG while preserving narrow typed admission. |
 | G6 current MCP process without anchor cannot map to lost peer | `COLLAB_IDENTITY_ANCHOR_MISSING` stops before ledger repair. | A maintenance owner can classify missing peers, but must not authenticate or promote a caller that has no valid anchor/token. |
 | G7 delivery and identity recovery are conflated | A lost endpoint is reported, but notification/subscription state has no separate terminal classification. | Split endpoint state from durable delivery state; mailbox receipt remains authoritative consumption. |
@@ -123,6 +123,32 @@ Probe states do not directly become ledger states. The classification combines t
 | archived credential | no active refs | Missing or all refs retired | revoked | `retire`; archive receipt retained. |
 | no current anchor | any | any | any | caller remains unauthenticated; maintenance may classify but not promote. |
 
+## Anchor duplicate resolution (implemented)
+
+When several persisted records claim one current anchor, the winning peer is
+chosen by a single ordered decision, not by a per-binding generation:
+
+1. **Scope first.** Restrict to records whose `project_scope` is the current
+   project. A foreign duplicate can never shadow, or be retired in place of, a
+   current-scope match.
+2. **Liveness is the only hard conflict.** A `live` member makes the anchor
+   ambiguous. Only an *explicit user override* (`--worker`) may adopt past it.
+3. **Cold/unproven overlaps are fail-closed.** A `cold` (`notLoaded`) or
+   `unknown` (probe error) member that still overlaps the current
+   pane/session/thread may be a live peer we could not reach, so it also makes
+   the anchor ambiguous and requires `--worker`; it is never silently
+   superseded or archived.
+4. **Provably dead or non-overlapping records never block.** A unique
+   non-overlapping record is adopted as normal drift; several unrelated stale
+   records mint a fresh identity for the current anchor instead of being
+   claimed.
+5. **Durable recency breaks ties.** Among adoptable records the winner is the
+   one this pane derives its id from (`codex-<pane>`), then the most recently
+   rewritten identity file, then the lowest `worker_id`. The identity file is
+   rewritten atomically on every registration, so its last-write time is a
+   global order (a new binding's `endpoint_generation` restarts at 1 and is
+   not).
+
 ## Repair actions
 
 1. **No-op classification.** For `live`, refresh projection metadata only; do not append journal events.
@@ -152,6 +178,9 @@ Required tests:
 - host/project adjacent split-journal mismatch reconciles through the route registry and emits a receipt.
 - non-adjacent or cross-worker mismatch becomes `repair_required`, no mutation.
 - two stale peers with one live peer block fresh identity creation and do not archive the live peer.
+- two cold/unproven peers on the same anchor stay ambiguous and require `--worker`; neither is adopted or archived.
+- scope partition prefers the current-scope record over a newer foreign record on the same anchor.
+- among provably dead duplicates the durable recency order wins over a larger per-binding generation.
 - all peers provably dead permits retirement, then fresh registration.
 - current process without anchor cannot authenticate as any existing peer.
 - retire archive is reversible enough for the existing archived pane recovery path and preserves worker ID/token/runtime generation.
@@ -165,4 +194,3 @@ Acceptance evidence must include isolated state-root tests, daemon startup repla
 - No cross-worker ownership transfer.
 - No notification loss or mailbox cleanup as a side effect of retirement.
 - No generic partial-information identity inference in ordinary route resolve.
-

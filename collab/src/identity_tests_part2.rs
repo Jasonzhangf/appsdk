@@ -392,7 +392,7 @@ fn explicit_worker_selection_rebinds_without_a_liveness_probe() {
 }
 
 #[test]
-fn explicit_worker_selection_rejects_conflicting_identity_anchor() {
+fn explicit_worker_selection_overrides_a_conflicting_identity_anchor() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -408,7 +408,7 @@ fn explicit_worker_selection_rejects_conflicting_identity_anchor() {
         "thread-a",
         1,
     );
-    persist_peer_at(
+    let explicit = persist_peer_at(
         &host_paths,
         &scope,
         "explicit-peer",
@@ -417,12 +417,159 @@ fn explicit_worker_selection_rejects_conflicting_identity_anchor() {
         1,
     );
 
-    let result = with_current_address("thread-a", "session-a", || {
-        load_or_create_resolved_at(&host_paths, &scope, Some("explicit-peer".into()), true)
-    });
+    // The unnamed path still resolves the current anchor.
+    let anchored = with_current_address("thread-a", "session-a", || {
+        load_or_create_resolved_at(&host_paths, &scope, None, true)
+    })
+    .unwrap();
+    assert_eq!(anchored.worker_id, "anchored-peer");
 
-    let error = result.unwrap_err().to_string();
-    assert!(error.starts_with("IDENTITY_RESTORE_CONFLICT:"), "{error}");
+    // Naming a different durable identity is the explicit override the error
+    // messages advertise: it must adopt that identity, not fail closed.
+    let selected = with_current_address("thread-a", "session-a", || {
+        load_or_create_resolved_at(&host_paths, &scope, Some("explicit-peer".into()), true)
+    })
+    .unwrap();
+    assert_eq!(selected.worker_id, "explicit-peer");
+    assert_eq!(selected.token, explicit.token);
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Two same-scope records that claim one anchor are this peer's own drifted
+/// registrations, so neither is live. The unnamed path adopts one, and the
+/// explicit `--worker` override picks the exact named identity.
+#[test]
+fn explicit_worker_recovers_duplicate_anchor_records() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let first = persist_peer_at(&host_paths, &scope, "dup-a", "session-dup", "thread-dup", 1);
+    let second = persist_peer_at(&host_paths, &scope, "dup-b", "session-dup", "thread-dup", 3);
+
+    for (named, expected) in [("dup-a", &first), ("dup-b", &second)] {
+        let selected = with_current_address("thread-dup", "session-dup", || {
+            load_or_create_resolved_at(&host_paths, &scope, Some(named.into()), true)
+        })
+        .unwrap();
+        assert_eq!(selected.worker_id, named);
+        assert_eq!(selected.token, expected.token);
+    }
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A non-dead cross-project record keeps the unnamed path fail-closed, and the
+/// explicit `--worker` override still recovers the named current-project
+/// identity without claiming or archiving the foreign owner.
+#[test]
+fn explicit_worker_recovers_across_a_non_dead_cross_project_anchor() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let other = root.join("other-project");
+    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let other_scope = test_scope(other.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let wanted = persist_peer_at(
+        &host_paths,
+        &scope,
+        "current-peer",
+        "session-own",
+        "thread-own",
+        1,
+    );
+    persist_peer_at(
+        &host_paths,
+        &other_scope,
+        "foreign-peer",
+        "session-shared",
+        "thread-shared",
+        1,
+    );
+
+    let blocked = with_current_address("thread-shared", "session-shared", || {
+        load_or_create_resolved_at(&host_paths, &scope, None, true)
+    });
+    let error = blocked.unwrap_err().to_string();
+    assert!(
+        error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
+        "{error}"
+    );
+
+    let selected = with_current_address("thread-shared", "session-shared", || {
+        load_or_create_resolved_at(&host_paths, &scope, Some("current-peer".into()), true)
+    })
+    .unwrap();
+    assert_eq!(selected.worker_id, "current-peer");
+    assert_eq!(selected.token, wanted.token);
+    assert!(
+        read_identity(&identity_path_at(&host_paths, "foreign-peer").unwrap())
+            .unwrap()
+            .is_some(),
+        "the explicit override must not archive the foreign owner"
+    );
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Two *live* records that claim one anchor are a genuine conflict: the unnamed
+/// path fails closed with the `--worker` guidance, and that override recovers
+/// the named identity without needing the liveness probe at all.
+#[test]
+fn explicit_worker_recovers_a_live_duplicate_anchor() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let socket = state_root.join("appserver.sock");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = spawn_live_app_server(socket.clone(), stop.clone());
+    let endpoint = format!("unix://{}", socket.display());
+    let first = persist_appserver_peer_at(
+        &host_paths,
+        &scope,
+        "live-a",
+        "session-live",
+        "thread-live",
+        &endpoint,
+        1,
+    );
+    persist_appserver_peer_at(
+        &host_paths,
+        &scope,
+        "live-b",
+        "session-live",
+        "thread-live",
+        &endpoint,
+        3,
+    );
+
+    let blocked = with_current_address("thread-live", "session-live", || {
+        load_or_create_resolved_at(&host_paths, &scope, None, true)
+    });
+    let error = blocked.unwrap_err().to_string();
+    assert!(error.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"), "{error}");
+
+    let selected = with_current_address("thread-live", "session-live", || {
+        load_or_create_resolved_at(&host_paths, &scope, Some("live-a".into()), true)
+    })
+    .unwrap();
+    assert_eq!(selected.worker_id, "live-a");
+    assert_eq!(selected.token, first.token);
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().ok();
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }
@@ -956,6 +1103,30 @@ fn persist_peer_at(
     thread: &str,
     generation: u64,
 ) -> Identity {
+    persist_appserver_peer_at(
+        host_paths,
+        scope,
+        worker,
+        session,
+        thread,
+        "unix:///tmp/codex.sock",
+        generation,
+    )
+}
+
+/// Build one persisted App Server identity whose probe endpoint is `endpoint`.
+/// A test that binds a live fake App Server there makes the peer genuinely
+/// `Live`; the shared `/tmp/codex.sock` default keeps every other peer
+/// unproven.
+fn persist_appserver_peer_at(
+    host_paths: &HostPaths,
+    scope: &Scope,
+    worker: &str,
+    session: &str,
+    thread: &str,
+    endpoint: &str,
+    generation: u64,
+) -> Identity {
     let mut identity =
         load_or_create_resolved_at(host_paths, scope, Some(worker.into()), false).unwrap();
     let mut runtime = runtime_identity(generation, &format!("binding-{worker}"));
@@ -968,7 +1139,7 @@ fn persist_peer_at(
         runtime,
         SelectedTransport {
             kind: TransportKind::AppServer,
-            endpoint: Some("unix:///tmp/codex.sock".into()),
+            endpoint: Some(endpoint.into()),
             namespace: Some("codex_tui".into()),
             session_id: Some(session.into()),
             thread_id: Some(thread.into()),
@@ -979,6 +1150,127 @@ fn persist_peer_at(
     )
     .unwrap();
     identity
+}
+
+/// Minimal fake App Server that answers the handshake, `initialize`, and
+/// `thread/read` (as a live thread) so `persisted_peer_liveness` classifies a
+/// persisted peer as `Live`. It serves connections until `stop` is set.
+fn spawn_live_app_server(
+    socket: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use std::os::unix::net::UnixListener;
+    let listener = UnixListener::bind(&socket).expect("bind fake App Server socket");
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // BSD/macOS accepted sockets inherit the listener's
+                    // non-blocking flag, so restore blocking reads.
+                    stream.set_nonblocking(false).unwrap();
+                    serve_live_app_server(&mut stream);
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn serve_live_app_server(stream: &mut std::os::unix::net::UnixStream) {
+    use std::io::{Read, Write};
+    let mut request = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !request.ends_with(b"\r\n\r\n") {
+        if stream.read_exact(&mut byte).is_err() {
+            return;
+        }
+        request.push(byte[0]);
+    }
+    if stream
+        .write_all(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        let Some(frame) = read_client_frame(stream) else {
+            return;
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&frame).unwrap_or(serde_json::Value::Null);
+        if value["method"] == "thread/read" {
+            let response = serde_json::json!({
+                "id": value["id"],
+                "result": {"thread": {"status": {"type": "active"}}}
+            });
+            let _ = stream.write_all(&encode_frame(0x1, &serde_json::to_vec(&response).unwrap()));
+            return;
+        }
+        if value.get("id").is_some() {
+            let response = serde_json::json!({"id": value["id"], "result": {}});
+            let _ = stream.write_all(&encode_frame(0x1, &serde_json::to_vec(&response).unwrap()));
+        }
+    }
+}
+
+fn read_client_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header).ok()?;
+    let masked = header[1] & 0x80 != 0;
+    let mut length = (header[1] & 0x7f) as usize;
+    if length == 126 {
+        let mut bytes = [0_u8; 2];
+        stream.read_exact(&mut bytes).ok()?;
+        length = u16::from_be_bytes(bytes) as usize;
+    } else if length == 127 {
+        let mut bytes = [0_u8; 8];
+        stream.read_exact(&mut bytes).ok()?;
+        length = u64::from_be_bytes(bytes) as usize;
+    }
+    let mut mask = [0_u8; 4];
+    if masked {
+        stream.read_exact(&mut mask).ok()?;
+    }
+    let mut payload = vec![0_u8; length];
+    stream.read_exact(&mut payload).ok()?;
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % 4];
+        }
+    }
+    Some(payload)
+}
+
+fn encode_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 14);
+    frame.push(0x80 | opcode);
+    let mask = [0x11_u8, 0x22, 0x33, 0x44];
+    match payload.len() {
+        length if length < 126 => frame.push(0x80 | length as u8),
+        length if length <= u16::MAX as usize => {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+        }
+        length => {
+            frame.push(0x80 | 127);
+            frame.extend_from_slice(&(length as u64).to_be_bytes());
+        }
+    }
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % 4]),
+    );
+    frame
 }
 fn with_current_address<T>(thread: &str, session: &str, body: impl FnOnce() -> T) -> T {
     let previous_thread = std::env::var_os("CODEX_THREAD_ID");

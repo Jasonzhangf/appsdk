@@ -133,6 +133,10 @@ chosen by a single ordered decision, not by a per-binding generation:
    project it registered under: a foreign live owner must never be hidden
    behind a non-live current-scope duplicate. Only an *explicit user override*
    (`--worker`) may adopt past a live conflict.
+   The override is decided before anchor resolution: a named identity is
+   recovered without a liveness probe, so anchor ambiguity, a cross-project
+   record, and a live duplicate all yield to the named identity instead of
+   blocking it. Without `--worker` the live conflict still fails closed.
 2. **Then scope preference.** Restrict to records whose `project_scope` is the
    current project. A foreign duplicate can never shadow, or be retired in
    place of, a current-scope match.

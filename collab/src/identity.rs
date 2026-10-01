@@ -1056,17 +1056,14 @@ pub(crate) fn load_existing_at(
             .filter(|value| !value.trim().is_empty())
     });
     let anchored_identity =
-        identity_by_current_anchors_same_scope_at(host_paths, scope, tmux_candidate.as_ref())?;
-    if let (Some(explicit_worker), Some(identity)) =
-        (explicit_worker.as_deref(), anchored_identity.as_ref())
-    {
-        if explicit_worker != identity.worker_id {
-            anyhow::bail!(
-                "IDENTITY_RESTORE_CONFLICT: explicit worker {explicit_worker} conflicts with the current tmux/Codex anchors for {}",
-                identity.worker_id
-            );
-        }
-    }
+        // An explicit `--worker` names the durable identity to load, so it is
+        // decided before anchor resolution: an anchor ambiguity or scope
+        // mismatch is exactly the case the override exists to resolve.
+        if explicit_worker.is_none() {
+            identity_by_current_anchors_same_scope_at(host_paths, scope, tmux_candidate.as_ref())?
+        } else {
+            None
+        };
     if explicit_worker.is_none() && anchored_identity.is_some() {
         return Ok(anchored_identity);
     }
@@ -1553,47 +1550,40 @@ fn load_or_create_resolved_full_at(
         anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane, a valid App Server endpoint, or an explicit worker_id")
     });
     let mut retired_cross_project = false;
-    let anchored_identity = match identity_by_current_anchors_at(
-        host_paths,
-        scope,
-        candidate.as_ref().ok().copied(),
-    )? {
-        Some(AnchorResolution::CurrentScope(identity)) => Some(identity),
-        Some(AnchorResolution::CrossProject(identity)) => {
-            if allow_scope_rebind {
-                // The same pane/thread previously registered in another
-                // project. A pane/thread can only belong to one live peer, so
-                // a *provably dead* foreign record is retired and the current
-                // project mints a fresh peer. A live, cold, or unproven
-                // foreign record may still be the live owner of this anchor,
-                // so it stays fail-closed and needs the explicit --worker
-                // override instead of being archived on scope mismatch alone.
-                if matches!(persisted_peer_liveness(&identity), PeerLiveness::Dead) {
-                    archive_dead_peers(host_paths, std::slice::from_ref(&identity))?;
-                    retired_cross_project = true;
-                    None
+    // An explicit `--worker` names the durable identity to recover, so it is
+    // decided before anchor resolution. Anchor ambiguity, a cross-project
+    // record, and a live duplicate are exactly the cases the override exists to
+    // resolve, and a named identity must never need a liveness probe to be
+    // recovered. Only the unnamed path resolves the current anchors.
+    if explicit_worker.is_none() {
+        match identity_by_current_anchors_at(host_paths, scope, candidate.as_ref().ok().copied())? {
+            Some(AnchorResolution::CurrentScope(identity)) => return Ok(identity),
+            Some(AnchorResolution::CrossProject(identity)) => {
+                if allow_scope_rebind {
+                    // The same pane/thread previously registered in another
+                    // project. A pane/thread can only belong to one live peer,
+                    // so a *provably dead* foreign record is retired and the
+                    // current project mints a fresh peer. A live, cold, or
+                    // unproven foreign record may still be the live owner of
+                    // this anchor, so it stays fail-closed and needs the
+                    // explicit --worker override instead of being archived on
+                    // scope mismatch alone.
+                    if matches!(persisted_peer_liveness(&identity), PeerLiveness::Dead) {
+                        archive_dead_peers(host_paths, std::slice::from_ref(&identity))?;
+                        retired_cross_project = true;
+                    } else {
+                        anyhow::bail!(
+                            "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project and its persisted peer is not provably dead; pass --worker to explicitly recover it"
+                        );
+                    }
                 } else {
                     anyhow::bail!(
-                        "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project and its persisted peer is not provably dead; pass --worker to explicitly recover it"
+                        "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
                     );
                 }
-            } else {
-                anyhow::bail!(
-                    "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
-                );
             }
+            None => {}
         }
-        None => None,
-    };
-    if let Some(identity) = anchored_identity {
-        if explicit_worker.as_ref().is_some_and(|worker| worker.as_str() != identity.worker_id) {
-            anyhow::bail!(
-                "IDENTITY_RESTORE_CONFLICT: explicit worker {:?} conflicts with the current tmux/Codex anchors for {}",
-                explicit_worker,
-                identity.worker_id
-            );
-        }
-        return Ok(identity);
     }
 
     if allow_scope_rebind && !retired_cross_project {

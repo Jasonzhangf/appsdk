@@ -1,3 +1,32 @@
+/// Decide whether a project's same-pane master binding has been superseded by
+/// another binding that now owns the same tmux pane.
+///
+/// A pane is addressable by exactly one live peer per project. The host route
+/// index keys a binding that carries live Codex session/thread IDs by its
+/// thread address, so a pane that was reused by a new peer keeps both the
+/// stale master anchor and the new owner in the index. This is the same rule
+/// `validate_current_thread_candidate` already applies: a live native thread
+/// is authoritative, and a shared pane must not block a second peer. The
+/// stale anchor therefore stops gating the project route instead of fencing
+/// every non-register request forever.
+///
+/// Only a peer that actually has a native session/thread can supersede the
+/// anchor; a bare pane recovery anchor never does.
+fn same_scope_pane_owner_supersedes(global: &GlobalState, binding: &RuntimeBinding) -> bool {
+    let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+        return false;
+    };
+    global.current_thread_routes.values().any(|other| {
+        other.route_scope() == binding.route_scope()
+            && other.binding_id != binding.binding_id
+            && other.session_id.is_some()
+            && other.native_thread_id.is_some()
+            && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
+                crate::client::adapters::tmux::same_pane_route(other_endpoint, endpoint)
+            })
+    })
+}
+
 impl ProjectRuntimeManager {
     fn new(host: Arc<Server>, host_paths: &crate::scope::HostPaths) -> Result<Arc<Self>, String> {
         let host_root = GlobalState::canonical_project_scope(&host.root)
@@ -240,8 +269,19 @@ impl ProjectRuntimeManager {
         if Arc::ptr_eq(runtime, &self.host) {
             return Ok(());
         }
-        for binding in self.pending_same_pane_master_bindings(runtime) {
-            let host = self.host.state.lock().unwrap();
+        let pending = self.pending_same_pane_master_bindings(runtime);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let host = self.host.state.lock().unwrap();
+        for binding in pending {
+            // A pane is addressable by exactly one live peer per project. Once
+            // another binding in the same route scope owns this pane with a
+            // live native thread, the stale same-pane master anchor is
+            // superseded and must not fence the whole project route forever.
+            if same_scope_pane_owner_supersedes(&host.global, &binding) {
+                continue;
+            }
             let route = binding
                 .tmux_endpoint
                 .as_ref()
@@ -265,14 +305,13 @@ impl ProjectRuntimeManager {
                 let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
                     continue;
                 };
-                let host_route = self
-                    .host
-                    .state
-                    .lock()
-                    .unwrap()
-                    .global
-                    .lookup_unique_tmux_pane_route(endpoint)
-                    .cloned();
+                let host_route = {
+                    let host = self.host.state.lock().unwrap();
+                    if same_scope_pane_owner_supersedes(&host.global, &binding) {
+                        continue;
+                    }
+                    host.global.lookup_unique_tmux_pane_route(endpoint).cloned()
+                };
                 if host_route.as_ref() == Some(&binding) {
                     continue;
                 }

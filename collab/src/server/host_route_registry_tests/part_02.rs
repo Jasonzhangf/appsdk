@@ -1051,6 +1051,345 @@
     }
 
     #[tokio::test]
+    async fn superseded_same_pane_master_does_not_fence_project_route() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        // Worker A is the stale same-pane master.
+        let master_worker = "stale-same-pane-master";
+        let master_token = "token-stale-same-pane-master";
+        let master_candidates = test_candidates(master_worker).unwrap();
+        let first = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(master_candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            "user approved same-pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&scope, &BindingId::new(format!("binding-{master_worker}")).unwrap())
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), master_binding.project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        // With only the master route published the fence is satisfied.
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+
+        // Worker B takes over the same tmux pane with a live native thread.
+        let peer_worker = "live-same-pane-peer";
+        let peer_token = "token-live-same-pane-peer";
+        let mut peer_candidates = master_candidates;
+        let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-live-same-pane-peer".into());
+        endpoint.codex_thread_id = Some("live-same-pane-peer-thread".into());
+        let peer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(peer_candidates),
+        );
+        assert!(peer.ok, "{peer:?}");
+        let peer_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new(format!("binding-{peer_worker}")).unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: peer_binding.clone(),
+        }])
+        .unwrap();
+
+        // Both bindings now share the pane in the host index. The stale master
+        // anchor is superseded by the live same-scope peer and must no longer
+        // fence the project route.
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        manager.reconcile_same_pane_master_routes().unwrap();
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_pane_master_still_fences_when_host_route_is_missing() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        let master_worker = "missing-host-route-pane-master";
+        let master_token = "token-missing-host-route-pane-master";
+        let candidates = test_candidates(master_worker).unwrap();
+        let first = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            "user approved same-pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&scope, &BindingId::new(format!("binding-{master_worker}")).unwrap())
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), master_binding.project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+
+        // The host route is missing again, but a live same-scope peer owns the
+        // same pane in the host index. The master anchor is superseded by that
+        // peer, so the project route must not fail closed.
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        let mut peer_candidates = candidates.clone();
+        let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-active-same-pane-peer".into());
+        endpoint.codex_thread_id = Some("active-same-pane-peer-thread".into());
+        let peer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            "active-same-pane-peer".into(),
+            "token-active-same-pane-peer".into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(peer_candidates),
+        );
+        assert!(peer.ok, "{peer:?}");
+        let peer_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new("binding-active-same-pane-peer".to_string()).unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: peer_binding,
+        }])
+        .unwrap();
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_pane_master_still_fences_when_no_peer_owns_the_pane() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        let master_worker = "missing-host-route-pane-master";
+        let master_token = "token-missing-host-route-pane-master";
+        let candidates = test_candidates(master_worker).unwrap();
+        let first = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            "user approved same-pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&scope, &BindingId::new(format!("binding-{master_worker}")).unwrap())
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), master_binding.project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+
+        // Retire the host route and leave no superseding same-scope peer: the
+        // project route must still fail closed instead of being silently
+        // served through a missing index entry.
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        assert!(manager.same_pane_master_route_ready(&runtime).is_err());
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pane_owner_in_another_pane_does_not_supersede_master() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        let master_worker = "other-pane-peer-master";
+        let master_token = "token-other-pane-peer-master";
+        let master_candidates = test_candidates(master_worker).unwrap();
+        let first = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(master_candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            "user approved same-pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&scope, &BindingId::new(format!("binding-{master_worker}")).unwrap())
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), master_binding.project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+
+        // A live peer in the same project but on a different pane is not a
+        // pane owner for the master's pane and must not supersede it. The
+        // unique-pane lookup for the master pane must still resolve exactly
+        // the master binding.
+        let other_worker = "other-pane-live-peer";
+        let other_token = "token-other-pane-live-peer";
+        let other = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            other_worker.into(),
+            other_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(test_candidates(other_worker).unwrap()),
+        );
+        assert!(other.ok, "{other:?}");
+        let other_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&scope, &BindingId::new(format!("binding-{other_worker}")).unwrap())
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: other_binding,
+        }])
+        .unwrap();
+        let master_pane = master_binding.tmux_endpoint.as_ref().unwrap();
+        assert!(host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_unique_tmux_pane_route(master_pane)
+            .is_some_and(|route| route.binding_id == master_binding.binding_id));
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        assert!(manager
+            .reconcile_same_pane_master_routes()
+            .is_ok());
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
     async fn startup_publishes_a_missing_current_thread_route_from_the_project_owner() {
         let (host, host_root, _) = test_server();
         let (runtime, project_root, _) = test_server();

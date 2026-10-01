@@ -1342,19 +1342,17 @@ fn choose_anchor_peer(
 /// carries no Codex IDs and the pane is its only anchor; otherwise a shared
 /// pane would hide a distinct live App Server thread.
 ///
-/// Since a non-live overlap may be a peer we could not reach, this predicate
-/// reports candidate overlap only; the caller pairs it with liveness to decide
-/// whether the overlap is a blocking conflict.
+/// The candidate's own anchors are the only reliable anchors here. Do not fall
+/// back to ambient `CODEX_*` values: a candidate is an existing peer or a
+/// recovered address that must be compared on its own fields.
 fn identity_anchor_conflicts_with_candidate(
     identity: &Identity,
     candidate: Option<&crate::proto::TmuxCandidate>,
 ) -> bool {
     let current_session = candidate
-        .and_then(|candidate| candidate.endpoint.codex_session_id.clone())
-        .or_else(|| std::env::var("CODEX_SESSION_ID").ok());
+        .and_then(|candidate| candidate.endpoint.codex_session_id.clone());
     let current_thread = candidate
-        .and_then(|candidate| candidate.endpoint.codex_thread_id.clone())
-        .or_else(|| std::env::var("CODEX_THREAD_ID").ok());
+        .and_then(|candidate| candidate.endpoint.codex_thread_id.clone());
     let runtime = identity.runtime.as_ref();
     let transport = identity.transport.as_ref();
     let persisted_session = transport

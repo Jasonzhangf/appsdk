@@ -1151,8 +1151,8 @@ enum PeerLiveness {
     /// loaded. It is preserved (never archived) and is not a live conflict.
     Cold,
     /// Liveness could not be established (probe error, malformed address, or
-    /// a missing transport). A record that overlaps the current anchor must
-    /// keep blocking, because an unreachable authority is not proof of death.
+    /// a missing transport). It is not live, so it never blocks recovery; like
+    /// `Cold` it is a normal drift/restart candidate the current pane adopts.
     Unknown,
 }
 
@@ -1277,14 +1277,10 @@ fn choose_anchor_peer(
     mut candidates: Vec<Identity>,
     liveness: impl Fn(&Identity) -> PeerLiveness,
 ) -> anyhow::Result<Identity> {
-    let in_scope = candidates
-        .iter()
-        .filter(|identity| identity.project_scope.as_ref() == Some(expected_scope))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !in_scope.is_empty() {
-        candidates = in_scope;
-    }
+    // A reachable peer that claims this anchor is a hard conflict regardless of
+    // which project scope it registered under. Scope preference must never hide
+    // a live owner (including a foreign one) behind a non-live current-scope
+    // duplicate.
     if candidates
         .iter()
         .any(|identity| matches!(liveness(identity), PeerLiveness::Live))
@@ -1292,6 +1288,14 @@ fn choose_anchor_peer(
         anyhow::bail!(
             "IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple live peers; pass --worker <worker_id> to explicitly select one"
         );
+    }
+    let in_scope = candidates
+        .iter()
+        .filter(|identity| identity.project_scope.as_ref() == Some(expected_scope))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !in_scope.is_empty() {
+        candidates = in_scope;
     }
     candidates.sort_by(|left, right| non_live_candidate_order(host_paths, candidate, left, right));
     Ok(candidates.remove(0))
@@ -1391,11 +1395,13 @@ fn archive_dead_peers(host_paths: &HostPaths, dead: &[Identity]) -> anyhow::Resu
 /// Recovery is single-source (persisted identities + current project scope +
 /// transport liveness) and single-sink. Normal session/thread/pane drift
 /// adopts the unique durable candidate even when current anchors no longer
-/// match, and provably dead records are archived. Only records that overlap
-/// the current anchor are conflicts: a live one is a hard conflict, and a
-/// cold/unproven one is a conflict because it cannot be shown to be gone.
-/// The explicit user override (selected_worker) supersedes either conflict so
-/// the named durable identity is always recoverable on request.
+/// match, and provably dead records are archived. Only a *live* record that
+/// overlaps the current anchor is a hard conflict: two reachable peers cannot
+/// share one anchor. Cold/unproven records are not live, so they never block:
+/// whether overlapping or not, they are normal drift/restart candidates the
+/// current pane adopts deterministically. The explicit user override
+/// (selected_worker) supersedes any live conflict so the named durable
+/// identity is always recoverable on request.
 fn identity_for_scope_rebind_at(
     host_paths: &HostPaths,
     scope: &Scope,

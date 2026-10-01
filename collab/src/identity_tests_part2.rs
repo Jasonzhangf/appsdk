@@ -575,6 +575,26 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
         },
     );
     assert!(live_blocks.is_err());
+    // A foreign *live* owner must not be hidden behind a non-live current-scope
+    // duplicate: the anchor is ambiguous and requires the explicit override.
+    let foreign_live_hidden = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![
+            identity_with_scope("current-cold", scope.clone(), 1),
+            identity_with_scope("foreign-live", other.clone(), 9),
+        ],
+        |identity| {
+            if identity.worker_id == "foreign-live" {
+                PeerLiveness::Live
+            } else {
+                PeerLiveness::Cold
+            }
+        },
+    );
+    assert!(foreign_live_hidden.is_err());
     let unknown_adopts = choose_anchor_peer(
         &host_paths,
         None,

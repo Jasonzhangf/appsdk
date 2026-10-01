@@ -128,20 +128,20 @@ Probe states do not directly become ledger states. The classification combines t
 When several persisted records claim one current anchor, the winning peer is
 chosen by a single ordered decision, not by a per-binding generation:
 
-1. **Scope first.** Restrict to records whose `project_scope` is the current
-   project. A foreign duplicate can never shadow, or be retired in place of, a
-   current-scope match.
-2. **Liveness is the only hard conflict.** A `live` member makes the anchor
-   ambiguous. Only an *explicit user override* (`--worker`) may adopt past it.
-3. **Cold/unproven overlaps are fail-closed.** A `cold` (`notLoaded`) or
-   `unknown` (probe error) member that still overlaps the current
-   pane/session/thread may be a live peer we could not reach, so it also makes
-   the anchor ambiguous and requires `--worker`; it is never silently
-   superseded or archived.
-4. **Provably dead or non-overlapping records never block.** A unique
-   non-overlapping record is adopted as normal drift; several unrelated stale
-   records mint a fresh identity for the current anchor instead of being
-   claimed.
+1. **Live conflict is checked first, before scope filtering.** A reachable
+   member that claims this anchor makes the anchor ambiguous regardless of the
+   project it registered under: a foreign live owner must never be hidden
+   behind a non-live current-scope duplicate. Only an *explicit user override*
+   (`--worker`) may adopt past a live conflict.
+2. **Then scope preference.** Restrict to records whose `project_scope` is the
+   current project. A foreign duplicate can never shadow, or be retired in
+   place of, a current-scope match.
+3. **Cold/unproven records never block.** A `cold` (`notLoaded`) or `unknown`
+   (probe error) member is not live, so it is never a conflict: whether it
+   overlaps the current pane/session/thread or not, it is a normal
+   drift/restart candidate the current pane adopts deterministically.
+4. **Provably dead records never block.** Dead members are archived before the
+   surviving candidates are considered.
 5. **Durable recency breaks ties.** Among adoptable records the winner is the
    one this pane derives its id from (`codex-<pane>`), then the most recently
    rewritten identity file, then the lowest `worker_id`. The identity file is

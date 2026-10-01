@@ -687,6 +687,45 @@ fn identifier_validation_rejects_empty_and_control_values() {
     assert!(DispatchId::new("d".repeat(MAX_ID_LENGTH + 1)).is_err());
 }
 
+#[test]
+fn identity_anchor_conflict_checks_overlap_not_project_residency() {
+    let base = Identity {
+        worker_id: "base-peer".into(),
+        token: "base-token".into(),
+        project_scope: None,
+        runtime: Some(RuntimeIdentity::cli_adapter("base-peer").unwrap()),
+        transport: Some(SelectedTransport {
+            kind: TransportKind::AppServer,
+            endpoint: Some("unix:///tmp/codex.sock".into()),
+            namespace: Some("codex_tui".into()),
+            session_id: Some("other-session".into()),
+            thread_id: Some("other-thread".into()),
+            tmux_endpoint: None,
+            capabilities: vec![],
+            self_check: "ok".into(),
+        }),
+    };
+
+    let candidate =
+        |pane_id: &str| tmux_candidate(Some("new-session"), Some("new-thread"), pane_id);
+
+    // A live peer on an unrelated thread/session must not block the current pane.
+    assert!(!identity_anchor_conflicts_with_candidate(&base, Some(&candidate("%900"))));
+
+    // The same native thread is the same durable principal, regardless of pane.
+    let mut same_thread = base.clone();
+    same_thread.worker_id = "same-thread-peer".into();
+    same_thread.transport.as_mut().unwrap().thread_id = Some("new-thread".into());
+    assert!(identity_anchor_conflicts_with_candidate(&same_thread, Some(&candidate("%901"))));
+
+    // The same tmux pane route is the same durable principal regardless of session.
+    let mut same_pane = base.clone();
+    same_pane.worker_id = "same-pane-peer".into();
+    same_pane.transport.as_mut().unwrap().kind = TransportKind::Tmux;
+    same_pane.transport.as_mut().unwrap().tmux_endpoint = Some(candidate("%902").endpoint.clone());
+    assert!(identity_anchor_conflicts_with_candidate(&same_pane, Some(&candidate("%902"))));
+}
+
 /// A short temp project root: the fake route-authority socket lives under the
 /// state root, so the combined path must stay under `sockaddr_un`'s limit.
 fn short_test_root() -> PathBuf {

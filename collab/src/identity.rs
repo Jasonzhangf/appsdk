@@ -1193,6 +1193,61 @@ fn classify_probe_error(detail: &str) -> PeerLiveness {
     }
 }
 
+/// Whether a persisted peer's durable anchor overlaps the current pane or the
+/// Codex session/thread being recovered. Only a peer that is *live* AND
+/// overlaps this anchor can block recovery; a live peer on an unrelated pane
+/// or thread must not gate a fresh pane or an anchor-drift recovery.
+fn identity_anchor_conflicts_with_candidate(
+    identity: &Identity,
+    candidate: Option<&crate::proto::TmuxCandidate>,
+) -> bool {
+    if let Some(candidate) = candidate {
+        if let Some(endpoint) = identity
+            .transport
+            .as_ref()
+            .and_then(|transport| transport.tmux_endpoint.as_ref())
+        {
+            if crate::client::adapters::tmux::same_pane_route(endpoint, &candidate.endpoint) {
+                return true;
+            }
+        }
+    }
+
+    let current_session = candidate
+        .and_then(|candidate| candidate.endpoint.codex_session_id.clone())
+        .or_else(|| std::env::var("CODEX_SESSION_ID").ok());
+    let current_thread = candidate
+        .and_then(|candidate| candidate.endpoint.codex_thread_id.clone())
+        .or_else(|| std::env::var("CODEX_THREAD_ID").ok());
+    let runtime = identity.runtime.as_ref();
+    let transport = identity.transport.as_ref();
+    let persisted_session = transport
+        .and_then(|transport| transport.session_id.as_deref())
+        .or_else(|| {
+            runtime
+                .and_then(|runtime| runtime.session_id.as_ref())
+                .map(|session| session.as_str())
+        });
+    let persisted_thread = transport
+        .and_then(|transport| transport.thread_id.as_deref())
+        .or_else(|| {
+            runtime
+                .and_then(|runtime| runtime.native_thread_id.as_ref())
+                .map(|thread| thread.as_str())
+        });
+    if let (Some(left), Some(right)) = (persisted_session, current_session.as_deref()) {
+        if left == right {
+            return true;
+        }
+    }
+    if let (Some(left), Some(right)) = (persisted_thread, current_thread.as_deref()) {
+        if left == right {
+            return true;
+        }
+    }
+    false
+}
+
 /// Move provably dead peers out of the live identity set so a new pane can
 /// register. The bytes are archived, never deleted, and only peers whose
 /// endpoint is *proven* gone are retired.
@@ -1257,8 +1312,9 @@ fn identity_for_scope_rebind_at(
         return Ok(ScopeRebindOutcome::NoCandidate);
     }
     let mut dead = Vec::new();
-    let mut live = Vec::new();
-    let mut unknown = Vec::new();
+    let mut live_peers = Vec::new();
+    let mut live_conflicts = Vec::new();
+    let mut recoverable = Vec::new();
     for entry in std::fs::read_dir(identities_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -1270,19 +1326,25 @@ fn identity_for_scope_rebind_at(
         if identity.project_scope.as_ref() != Some(&project_scope) {
             continue;
         }
+        let conflict = identity_anchor_conflicts_with_candidate(&identity, candidate.as_ref());
         match persisted_peer_liveness(&identity) {
             PeerLiveness::Dead => dead.push(identity),
-            PeerLiveness::Live => live.push(identity),
-            PeerLiveness::Unknown => unknown.push(identity),
+            PeerLiveness::Live => {
+                live_peers.push(identity.clone());
+                if conflict {
+                    live_conflicts.push(identity);
+                }
+            }
+            PeerLiveness::Unknown => recoverable.push(identity),
         }
     }
     if let Some(selected) = selected_worker {
         // Explicit user override: retire live conflicts and ambiguous unknown
         // records, then recover the named durable identity (or return
         // NoCandidate so the caller may mint it fresh).
-        let selected_persisted = live
+        let selected_persisted = live_peers
             .iter()
-            .chain(unknown.iter())
+            .chain(recoverable.iter())
             .chain(dead.iter())
             .find(|identity| identity.worker_id == selected)
             .cloned();
@@ -1295,23 +1357,23 @@ fn identity_for_scope_rebind_at(
     // Provably dead same-scope records never block recovery.
     archive_dead_peers(host_paths, &dead)?;
 
-    if !live.is_empty() {
-        let conflict_ids = live
+    if !live_conflicts.is_empty() {
+        let conflict_ids = live_conflicts
             .iter()
             .map(|identity| identity.worker_id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         return Ok(ScopeRebindOutcome::Unproven(format!(
-            "persisted live peers exist in this project ({conflict_ids}); pass --worker to explicitly override the live conflict before recovery"
+            "persisted live peers conflict with the current anchor ({conflict_ids}); pass --worker to explicitly override the live conflict before recovery"
         )));
     }
 
-    match unknown.len() {
+    match recoverable.len() {
         0 => Ok(ScopeRebindOutcome::NoCandidate),
-        1 => Ok(ScopeRebindOutcome::Adopted(unknown.remove(0))),
+        1 => Ok(ScopeRebindOutcome::Adopted(recoverable.remove(0))),
         _ => Ok(ScopeRebindOutcome::Unproven(format!(
             "persisted same-scope peers are ambiguous ({}); pass --worker to explicitly select one before recovery",
-            unknown
+            recoverable
                 .iter()
                 .map(|identity| identity.worker_id.as_str())
                 .collect::<Vec<_>>()

@@ -574,6 +574,87 @@ fn explicit_worker_recovers_a_live_duplicate_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A cross-project anchor may only be retired when every duplicate claiming it
+/// is provably dead. A provably dead duplicate must not let the current project
+/// archive the anchor while an unproven duplicate may still own it.
+#[test]
+fn cross_project_retirement_requires_every_same_anchor_duplicate_to_be_dead() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let other = root.join("other-project");
+    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
+    let other_scope = test_scope(other.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+
+    // A fake App Server that reports a `systemError` thread makes the peer that
+    // owns it provably dead.
+    let socket = state_root.join("dead-appserver.sock");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = spawn_app_server_with_thread_status(socket.clone(), stop.clone(), "systemError");
+    let dead_endpoint = format!("unix://{}", socket.display());
+
+    // Two foreign records claim one anchor: the dead one is written last so the
+    // deterministic non-live order selects it, and the unproven one may still be
+    // the live owner of the anchor.
+    persist_appserver_peer_at(
+        &host_paths,
+        &other_scope,
+        "zzz-unproven-foreign",
+        "session-shared",
+        "thread-shared",
+        "unix:///tmp/absent-appserver.sock",
+        1,
+    );
+    persist_appserver_peer_at(
+        &host_paths,
+        &other_scope,
+        "aaa-dead-foreign",
+        "session-shared",
+        "thread-shared",
+        &dead_endpoint,
+        1,
+    );
+
+    let blocked = with_current_address("thread-shared", "session-shared", || {
+        load_or_create_resolved_at(&host_paths, &scope, None, true)
+    });
+    let error = blocked.unwrap_err().to_string();
+    assert!(
+        error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
+        "{error}"
+    );
+
+    // Neither duplicate may be archived, and the current project must not mint a
+    // fresh peer over the anchor the unproven duplicate still claims.
+    for worker in ["aaa-dead-foreign", "zzz-unproven-foreign"] {
+        assert!(
+            read_identity(&identity_path_at(&host_paths, worker).unwrap())
+                .unwrap()
+                .is_some(),
+            "{worker} must stay in the live identity set"
+        );
+    }
+    let live = std::fs::read_dir(host_paths.state_root().join("identities"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live.len(),
+        2,
+        "no current-project peer may be minted over an unproven foreign duplicate: {live:?}"
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().ok();
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Several persisted peers that are not live must not block recovery: none is a
 /// live conflict, so the current pane adopts the newest one instead of failing
 /// closed with a manual `--worker` requirement.
@@ -1202,6 +1283,16 @@ fn spawn_live_app_server(
     socket: PathBuf,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
+    spawn_app_server_with_thread_status(socket, stop, "active")
+}
+
+/// Same fake App Server, but `thread/read` reports the given thread status so a
+/// test can make a persisted peer provably `Dead` (`systemError`).
+fn spawn_app_server_with_thread_status(
+    socket: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread_status: &'static str,
+) -> std::thread::JoinHandle<()> {
     use std::os::unix::net::UnixListener;
     let listener = UnixListener::bind(&socket).expect("bind fake App Server socket");
     listener.set_nonblocking(true).unwrap();
@@ -1212,7 +1303,7 @@ fn spawn_live_app_server(
                     // BSD/macOS accepted sockets inherit the listener's
                     // non-blocking flag, so restore blocking reads.
                     stream.set_nonblocking(false).unwrap();
-                    serve_live_app_server(&mut stream);
+                    serve_app_server(&mut stream, thread_status);
                 }
                 Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1223,7 +1314,7 @@ fn spawn_live_app_server(
     })
 }
 
-fn serve_live_app_server(stream: &mut std::os::unix::net::UnixStream) {
+fn serve_app_server(stream: &mut std::os::unix::net::UnixStream, thread_status: &str) {
     use std::io::{Read, Write};
     let mut request = Vec::new();
     let mut byte = [0_u8; 1];
@@ -1250,7 +1341,7 @@ fn serve_live_app_server(stream: &mut std::os::unix::net::UnixStream) {
         if value["method"] == "thread/read" {
             let response = serde_json::json!({
                 "id": value["id"],
-                "result": {"thread": {"status": {"type": "active"}}}
+                "result": {"thread": {"status": {"type": thread_status}}}
             });
             let _ = stream.write_all(&encode_frame(0x1, &serde_json::to_vec(&response).unwrap()));
             return;

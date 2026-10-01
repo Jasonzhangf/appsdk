@@ -859,8 +859,13 @@ fn identity_by_tmux_anchor_at(
 enum AnchorResolution {
     /// The anchor belongs to the current project scope.
     CurrentScope(Identity),
-    /// The anchor uniquely belongs to another project scope.
-    CrossProject(Identity),
+    /// The anchor belongs to another project scope. `anchor_peers` holds every
+    /// record that matched this anchor, so a caller can refuse to retire the
+    /// anchor while any duplicate may still own it.
+    CrossProject {
+        chosen: Identity,
+        anchor_peers: Vec<Identity>,
+    },
 }
 
 /// Fail-closed wrapper for scope resolution, init, and explicit recovery:
@@ -872,7 +877,7 @@ fn identity_by_current_anchors_same_scope_at(
 ) -> anyhow::Result<Option<Identity>> {
     match identity_by_current_anchors_at(host_paths, scope, candidate)? {
         Some(AnchorResolution::CurrentScope(identity)) => Ok(Some(identity)),
-        Some(AnchorResolution::CrossProject(_)) => anyhow::bail!(
+        Some(AnchorResolution::CrossProject { .. }) => anyhow::bail!(
             "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project"
         ),
         None => Ok(None),
@@ -982,33 +987,45 @@ fn identity_by_current_anchors_at(
         }
     }
     let mut matched_workers = BTreeMap::<String, Identity>::new();
+    let mut anchor_groups = BTreeMap::<String, Vec<Identity>>::new();
     let expected_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
     for (anchor, identities) in matches {
-        if identities.len() > 1 {
+        let group = identities.into_values().collect::<Vec<_>>();
+        if group.len() > 1 {
             let chosen = choose_anchor_peer(
                 host_paths,
                 candidate,
                 &expected_scope,
                 &anchor,
-                identities.into_values().collect(),
+                group.clone(),
                 persisted_peer_liveness,
             )?;
+            anchor_groups.insert(chosen.worker_id.clone(), group);
             matched_workers.insert(chosen.worker_id.clone(), chosen);
         } else {
-            matched_workers.extend(identities);
+            for identity in group {
+                anchor_groups.insert(identity.worker_id.clone(), vec![identity.clone()]);
+                matched_workers.insert(identity.worker_id.clone(), identity);
+            }
         }
     }
     match matched_workers.len() {
         0 => Ok(None),
         1 => {
-            let identity = matched_workers.into_values().next().unwrap();
+            let (worker_id, identity) = matched_workers.into_iter().next().unwrap();
+            let anchor_peers = anchor_groups
+                .remove(&worker_id)
+                .unwrap_or_else(|| vec![identity.clone()]);
             Ok(Some(
                 if identity.project_scope.as_ref() == Some(&expected_scope) {
                     AnchorResolution::CurrentScope(identity)
                 } else {
-                    AnchorResolution::CrossProject(identity)
+                    AnchorResolution::CrossProject {
+                        chosen: identity,
+                        anchor_peers,
+                    }
                 },
             ))
         }
@@ -1567,22 +1584,29 @@ fn load_or_create_resolved_full_at(
     if explicit_worker.is_none() {
         match identity_by_current_anchors_at(host_paths, scope, candidate.as_ref().ok().copied())? {
             Some(AnchorResolution::CurrentScope(identity)) => return Ok(identity),
-            Some(AnchorResolution::CrossProject(identity)) => {
+            Some(AnchorResolution::CrossProject {
+                chosen,
+                anchor_peers,
+            }) => {
                 if allow_scope_rebind {
                     // The same pane/thread previously registered in another
                     // project. A pane/thread can only belong to one live peer,
-                    // so a *provably dead* foreign record is retired and the
-                    // current project mints a fresh peer. A live, cold, or
-                    // unproven foreign record may still be the live owner of
-                    // this anchor, so it stays fail-closed and needs the
-                    // explicit --worker override instead of being archived on
-                    // scope mismatch alone.
-                    if matches!(persisted_peer_liveness(&identity), PeerLiveness::Dead) {
-                        archive_dead_peers(host_paths, std::slice::from_ref(&identity))?;
+                    // so the anchor is retired and the current project mints a
+                    // fresh peer only when every duplicate that claims it is
+                    // provably dead. A live, cold, or unproven duplicate may
+                    // still be the live owner of this anchor, so it stays
+                    // fail-closed and needs the explicit --worker override
+                    // instead of being archived on scope mismatch alone.
+                    if anchor_peers
+                        .iter()
+                        .all(|peer| matches!(persisted_peer_liveness(peer), PeerLiveness::Dead))
+                    {
+                        archive_dead_peers(host_paths, &anchor_peers)?;
                         retired_cross_project = true;
                     } else {
                         anyhow::bail!(
-                            "IDENTITY_RESTORE_CROSS_PROJECT: a unique tmux/Codex anchor belongs to another project and its persisted peer is not provably dead; pass --worker to explicitly recover it"
+                            "IDENTITY_RESTORE_CROSS_PROJECT: anchor peer {} belongs to another project and not every duplicate claiming the anchor is provably dead; pass --worker to explicitly recover it",
+                            chosen.worker_id
                         );
                     }
                 } else {

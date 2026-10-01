@@ -427,11 +427,13 @@ fn explicit_worker_selection_rejects_conflicting_identity_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// With multiple persisted peers and no matching stable anchor, init must
-/// fail closed. Anchor ambiguity itself is covered by the tmux recovery
-/// tests above.
+/// Multiple persisted peers that cannot be proven live never gate recovery:
+/// only a *live* peer whose durable anchor overlaps the current pane/session/
+/// thread may block.  Unknown peers on unrelated anchors are not conflicts, so
+/// recovery adopts a concrete candidate instead of failing with
+/// IDENTITY_REBIND_UNPROVEN.
 #[test]
-fn init_fails_closed_when_multiple_peers_exist_without_matching_anchor() {
+fn unknown_peers_on_unrelated_anchors_do_not_block_scope_rebind() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = short_test_root();
     std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
@@ -442,18 +444,50 @@ fn init_fails_closed_when_multiple_peers_exist_without_matching_anchor() {
     persist_peer_at(&host_paths, &scope, "agent-a", "session-a", "thread-a", 1);
     persist_peer_at(&host_paths, &scope, "agent-b", "session-b", "thread-b", 1);
 
-    let restored = with_current_address("thread-new", "session-new", || {
-        load_or_create_resolved_at(&host_paths, &scope, None, true)
-    });
+    // With no current anchor there is nothing to conflict with, so recovery
+    // must not refuse the whole project because several peers cannot be proven
+    // live.
+    let adopted = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
+    match adopted {
+        ScopeRebindOutcome::Adopted(identity) => {
+            assert!(identity.worker_id == "agent-a" || identity.worker_id == "agent-b")
+        }
+        other => panic!("unknown peers must never gate a registration: {other:?}"),
+    }
 
-    let error = restored.unwrap_err().to_string();
-    assert!(error.contains("IDENTITY_REBIND_UNPROVEN"), "{error}");
-    assert!(error.contains("--worker"), "{error}");
+    // The explicit --worker override still selects the named durable identity.
+    let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-b")).unwrap();
+    match selected {
+        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "agent-b"),
+        other => panic!("--worker override must adopt the named identity: {other:?}"),
+    }
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
 
-    let selected = with_current_address("thread-new", "session-new", || {
-        load_or_create_resolved_at(&host_paths, &scope, Some("agent-b".into()), true)
-    });
-    assert_eq!(selected.unwrap().worker_id, "agent-b");
+/// When several non-live records all claim the same drifted anchor, the newest
+/// durable registration is this peer's own identity and is adopted
+/// automatically; liveness is the only conflict, not repeat registrations.
+#[test]
+fn overlapping_unknown_peers_adopt_the_newest_durable_registration() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    persist_peer_at(&host_paths, &scope, "agent-a", "session-x", "thread-x", 1);
+    persist_peer_at(&host_paths, &scope, "agent-b", "session-x", "thread-x", 3);
+
+    let outcome = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
+    match outcome {
+        ScopeRebindOutcome::Adopted(identity) => assert_eq!(
+            identity.worker_id, "agent-b",
+            "the newest registration must win"
+        ),
+        other => panic!("overlapping unknown peers must auto-adopt: {other:?}"),
+    }
     std::fs::remove_dir_all(state_root).ok();
     std::fs::remove_dir_all(root).ok();
 }

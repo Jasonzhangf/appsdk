@@ -1111,6 +1111,7 @@ pub(crate) fn load_or_create_full(
 }
 
 /// Why identity loading may not mint a brand-new peer for this project.
+#[derive(Debug)]
 enum ScopeRebindOutcome {
     /// One durable identity matches a current tmux/Codex anchor.
     Adopted(Identity),
@@ -1315,6 +1316,7 @@ fn identity_for_scope_rebind_at(
     let mut live_peers = Vec::new();
     let mut live_conflicts = Vec::new();
     let mut recoverable = Vec::new();
+    let mut recoverable_overlap = Vec::new();
     for entry in std::fs::read_dir(identities_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -1335,7 +1337,17 @@ fn identity_for_scope_rebind_at(
                     live_conflicts.push(identity);
                 }
             }
-            PeerLiveness::Unknown => recoverable.push(identity),
+            PeerLiveness::Unknown => {
+                // A record whose liveness cannot be proven is not a live
+                // conflict.  Only a recoverable record that still claims the
+                // same pane/session/thread can be this peer's own drifted
+                // identity; unrelated stale records (finished subagents,
+                // replaced panes) never gate a fresh registration.
+                recoverable.push(identity.clone());
+                if conflict {
+                    recoverable_overlap.push(identity);
+                }
+            }
         }
     }
     if let Some(selected) = selected_worker {
@@ -1368,17 +1380,36 @@ fn identity_for_scope_rebind_at(
         )));
     }
 
-    match recoverable.len() {
-        0 => Ok(ScopeRebindOutcome::NoCandidate),
-        1 => Ok(ScopeRebindOutcome::Adopted(recoverable.remove(0))),
-        _ => Ok(ScopeRebindOutcome::Unproven(format!(
-            "persisted same-scope peers are ambiguous ({}); pass --worker to explicitly select one before recovery",
-            recoverable
-                .iter()
-                .map(|identity| identity.worker_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+    // Only a *live* overlap blocks recovery.  A unique recoverable record is
+    // this project's only remaining candidate and is adopted (its stale anchor
+    // is refreshed on registration); when several non-live records claim the
+    // same drifted anchor across pane restarts, the newest durable registration
+    // is this peer's own identity and is adopted automatically instead of
+    // failing as ambiguous.
+    let mut candidates = recoverable;
+    for identity in recoverable_overlap {
+        if !candidates.iter().any(|candidate| candidate.worker_id == identity.worker_id) {
+            candidates.push(identity);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        let left_generation = left
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.endpoint_generation)
+            .unwrap_or(0);
+        let right_generation = right
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.endpoint_generation)
+            .unwrap_or(0);
+        right_generation
+            .cmp(&left_generation)
+            .then_with(|| left.worker_id.cmp(&right.worker_id))
+    });
+    match candidates.first() {
+        Some(identity) => Ok(ScopeRebindOutcome::Adopted(identity.clone())),
+        None => Ok(ScopeRebindOutcome::NoCandidate),
     }
 }
 

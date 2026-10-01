@@ -336,17 +336,17 @@ fn tmux_identity_recovery_rejects_anchor_conflict_and_cross_project() {
         None,
         None,
     );
-    let ambiguous = identity_by_tmux_anchor_at(
+    // Two records claiming the same anchor and neither provably live are this
+    // peer's own drifted identities, not a live conflict: the newest durable
+    // registration is adopted automatically.
+    let recovered = identity_by_tmux_anchor_at(
         &host_paths,
         &scope,
         &tmux_candidate(Some("session-duplicate"), None, "%6"),
     )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        ambiguous.starts_with("IDENTITY_RESTORE_AMBIGUOUS:"),
-        "{ambiguous}"
-    );
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.worker_id, "duplicate-peer-a");
     std::fs::remove_dir_all(root).ok();
 }
 

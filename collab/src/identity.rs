@@ -984,9 +984,36 @@ fn identity_by_current_anchors_at(
     let mut matched_workers = BTreeMap::<String, Identity>::new();
     for (anchor, identities) in matches {
         if identities.len() > 1 {
-            anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted peers");
+            let mut candidates = identities.into_values().collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                let left_generation = left
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| runtime.endpoint_generation)
+                    .unwrap_or(0);
+                let right_generation = right
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| runtime.endpoint_generation)
+                    .unwrap_or(0);
+                right_generation
+                    .cmp(&left_generation)
+                    .then_with(|| left.worker_id.cmp(&right.worker_id))
+            });
+            if candidates
+                .iter()
+                .any(|identity| matches!(persisted_peer_liveness(identity), PeerLiveness::Live))
+            {
+                anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted peers");
+            }
+            // Multiple records all claim the same anchor and none is provably
+            // live, so the newest durable registration is this peer's own
+            // drifted identity and is adopted automatically.
+            let newest = candidates.remove(0);
+            matched_workers.insert(newest.worker_id.clone(), newest);
+        } else {
+            matched_workers.extend(identities);
         }
-        matched_workers.extend(identities);
     }
     match matched_workers.len() {
         0 => Ok(None),
@@ -1382,17 +1409,16 @@ fn identity_for_scope_rebind_at(
 
     // Only a *live* overlap blocks recovery.  A unique recoverable record is
     // this project's only remaining candidate and is adopted (its stale anchor
-    // is refreshed on registration); when several non-live records claim the
-    // same drifted anchor across pane restarts, the newest durable registration
-    // is this peer's own identity and is adopted automatically instead of
-    // failing as ambiguous.
-    let mut candidates = recoverable;
-    for identity in recoverable_overlap {
-        if !candidates.iter().any(|candidate| candidate.worker_id == identity.worker_id) {
-            candidates.push(identity);
-        }
+    // is refreshed on registration).  When several non-live records exist, an
+    // unrelated batch of stale peers must not be claimed by this pane: adopt
+    // only a record that overlaps the current anchor, and if several do, the
+    // newest durable registration is this peer's own identity.  If none
+    // overlaps, mint a fresh identity for the current anchor instead.
+    if recoverable.len() == 1 {
+        return Ok(ScopeRebindOutcome::Adopted(recoverable.into_iter().next().unwrap()));
     }
-    candidates.sort_by(|left, right| {
+    let mut overlaps = recoverable_overlap;
+    overlaps.sort_by(|left, right| {
         let left_generation = left
             .runtime
             .as_ref()
@@ -1407,7 +1433,7 @@ fn identity_for_scope_rebind_at(
             .cmp(&left_generation)
             .then_with(|| left.worker_id.cmp(&right.worker_id))
     });
-    match candidates.first() {
+    match overlaps.first() {
         Some(identity) => Ok(ScopeRebindOutcome::Adopted(identity.clone())),
         None => Ok(ScopeRebindOutcome::NoCandidate),
     }

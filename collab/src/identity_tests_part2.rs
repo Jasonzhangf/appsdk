@@ -448,12 +448,10 @@ fn unknown_peers_on_unrelated_anchors_do_not_block_scope_rebind() {
     // must not refuse the whole project because several peers cannot be proven
     // live.
     let adopted = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
-    match adopted {
-        ScopeRebindOutcome::Adopted(identity) => {
-            assert!(identity.worker_id == "agent-a" || identity.worker_id == "agent-b")
-        }
-        other => panic!("unknown peers must never gate a registration: {other:?}"),
-    }
+    assert!(
+        matches!(adopted, ScopeRebindOutcome::NoCandidate),
+        "unrelated unknown peers must not be claimed by this pane: {adopted:?}"
+    );
 
     // The explicit --worker override still selects the named durable identity.
     let selected = identity_for_scope_rebind_at(&host_paths, &scope, Some("agent-b")).unwrap();
@@ -480,7 +478,9 @@ fn overlapping_unknown_peers_adopt_the_newest_durable_registration() {
     persist_peer_at(&host_paths, &scope, "agent-a", "session-x", "thread-x", 1);
     persist_peer_at(&host_paths, &scope, "agent-b", "session-x", "thread-x", 3);
 
-    let outcome = identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap();
+    let outcome = with_current_address("thread-x", "session-x", || {
+        identity_for_scope_rebind_at(&host_paths, &scope, None).unwrap()
+    });
     match outcome {
         ScopeRebindOutcome::Adopted(identity) => assert_eq!(
             identity.worker_id, "agent-b",

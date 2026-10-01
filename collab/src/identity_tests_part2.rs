@@ -574,6 +574,126 @@ fn explicit_worker_recovers_a_live_duplicate_anchor() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// A `--worker` name that resolves to no durable record is a typo or a stale
+/// name, not a recovery. When the current anchor already belongs to a durable
+/// peer, the override must fail closed instead of minting a second owner for
+/// that anchor.
+#[test]
+fn explicit_worker_unknown_name_over_an_owned_anchor_fails_closed() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let owner = persist_peer_at(
+        &host_paths,
+        &scope,
+        "anchored-peer",
+        "session-a",
+        "thread-a",
+        1,
+    );
+
+    let blocked = with_current_address("thread-a", "session-a", || {
+        load_or_create_resolved_at(&host_paths, &scope, Some("typo-peer".into()), true)
+    });
+    let error = blocked.unwrap_err().to_string();
+    assert!(error.starts_with("IDENTITY_RESTORE_CONFLICT:"), "{error}");
+    assert!(error.contains("anchored-peer"), "{error}");
+
+    assert!(
+        read_identity(&identity_path_at(&host_paths, "typo-peer").unwrap())
+            .unwrap()
+            .is_none(),
+        "a --worker name with no durable record must never be minted"
+    );
+    assert_eq!(
+        read_identity(&identity_path_at(&host_paths, "anchored-peer").unwrap())
+            .unwrap()
+            .unwrap()
+            .token,
+        owner.token,
+        "the anchor owner must be left untouched"
+    );
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The explicit override is resolved directly by path, so it must not probe an
+/// unrelated cold/silent same-scope peer: that probe could delay the recovery
+/// by the App Server timeout, and its endpoint is irrelevant to the name the
+/// caller asked for.
+#[test]
+fn explicit_worker_override_does_not_probe_unrelated_peers() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    let wanted = persist_peer_at(
+        &host_paths,
+        &scope,
+        "agent-peer",
+        "session-own",
+        "thread-own",
+        1,
+    );
+
+    // An unrelated same-scope peer whose endpoint is bound but never answers:
+    // any liveness probe against it would be counted here.
+    let socket = state_root.join("unrelated.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let counter = probes.clone();
+    let stopper = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !stopper.load(std::sync::atomic::Ordering::SeqCst) {
+            if listener.accept().is_ok() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    persist_appserver_peer_at(
+        &host_paths,
+        &scope,
+        "unrelated-peer",
+        "session-other",
+        "thread-other",
+        &format!("unix://{}", socket.display()),
+        1,
+    );
+
+    let selected = with_current_address("thread-own", "session-own", || {
+        load_or_create_resolved_at(&host_paths, &scope, Some("agent-peer".into()), true)
+    })
+    .unwrap();
+    assert_eq!(selected.worker_id, "agent-peer");
+    assert_eq!(selected.token, wanted.token);
+    assert_eq!(
+        probes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the explicit override must resolve the named identity without probing unrelated peers"
+    );
+    assert!(
+        read_identity(&identity_path_at(&host_paths, "unrelated-peer").unwrap())
+            .unwrap()
+            .is_some(),
+        "the override must not archive an unrelated peer"
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().ok();
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// A cross-project anchor may only be retired when every duplicate claiming it
 /// is provably dead. A provably dead duplicate must not let the current project
 /// archive the anchor while an unproven duplicate may still own it.

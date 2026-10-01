@@ -1423,13 +1423,28 @@ fn archive_dead_peers(host_paths: &HostPaths, dead: &[Identity]) -> anyhow::Resu
 /// share one anchor. Cold/unproven records are not live, so they never block:
 /// whether overlapping or not, they are normal drift/restart candidates the
 /// current pane adopts deterministically. The explicit user override
-/// (selected_worker) supersedes any live conflict so the named durable
-/// identity is always recoverable on request.
+/// (selected_worker) is resolved first and directly by path, before any anchor
+/// or liveness work, so the named durable identity is always recoverable on
+/// request without probing the very records it exists to bypass.
 fn identity_for_scope_rebind_at(
     host_paths: &HostPaths,
     scope: &Scope,
     selected_worker: Option<&str>,
 ) -> anyhow::Result<ScopeRebindOutcome> {
+    // The explicit override names the durable identity to recover, so it is
+    // resolved first, directly by path, before any anchor or liveness work: it
+    // exists precisely to bypass an ambiguous anchor or a stale/silent peer, so
+    // probing the very records it must bypass could delay the recovery by the
+    // probe timeout or fail it outright. A name with no record is
+    // `NoCandidate`; the caller decides whether that may mint.
+    if let Some(selected) = selected_worker {
+        return Ok(
+            match read_identity(&identity_path_at(host_paths, selected)?)? {
+                Some(identity) => ScopeRebindOutcome::Adopted(identity),
+                None => ScopeRebindOutcome::NoCandidate,
+            },
+        );
+    }
     let project_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
@@ -1438,12 +1453,10 @@ fn identity_for_scope_rebind_at(
     } else {
         None
     };
-    if selected_worker.is_none() {
-        if let Some(identity) =
-            identity_by_current_anchors_same_scope_at(host_paths, scope, candidate.as_ref())?
-        {
-            return Ok(ScopeRebindOutcome::Adopted(identity));
-        }
+    if let Some(identity) =
+        identity_by_current_anchors_same_scope_at(host_paths, scope, candidate.as_ref())?
+    {
+        return Ok(ScopeRebindOutcome::Adopted(identity));
     }
     let identities_root = host_paths.state_root().join("identities");
     if !identities_root.is_dir() {
@@ -1484,22 +1497,6 @@ fn identity_for_scope_rebind_at(
             PeerLiveness::Cold | PeerLiveness::Unknown => recoverable.push(identity),
         }
     }
-    if let Some(selected) = selected_worker {
-        // Explicit user override: recover any durable identity, including one
-        // that is live or unproven, or return NoCandidate so the caller may
-        // mint it fresh.
-        let selected_persisted = live_conflict
-            .iter()
-            .chain(recoverable.iter())
-            .chain(dead.iter())
-            .find(|identity| identity.worker_id == selected)
-            .cloned();
-        return Ok(match selected_persisted {
-            Some(identity) => ScopeRebindOutcome::Adopted(identity),
-            None => ScopeRebindOutcome::NoCandidate,
-        });
-    }
-
     // Provably dead same-scope records never block recovery.
     archive_dead_peers(host_paths, &dead)?;
 
@@ -1576,12 +1573,40 @@ fn load_or_create_resolved_full_at(
         anyhow::anyhow!("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane, a valid App Server endpoint, or an explicit worker_id")
     });
     let mut retired_cross_project = false;
-    // An explicit `--worker` names the durable identity to recover, so it is
-    // decided before anchor resolution. Anchor ambiguity, a cross-project
-    // record, and a live duplicate are exactly the cases the override exists to
-    // resolve, and a named identity must never need a liveness probe to be
-    // recovered. Only the unnamed path resolves the current anchors.
-    if explicit_worker.is_none() {
+    if let Some(named) = explicit_worker.as_deref() {
+        // An explicit `--worker` names the durable identity to recover, so it is
+        // decided before anchor resolution. Anchor ambiguity, a cross-project
+        // record, and a live duplicate are exactly the cases the override exists
+        // to resolve, and a named identity must never need a liveness probe to
+        // be recovered. Only the unnamed path resolves the current anchors.
+        match identity_for_scope_rebind_at(host_paths, scope, Some(named))? {
+            ScopeRebindOutcome::Adopted(identity) => return Ok(identity),
+            ScopeRebindOutcome::Unproven(detail) => {
+                anyhow::bail!("IDENTITY_REBIND_UNPROVEN: {detail}")
+            }
+            ScopeRebindOutcome::NoCandidate => {
+                // The name resolves to no durable record, so this is a typo or a
+                // stale name, not a recovery. Minting would create a second
+                // owner for an anchor that already belongs to a peer, so fail
+                // closed exactly like the unnamed conflict path.
+                match identity_by_current_anchors_at(
+                    host_paths,
+                    scope,
+                    candidate.as_ref().ok().copied(),
+                )? {
+                    Some(AnchorResolution::CurrentScope(identity)) => anyhow::bail!(
+                        "IDENTITY_RESTORE_CONFLICT: --worker {named} names no durable identity and the current anchor already belongs to {}",
+                        identity.worker_id
+                    ),
+                    Some(AnchorResolution::CrossProject { chosen, .. }) => anyhow::bail!(
+                        "IDENTITY_RESTORE_CROSS_PROJECT: --worker {named} names no durable identity and the current anchor belongs to another project ({})",
+                        chosen.worker_id
+                    ),
+                    None => {}
+                }
+            }
+        }
+    } else {
         match identity_by_current_anchors_at(host_paths, scope, candidate.as_ref().ok().copied())? {
             Some(AnchorResolution::CurrentScope(identity)) => return Ok(identity),
             Some(AnchorResolution::CrossProject {
@@ -1619,8 +1644,8 @@ fn load_or_create_resolved_full_at(
         }
     }
 
-    if allow_scope_rebind && !retired_cross_project {
-        match identity_for_scope_rebind_at(host_paths, scope, explicit_worker.as_deref())? {
+    if allow_scope_rebind && !retired_cross_project && explicit_worker.is_none() {
+        match identity_for_scope_rebind_at(host_paths, scope, None)? {
             ScopeRebindOutcome::Adopted(identity) => return Ok(identity),
             ScopeRebindOutcome::NoCandidate => {}
             ScopeRebindOutcome::Unproven(detail) => {

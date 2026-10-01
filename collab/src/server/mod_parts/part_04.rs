@@ -12,18 +12,60 @@
 ///
 /// Only a peer that actually has a native session/thread can supersede the
 /// anchor; a bare pane recovery anchor never does.
-fn same_scope_pane_owner_supersedes(global: &GlobalState, binding: &RuntimeBinding) -> bool {
+///
+/// The host route index is durable: closing a peer retires its worker and
+/// keepalives but keeps its current-thread route, so a closed or moved peer's
+/// route is not evidence that the pane has a new owner. A superseding binding
+/// therefore only counts when its worker is still registered and that worker's
+/// current transport is present.
+fn same_scope_pane_owner_supersedes(
+    host_server: &Arc<Server>,
+    runtime: &Arc<Server>,
+    binding: &RuntimeBinding,
+) -> bool {
     let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
         return false;
     };
-    global.current_thread_routes.values().any(|other| {
-        other.route_scope() == binding.route_scope()
-            && other.binding_id != binding.binding_id
-            && other.session_id.is_some()
-            && other.native_thread_id.is_some()
-            && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
-                crate::client::adapters::tmux::same_pane_route(other_endpoint, endpoint)
+    let candidates = {
+        let host = host_server.state.lock().unwrap();
+        host.global
+            .current_thread_routes
+            .values()
+            .filter(|other| {
+                other.route_scope() == binding.route_scope()
+                    && other.binding_id != binding.binding_id
+                    && other.session_id.is_some()
+                    && other.native_thread_id.is_some()
+                    && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
+                        crate::client::adapters::tmux::same_pane_route(other_endpoint, endpoint)
+                    })
             })
+            .map(|other| other.agent_id.clone())
+            .collect::<Vec<_>>()
+    };
+    // Probing the transport spawns a process, so it runs without the state
+    // lock held.
+    candidates.into_iter().any(|agent_id| {
+        let owner = {
+            let state = runtime.state.lock().unwrap();
+            state
+                .workers
+                .get(agent_id.as_str())
+                .cloned()
+                .map(|worker| (runtime.clone(), worker))
+        };
+        let owner = owner.or_else(|| {
+            let state = host_server.state.lock().unwrap();
+            state
+                .workers
+                .get(agent_id.as_str())
+                .cloned()
+                .map(|worker| (host_server.clone(), worker))
+        });
+        owner.is_some_and(|(server, worker)| {
+            crate::server::worker_presence(&server, &worker)
+                == crate::server::presence::IdentityPresence::Present
+        })
     })
 }
 
@@ -273,20 +315,23 @@ impl ProjectRuntimeManager {
         if pending.is_empty() {
             return Ok(());
         }
-        let host = self.host.state.lock().unwrap();
         for binding in pending {
             // A pane is addressable by exactly one live peer per project. Once
             // another binding in the same route scope owns this pane with a
             // live native thread, the stale same-pane master anchor is
             // superseded and must not fence the whole project route forever.
-            if same_scope_pane_owner_supersedes(&host.global, &binding) {
+            if same_scope_pane_owner_supersedes(&self.host, runtime, &binding) {
                 continue;
             }
-            let route = binding
-                .tmux_endpoint
-                .as_ref()
-                .and_then(|endpoint| host.global.lookup_unique_tmux_pane_route(endpoint));
-            if route != Some(&binding) {
+            let route = {
+                let host = self.host.state.lock().unwrap();
+                binding
+                    .tmux_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| host.global.lookup_unique_tmux_pane_route(endpoint))
+                    .cloned()
+            };
+            if route.as_ref() != Some(&binding) {
                 return Err(format!(
                     "RECOVERY_RECONCILE_REQUIRED: host route for {} is not at project generation {}",
                     binding.agent_id, binding.endpoint_generation
@@ -305,11 +350,11 @@ impl ProjectRuntimeManager {
                 let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
                     continue;
                 };
+                if same_scope_pane_owner_supersedes(&self.host, &runtime, &binding) {
+                    continue;
+                }
                 let host_route = {
                     let host = self.host.state.lock().unwrap();
-                    if same_scope_pane_owner_supersedes(&host.global, &binding) {
-                        continue;
-                    }
                     host.global.lookup_unique_tmux_pane_route(endpoint).cloned()
                 };
                 if host_route.as_ref() == Some(&binding) {

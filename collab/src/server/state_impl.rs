@@ -787,13 +787,17 @@ impl State {
     }
 
     pub fn apply_global_event(&mut self, event: &GlobalEvent) -> Result<(), String> {
-        let mut next = self.global.clone();
+        // GlobalEvent::apply already mutates through the atomic clone-then-commit
+        // primitive, so cloning the whole global state a second time here only
+        // added one more O(state) copy per event and made journal replay
+        // quadratic for journals with many repeated global events.
+        let sequence = self.sequence;
+        let revision = self.revision;
         event
             .clone()
-            .apply(&mut next)
+            .apply(&mut self.global)
             .map_err(|error| format!("global reducer rejected event: {error}"))?;
-        next.set_counters(self.sequence, self.revision);
-        self.global = next;
+        self.global.set_counters(sequence, revision);
         Ok(())
     }
 

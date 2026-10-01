@@ -1,6 +1,38 @@
     use super::*;
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn recording_many_ledger_scan_receipts_does_not_copy_global_state_each_time() {
+        // A durable scan receipt is appended for every ledger scan that finds
+        // blocked work, so a real project journal can hold tens of thousands of
+        // them.  Recording one must not deep-clone the whole global state, or
+        // journal replay becomes quadratic and the daemon never becomes ready.
+        let mut state = GlobalState::default();
+        let receipts = 30_000_u32;
+        let started = std::time::Instant::now();
+        for index in 0..receipts {
+            state
+                .record_ledger_scan_receipt(LedgerScanReceipt {
+                    scan_id: format!("ledger-scan-{index}"),
+                    scanned_ms: i64::from(index),
+                    classified: 0,
+                    transitioned: 0,
+                    unchanged: 7,
+                    blocked: 93,
+                    mailbox_messages_unchanged: true,
+                })
+                .unwrap();
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(state.ledger_scan_receipts.len(), receipts as usize);
+        assert_eq!(state.sequence, u64::from(receipts));
+        state.validate().unwrap();
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "recording {receipts} scan receipts took {elapsed:?}"
+        );
+    }
 include!("global_state_tests_part2.rs");
 
     fn project_scope() -> ProjectScopeId {

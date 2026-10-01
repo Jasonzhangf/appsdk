@@ -939,11 +939,15 @@ impl GlobalState {
 
     pub fn record_ledger_scan_receipt(&mut self, receipt: LedgerScanReceipt) -> Result<StateVersion, StateError> {
         receipt.validate()?;
-        let key = receipt.scan_id.clone();
-        self.mutate(|next| {
-            next.ledger_scan_receipts.insert(key.clone(), receipt);
-            Ok(())
-        })
+        // A scan receipt only inserts one entry into a map that no GlobalState
+        // invariant inspects.  The clone-then-commit mutate path would copy the
+        // whole unbounded receipt map (plus every project) for each event, so
+        // replaying a journal with many receipts became quadratic.  Bump the
+        // counters before the insert so a counter overflow still leaves the
+        // state untouched.
+        let version = self.bump_counters()?;
+        self.ledger_scan_receipts.insert(receipt.scan_id.clone(), receipt);
+        Ok(version)
     }
 
 pub fn classify_runtime_binding_ledger(&mut self, record: RuntimeBindingLedgerRecord) -> Result<StateVersion, StateError> {

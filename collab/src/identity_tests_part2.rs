@@ -775,6 +775,89 @@ fn cross_project_retirement_requires_every_same_anchor_duplicate_to_be_dead() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// One record can match several supplied anchors. Retirement must consider the
+/// union of every duplicate that matched any anchor, not just the duplicates of
+/// the last anchor group.
+#[test]
+fn cross_project_retirement_unions_every_anchor_group() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let other = root.join("other-project");
+    std::fs::create_dir_all(other.join(".agent-collab")).unwrap();
+    let other_scope = test_scope(other.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+
+    let socket = state_root.join("dead-appserver.sock");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = spawn_app_server_with_thread_status(socket.clone(), stop.clone(), "systemError");
+    let dead_endpoint = format!("unix://{}", socket.display());
+
+    // `aaa-shared-chosen` matches the session anchor and the thread anchor. Each
+    // anchor also has its own duplicate, and only the session duplicate is
+    // unproven.
+    persist_appserver_peer_at(
+        &host_paths,
+        &other_scope,
+        "zzz-session-dup",
+        "session-shared",
+        "thread-other",
+        "unix:///tmp/absent-appserver.sock",
+        1,
+    );
+    persist_appserver_peer_at(
+        &host_paths,
+        &other_scope,
+        "zzz-thread-dup",
+        "session-other",
+        "thread-shared",
+        &dead_endpoint,
+        1,
+    );
+    persist_appserver_peer_at(
+        &host_paths,
+        &other_scope,
+        "aaa-shared-chosen",
+        "session-shared",
+        "thread-shared",
+        &dead_endpoint,
+        1,
+    );
+
+    let blocked = with_current_address("thread-shared", "session-shared", || {
+        load_or_create_resolved_at(&host_paths, &scope, None, true)
+    });
+    let error = blocked.unwrap_err().to_string();
+    assert!(
+        error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:"),
+        "{error}"
+    );
+
+    // The unproven session duplicate still claims the anchor, so nothing may be
+    // archived and no current-project peer may be minted.
+    for worker in ["aaa-shared-chosen", "zzz-session-dup", "zzz-thread-dup"] {
+        assert!(
+            read_identity(&identity_path_at(&host_paths, worker).unwrap())
+                .unwrap()
+                .is_some(),
+            "{worker} must stay in the live identity set"
+        );
+    }
+    let live = std::fs::read_dir(host_paths.state_root().join("identities"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .count();
+    assert_eq!(live, 3, "no current-project peer may be minted");
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().ok();
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Several persisted peers that are not live must not block recovery: none is a
 /// live conflict, so the current pane adopts the newest one instead of failing
 /// closed with a manual `--worker` requirement.

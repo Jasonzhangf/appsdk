@@ -987,7 +987,11 @@ fn identity_by_current_anchors_at(
         }
     }
     let mut matched_workers = BTreeMap::<String, Identity>::new();
-    let mut anchor_groups = BTreeMap::<String, Vec<Identity>>::new();
+    // Every record that matched any anchor of a worker, deduplicated by
+    // worker_id. One identity can match several anchors (its Codex session and
+    // its thread), so a later anchor must add to this set instead of replacing
+    // the duplicates an earlier anchor already contributed.
+    let mut anchor_groups = BTreeMap::<String, BTreeMap<String, Identity>>::new();
     let expected_scope = scope
         .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
         .project_scope_id;
@@ -1002,11 +1006,17 @@ fn identity_by_current_anchors_at(
                 group.clone(),
                 persisted_peer_liveness,
             )?;
-            anchor_groups.insert(chosen.worker_id.clone(), group);
+            let peers = anchor_groups.entry(chosen.worker_id.clone()).or_default();
+            for identity in group {
+                peers.insert(identity.worker_id.clone(), identity);
+            }
             matched_workers.insert(chosen.worker_id.clone(), chosen);
         } else {
             for identity in group {
-                anchor_groups.insert(identity.worker_id.clone(), vec![identity.clone()]);
+                anchor_groups
+                    .entry(identity.worker_id.clone())
+                    .or_default()
+                    .insert(identity.worker_id.clone(), identity.clone());
                 matched_workers.insert(identity.worker_id.clone(), identity);
             }
         }
@@ -1017,6 +1027,7 @@ fn identity_by_current_anchors_at(
             let (worker_id, identity) = matched_workers.into_iter().next().unwrap();
             let anchor_peers = anchor_groups
                 .remove(&worker_id)
+                .map(|peers| peers.into_values().collect::<Vec<_>>())
                 .unwrap_or_else(|| vec![identity.clone()]);
             Ok(Some(
                 if identity.project_scope.as_ref() == Some(&expected_scope) {

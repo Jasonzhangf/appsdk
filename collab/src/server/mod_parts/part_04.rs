@@ -40,17 +40,17 @@ fn same_scope_pane_owner_supersedes(
                         crate::client::adapters::tmux::same_pane_route(other_endpoint, endpoint)
                     })
             })
-            .map(|other| other.agent_id.clone())
+            .cloned()
             .collect::<Vec<_>>()
     };
     // Probing the transport spawns a process, so it runs without the state
     // lock held.
-    candidates.into_iter().any(|agent_id| {
+    candidates.into_iter().any(|route| {
         let owner = {
             let state = runtime.state.lock().unwrap();
             state
                 .workers
-                .get(agent_id.as_str())
+                .get(route.agent_id.as_str())
                 .cloned()
                 .map(|worker| (runtime.clone(), worker))
         };
@@ -58,13 +58,26 @@ fn same_scope_pane_owner_supersedes(
             let state = host_server.state.lock().unwrap();
             state
                 .workers
-                .get(agent_id.as_str())
+                .get(route.agent_id.as_str())
                 .cloned()
                 .map(|worker| (host_server.clone(), worker))
         });
         owner.is_some_and(|(server, worker)| {
-            crate::server::worker_presence(&server, &worker)
-                == crate::server::presence::IdentityPresence::Present
+            // The durable host route must still be this worker's current
+            // transport. A worker that moved to another pane keeps its old
+            // route in the index and no longer owns the pane of that route.
+            let route_is_current = worker
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.tmux_endpoint.as_ref())
+                .is_some_and(|current| {
+                    route.tmux_endpoint.as_ref().is_some_and(|route_endpoint| {
+                        crate::client::adapters::tmux::same_pane_route(current, route_endpoint)
+                    })
+                });
+            route_is_current
+                && crate::server::worker_presence(&server, &worker)
+                    == crate::server::presence::IdentityPresence::Present
         })
     })
 }

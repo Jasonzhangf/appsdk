@@ -1380,6 +1380,130 @@
     }
 
     #[tokio::test]
+    async fn same_pane_peer_that_moved_away_does_not_supersede_the_master_anchor() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        let master_worker = "moved-peer-pane-master";
+        let master_token = "token-moved-peer-pane-master";
+        let candidates = test_candidates(master_worker).unwrap();
+        let first = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            "user approved same-pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(&scope, &BindingId::new(format!("binding-{master_worker}")).unwrap())
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(app.as_str().to_owned(), master_binding.project_scope.as_str().to_owned()),
+            runtime.clone(),
+            None,
+        );
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+
+        // A peer registers on the same pane with a live native thread, so it
+        // takes the pane over from the stale master anchor.
+        let peer_worker = "moved-same-pane-peer";
+        let peer_token = "token-moved-same-pane-peer";
+        let mut peer_candidates = candidates.clone();
+        let endpoint = &mut peer_candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-moved-same-pane-peer".into());
+        endpoint.codex_thread_id = Some("moved-same-pane-peer-thread".into());
+        let peer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(peer_candidates),
+        );
+        assert!(peer.ok, "{peer:?}");
+        let peer_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new(format!("binding-{peer_worker}")).unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: peer_binding.clone(),
+        }])
+        .unwrap();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+
+        // The peer rebinds to another pane. Its old route stays in the durable
+        // host index, but the peer no longer owns the master pane.
+        let moved = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            test_candidates("moved-same-pane-peer"),
+        );
+        assert!(moved.ok, "{moved:?}");
+        let current = runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get(peer_worker)
+            .and_then(|worker| worker.transport.as_ref())
+            .and_then(|transport| transport.tmux_endpoint.clone())
+            .expect("moved peer transport");
+        assert!(
+            !crate::client::adapters::tmux::same_pane_route(
+                &current,
+                peer_binding.tmux_endpoint.as_ref().unwrap()
+            ),
+            "the moved peer must no longer be on the master pane"
+        );
+
+        // A durable route of a peer that moved away is not a live owner of the
+        // master pane, so the project route stays fenced.
+        let fenced = manager.same_pane_master_route_ready(&runtime);
+        assert!(fenced.is_err(), "{fenced:?}");
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
     async fn same_pane_master_still_fences_when_no_peer_owns_the_pane() {
         let (host, host_root, _) = test_server();
         let (runtime, project_root, _) = test_server();

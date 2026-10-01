@@ -1263,9 +1263,10 @@ fn non_live_candidate_order(
 /// Project scope is applied first: a record registered under another project
 /// can never be the current project's peer for the same anchor, so a foreign
 /// duplicate can neither shadow nor be retired in place of a current-scope
-/// match. Only a *live* or *unproven* member is a blocking conflict; a set
-/// that is entirely provably dead or cold is this peer's own drifted
-/// registration and the deterministic winner is adopted.
+/// match. Every member here matches this exact anchor, so only a set that is
+/// entirely *provably dead* is this peer's own drifted registration and may be
+/// adopted; a live, cold, or unproven member makes the anchor ambiguous and
+/// requires the explicit `--worker` override.
 fn choose_anchor_peer(
     host_paths: &HostPaths,
     candidate: Option<&crate::proto::TmuxCandidate>,
@@ -1284,7 +1285,7 @@ fn choose_anchor_peer(
     }
     if candidates
         .iter()
-        .any(|identity| matches!(liveness(identity), PeerLiveness::Live | PeerLiveness::Unknown))
+        .any(|identity| !matches!(liveness(identity), PeerLiveness::Dead))
     {
         anyhow::bail!("IDENTITY_RESTORE_AMBIGUOUS: {anchor} matches multiple persisted peers");
     }

@@ -554,7 +554,8 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
     .unwrap();
     assert_eq!(chosen.worker_id, "current-older");
 
-    // Live or unproven duplicates block; only a provably dead set is adopted.
+    // Live, cold, or unproven duplicates block; only a provably dead set is
+    // adopted.
     let live_blocks = choose_anchor_peer(
         &host_paths,
         None,
@@ -591,6 +592,24 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
         },
     );
     assert!(unknown_blocks.is_err());
+    let cold_blocks = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![
+            identity_with_scope("dead-peer", scope.clone(), 1),
+            identity_with_scope("cold-peer", scope.clone(), 9),
+        ],
+        |identity| {
+            if identity.worker_id == "cold-peer" {
+                PeerLiveness::Cold
+            } else {
+                PeerLiveness::Dead
+            }
+        },
+    );
+    assert!(cold_blocks.is_err());
 
     // A provably dead set is adopted by durable recency, not the higher
     // per-binding generation of the older record.

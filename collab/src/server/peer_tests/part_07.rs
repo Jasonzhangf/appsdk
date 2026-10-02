@@ -1200,3 +1200,81 @@ async fn duplicate_daemon_rejection_preserves_authoritative_pid() {
     let _ = first.await;
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Register a worker whose selected transport is App Server, so the App Server
+/// status probe (not the tmux pane probe) is the presence authority.
+fn register_appserver_worker(
+    server: &mut Server,
+    root: &Path,
+    id: &str,
+    thread_id: &str,
+) -> WorkerRec {
+    let transport = test_appserver_transport(thread_id);
+    let project_scope =
+        crate::server::global_state::GlobalState::canonical_project_scope(root).unwrap();
+    let app_scope = crate::identity::AppServerId::new("tui-default").unwrap();
+    let envelope = server
+        .typed_register_envelope_for_scope(
+            id,
+            &format!("token-{id}"),
+            &transport,
+            project_scope,
+            root.to_str().unwrap(),
+            app_scope,
+            false,
+        )
+        .unwrap();
+    server
+        .typed_dispatch(envelope)
+        .expect("appserver registration must succeed");
+    server.state.lock().unwrap().workers[id].clone()
+}
+
+/// A live App Server response that omits `thread/status/type` is not evidence of
+/// presence. Falling through to the catch-all arm reported it as `Present`,
+/// which let the ledger mark the binding `Live` on a malformed or truncated
+/// response and suppressed repair; `identity.rs::classify_thread_status` already
+/// treats the same shape as `Unknown`, so the two paths disagreed.
+#[test]
+fn appserver_response_without_thread_status_is_unknown_not_present() {
+    let (mut server, root) = test_server();
+    let worker = register_appserver_worker(&mut server, &root, "no-status", "thread-no-status");
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "canAcceptDirectInput": true
+            }
+        }))
+    });
+    assert_eq!(
+        worker_presence(&server, &worker),
+        IdentityPresence::Unknown,
+        "a response without thread/status/type must not be reported as Present"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The same endpoint must still report `Present` for a well-formed live status,
+/// so the fix narrows one shape instead of disabling the probe.
+#[test]
+fn appserver_response_with_a_live_thread_status_is_present() {
+    let (mut server, root) = test_server();
+    let worker =
+        register_appserver_worker(&mut server, &root, "live-status", "thread-live-status");
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "idle"},
+                "canAcceptDirectInput": true
+            }
+        }))
+    });
+    assert_eq!(
+        worker_presence(&server, &worker),
+        IdentityPresence::Present,
+        "a well-formed live status must still report Present"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

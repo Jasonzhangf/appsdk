@@ -140,17 +140,23 @@ fn transport_agent_view(
                 let thread_state = raw
                     .pointer("/thread/status/type")
                     .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "unknown".to_owned());
-                let identity_presence = match thread_state.as_str() {
-                    "notLoaded" => IdentityPresence::Cold,
-                    "systemError" => IdentityPresence::Missing,
-                    _ => IdentityPresence::Present,
+                    .map(str::to_owned);
+                // A response without `thread/status/type` is not evidence of a
+                // resident thread. Reporting it as Present let the ledger mark
+                // the binding Live on a malformed or truncated response and
+                // suppressed repair; `identity.rs::classify_thread_status`
+                // already treats the same shape as Unknown, so the two paths
+                // disagreed.
+                let identity_presence = match thread_state.as_deref() {
+                    Some("notLoaded") => IdentityPresence::Cold,
+                    Some("systemError") => IdentityPresence::Missing,
+                    Some(_) => IdentityPresence::Present,
+                    None => IdentityPresence::Unknown,
                 };
                 (
                     identity_presence,
                     serde_json::json!({
-                        "thread_state": thread_state,
+                        "thread_state": thread_state.as_deref().unwrap_or("unknown"),
                         "active_flags": raw.pointer("/activeTurns").cloned().unwrap_or(serde_json::json!([])),
                         "can_accept_direct_input": raw.pointer("/thread/canAcceptDirectInput").cloned().unwrap_or(serde_json::Value::Bool(false)),
                         "latest_turn_status": raw.pointer("/thread/latestTurnStatus").cloned().unwrap_or(serde_json::Value::Null),

@@ -1211,9 +1211,40 @@ fn identity_update_view_names_the_reason_and_the_recovery_action() {
     );
     assert_eq!(mismatch["reason"], "TOKEN_MISMATCH");
     assert_eq!(mismatch["requires_approval"], false);
+    // Every `collab` command run as this worker authenticates through `me()`,
+    // which re-sends the rejected token, so the action must not name one.
+    let mismatch_action = mismatch["action"].as_str().unwrap();
     assert!(
-        mismatch["action"].as_str().unwrap().contains("sendmessage"),
+        mismatch_action.contains("escalate out of band"),
         "{mismatch}"
+    );
+    assert!(
+        !mismatch_action.contains("collab sendmessage"),
+        "{mismatch}"
+    );
+    assert!(!mismatch_action.contains("collab context"), "{mismatch}");
+}
+
+/// The rejected-token terminal cannot be repaired by re-authenticating: `me()`
+/// reloads the same persisted identity and re-sends the same rejected token, so
+/// any `collab` command the action names would fail exactly like the invocation
+/// that produced the terminal. The action must therefore be an out-of-band
+/// escalation that names the concrete worker, so the agent can hand it to the
+/// project owner without the rejected identity.
+#[test]
+fn token_mismatch_action_is_executable_without_the_rejected_identity() {
+    use crate::main_context::IdentityFailure;
+
+    let action = IdentityFailure::TokenMismatch.action(Some("codex-%9"));
+    assert!(action.contains("escalate out of band"), "{action}");
+    assert!(action.contains("codex-%9"), "{action}");
+    assert!(
+        !action.contains("collab "),
+        "the action must not name a collab command that reuses the rejected token: {action}"
+    );
+    assert!(
+        !action.contains("<master>") && !action.contains("<exact error"),
+        "the escalation must be concrete, not a shell template: {action}"
     );
 }
 
@@ -1223,11 +1254,23 @@ fn identity_update_view_names_the_reason_and_the_recovery_action() {
 fn no_classified_failure_repeats_the_command_that_just_failed() {
     use crate::main_context::IdentityFailure;
 
-    for (failure, produced_by) in [
-        (IdentityFailure::TokenMismatch, "collab context"),
-        (IdentityFailure::RebindUnproven, "collab context"),
-        (IdentityFailure::CrossProjectRestore, "collab context"),
-        (IdentityFailure::AnchorMissing, "collab context"),
+    for (failure, produced_by, marker) in [
+        (
+            IdentityFailure::TokenMismatch,
+            "collab context",
+            "escalate out of band",
+        ),
+        (
+            IdentityFailure::RebindUnproven,
+            "collab context",
+            "--worker",
+        ),
+        (
+            IdentityFailure::CrossProjectRestore,
+            "collab context",
+            "--worker",
+        ),
+        (IdentityFailure::AnchorMissing, "collab context", "--worker"),
     ] {
         let action = failure.action(None);
         assert_ne!(
@@ -1237,7 +1280,7 @@ fn no_classified_failure_repeats_the_command_that_just_failed() {
             failure.code()
         );
         assert!(
-            action.contains("--worker") || action.contains("sendmessage"),
+            action.contains(marker),
             "{} must name an executable next step, got {action}",
             failure.code()
         );

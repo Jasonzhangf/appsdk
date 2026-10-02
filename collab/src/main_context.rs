@@ -192,13 +192,15 @@ impl IdentityFailure {
     /// `COLLAB_IDENTITY_ANCHOR_MISSING` are only reached without `--worker`, and
     /// the identity layer documents `--worker` as their recovery, so the action
     /// names the missing argument with a placeholder: the operator picks the
-    /// durable identity. A rejected token cannot be re-run into validity, so it
-    /// escalates to the live master instead.
+    /// durable identity. A rejected token cannot be re-run into validity, and
+    /// every `collab` command run as that worker re-sends the same rejected
+    /// token through `me()`, so `TokenMismatch` escalates out of band with the
+    /// concrete worker instead of naming a command that cannot work.
     pub(crate) fn action(self, worker: Option<&str>) -> String {
         let named = worker.unwrap_or("<worker_id>");
         match self {
             Self::TokenMismatch => format!(
-                "COLLAB_WORKER={named} collab sendmessage --from {named} --to <master> --subject blocker \"<exact error; worker_id={named}>\""
+                "escalate out of band to the project owner, or to the live master through a healthy peer: worker {named} is already declared and its token was rejected, so no collab command run as {named} can re-authenticate; preserve exact_error and worker_id={named} and wait for the owner to declare which durable identity to adopt; do not copy tokens, mint a new identity, or edit routes"
             ),
             Self::RebindUnproven | Self::CrossProjectRestore | Self::AnchorMissing => {
                 "collab context --worker <worker_id>".to_owned()

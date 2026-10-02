@@ -1252,13 +1252,14 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let master_assigned_by = master_grant.as_ref().map(|grant| grant.granted_by.clone());
     let master_approval = master_grant.as_ref().map(|grant| grant.approval.clone());
     let master_assigned_ms = master_grant.as_ref().map(|grant| grant.granted_at_ms);
-    let master_wake = st.master_wake.clone();
     let pending_merges = pending_merge_views(&st);
     // `collab context` is the single agent bootstrap read, so the projections
     // that `collab status --all` and `collab who` expose belong to the same
     // snapshot instead of a second call. They are captured here because `st` is
-    // released before the transport probes below.
-    let message_count = st.msgs.len();
+    // released before the transport probes below. `master_wake` and the message
+    // count are deliberately not captured here: the presence recording below can
+    // commit a wake signal and worker-unresponsive / worker-recovered messages,
+    // so reading them before it would return pre-transition scheduling state.
     let task_count = st.tasks.len();
     let mut subagents: Vec<crate::subagent::Record> = st.subagents.values().cloned().collect();
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
@@ -1272,6 +1273,16 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // agents follow the consolidated entry. Must run after `drop(st)` because it
     // takes the state lock itself.
     record_ordinary_peer_presence_edges(server, None);
+
+    // That recording can commit KeepaliveUpdated, MasterWakeSignal, and
+    // worker-unresponsive / worker-recovered messages, so the scheduling
+    // projections are read after it. `StatusAll` records first for the same
+    // reason; reading them before would return pre-transition state next to
+    // already-updated peer presence.
+    let (master_wake, message_count) = {
+        let st = server.state.lock().unwrap();
+        (st.master_wake.clone(), st.msgs.len())
+    };
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
     let peers: Vec<_> = peer_snapshots

@@ -28,6 +28,10 @@
     {
       "id": "appsdk-collab-merge-pending",
       "path": "docs/dagpipe/merge-pending.graph.json"
+    },
+    {
+      "id": "appsdk-collab-identity-adjudication",
+      "path": "docs/dagpipe/collab-identity-adjudication.graph.json"
     }
   ]
 }

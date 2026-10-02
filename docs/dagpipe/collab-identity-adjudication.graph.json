@@ -1,0 +1,81 @@
+{
+  "id": "appsdk-collab-identity-adjudication",
+  "version": "0.1.0",
+  "description": "F2, the manual adjudication slice of identity recovery from docs/design/identity-governance-recovery-design.md section 5.3: an operator declaration selects a durable identity and rebinds the channel to it. SESE: one entry (the declaration), one sink (the identity/binding write), each node single-entry single-exit. The automatic slice (F1) is appsdk-collab-context; both write through the same identity/binding CAS sink and neither reaches into the other's source of truth. T0 status: the entry point is `collab context --worker <id>` with the scope derived from cwd/route, and the durable receipt is not yet written. The `--scope` declaration and the receipt are T1 items G-1/G-2 in section 8.2 of that design, recorded here so the graph and the design cannot drift.",
+  "inputs": [
+    {
+      "id": "operator_declaration",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "parse_declaration",
+      "operator": "appsdk.collab_adjudication.parse_declaration",
+      "operator_version": "1",
+      "inputs": ["operator_declaration"],
+      "output": {"id": "adjudication_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "load_target",
+      "operator": "appsdk.collab_adjudication.load_target",
+      "operator_version": "1",
+      "inputs": ["adjudication_request"],
+      "output": {"id": "target_principal", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "collect_inherited",
+      "operator": "appsdk.collab_adjudication.collect_inherited",
+      "operator_version": "1",
+      "inputs": ["target_principal"],
+      "output": {"id": "inherited_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "write_receipt",
+      "operator": "appsdk.collab_adjudication.write_receipt",
+      "operator_version": "1",
+      "inputs": ["inherited_state"],
+      "output": {"id": "adjudication_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "rebind_identity",
+      "operator": "appsdk.collab_adjudication.rebind_identity",
+      "operator_version": "1",
+      "inputs": ["adjudication_receipt"],
+      "output": {"id": "adjudicated_binding", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_outcome",
+      "operator": "appsdk.collab_adjudication.emit_outcome",
+      "operator_version": "1",
+      "inputs": ["adjudicated_binding"],
+      "output": {"id": "adjudication_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "parse_declaration", "to": "load_target", "arc_id": "adjudication_request"},
+    {"from": "load_target", "to": "collect_inherited", "arc_id": "target_principal"},
+    {"from": "collect_inherited", "to": "write_receipt", "arc_id": "inherited_state"},
+    {"from": "write_receipt", "to": "rebind_identity", "arc_id": "adjudication_receipt"},
+    {"from": "rebind_identity", "to": "emit_outcome", "arc_id": "adjudicated_binding"}
+  ],
+  "outputs": ["adjudication_result"]
+}

@@ -610,7 +610,7 @@ impl ProjectRuntimeManager {
                         binding.agent_id
                     ));
                 }
-                self.retire_cross_project_anchor_candidate(context, &candidate.endpoint, binding)?;
+                self.retire_cross_project_anchor_candidate(context, binding)?;
             }
             let remaining_scope_mismatch = binding.app_scope_id != context.app_scope_id
                 || binding.project_scope != context.project_scope;
@@ -621,7 +621,7 @@ impl ProjectRuntimeManager {
                 );
             }
             if remaining_scope_mismatch {
-                self.retire_cross_project_anchor_candidate(context, &candidate.endpoint, binding)?;
+                self.retire_cross_project_anchor_candidate(context, binding)?;
             }
         }
         Ok(())
@@ -630,7 +630,6 @@ impl ProjectRuntimeManager {
     fn retire_cross_project_anchor_candidate(
         &self,
         context: &ProjectContext,
-        candidate: &crate::server::global_state::TmuxEndpoint,
         binding: &RuntimeBinding,
     ) -> Result<(), String> {
         let candidate_scope_mismatch = binding.app_scope_id != context.app_scope_id
@@ -646,13 +645,11 @@ impl ProjectRuntimeManager {
             "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no session id"
                 .to_owned()
         })?;
-        let matches_candidate = |previous: &RuntimeBinding| {
-            previous.session_id.as_ref() == Some(session_id)
-                && previous.native_thread_id.as_ref() == Some(native_thread_id)
-                && previous.tmux_endpoint.as_ref().is_some_and(|endpoint| {
-                    crate::client::adapters::tmux::same_pane_route(endpoint, candidate)
-                })
-        };
+        // The anchor match that selected this binding already applied the single
+        // pane-identity implementation (`same_pane_route`). Re-deriving pane
+        // identity here a second time could only disagree with the match that got
+        // us here, so the postcondition asks the exact question the reducer
+        // answers: is this binding still a live current-thread route?
         self.host
             .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
                 binding: binding.clone(),
@@ -665,7 +662,7 @@ impl ProjectRuntimeManager {
                 .global
                 .current_thread_routes
                 .values()
-                .any(|route| route.binding_id == binding.binding_id && matches_candidate(route))
+                .any(|route| route == binding)
         };
         if retired {
             Ok(())

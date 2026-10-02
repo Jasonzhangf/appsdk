@@ -195,7 +195,7 @@
 | I5 | 锚点按 principal 归并去重 | `anchor_groups` 归并 | 同一 peer 被当成多个候选 |
 | I6 | same-pane master supersede 必须同时绑定 route 与 presence | `same_scope_pane_owner_supersedes` | 无 presence 就顶替 master |
 | I7 | probe 错误只在明确文本下判 Dead，其余 Unknown | `classify_probe_error`（仅 `no rollout` / `thread not found` / `tmux_pane_missing`） | 畸形响应被当成死亡证明 |
-| I8 | pane 同一性比较必须含 `pane_pid`（5 字段） | `collab/src/adapters/tmux.rs:308-314` 的 `same_pane_route` | pane id 复用被误认为同一 pane |
+| I8 | pane 同一性比较必须含 `pane_pid`（5 字段） | `collab/src/adapters/tmux.rs:308-314` 的 `same_pane_route`（唯一实现；调用点唯一，见 T0-3） | pane id 复用被误认为同一 pane |
 
 每条必须有对应回归测试；删除任一实现必须使对应测试变红。
 
@@ -316,7 +316,7 @@
 |---|---|---|---|
 | T0-1（F-02） | `collab/src/main.rs` 把 `thread_local!` 提到 module scope，getter/setter 共用同一 static；`collab/src/main_context.rs` 只在显式 `--worker` 时置位；核对读写配对 | getter/setter 共用同一 cell；显式 `--worker` 的注册请求 `retire_cross_project_anchor == true`，daemon 退休 foreign route 且当前 scope 取得锚点；F1（无 `--worker`）恒 `false`，跨 scope 仍 fail-closed 到 `IDENTITY_CROSS_PROJECT`（与 `c5007ad` 契约一致） | 单测：setter→getter 同一 cell；单测：gate 仅对 `Some(worker)` 为真；集成（`ProjectRuntimeManager`）：flag=true 时 foreign route 被退休且当前 scope 持有锚点，flag=false 时被拒（**该路径原先零覆盖**） |
 | T0-2（F-03） | `collab/src/server/mod_parts/part_07.rs:140-147` 缺 `thread/status/type` 归 `Unknown`，与 `collab/src/identity.rs` 的 `classify_thread_status` 对齐 | 畸形/缺字段响应不再产生 `Present` | 三条断言：缺 status → `Unknown`；`notLoaded` → `Cold`；`systemError` → `Missing` |
-| T0-3（F-04） | `collab/src/server/mod_parts/part_04.rs:582-593`、`:650-658` 删除手写比较，统一调用 `collab/src/adapters/tmux.rs:308-314` 的 `same_pane_route` | pane 同一性判定只有唯一实现；`pane_pid` 变化不再被误认 | 两处调用点各一条：pane id 相同、`pane_pid` 不同 → 判不同 |
+| T0-3（F-04） | `collab/src/server/mod_parts/part_04.rs` 删除手写比较，统一调用 `collab/src/adapters/tmux.rs:308-314` 的 `same_pane_route`；退休后置条件不再二次推导 pane 同一性，改为"该 binding 已不是 live route" | pane 同一性判定只有唯一实现、唯一调用点；`pane_pid` 变化不再被误认 | 唯一调用点一条：pane id 相同、`pane_pid` 不同 → 判不同 |
 | T0-4（F-08） | `collab/src/adapters/mod.rs:1-2` 注释与实现对齐（AppServer adapter 未退役、非 `cfg(test)`、生产路径在用）；若确实要退役，必须先迁移 `candidate_from_env`/`verify_candidate` 的生产调用点 | 注释、`cfg` 属性、生产调用三者一致 | 针对性检查 + 断言生产调用存在 |
 
 ### 6.2 阶段 B：平台级（F1/F2 的完整实现）
@@ -350,7 +350,7 @@ T1 新模型（`identity/model.rs`）+ policy validator（拒绝 floor 下调）
 | 单测（T0-1） | getter/setter 同一 static | setter(true) 后 getter() 为 true |
 | 集成（T0-1） | daemon 退休 foreign route | flag=true：foreign route 消失且当前 scope 持有锚点；flag=false：拒绝且不退休 |
 | 黑盒 AppServer（T0-2） | 缺 `thread/status/type` | 必须 `Unknown`；不得 `Present` |
-| 黑盒 tmux（T0-3） | pane id 相同、`pane_pid` 变化 | 判不同 pane；两处调用点各一条 |
+| 黑盒 tmux（T0-3） | pane id 相同、`pane_pid` 变化 | 判不同 pane；唯一调用点一条 |
 | 契约（T0-4） | 注释/`cfg`/生产调用一致 | 三者一致；生产调用存在 |
 | 恢复判定顺序 | §3.2 的 R-1..R-8 | 每行一条：构造该条件，断言终态码唯一且优先级正确；R-6 不得越过 R-1/R-2 |
 | 失败终态 | §3.3 | 每个终态码都携 reason + repair_required + 命令模板 |

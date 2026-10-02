@@ -1090,6 +1090,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
              root.display().to_string(),
              Some(crate::proto::TransportCandidates {
                 appserver: None,
+                dsh: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint: endpoint.clone(),
                     cwd: root.display().to_string(),
@@ -1104,6 +1105,7 @@ fn migration_freeze_rejects_mutations_but_allows_rebind_and_reads() {
              root.display().to_string(),
              Some(crate::proto::TransportCandidates {
                 appserver: None,
+                dsh: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint,
                     cwd: root.display().to_string(),

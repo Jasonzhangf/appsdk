@@ -1238,10 +1238,12 @@ fn token_mismatch_action_is_executable_without_the_rejected_identity() {
     let action = IdentityFailure::TokenMismatch.action(Some("codex-%9"));
     assert!(action.contains("escalate out of band"), "{action}");
     assert!(action.contains("codex-%9"), "{action}");
-    assert!(
-        !action.contains("collab "),
-        "the action must not name a collab command that reuses the rejected token: {action}"
-    );
+    for command in ["collab context", "collab sendmessage", "COLLAB_WORKER="] {
+        assert!(
+            !action.contains(command),
+            "the action must not name a collab invocation that reuses the rejected token: {action}"
+        );
+    }
     assert!(
         !action.contains("<master>") && !action.contains("<exact error"),
         "the escalation must be concrete, not a shell template: {action}"

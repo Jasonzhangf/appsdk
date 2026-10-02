@@ -143,20 +143,20 @@ flowchart LR
     S[context_request] --> R[解析项目根]
     R --> B[检查/创建基线]
     B --> D[检查/启动守护]
-    D --> I[装载/创建身份]
-    I --> V[校验令牌]
-    V --> G[注册/重建对端]
-    G --> N[恢复默认订阅]
+    D --> I[身份门: 装载/校验/注册/首次鉴权调用]
+    I --> N[恢复默认订阅]
     N --> M[查找主控]
-    M --> U[身份修复判定]
-    U --> P[只读投影]
+    M --> P[只读投影]
     P --> E[环境投影]
     E --> O[state_snapshot]
 ```
 
-该图的契约要求每个节点恰好一个输入、每条 ARC 恰好一个汇，因此拓扑是一条链：
-`identity_update` 是链上的身份修复判定阶段，由它内部决定走已分类失败的修复投影
-还是成功快照，而不是在图上分出第二个出口。
+该图的契约要求每个节点恰好一个输入、每条 ARC 恰好一个汇，因此拓扑是一条链。
+身份失败有三个真实边界 —— `load_or_create_for_context`、令牌校验/注册、以及第一次
+带鉴权的 daemon 调用（`Req::Context` 返回的 token mismatch）—— 它们都属于同一个
+`identity_gate` 节点，由该节点内部决定走已分类失败的修复终点还是成功路径；契约不允许
+在图上分出第二个出口，所以修复终点不单独成节点。`read_only_state` 与 `env_view` 是
+两种结果共用的投影。
 
 ARC 契约：
 
@@ -166,12 +166,9 @@ ARC 契约：
 | `resolved_scope` | Object | 已解析项目根 |
 | `baseline_ready` | Object | `.agent-collab/` 基线就绪 |
 | `daemon_ready` | Object | daemon socket 就绪 |
-| `identity_token` | Object | worker id + token |
-| `verified_identity` | Object | 令牌校验通过 |
-| `registered_route` | Object | route/transport 注册完成 |
+| `identity_verified` | Object | 身份门通过：身份已装载、令牌已校验、route 已注册、首次鉴权调用成功 |
 | `notify_state` | Object | 默认订阅状态 |
 | `master_grant` | Object | live master grant 或空 |
-| `identity_repair_request` | Object | 身份修复判定阶段输出；只有已分类身份失败才继续走修复投影 |
 | `read_only_projection` | Object | peers / master / status 只读投影 |
 | `env_projection` | Object | 过滤后的 shell 环境子集（凭据形状的键已丢弃） |
 | `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/env；身份修复时另有 requires_identity_update 且 registered=false |
@@ -179,10 +176,10 @@ ARC 契约：
 失败终点不进入成功 DAG，作为 attempt 终态显式存在：
 `路径未识别`、`拒绝在 playground`。只有**已分类的身份失败**
 （`TOKEN_MISMATCH`、`IDENTITY_REBIND_UNPROVEN`、`IDENTITY_RESTORE_CROSS_PROJECT`、
-`COLLAB_IDENTITY_ANCHOR_MISSING`）不另设终点，统一走 `identity_update` →
+`COLLAB_IDENTITY_ANCHOR_MISSING`）不另设终点，由 `identity_gate` 内部的修复终点 →
 同一个 `state_snapshot` 出口，由 `requires_identity_update` 显式承载失败事实。
 route / runtime binding / transport（`DAEMON_*`）等非身份失败**不进入**
-`identity_update`：它们保留原始错误并非零退出，避免 `requires_identity_update`
+身份门的修复终点：它们保留原始错误并非零退出，避免 `requires_identity_update`
 掩盖真实故障。
 
 ## 节点 owner 映射
@@ -192,16 +189,13 @@ route / runtime binding / transport（`DAEMON_*`）等非身份失败**不进入
 | 解析项目根 | `appsdk.collab_context.resolve_root` | `resolve_context_root` / `collab/src/main.rs` |
 | 创建基线 | `appsdk.collab_context.ensure_baseline` | `scope::init` / `collab/src/scope.rs` |
 | 启动守护 | `appsdk.collab_context.ensure_daemon` | `client::ensure_server` / `collab/src/client.rs` |
-| 装载身份 / 创建身份 | `appsdk.collab_context.load_identity` | `identity::load_or_create` / `collab/src/identity.rs` |
-| 校验令牌 | `appsdk.collab_context.verify_token` | `verify` / `collab/src/server/mod.rs` |
-| 注册对端 | `appsdk.collab_context.ensure_registration` | `ensure_registration_with_outcome` / `collab/src/main.rs` |
-| 沿用 / 原地重建 / 新建 | `appsdk.collab_context.register_route` | `handle_register_with_app_scope` / `collab/src/server/mod.rs` |
+| 身份门（装载/校验/注册/首次鉴权） | `appsdk.collab_context.identity_gate` | `identity::load_or_create_for_context` / `collab/src/identity.rs`；`verify` / `collab/src/server/mod.rs`；`ensure_registration_with_outcome` / `collab/src/main.rs`；`handle_register_with_app_scope` / `collab/src/server/mod.rs`；首次 `call_project(&Req::Context)` / `collab/src/main_context.rs` |
 | 恢复默认订阅 | `appsdk.collab_context.restore_default_lease` | `default_direct_message_events` / `collab/src/server/mod.rs` |
 | 查找主控 | `appsdk.collab_context.find_master` | `current_master_worker_id` / `current_master_grant` / `collab/src/server/mod.rs` |
 | 输出快照 | `appsdk.collab_context.emit_snapshot` | `handle_context` / `collab/src/server/mod.rs` |
 | 只读投影（peers/master/status） | `appsdk.collab_context.read_only_state` | `read_only_project_state` / `collab/src/main_context.rs` |
 | 环境投影 | `appsdk.collab_context.env_view` | `context_env_view` / `collab/src/main_context.rs`；只取 `HOME`/`USER`/`LOGNAME`/`CARGO_HOME` 与 `COLLAB_`/`APPSDK_`/`CODEX_` 前缀，名字含 TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL 的键一律丢弃 |
-| 身份修复终点 | `appsdk.collab_context.identity_update` | `IdentityFailure::classify` / `identity_terminal` / `identity_update_view` / `identity_update_snapshot` / `collab/src/main_context.rs`；只有闭集身份码进入，其余失败原样上抛 |
+| 身份修复终点（`identity_gate` 内部） | `appsdk.collab_context.identity_gate` | `IdentityFailure::classify` / `identity_terminal` / `identity_update_view` / `identity_update_snapshot` / `collab/src/main_context.rs`；只有闭集身份码进入，其余失败原样上抛 |
 
 ## 变更边界
 

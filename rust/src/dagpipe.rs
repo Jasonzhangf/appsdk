@@ -340,17 +340,14 @@ fn design_graph_ids() -> [&'static str; 5] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 30] {
+fn design_graph_operator_names() -> [&'static str; 27] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
         "appsdk.collab_context.ensure_daemon",
-        "appsdk.collab_context.load_identity",
-        "appsdk.collab_context.verify_token",
-        "appsdk.collab_context.ensure_registration",
+        "appsdk.collab_context.identity_gate",
         "appsdk.collab_context.restore_default_lease",
         "appsdk.collab_context.find_master",
-        "appsdk.collab_context.identity_update",
         "appsdk.collab_context.read_only_state",
         "appsdk.collab_context.env_view",
         "appsdk.collab_context.emit_snapshot",

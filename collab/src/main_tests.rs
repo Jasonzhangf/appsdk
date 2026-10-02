@@ -1041,6 +1041,37 @@ fn context_daemon_down_marker_fails_closed_and_preserves_marker() {
 /// variables an agent previously grepped out of its own shell must be part of
 /// the snapshot. Unrelated values must not leak: this projection is the one
 /// place the caller's environment enters a Collab response.
+/// `context_env_view` runs on every `collab context` response, including the
+/// identity terminal, so a non-Unicode entry in the process environment must not
+/// abort the single bootstrap entry. `std::env::vars()` panics on one; `vars_os()`
+/// plus `to_str()` skips it.
+#[cfg(unix)]
+#[test]
+fn context_env_view_skips_a_non_unicode_environment_entry() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = "COLLAB_TEST_NON_UTF8";
+    let previous = std::env::var_os(key);
+    // 0x80 is not a valid UTF-8 byte, and the key is under a selected prefix, so
+    // the only reason it can be absent from the view is the encoding guard.
+    std::env::set_var(key, OsString::from_vec(vec![0x66, 0x6f, 0x80]));
+
+    let view = crate::main_context::context_env_view();
+
+    match previous {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+    assert!(
+        view.get(key).is_none(),
+        "a non-Unicode value must be skipped, not abort the snapshot: {view}"
+    );
+}
+
 #[test]
 fn context_env_view_selects_only_collab_identity_variables() {
     // A pre-existing environment-sensitive test can panic while holding this
@@ -1376,6 +1407,38 @@ fn identity_update_snapshot_is_explicit_and_not_a_registered_snapshot() {
             .contains("live master"),
         "{snapshot}"
     );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The implicit `collab context` path passes no `--worker`, so the terminal must
+/// name the identity it actually loaded and had rejected. Before this, that most
+/// common bootstrap path reported `worker_id: null` and a `<worker_id>`
+/// placeholder, which is not actionable: the agent cannot run
+/// `collab context --worker <worker_id>` without knowing the id. `context_snapshot`
+/// now passes the loaded identity at both of its terminal call sites that have one.
+#[test]
+fn implicit_token_mismatch_terminal_names_the_loaded_identity() {
+    let root = test_root("context-implicit-token-mismatch");
+    let bootstrap = crate::main_context::ContextBootstrap {
+        scope: Scope { root: root.clone() },
+        project_root_resolution: "cwd",
+        baseline_created: false,
+        daemon_started: false,
+    };
+    let error = anyhow::anyhow!("token mismatch: identity does not own this worker_id");
+    let snapshot = crate::main_context::identity_update_snapshot(
+        &bootstrap,
+        &error,
+        crate::main_context::IdentityFailure::TokenMismatch,
+        Some("codex-%9"),
+    );
+
+    let update = &snapshot["requires_identity_update"];
+    assert_eq!(update["worker_id"], "codex-%9", "{snapshot}");
+    let action = update["action"].as_str().unwrap();
+    assert!(action.contains("codex-%9"), "{snapshot}");
+    assert!(!action.contains("<worker_id>"), "{snapshot}");
 
     std::fs::remove_dir_all(root).ok();
 }

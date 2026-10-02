@@ -122,13 +122,20 @@ fn context_env_key_is_secret(key: &str) -> bool {
 
 pub(crate) fn context_env_view() -> serde_json::Value {
     let mut selected = std::collections::BTreeMap::new();
-    for (key, value) in std::env::vars() {
-        let named = CONTEXT_ENV_KEYS.contains(&key.as_str())
+    // `std::env::vars()` panics when any key or value is not valid Unicode, and
+    // this projection runs on every `collab context` response, including the
+    // identity terminal. A non-Unicode entry is skipped instead of aborting the
+    // single bootstrap entry.
+    for (key, value) in std::env::vars_os() {
+        let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+            continue;
+        };
+        let named = CONTEXT_ENV_KEYS.contains(&key)
             || CONTEXT_ENV_PREFIXES
                 .iter()
                 .any(|prefix| key.starts_with(prefix));
-        if named && !context_env_key_is_secret(&key) {
-            selected.insert(key, value);
+        if named && !context_env_key_is_secret(key) {
+            selected.insert(key.to_owned(), value.to_owned());
         }
     }
     serde_json::to_value(selected).unwrap_or(serde_json::Value::Null)
@@ -332,7 +339,11 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
     crate::set_context_registration_requested(false);
     let (_, identity_state) = match registration {
         Ok(outcome) => outcome,
-        Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
+        // The durable identity is loaded here, so the terminal can name the
+        // concrete worker instead of leaving the caller with a placeholder.
+        Err(error) => {
+            return identity_terminal(&bootstrap, error, Some(ident.worker_id.as_str()));
+        }
     };
     let identity_state = match identity_state {
         RegistrationOutcome::Created => "created",
@@ -343,7 +354,9 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
     // A registered identity can still be rejected by the daemon when its token
     // no longer owns the worker id. `identity_terminal` decides whether that
     // rejection is a classified identity failure or an unrelated one that must
-    // keep failing closed.
+    // keep failing closed. The rejected worker is the loaded identity, not the
+    // caller's optional `--worker`, so the escalation names a concrete id even
+    // on the implicit `collab context` path.
     let mut v: serde_json::Value = match call_project(
         &scope,
         &ident,
@@ -353,7 +366,9 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
         },
     ) {
         Ok(value) => value,
-        Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
+        Err(error) => {
+            return identity_terminal(&bootstrap, error, Some(ident.worker_id.as_str()));
+        }
     };
     if let Some(value) = v.as_object_mut() {
         value.insert(

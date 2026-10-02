@@ -912,10 +912,12 @@ can branch on it without parsing natural language.
 | reason | `action` | `requires_approval` |
 | --- | --- | --- |
 | `IDENTITY_REBIND_UNPROVEN` / `IDENTITY_RESTORE_CROSS_PROJECT` / `COLLAB_IDENTITY_ANCHOR_MISSING` | `collab context --worker <worker_id>` — the operator declares the durable identity; `collab context` must not infer one | `true` |
-| `TOKEN_MISMATCH` | `COLLAB_WORKER=<worker_id> collab sendmessage ... --to <master> --subject blocker` — a rejected token cannot be re-run into validity, so escalate it | `false` |
+| `TOKEN_MISMATCH` | escalate out of band with the concrete `worker_id`: report `exact_error` and `worker_id` to the project owner, or to the live master through a healthy peer. Every `collab` command run as that worker re-authenticates through `me()` and re-sends the rejected token, so no command can be the repair | `false` |
 
-`worker_id` reports the `--worker` you passed (null when you passed none); it is
-not a substitute for choosing one.
+`worker_id` is the identity the terminal actually rejected: the loaded identity
+for `TOKEN_MISMATCH` and for a failed registration, or the `--worker` you passed.
+It is null only when no durable identity could be loaded at all. It is not a
+substitute for choosing one.
 
 Only these classified identity failures reach the `identity_update` exit. A
 route, runtime-binding, or transport failure is a different problem: it keeps its

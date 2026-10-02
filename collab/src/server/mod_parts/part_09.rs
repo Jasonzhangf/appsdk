@@ -1172,24 +1172,6 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         .map(|task| task_view(&st, task))
         .collect();
     tasks.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    let unread: Vec<&Message> = st.inbox_of(&worker_id);
-    let unread_count = unread.len();
-    let inbox_messages: Vec<serde_json::Value> = unread
-        .iter()
-        .rev()
-        .take(20)
-        .map(|message| {
-            json!({
-                "id": message.id,
-                "from": message.from,
-                "type": message.mtype,
-                "subject": message.subject,
-                "state": message.state,
-                "created_at": iso(message.created_ms),
-                "body": message.body,
-            })
-        })
-        .collect();
     let current_role_brief = role_brief(server, &st, &worker_id);
     let role = current_role_brief
         .get("role")
@@ -1279,9 +1261,31 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     // projections are read after it. `StatusAll` records first for the same
     // reason; reading them before would return pre-transition state next to
     // already-updated peer presence.
-    let (master_wake, message_count) = {
+    let (master_wake, message_count, unread_count, inbox_messages) = {
         let st = server.state.lock().unwrap();
-        (st.master_wake.clone(), st.msgs.len())
+        let unread: Vec<&Message> = st.inbox_of(&worker_id);
+        let messages: Vec<serde_json::Value> = unread
+            .iter()
+            .rev()
+            .take(20)
+            .map(|message| {
+                json!({
+                    "id": message.id,
+                    "from": message.from,
+                    "type": message.mtype,
+                    "subject": message.subject,
+                    "state": message.state,
+                    "created_at": iso(message.created_ms),
+                    "body": message.body,
+                })
+            })
+            .collect();
+        (
+            st.master_wake.clone(),
+            st.msgs.len(),
+            unread.len(),
+            messages,
+        )
     };
 
     let (presence, agent) = worker_presence_with_view(server, &worker);

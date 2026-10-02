@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-context",
-  "version": "0.2.0",
-  "description": "F1, the automatic identity recovery slice from docs/design/identity-governance-recovery-design.md section 5.2: `collab context` resolves the canonical scope, guarantees the daemon, loads and verifies the durable identity, registers the route, restores the default lease, finds the master, and emits the snapshot. One entry (the context request), one exit (the snapshot); refusal and conflict branches terminate at the section 3.3 failure terminals instead of continuing. The manual adjudication slice (F2) is a separate graph, appsdk-collab-identity-adjudication. T0 status: the explicit `--worker` override is F2's entry point and it is the only path that sets Req::Register.retire_cross_project_anchor, which ensure_registration applies; the implicit F1 path never crosses project scope and fails closed at IDENTITY_RESTORE_CROSS_PROJECT. Crossing scope without an operator declaration, retiring a foreign anchor transactionally, and the adjudication receipt are T1 items G-1/G-3 in section 8.2 of that design. 0.2.0: the snapshot is also the agent's complete state read. emit_snapshot now carries the projections that previously required `collab who` (peers, peer_count), `collab status --all` (summary, master_wake, subagents, pending_merges), `collab master status` (master, recorded_unusable), and a shell env probe (env). Identity load, token verification, or registration failure does not add a second exit: it is the same single state_snapshot output with registered=false, identity=null, and requires_identity_update carrying reason/action/exact_error, alongside the read-only daemon projections. Root-resolution refusal (COLLAB_CONTEXT_UNRESOLVED) and the playground-baseline refusal remain explicit non-zero terminals before the identity node. 0.2.0 topology: the identity terminal is a stage of this single-input chain, not a second exit. After find_master the chain runs identity_update, read_only_state, env_view, and then the single emit_snapshot sink. Every node consumes exactly one arc and every arc has exactly one sink, so the graph stays a path; the identity stage decides internally whether the classified failure terminal or the success snapshot is built, and only a classified identity failure reaches the repair projections. Route, runtime-binding, and transport failures still terminate non-zero without an identity node.",
+  "version": "0.3.0",
+  "description": "F1, the automatic identity recovery slice from docs/design/identity-governance-recovery-design.md section 5.2: `collab context` resolves the canonical scope, guarantees the daemon, runs the identity gate, restores the default lease, finds the master, projects the read-only daemon state and the shell environment, and emits the snapshot. One entry (the context request), one exit (the snapshot). The manual adjudication slice (F2) is a separate graph, appsdk-collab-identity-adjudication. T0 status: the explicit `--worker` override is F2's entry point and it is the only path that sets Req::Register.retire_cross_project_anchor, which the identity gate applies; the implicit F1 path never crosses project scope and fails closed at IDENTITY_RESTORE_CROSS_PROJECT. Crossing scope without an operator declaration, retiring a foreign anchor transactionally, and the adjudication receipt are T1 items G-1/G-3 in section 8.2 of that design. 0.2.0: the snapshot is also the agent's complete state read. emit_snapshot carries the projections that previously required `collab who` (peers, peer_count), `collab status --all` (summary, master_wake, subagents, pending_merges), `collab master status` (master, recorded_unusable), and a shell env probe (env). 0.3.0 topology: identity failures happen at their real boundaries, and those boundaries are one node. `identity::load_or_create_for_context`, token verification, `ensure_registration_with_outcome`, and the first authenticated daemon call (`Req::Context`, which is what returns the daemon's token mismatch) all fail into the same classified-failure terminal, so they are modelled as the single `identity_gate` stage whose internal control flow decides between the terminal and the success path. That matches `context_snapshot`, which enters `identity_terminal` from exactly those three call sites before any master lookup. The graph contract requires exactly one input per node and exactly one sink per arc, so the terminal cannot be drawn as a second branch: a classified identity failure is answered by the same single `state_snapshot` exit with registered=false, identity=null, and requires_identity_update carrying reason/action/exact_error, and `read_only_state` plus `env_view` are the projections that build that snapshot on either outcome. Only a classified identity failure reaches the terminal; route, runtime-binding, and transport failures keep their original error and exit non-zero. Root-resolution refusal (COLLAB_CONTEXT_UNRESOLVED) and the playground-baseline refusal remain explicit non-zero terminals before the identity gate.",
   "inputs": [
     {
       "id": "context_request",
@@ -40,31 +40,11 @@
       "iterator": "Whole"
     },
     {
-      "id": "load_identity",
-      "operator": "appsdk.collab_context.load_identity",
+      "id": "identity_gate",
+      "operator": "appsdk.collab_context.identity_gate",
       "operator_version": "1",
       "inputs": ["daemon_ready"],
-      "output": {"id": "identity_token", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "verify_token",
-      "operator": "appsdk.collab_context.verify_token",
-      "operator_version": "1",
-      "inputs": ["identity_token"],
-      "output": {"id": "verified_identity", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
-      "id": "ensure_registration",
-      "operator": "appsdk.collab_context.ensure_registration",
-      "operator_version": "1",
-      "inputs": ["verified_identity"],
-      "output": {"id": "registered_route", "schema": "Object"},
+      "output": {"id": "identity_verified", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
       "iterator": "Whole"
@@ -73,7 +53,7 @@
       "id": "restore_default_lease",
       "operator": "appsdk.collab_context.restore_default_lease",
       "operator_version": "1",
-      "inputs": ["registered_route"],
+      "inputs": ["identity_verified"],
       "output": {"id": "notify_state", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -90,20 +70,10 @@
       "iterator": "Whole"
     },
     {
-      "id": "identity_update",
-      "operator": "appsdk.collab_context.identity_update",
-      "operator_version": "1",
-      "inputs": ["master_grant"],
-      "output": {"id": "identity_repair_request", "schema": "Object"},
-      "input_selector": {"include": [], "exclude": [], "predicate": null},
-      "output_selector": {"include": [], "exclude": [], "predicate": null},
-      "iterator": "Whole"
-    },
-    {
       "id": "read_only_state",
       "operator": "appsdk.collab_context.read_only_state",
       "operator_version": "1",
-      "inputs": ["identity_repair_request"],
+      "inputs": ["master_grant"],
       "output": {"id": "read_only_projection", "schema": "Object"},
       "input_selector": {"include": [], "exclude": [], "predicate": null},
       "output_selector": {"include": [], "exclude": [], "predicate": null},
@@ -133,13 +103,10 @@
   "edges": [
     {"from": "resolve_context_root", "to": "ensure_baseline", "arc_id": "resolved_scope"},
     {"from": "ensure_baseline", "to": "ensure_daemon", "arc_id": "baseline_ready"},
-    {"from": "ensure_daemon", "to": "load_identity", "arc_id": "daemon_ready"},
-    {"from": "load_identity", "to": "verify_token", "arc_id": "identity_token"},
-    {"from": "verify_token", "to": "ensure_registration", "arc_id": "verified_identity"},
-    {"from": "ensure_registration", "to": "restore_default_lease", "arc_id": "registered_route"},
+    {"from": "ensure_daemon", "to": "identity_gate", "arc_id": "daemon_ready"},
+    {"from": "identity_gate", "to": "restore_default_lease", "arc_id": "identity_verified"},
     {"from": "restore_default_lease", "to": "find_master", "arc_id": "notify_state"},
-    {"from": "find_master", "to": "identity_update", "arc_id": "master_grant"},
-    {"from": "identity_update", "to": "read_only_state", "arc_id": "identity_repair_request"},
+    {"from": "find_master", "to": "read_only_state", "arc_id": "master_grant"},
     {"from": "read_only_state", "to": "env_view", "arc_id": "read_only_projection"},
     {"from": "env_view", "to": "emit_snapshot", "arc_id": "env_projection"}
   ],

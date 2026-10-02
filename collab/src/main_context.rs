@@ -91,13 +91,25 @@ pub(crate) fn context_bootstrap(
     })
 }
 
+/// Only the explicit `--worker` override is the adjudication channel, and it is
+/// the one path the cross-project restore error points the user at. The implicit
+/// `collab context` path must never ask the daemon to retire another peer's
+/// anchor: the ledger contract keeps the implicit path inside the current scope
+/// and fails closed on a foreign record.
+pub(crate) fn context_may_retire_foreign_anchor(worker: Option<&str>) -> bool {
+    worker.is_some()
+}
+
 pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_json::Value> {
     let host_paths = scope::HostPaths::resolve()?;
     let cwd = std::env::current_dir()?;
     let bootstrap = context_bootstrap(&host_paths, &cwd)?;
     let scope = bootstrap.scope;
+    let retire_foreign_anchor = context_may_retire_foreign_anchor(worker.as_deref());
     let mut ident = identity::load_or_create_for_context(&scope, worker)?;
-    crate::set_context_registration_requested(true);
+    if retire_foreign_anchor {
+        crate::set_context_registration_requested(true);
+    }
     let result = ensure_registration_with_outcome(&scope, &mut ident);
     crate::set_context_registration_requested(false);
     let (_, identity_state) = result?;

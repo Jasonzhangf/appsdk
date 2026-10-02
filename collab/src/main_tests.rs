@@ -952,6 +952,19 @@ fn context_registration_requested_reads_the_cell_the_setter_writes() {
     assert!(!context_registration_requested());
 }
 
+/// The retire request is the adjudication channel, so it belongs to the explicit
+/// `--worker` override only. If the implicit `collab context` path also asked for
+/// it, an unnamed peer could retire another peer's live anchor on a foreign
+/// project scope instead of failing closed with the error that points the user
+/// at `--worker`.
+#[test]
+fn only_the_named_override_may_retire_a_foreign_anchor() {
+    assert!(!crate::main_context::context_may_retire_foreign_anchor(None));
+    assert!(crate::main_context::context_may_retire_foreign_anchor(Some(
+        "codex-%3"
+    )));
+}
+
 #[test]
 fn context_root_resolution_fails_closed_without_route_or_baseline() {
     let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();

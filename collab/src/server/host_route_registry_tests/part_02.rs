@@ -2520,3 +2520,104 @@
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// `collab context --worker <id>` is the adjudication channel: it may retire
+    /// the foreign route that holds the anchor and register the peer in the
+    /// current scope. The implicit path must not, so the identical request with
+    /// the retire flag cleared stays rejected.
+    #[tokio::test]
+    async fn named_override_retires_a_stale_cross_scope_anchor() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        let candidates = test_candidates("thread-cross-scope-retire").unwrap();
+        let anchor = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let (_, first) = manager.dispatch_sync(
+            Some(context_with_app(&root, "appserver-cli")),
+            Req::Register {
+                worker_id: "cross-scope-worker".into(),
+                token: "token-cross-scope-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: Some(candidates),
+                retire_cross_project_anchor: false,
+            },
+        );
+        assert!(first.ok, "{first:?}");
+
+        // Same pane, no native thread: only the pane anchor can match.
+        let pane_only = || {
+            let mut candidates = test_candidates("thread-cross-scope-probe").unwrap();
+            let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
+            endpoint.socket_path = anchor.socket_path.clone();
+            endpoint.server_pid = anchor.server_pid;
+            endpoint.tmux_session_id = anchor.tmux_session_id.clone();
+            endpoint.pane_id = anchor.pane_id.clone();
+            endpoint.pane_pid = anchor.pane_pid;
+            endpoint.codex_session_id = None;
+            endpoint.codex_thread_id = None;
+            candidates
+        };
+
+        let (_, implicit) = manager.dispatch_sync(
+            Some(context_with_app(&root, "tui-other")),
+            Req::Register {
+                worker_id: "cross-scope-worker".into(),
+                token: "token-cross-scope-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: Some(pane_only()),
+                retire_cross_project_anchor: false,
+            },
+        );
+        assert!(!implicit.ok, "{implicit:?}");
+        assert!(
+            implicit
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("another project route")),
+            "{implicit:?}"
+        );
+
+        let (_, named) = manager.dispatch_sync(
+            Some(context_with_app(&root, "tui-other")),
+            Req::Register {
+                worker_id: "cross-scope-worker".into(),
+                token: "token-cross-scope-worker".into(),
+                cwd: root.display().to_string(),
+                candidates: Some(pane_only()),
+                retire_cross_project_anchor: true,
+            },
+        );
+        assert!(named.ok, "{named:?}");
+
+        let pane_owners = |server: &Arc<Server>| {
+            server
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .current_thread_routes
+                .values()
+                .filter(|binding| {
+                    binding.tmux_endpoint.as_ref().is_some_and(|endpoint| {
+                        endpoint.socket_path == anchor.socket_path
+                            && endpoint.tmux_session_id == anchor.tmux_session_id
+                            && endpoint.pane_id == anchor.pane_id
+                            && endpoint.pane_pid == anchor.pane_pid
+                    })
+                })
+                .map(|binding| binding.app_scope_id.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let owners = pane_owners(&server);
+        assert!(
+            !owners.iter().any(|scope| scope == "appserver-cli"),
+            "the foreign route must be retired: {owners:?}"
+        );
+        assert!(
+            owners.iter().any(|scope| scope == "tui-other"),
+            "the current scope must own the anchor: {owners:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }

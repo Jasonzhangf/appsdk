@@ -1,5 +1,8 @@
-//! tmux is the production transport. The retired AppServer adapter contract is
-//! kept under `cfg(test)` only for fail-closed compatibility tests.
+//! tmux is the primary transport for interactive peers, and the App Server
+//! adapter is a production path as well: it verifies App Server candidates
+//! (`verify_candidate`) and drives subagent threads (`read_thread_status`,
+//! `archive_thread`, `start_thread`, `immediate_notify`). It is not
+//! `cfg(test)`-only; deleting it would break App Server peers and subagents.
 //!
 //! This is deliberately a thin typed boundary, not a second identity or scope
 //! registry. It owns endpoint kind/capability selection, fail-closed command

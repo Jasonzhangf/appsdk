@@ -211,3 +211,6 @@ route / runtime binding / transport（`DAEMON_*`）等非身份失败**不进入
 `collab status --all`、`collab master status` 是 operator 诊断，不是 Agent 引导路径。
 快照带 `requires_identity_update` 时，Agent 按其中的 `action` 修复身份；退出码 0
 不代表身份已验真，`registered` 与 `requires_identity_update` 才是判据。
+`action` 永不是刚失败的那条调用（否则跟随即死循环）：身份未确立的三类返回
+`collab context --worker <worker_id>` 并要求 operator 声明（`requires_approval=true`），
+`TOKEN_MISMATCH` 返回向 live master 的 blocker 上报（`requires_approval=false`）。

@@ -178,20 +178,31 @@ impl IdentityFailure {
         }
     }
 
-    /// Cross-project adjudication is the one repair that must not be inferred:
-    /// the identity design requires an operator-declared `--worker`, so the
-    /// caller is told a human decision is part of the action.
+    /// Every repair in this set needs an operator to declare which durable
+    /// identity to adopt, because `collab context` must not infer one.
+    /// `TokenMismatch` is the exception: that identity is already declared and
+    /// was rejected, so the recovery is to escalate it, not to approve a new
+    /// declaration.
     pub(crate) fn requires_approval(self) -> bool {
-        matches!(self, Self::CrossProjectRestore)
+        !matches!(self, Self::TokenMismatch)
     }
 
+    /// The action must never be the invocation that just failed, or an agent
+    /// following it loops. `IDENTITY_REBIND_UNPROVEN` and
+    /// `COLLAB_IDENTITY_ANCHOR_MISSING` are only reached without `--worker`, and
+    /// the identity layer documents `--worker` as their recovery, so the action
+    /// names the missing argument with a placeholder: the operator picks the
+    /// durable identity. A rejected token cannot be re-run into validity, so it
+    /// escalates to the live master instead.
     pub(crate) fn action(self, worker: Option<&str>) -> String {
-        match worker {
-            Some(worker) => format!("collab context --worker {worker}"),
-            None if self == Self::CrossProjectRestore => {
+        let named = worker.unwrap_or("<worker_id>");
+        match self {
+            Self::TokenMismatch => format!(
+                "COLLAB_WORKER={named} collab sendmessage --from {named} --to <master> --subject blocker \"<exact error; worker_id={named}>\""
+            ),
+            Self::RebindUnproven | Self::CrossProjectRestore | Self::AnchorMissing => {
                 "collab context --worker <worker_id>".to_owned()
             }
-            None => "collab context".to_owned(),
         }
     }
 }
@@ -212,13 +223,13 @@ pub(crate) fn identity_update_view(
         "worker_id": requested_worker,
         "action": failure.action(requested_worker),
         "requires_approval": failure.requires_approval(),
-        "next": "re-run the action from the canonical project main checkout with a live runtime anchor; if the same error persists, preserve exact_error and worker_id and report them to the live master; do not edit routes, copy tokens, or start a second daemon",
+        "next": "run the action from the canonical project main checkout with a live runtime anchor; if the same error persists, preserve exact_error and worker_id and report them to the live master; do not edit routes, copy tokens, or start a second daemon",
     })
 }
 
 /// The identity terminal is entered only for a classified identity failure.
 /// Everything else keeps its original error and a non-zero exit.
-fn identity_terminal(
+pub(crate) fn identity_terminal(
     bootstrap: &ContextBootstrap,
     error: anyhow::Error,
     requested_worker: Option<&str>,

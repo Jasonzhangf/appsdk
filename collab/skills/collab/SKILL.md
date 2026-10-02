@@ -905,10 +905,17 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 `requires_identity_update.reason` is the classified failure code, not a slice of
 prose: `TOKEN_MISMATCH`, `IDENTITY_REBIND_UNPROVEN`,
 `IDENTITY_RESTORE_CROSS_PROJECT`, or `COLLAB_IDENTITY_ANCHOR_MISSING`. A caller
-can branch on it without parsing natural language. `requires_approval` says
-whether a human decision is part of the action (`IDENTITY_RESTORE_CROSS_PROJECT`
-is the one that needs an operator-declared `--worker`, so its `action` names
-`collab context --worker <worker_id>` even when you passed no `--worker`).
+can branch on it without parsing natural language.
+
+`action` is never the invocation that just failed, so following it cannot loop:
+
+| reason | `action` | `requires_approval` |
+| --- | --- | --- |
+| `IDENTITY_REBIND_UNPROVEN` / `IDENTITY_RESTORE_CROSS_PROJECT` / `COLLAB_IDENTITY_ANCHOR_MISSING` | `collab context --worker <worker_id>` — the operator declares the durable identity; `collab context` must not infer one | `true` |
+| `TOKEN_MISMATCH` | `COLLAB_WORKER=<worker_id> collab sendmessage ... --to <master> --subject blocker` — a rejected token cannot be re-run into validity, so escalate it | `false` |
+
+`worker_id` reports the `--worker` you passed (null when you passed none); it is
+not a substitute for choosing one.
 
 Only these classified identity failures reach the `identity_update` exit. A
 route, runtime-binding, or transport failure is a different problem: it keeps its

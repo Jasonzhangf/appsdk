@@ -1326,6 +1326,14 @@ fn choose_anchor_peer(
         .collect::<Vec<_>>();
     if !in_scope.is_empty() {
         candidates = in_scope;
+        // A provably dead record is only chosen when every same-scope record
+        // that claims this anchor is provably dead. If any current-scope record
+        // is still cold/unproven it is the surviving recovery candidate, so a
+        // newer Dead record must never be revived by durable recency.
+        let (dead, surviving): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|identity| matches!(liveness(identity), PeerLiveness::Dead));
+        candidates = if surviving.is_empty() { dead } else { surviving };
     }
     candidates.sort_by(|left, right| non_live_candidate_order(host_paths, candidate, left, right));
     Ok(candidates.remove(0))

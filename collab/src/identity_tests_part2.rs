@@ -1115,6 +1115,47 @@ fn anchor_peer_selection_uses_scope_then_liveness_then_recency() {
     std::fs::remove_dir_all(root).ok();
 }
 
+#[test]
+fn dead_duplicate_with_newer_mtime_does_not_beat_a_surviving_candidate() {
+    let root = short_test_root();
+    std::fs::create_dir_all(&root).unwrap();
+    let host_paths = HostPaths::for_state_root(root.join("global")).unwrap();
+    let scope = crate::scope::ProjectScopeId::new("/tmp/project-current").unwrap();
+    let surviving = identity_with_scope("surviving-peer", scope.clone(), 1);
+    write_identity(
+        &identity_path_at(&host_paths, "surviving-peer").unwrap(),
+        &surviving,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let dead = identity_with_scope("dead-peer", scope.clone(), 1);
+    write_identity(
+        &identity_path_at(&host_paths, "dead-peer").unwrap(),
+        &dead,
+    )
+    .unwrap();
+    let chosen = choose_anchor_peer(
+        &host_paths,
+        None,
+        &scope,
+        "codex_session_id",
+        vec![dead, surviving],
+        |identity| {
+            if identity.worker_id == "dead-peer" {
+                PeerLiveness::Dead
+            } else {
+                PeerLiveness::Unknown
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        chosen.worker_id, "surviving-peer",
+        "the newer Dead record must not be revived while an unproven duplicate survives"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// An old App Server identity without a matching tmux/Codex anchor cannot
 /// be recovered by route-death inference.
 #[test]

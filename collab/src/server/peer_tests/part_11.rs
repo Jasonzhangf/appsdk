@@ -429,3 +429,61 @@ fn context_snapshot_carries_peer_status_and_scheduling_state() {
 
     std::fs::remove_dir_all(root).ok();
 }
+
+/// `collab context` replaces `collab who` / `collab status --all` for agents,
+/// and `Workers` / `StatusAll` were the calls that recorded ordinary-peer
+/// presence edges. Driving the same transition through the consolidated entry
+/// must still emit the recovery notification, or the wake loop silently
+/// degrades as soon as agents stop calling the demoted commands.
+#[test]
+fn context_records_peer_presence_transitions_like_status_all() {
+    let (server, root) = test_server();
+    register(&server, "master-worker", "thread-master");
+    register(&server, "cold-worker", "thread-cold");
+    kill_registered_worker_pane(&server, "cold-worker");
+    let server_arc = std::sync::Arc::new(server);
+    let promoted = dispatch(
+        &server_arc,
+        Req::MasterPromote {
+            worker_id: "master-worker".into(),
+            token: "token-master-worker".into(),
+            approval: "approved".into(),
+        },
+    );
+    assert!(promoted.ok, "{promoted:?}");
+
+    // The first read only establishes the offline baseline; it must not notify.
+    let baseline = handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    assert!(baseline.ok, "{baseline:?}");
+    {
+        let state = server_arc.state.lock().unwrap();
+        assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
+        assert!(state.msgs.values().all(|m| {
+            !(m.to == "master-worker"
+                && m.subject == Some("worker-unresponsive: cold-worker".into()))
+        }));
+    }
+
+    assert!(register(&server_arc, "cold-worker", "thread-cold").ok);
+    let recovered =
+        handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    assert!(recovered.ok, "{recovered:?}");
+    let repeated = handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    assert!(repeated.ok, "{repeated:?}");
+
+    let state = server_arc.state.lock().unwrap();
+    assert_eq!(
+        state
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker" && m.subject == Some("worker-recovered: cold-worker".into())
+            })
+            .count(),
+        1,
+        "the offline->online edge must still notify exactly once through collab context"
+    );
+    assert_eq!(state.keepalives["cold-worker"].notified_presence, "online");
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}

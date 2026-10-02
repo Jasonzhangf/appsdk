@@ -1264,6 +1264,15 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     subagents.sort_by(|left, right| left.id.cmp(&right.id));
     drop(st);
 
+    // `collab context` replaces `collab who` / `collab status --all` /
+    // `collab master status` for agents, and `Workers` / `StatusAll` were the
+    // calls that recorded ordinary-peer presence edges. Without this the
+    // online/offline transitions would stop emitting KeepaliveUpdated,
+    // MasterWakeSignal, worker-unresponsive and worker-recovered as soon as
+    // agents follow the consolidated entry. Must run after `drop(st)` because it
+    // takes the state lock itself.
+    record_ordinary_peer_presence_edges(server, None);
+
     let (presence, agent) = worker_presence_with_view(server, &worker);
     let peers: Vec<_> = peer_snapshots
         .into_iter()

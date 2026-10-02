@@ -1222,13 +1222,17 @@ fn verify_master_actor(
     }
 }
 
-/// Whether the recorded master no longer owns its tmux anchor.
+/// Whether a distinct live worker has taken over the recorded master's pane.
 ///
 /// A pane's `pane_pid` is the pane shell, so it survives a Codex restart inside
 /// that pane: the pane probe behind `live_master_id` proves the *pane* is alive,
-/// never that the recorded master still owns it. Once another registration
-/// takes that pane, or the anchor has no registered route at all, the recorded
-/// master can no longer act on its anchor.
+/// never that the recorded master still owns it. Only a same-scope worker that
+/// is registered, whose *current* transport is still that pane, and which
+/// probes `Present` counts as a takeover — the same route-plus-presence
+/// invariant the close path enforces. A route left behind by a closed or
+/// moved-away peer is not evidence, and neither is the absence of a route:
+/// host-managed current-thread routes are published to the host server, so this
+/// runtime's route index is not authoritative for ownership.
 fn master_anchor_is_superseded(server: &Server, state: &State, master_worker_id: &str) -> bool {
     let Ok(route_scope) = server_route_scope(server, state) else {
         return false;
@@ -1239,25 +1243,48 @@ fn master_anchor_is_superseded(server: &Server, state: &State, master_worker_id:
     if grant.agent_id.as_str() != master_worker_id {
         return false;
     }
+    let grant_scope = RouteScope {
+        app_scope_id: grant.app_scope_id.clone(),
+        project_scope_id: grant.project_scope.clone(),
+    };
     let Some(endpoint) = state
         .global
-        .lookup_binding_for(
-            &RouteScope {
-                app_scope_id: grant.app_scope_id.clone(),
-                project_scope_id: grant.project_scope.clone(),
-            },
-            &grant.binding_id,
-        )
+        .lookup_binding_for(&grant_scope, &grant.binding_id)
         .and_then(|binding| binding.tmux_endpoint.as_ref())
+        .cloned()
     else {
         // A transport without a pane anchor has no anchor for another
         // registration to take over.
         return false;
     };
-    !state
+    let owners = state
         .global
-        .lookup_unique_tmux_pane_route(endpoint)
-        .is_some_and(|route| route.binding_id == grant.binding_id)
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|other| {
+            other.route_scope() == grant_scope
+                && other.binding_id != grant.binding_id
+                && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
+                    crate::client::adapters::tmux::same_pane_route(other_endpoint, &endpoint)
+                })
+        })
+        .map(|other| other.agent_id.clone())
+        .collect::<Vec<_>>();
+    owners.into_iter().any(|agent_id| {
+        state.workers.get(agent_id.as_str()).is_some_and(|worker| {
+            // The taker's *current* transport must still be this pane: a worker
+            // that moved away keeps its old binding and no longer owns it.
+            let owns_pane = worker
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.tmux_endpoint.as_ref())
+                .is_some_and(|current| {
+                    crate::client::adapters::tmux::same_pane_route(current, &endpoint)
+                });
+            owns_pane && worker_presence(server, worker) == IdentityPresence::Present
+        })
+    })
 }
 
 fn handle_master_promote(

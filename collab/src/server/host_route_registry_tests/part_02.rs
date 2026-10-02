@@ -1379,6 +1379,220 @@
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
+    /// Registers a master through the manager, gives the host the master's
+    /// current-thread route, and hands back what a promotion test needs. The
+    /// runtime deliberately never receives that host route event, which is the
+    /// real split: the runtime's own route index stays empty.
+    fn fenced_master_fixture(
+        master_worker: &str,
+    ) -> (
+        std::sync::Arc<Server>,
+        std::path::PathBuf,
+        std::sync::Arc<Server>,
+        std::path::PathBuf,
+        std::sync::Arc<ProjectRuntimeManager>,
+        AppServerId,
+        TransportCandidates,
+        crate::server::global_state::RuntimeBinding,
+    ) {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        let candidates = test_candidates(master_worker).unwrap();
+        let first = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            format!("token-{master_worker}"),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(candidates.clone()),
+        );
+        assert!(first.ok, "{first:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            format!("token-{master_worker}"),
+            "user approved the fenced master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new(format!("binding-{master_worker}")).unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(
+                app.as_str().to_owned(),
+                master_binding.project_scope.as_str().to_owned(),
+            ),
+            runtime.clone(),
+            None,
+        );
+        assert!(manager.same_pane_master_route_ready(&runtime).is_ok());
+        assert!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .current_thread_routes
+                .is_empty(),
+            "the runtime does not receive host route events, so its route index is not authoritative"
+        );
+        (
+            host,
+            host_root,
+            runtime,
+            project_root,
+            manager,
+            app,
+            candidates,
+            master_binding,
+        )
+    }
+
+    /// The fence has to hold until a distinct same-scope worker actually owns
+    /// the pane and is present. Reading the runtime's own (empty) route index as
+    /// "the recorded master lost its anchor" would let an approved promotion
+    /// replace a live master.
+    #[tokio::test]
+    async fn approved_promotion_keeps_the_fence_without_a_live_pane_taker() {
+        let (_host, host_root, runtime, project_root, _manager, app, _candidates, _master) =
+            fenced_master_fixture("fenced-pane-master");
+
+        // The peer registers on a different pane, so nobody took the anchor.
+        let peer_worker = "fenced-other-pane-peer";
+        let peer_token = "token-fenced-other-pane-peer";
+        let peer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            project_root.display().to_string(),
+            Some(app),
+            test_candidates("fenced-other-pane-peer-thread"),
+        );
+        assert!(peer.ok, "{peer:?}");
+        let refused = handle_master_promote(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            "user approved the peer".into(),
+        );
+        assert!(!refused.ok, "{refused:?}");
+        assert_eq!(
+            refused.error.as_deref(),
+            Some("master already exists; only the registered master may delegate")
+        );
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    /// The live shape that produced the dead loop: a later Codex thread runs in
+    /// the recorded master's pane and is present, so the master can no longer
+    /// act on that anchor. The owner's explicit approval must then be able to
+    /// replace it instead of leaving the project with an unreachable authority.
+    #[tokio::test]
+    async fn approved_promotion_replaces_the_master_when_a_live_peer_took_its_pane() {
+        let (_host, host_root, runtime, project_root, _manager, app, mut candidates, _master) =
+            fenced_master_fixture("taken-pane-master");
+
+        let peer_worker = "taken-pane-peer";
+        let peer_token = "token-taken-pane-peer";
+        let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-taken-pane-peer".into());
+        endpoint.codex_thread_id = Some("taken-pane-peer-thread".into());
+        let peer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            project_root.display().to_string(),
+            Some(app),
+            Some(candidates),
+        );
+        assert!(peer.ok, "{peer:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            "user approved the peer".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    /// A durable route left behind by a peer that moved to another pane is not
+    /// takeover evidence: only the peer's *current* transport owning the pane
+    /// counts, which is the route-plus-presence invariant the close path uses.
+    #[tokio::test]
+    async fn approved_promotion_refuses_a_peer_that_moved_off_the_master_pane() {
+        let (_host, host_root, runtime, project_root, _manager, app, mut candidates, _master) =
+            fenced_master_fixture("moved-pane-master");
+
+        let peer_worker = "moved-off-pane-peer";
+        let peer_token = "token-moved-off-pane-peer";
+        let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
+        endpoint.codex_session_id = Some("session-moved-off-pane-peer".into());
+        endpoint.codex_thread_id = Some("moved-off-pane-peer-thread".into());
+        let peer = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            project_root.display().to_string(),
+            Some(app),
+            Some(candidates),
+        );
+        assert!(peer.ok, "{peer:?}");
+
+        let moved = test_candidates("moved-off-pane-peer-new-thread")
+            .unwrap()
+            .tmux
+            .expect("tmux candidate")
+            .endpoint;
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .workers
+            .get_mut(peer_worker)
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .tmux_endpoint = Some(moved);
+
+        let refused = handle_master_promote(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            "user approved the peer".into(),
+        );
+        assert!(!refused.ok, "{refused:?}");
+        assert_eq!(
+            refused.error.as_deref(),
+            Some("master already exists; only the registered master may delegate")
+        );
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
     #[tokio::test]
     async fn same_pane_peer_that_moved_away_does_not_supersede_the_master_anchor() {
         let (host, host_root, _) = test_server();

@@ -637,14 +637,19 @@ impl ProjectRuntimeManager {
         if !candidate_scope_mismatch {
             return Ok(());
         }
-        let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
-            "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no native thread id"
-                .to_owned()
-        })?;
-        let session_id = binding.session_id.as_ref().ok_or_else(|| {
-            "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no session id"
-                .to_owned()
-        })?;
+        // The reducer refuses to retire a route without both ids; report the
+        // same precondition with a message that names the stale anchor.
+        if binding.native_thread_id.is_none() {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no native thread id"
+                    .to_owned(),
+            );
+        }
+        if binding.session_id.is_none() {
+            return Err(
+                "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no session id".to_owned(),
+            );
+        }
         // The anchor match that selected this binding already applied the single
         // pane-identity implementation (`same_pane_route`). Re-deriving pane
         // identity here a second time could only disagree with the match that got

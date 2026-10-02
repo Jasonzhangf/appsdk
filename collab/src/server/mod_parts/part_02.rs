@@ -1107,6 +1107,20 @@ fn validate_transport_candidates(
             candidate_root.display()
         ));
     }
+    // dsh is a mutually exclusive channel: it has no pane to act as an App
+    // Server recovery anchor, and a caller supplying dsh *and* a tmux/appserver
+    // candidate has ambiguous intent. Resolving that silently is exactly the
+    // candidate-shadowing this design forbids, so the ambiguous set is refused
+    // rather than ranked.
+    if candidates.dsh.is_some() && (candidates.appserver.is_some() || candidates.tmux.is_some()) {
+        return Err(
+            "DSH_ENDPOINT_REJECTED: a dsh candidate must not be combined with an App Server or tmux candidate"
+                .into(),
+        );
+    }
+    if let Some(dsh) = candidates.dsh.as_ref() {
+        return admit_dsh_candidate(dsh, &candidate_root);
+    }
     if let Some(appserver) = candidates.appserver.as_ref() {
         let app_cwd = std::fs::canonicalize(&appserver.cwd).map_err(|error| {
             format!("RUNTIME_BINDING_REJECTED: App Server candidate cwd: {error}")
@@ -1196,7 +1210,83 @@ fn validate_transport_candidates(
             self_check: "tmux socket, session, pane and pane pid verified".into(),
         });
     }
-    Err("TRANSPORT_NONE: no reachable App Server or tmux candidate was supplied".into())
+    Err("TRANSPORT_NONE: no reachable App Server, tmux or dsh candidate was supplied".into())
+}
+
+/// Admits a dsh candidate by challenging the gateway control socket once.
+///
+/// Every field must agree in the *same* response: the nonce proves the reply
+/// belongs to this challenge, and runtime/agent/session/cwd are compared
+/// field-by-field. Any mismatch is a rejection, never a degraded admission.
+fn admit_dsh_candidate(
+    candidate: &crate::proto::DshCandidate,
+    candidate_root: &Path,
+) -> Result<SelectedTransport, String> {
+    if !candidate.cwd.starts_with('/') {
+        return Err("DSH_ENDPOINT_REJECTED: dsh candidate cwd must be absolute".into());
+    }
+    let dsh_cwd = std::fs::canonicalize(&candidate.cwd)
+        .map_err(|error| format!("DSH_ENDPOINT_REJECTED: dsh candidate cwd: {error}"))?;
+    if dsh_cwd != candidate_root {
+        return Err(format!(
+            "DSH_ENDPOINT_REJECTED: dsh candidate cwd {} does not match project root {}",
+            dsh_cwd.display(),
+            candidate_root.display()
+        ));
+    }
+    let facts = crate::client::adapters::dsh::facts(
+        &candidate.endpoint,
+        &candidate.runtime_id,
+        &candidate.agent_id,
+    )
+    .map_err(|error| error.to_string())?;
+    if facts.runtime_id != candidate.runtime_id {
+        return Err(format!(
+            "DSH_ENDPOINT_REJECTED: gateway reports runtime {} for candidate runtime {}",
+            facts.runtime_id, candidate.runtime_id
+        ));
+    }
+    if facts.agent_id != candidate.agent_id {
+        return Err(format!(
+            "DSH_ENDPOINT_REJECTED: gateway reports agent {} for candidate agent {}",
+            facts.agent_id, candidate.agent_id
+        ));
+    }
+    if facts.session_id != candidate.session_id {
+        return Err(format!(
+            "DSH_ENDPOINT_REJECTED: gateway reports session {} for candidate session {}",
+            facts.session_id, candidate.session_id
+        ));
+    }
+    if facts.status.trim().is_empty() {
+        return Err("DSH_ENDPOINT_REJECTED: gateway reported an empty agent status".into());
+    }
+    let reported_cwd = std::fs::canonicalize(&facts.cwd).map_err(|error| {
+        format!(
+            "DSH_ENDPOINT_REJECTED: gateway reported dsh cwd {}: {error}",
+            facts.cwd
+        )
+    })?;
+    if reported_cwd != *candidate_root {
+        return Err(format!(
+            "DSH_ENDPOINT_REJECTED: gateway reports dsh cwd {} outside project root {}",
+            reported_cwd.display(),
+            candidate_root.display()
+        ));
+    }
+    Ok(SelectedTransport {
+        kind: TransportKind::Dsh,
+        endpoint: Some(candidate.endpoint.clone()),
+        namespace: Some(candidate.runtime_id.clone()),
+        session_id: Some(candidate.session_id.clone()),
+        thread_id: Some(candidate.agent_id.clone()),
+        tmux_endpoint: None,
+        capabilities: vec!["enqueue_wake".into(), "agent_facts".into()],
+        self_check: format!(
+            "gateway control socket answered a single-use nonce challenge; runtime, agent, session and cwd verified; reported status {}",
+            facts.status
+        ),
+    })
 }
 
 type RouteKey = (String, String);

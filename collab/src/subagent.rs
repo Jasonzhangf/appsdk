@@ -638,6 +638,9 @@ fn launch(
         Some(crate::proto::TransportCandidates {
             appserver: Some(candidate),
             tmux: None,
+            // A subagent is a child App Server thread. dsh peers register as
+            // independent peers, never through this path.
+            dsh: None,
         }),
     );
     if !registered.ok {

@@ -154,6 +154,25 @@ fn validate_registration_transport(
                 anyhow::bail!("selected tmux address does not match its endpoint");
             }
         }
+        TransportKind::Dsh => {
+            // The dsh endpoint is the gateway control socket. It gets its own
+            // `unix://` judgement rather than sharing the App Server one: the
+            // scheme requirement is the same, but relaxing it for the new kind
+            // is exactly the hole this branch exists to close.
+            if !endpoint.starts_with("unix://") {
+                anyhow::bail!("selected dsh transport endpoint is not unix://");
+            }
+            transport
+                .namespace
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("selected dsh transport has no gateway runtime id")
+                })?;
+            if transport.tmux_endpoint.is_some() {
+                anyhow::bail!("selected dsh transport must not carry a tmux pane binding");
+            }
+        }
     }
     if transport.self_check.trim().is_empty() {
         anyhow::bail!("selected transport is missing its server self-check");
@@ -1212,6 +1231,25 @@ fn persisted_peer_liveness(identity: &Identity) -> PeerLiveness {
                 Err(error) => classify_probe_error(&error.to_string()),
             }
         }
+        TransportKind::Dsh => {
+            // A dsh peer is re-anchored by challenging the gateway, not by
+            // comparing a pane. Only an explicit "the gateway does not know
+            // this agent" retires the record: a gateway that is down, slow or
+            // answering garbage says nothing about the agent, so it stays
+            // `Unknown` and never authorizes retirement.
+            let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
+                transport.endpoint.as_deref(),
+                transport.namespace.as_deref(),
+                transport.thread_id.as_deref(),
+            ) else {
+                return PeerLiveness::Unknown;
+            };
+            match crate::client::adapters::dsh::probe(endpoint, runtime_id, agent_id) {
+                crate::client::adapters::dsh::PeerPresence::Live => PeerLiveness::Live,
+                crate::client::adapters::dsh::PeerPresence::Absent => PeerLiveness::Dead,
+                crate::client::adapters::dsh::PeerPresence::Unknown => PeerLiveness::Unknown,
+            }
+        }
     }
 }
 
@@ -1687,7 +1725,14 @@ fn load_or_create_resolved_full_at(
         }
     }
 
-    if tmux_candidate.is_none() && appserver_worker.is_none() {
+    // The anchor set is exactly what the error above advertises: a tmux pane, an
+    // existing App Server worker in this scope, or an explicit worker id. The
+    // explicit-id case was missing from this guard, so `--worker`/`COLLAB_WORKER`
+    // alone still failed with COLLAB_IDENTITY_ANCHOR_MISSING even though it named
+    // a valid identity. A dsh peer depends on this: the gateway registers it as
+    // an independent peer under its own worker id and has no pane or App Server
+    // thread to anchor to.
+    if tmux_candidate.is_none() && appserver_worker.is_none() && explicit_worker.is_none() {
         candidate?;
     }
     let worker_id = explicit_worker

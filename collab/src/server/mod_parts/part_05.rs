@@ -600,6 +600,18 @@ fn notification_transport_method(transport: &SelectedTransport) -> &'static str 
     match transport.kind {
         TransportKind::Tmux => "tmux",
         TransportKind::AppServer => "appserver",
+        TransportKind::Dsh => "dsh",
+    }
+}
+
+/// Uppercase transport tag for wake log lines. Single owner: the wake paths
+/// used to inline this mapping twice, which is exactly how a new transport
+/// kind ends up labelled wrong in one of them.
+fn transport_log_label(transport: &SelectedTransport) -> &'static str {
+    match transport.kind {
+        TransportKind::Tmux => "TMUX",
+        TransportKind::AppServer => "APPSERVER",
+        TransportKind::Dsh => "DSH",
     }
 }
 
@@ -783,10 +795,7 @@ fn attempt_tmux_notification_with_retry(
                 &server.log_path(),
                 &format!(
                     "{method_label}_WAKE_SUBMITTED recipient={recipient} message={seed_id} explicit={explicit} receipt={receipt}",
-                    method_label = match transport.kind {
-                        TransportKind::Tmux => "TMUX",
-                        TransportKind::AppServer => "APPSERVER",
-                    }
+                    method_label = transport_log_label(transport)
                 ),
             );
             let accepted_ms = now_ms();
@@ -809,10 +818,7 @@ fn attempt_tmux_notification_with_retry(
                 &server.log_path(),
                 &format!(
                     "{method_label}_WAKE_FAILED recipient={recipient} message={seed_id} error={error}",
-                    method_label = match transport.kind {
-                        TransportKind::Tmux => "TMUX",
-                        TransportKind::AppServer => "APPSERVER",
-                    }
+                    method_label = transport_log_label(transport)
                 ),
             );
             let mut state = server.state.lock().unwrap();
@@ -1079,10 +1085,12 @@ fn notification_send_response(
     match notification {
         NotificationAttempt::Accepted => {
             data["durable"] = json!(true);
-            data["notification"] = if notification_method == "appserver" {
-                json!("appserver-input-submitted")
-            } else {
-                json!("tmux-input-submitted")
+            data["notification"] = match notification_method {
+                "appserver" => json!("appserver-input-submitted"),
+                // The gateway answered `enqueue` with a durable message id.
+                // That is queue admission, not agent execution.
+                "dsh" => json!("dsh-wake-enqueued"),
+                _ => json!("tmux-input-submitted"),
             };
             data["consumed"] = json!(false);
             Resp::data(data)
@@ -1119,10 +1127,10 @@ fn notification_send_response(
 }
 
 fn notification_rejected_label(notification_method: &str, error: &str) -> String {
-    if notification_method == "appserver" {
-        format!("APPSERVER_NOTIFICATION_REJECTED: {error}")
-    } else {
-        format!("TMUX_NOTIFICATION_REJECTED: {error}")
+    match notification_method {
+        "appserver" => format!("APPSERVER_NOTIFICATION_REJECTED: {error}"),
+        "dsh" => format!("DSH_NOTIFICATION_REJECTED: {error}"),
+        _ => format!("TMUX_NOTIFICATION_REJECTED: {error}"),
     }
 }
 

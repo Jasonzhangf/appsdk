@@ -2,35 +2,65 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
     let Some(transport) = selected_transport_for_worker(worker) else {
         return IdentityPresence::Missing;
     };
-    if transport.kind == TransportKind::Tmux {
-        let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
-            return IdentityPresence::Missing;
-        };
-        return match crate::client::adapters::tmux::probe(endpoint) {
-            Ok(crate::client::adapters::tmux::PanePresence::Present) => IdentityPresence::Present,
-            Ok(crate::client::adapters::tmux::PanePresence::Missing) => IdentityPresence::Missing,
-            Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
-                IdentityPresence::Unknown
+    match transport.kind {
+        TransportKind::Tmux => {
+            let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
+                return IdentityPresence::Missing;
+            };
+            match crate::client::adapters::tmux::probe(endpoint) {
+                Ok(crate::client::adapters::tmux::PanePresence::Present) => {
+                    IdentityPresence::Present
+                }
+                Ok(crate::client::adapters::tmux::PanePresence::Missing) => {
+                    IdentityPresence::Missing
+                }
+                Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
+                    IdentityPresence::Unknown
+                }
             }
-        };
-    }
-    if transport.kind == TransportKind::AppServer {
-        let Some(thread_id) = transport.thread_id.as_deref() else {
-            return IdentityPresence::Missing;
-        };
-        return match (server.appserver_thread_status)(&transport, thread_id) {
-            Ok(_) => IdentityPresence::Present,
-            Err(error)
-                if error.contains("not found")
-                    || error.contains("MISSING")
-                    || error.contains("GONE") =>
-            {
-                IdentityPresence::Missing
+        }
+        TransportKind::AppServer => {
+            let Some(thread_id) = transport.thread_id.as_deref() else {
+                return IdentityPresence::Missing;
+            };
+            match (server.appserver_thread_status)(&transport, thread_id) {
+                Ok(_) => IdentityPresence::Present,
+                Err(error)
+                    if error.contains("not found")
+                        || error.contains("MISSING")
+                        || error.contains("GONE") =>
+                {
+                    IdentityPresence::Missing
+                }
+                Err(_) => IdentityPresence::Unknown,
             }
-            Err(_) => IdentityPresence::Unknown,
-        };
+        }
+        TransportKind::Dsh => dsh_identity_presence(&transport),
     }
-    IdentityPresence::Unknown
+}
+
+/// Presence of a dsh peer, judged only from what the gateway reports.
+///
+/// The gateway's agent status domain is exactly `running | inactive`, so a
+/// reachable gateway answers with one of two states: running means Present, and
+/// inactive means the agent is known but not live, which is Cold (resumable) and
+/// emphatically not Missing. Missing is reserved for an explicit
+/// `unknown-runtime` / `unknown-agent` denial; an unreachable, slow or
+/// malformed gateway leaves the record Unknown so it is never retired.
+fn dsh_identity_presence(transport: &SelectedTransport) -> IdentityPresence {
+    let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
+        transport.endpoint.as_deref(),
+        transport.namespace.as_deref(),
+        transport.thread_id.as_deref(),
+    ) else {
+        return IdentityPresence::Unknown;
+    };
+    match crate::client::adapters::dsh::facts(endpoint, runtime_id, agent_id) {
+        Ok(facts) if facts.status == "running" => IdentityPresence::Present,
+        Ok(_) => IdentityPresence::Cold,
+        Err(error) if error.is_definitely_absent() => IdentityPresence::Missing,
+        Err(_) => IdentityPresence::Unknown,
+    }
 }
 
 fn merge_transport_presence(
@@ -170,6 +200,62 @@ fn transport_agent_view(
             Err(error) => (
                 IdentityPresence::Unknown,
                 serde_json::json!({"transport": "appserver", "thread_state": "unknown", "error": error}),
+                serde_json::Value::Null,
+            ),
+        };
+    }
+    if transport.kind == TransportKind::Dsh {
+        let (Some(endpoint), Some(runtime_id), Some(agent_id)) = (
+            transport.endpoint.as_deref(),
+            transport.namespace.as_deref(),
+            transport.thread_id.as_deref(),
+        ) else {
+            return (
+                IdentityPresence::Unknown,
+                serde_json::json!({"transport": "dsh", "thread_state": "unknown", "error": "DSH_ENDPOINT_INCOMPLETE"}),
+                serde_json::Value::Null,
+            );
+        };
+        return match crate::client::adapters::dsh::facts(endpoint, runtime_id, agent_id) {
+            Ok(facts) => {
+                // The gateway's status domain is `running | inactive`: running
+                // is live, anything else is known-but-not-live, which is Cold.
+                let running = facts.status == "running";
+                let presence = if running {
+                    IdentityPresence::Present
+                } else {
+                    IdentityPresence::Cold
+                };
+                let view = serde_json::json!({
+                    "transport": "dsh",
+                    "runtimeId": facts.runtime_id,
+                    "agentId": facts.agent_id,
+                    "sessionId": facts.session_id,
+                    "cwd": facts.cwd,
+                    "status": facts.status,
+                });
+                (
+                    presence,
+                    serde_json::json!({
+                        "thread_state": facts.status,
+                        "active_flags": [],
+                        "can_accept_direct_input": running,
+                        "latest_turn_status": serde_json::Value::Null,
+                        "latest_turn_error": serde_json::Value::Null,
+                        "transport": "dsh",
+                        "observed_at_ms": chrono::Utc::now().timestamp_millis(),
+                    }),
+                    view,
+                )
+            }
+            Err(error) if error.is_definitely_absent() => (
+                IdentityPresence::Missing,
+                serde_json::json!({"transport": "dsh", "thread_state": "missing", "error": error.to_string()}),
+                serde_json::Value::Null,
+            ),
+            Err(error) => (
+                IdentityPresence::Unknown,
+                serde_json::json!({"transport": "dsh", "thread_state": "unknown", "error": error.to_string()}),
                 serde_json::Value::Null,
             ),
         };

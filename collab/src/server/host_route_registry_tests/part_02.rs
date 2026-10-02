@@ -291,6 +291,7 @@
                      root.to_string_lossy().into_owned(),
                      Some(TransportCandidates {
                         appserver: None,
+                        dsh: None,
                         tmux: Some(crate::proto::TmuxCandidate {
                             endpoint,
                             cwd: root.to_string_lossy().into_owned(),

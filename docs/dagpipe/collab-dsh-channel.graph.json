@@ -1,0 +1,103 @@
+{
+  "id": "appsdk-collab-dsh-channel",
+  "version": "0.1.0",
+  "description": "DSH channel slice of dsh-gateway/docs/COLLAB-DSH-CHANNEL-DESIGN.md (frozen at dsh-gateway 81f3fd3): a dsh-gateway-proxied registration makes one DSH agent appear as an independent collab peer with its own durable mailbox, and each direction carries one real round trip. SESE: one entry (the registration intent), one sink (the round-trip evidence), every node single-entry single-exit. N2 consumes the section 3.7 challenge (agent-facts over the gateway control plane) and N7 consumes the section 3.7 enqueue; both are cross-side interfaces that must be frozen before either side writes code. dsh is mutually exclusive with appserver/tmux: an ambiguous candidate set is rejected outright, never silently resolved by priority. The section 3.6 phase-B quorum is deliberately NOT a node here: it does not exist in code (T1/T2 unstarted) and DSH stays enabled false until it lands, so this graph covers only the channel-level slice S1-S14/S16/S17 of section 5, not S15.",
+  "inputs": [
+    {
+      "id": "dsh_registration_intent",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "build_dsh_candidate",
+      "operator": "appsdk.collab_dsh_channel.build_dsh_candidate",
+      "operator_version": "1",
+      "inputs": ["dsh_registration_intent"],
+      "output": {"id": "dsh_candidate", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "admit_dsh_transport",
+      "operator": "appsdk.collab_dsh_channel.admit_dsh_transport",
+      "operator_version": "1",
+      "inputs": ["dsh_candidate"],
+      "output": {"id": "admitted_transport", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "bind_and_receipt",
+      "operator": "appsdk.collab_dsh_channel.bind_and_receipt",
+      "operator_version": "1",
+      "inputs": ["admitted_transport"],
+      "output": {"id": "registration_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_route",
+      "operator": "appsdk.collab_dsh_channel.publish_route",
+      "operator_version": "1",
+      "inputs": ["registration_receipt"],
+      "output": {"id": "route_address", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "arm_default_lease",
+      "operator": "appsdk.collab_dsh_channel.arm_default_lease",
+      "operator_version": "1",
+      "inputs": ["route_address"],
+      "output": {"id": "subscription_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "project_presence",
+      "operator": "appsdk.collab_dsh_channel.project_presence",
+      "operator_version": "1",
+      "inputs": ["subscription_state"],
+      "output": {"id": "presence_projection", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "deliver_wake",
+      "operator": "appsdk.collab_dsh_channel.deliver_wake",
+      "operator_version": "1",
+      "inputs": ["presence_projection"],
+      "output": {"id": "wake_evidence", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "send_to_peer",
+      "operator": "appsdk.collab_dsh_channel.send_to_peer",
+      "operator_version": "1",
+      "inputs": ["wake_evidence"],
+      "output": {"id": "channel_roundtrip_evidence", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "build_dsh_candidate", "to": "admit_dsh_transport", "arc_id": "dsh_candidate"},
+    {"from": "admit_dsh_transport", "to": "bind_and_receipt", "arc_id": "admitted_transport"},
+    {"from": "bind_and_receipt", "to": "publish_route", "arc_id": "registration_receipt"},
+    {"from": "publish_route", "to": "arm_default_lease", "arc_id": "route_address"},
+    {"from": "arm_default_lease", "to": "project_presence", "arc_id": "subscription_state"},
+    {"from": "project_presence", "to": "deliver_wake", "arc_id": "presence_projection"},
+    {"from": "deliver_wake", "to": "send_to_peer", "arc_id": "wake_evidence"}
+  ],
+  "outputs": ["channel_roundtrip_evidence"]
+}

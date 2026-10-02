@@ -32,6 +32,10 @@
     {
       "id": "appsdk-collab-identity-adjudication",
       "path": "docs/dagpipe/collab-identity-adjudication.graph.json"
+    },
+    {
+      "id": "appsdk-collab-dsh-channel",
+      "path": "docs/dagpipe/collab-dsh-channel.graph.json"
     }
   ]
 }

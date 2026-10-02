@@ -149,34 +149,104 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
     let tmux = default_tmux_notification_sink();
     Arc::new(
         move |transport, source_thread_id, body, message_id, explicit, mode| {
-            if transport.kind != TransportKind::AppServer {
-                tmux(
+            // Exhaustive on purpose. This used to be `if kind != AppServer`,
+            // which sent any new kind into the tmux sink and failed with
+            // "Collab notifications require tmux".
+            match transport.kind {
+                TransportKind::AppServer => {
+                    if mode == "queued" {
+                        crate::client::adapters::codex_app_server::queued_notify(
+                            transport,
+                            source_thread_id,
+                            body,
+                            message_id,
+                        )
+                        .map_err(|error| error.to_string())
+                    } else {
+                        crate::client::adapters::codex_app_server::immediate_notify(
+                            transport,
+                            source_thread_id,
+                            body,
+                            message_id,
+                        )
+                        .map_err(|error| error.to_string())
+                    }
+                }
+                TransportKind::Tmux => tmux(
                     transport,
                     source_thread_id,
                     body,
                     message_id,
                     explicit,
                     mode,
-                )
-            } else if mode == "queued" {
-                crate::client::adapters::codex_app_server::queued_notify(
-                    transport,
-                    source_thread_id,
-                    body,
-                    message_id,
-                )
-                .map_err(|error| error.to_string())
-            } else {
-                crate::client::adapters::codex_app_server::immediate_notify(
-                    transport,
-                    source_thread_id,
-                    body,
-                    message_id,
-                )
-                .map_err(|error| error.to_string())
+                ),
+                TransportKind::Dsh => {
+                    let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
+                        "DSH_ENDPOINT_REJECTED: selected dsh transport has no control socket"
+                            .to_owned()
+                    })?;
+                    let runtime_id = transport.namespace.as_deref().ok_or_else(|| {
+                        "DSH_ENDPOINT_REJECTED: selected dsh transport has no gateway runtime id"
+                            .to_owned()
+                    })?;
+                    let agent_id = transport.thread_id.as_deref().ok_or_else(|| {
+                        "DSH_ENDPOINT_REJECTED: selected dsh transport has no agent id".to_owned()
+                    })?;
+                    let (gateway_mode, internal_marker) = dsh_wake_mode(mode, message_id)?;
+                    let mut receipt = crate::client::adapters::dsh::notify(
+                        endpoint,
+                        runtime_id,
+                        agent_id,
+                        gateway_mode,
+                        source_thread_id.unwrap_or("collab"),
+                        body,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if let Some(object) = receipt.as_object_mut() {
+                        object.insert(
+                            "sink_mode".into(),
+                            serde_json::Value::String(mode.to_owned()),
+                        );
+                        if internal_marker {
+                            object.insert(
+                                "unexpected_internal_mode".into(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
+                    }
+                    Ok(receipt)
+                }
             }
         },
     )
+}
+
+/// Maps collab's delivery `mode` onto the gateway's `enqueue` mode.
+///
+/// The domain is exhaustive. The sink used to be a two-way if/else, so any
+/// value other than `queued` silently took the immediate path; a new value must
+/// be a deliberate decision here, not a fallthrough.
+///
+/// Returns the gateway mode and whether the sink mode was one of the internal
+/// bookkeeping markers that should never reach a dsh wake.
+fn dsh_wake_mode(mode: &str, message_id: &str) -> Result<(&'static str, bool), String> {
+    match mode {
+        // Start a turn.
+        "immediate" => Ok(("followup", false)),
+        // Cross-project explicit notification. The App Server sink sends
+        // everything except `queued` through `immediate_notify`, so `followup`
+        // is the behaviour-preserving mapping.
+        "explicit-notification" => Ok(("followup", false)),
+        // Queue without starting a turn.
+        "queued" => Ok(("inject", false)),
+        // Internal bookkeeping markers. Not produced for dsh; if one arrives it
+        // is treated as an immediate wake rather than dropped, and the anomaly
+        // is recorded in the durable receipt.
+        "daemon-live-closure" | "restart-replay-pending" => Ok(("followup", true)),
+        other => Err(format!(
+            "DSH_ENDPOINT_REJECTED: wake {message_id} carries unknown delivery mode {other}"
+        )),
+    }
 }
 
 fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
@@ -184,8 +254,8 @@ fn notification_sink(server: &Server) -> &Arc<TmuxNotificationSink> {
 }
 
 fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
-    Arc::new(|transport, thread_id| {
-        if transport.kind == TransportKind::Tmux {
+    Arc::new(|transport, thread_id| match transport.kind {
+        TransportKind::Tmux => {
             let endpoint = transport.tmux_endpoint.as_ref().ok_or_else(|| {
                 "TMUX_ENDPOINT_MISSING: selected transport has no endpoint".to_owned()
             })?;
@@ -195,16 +265,52 @@ fn default_appserver_thread_status() -> Arc<AppServerThreadStatus> {
                         .into(),
                 );
             }
-            return crate::client::adapters::tmux::view(endpoint);
+            crate::client::adapters::tmux::view(endpoint)
         }
-        crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
-            .map_err(|error| error.to_string())
+        TransportKind::AppServer => {
+            crate::client::adapters::codex_app_server::read_thread_status(transport, thread_id)
+                .map_err(|error| error.to_string())
+        }
+        TransportKind::Dsh => {
+            let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
+                "DSH_ENDPOINT_REJECTED: selected dsh transport has no control socket".to_owned()
+            })?;
+            let runtime_id = transport.namespace.as_deref().ok_or_else(|| {
+                "DSH_ENDPOINT_REJECTED: selected dsh transport has no gateway runtime id".to_owned()
+            })?;
+            // The dsh agent id is the address; asking about a different agent
+            // than the selected endpoint is a caller error, not a probe.
+            if transport.thread_id.as_deref() != Some(thread_id) {
+                return Err(
+                    "DSH_ENDPOINT_REJECTED: requested agent does not match selected endpoint"
+                        .to_owned(),
+                );
+            }
+            let facts = crate::client::adapters::dsh::facts(endpoint, runtime_id, thread_id)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({
+                "transport": "dsh",
+                "runtimeId": facts.runtime_id,
+                "agentId": facts.agent_id,
+                "sessionId": facts.session_id,
+                "cwd": facts.cwd,
+                "status": facts.status,
+            }))
+        }
     })
 }
 
 pub(crate) fn default_appserver_thread_archive() -> Arc<AppServerThreadArchive> {
-    Arc::new(|_transport, _thread_id| {
-        Err("TRANSPORT_UNSUPPORTED: tmux has no Codex thread archive operation".into())
+    Arc::new(|transport, _thread_id| match transport.kind {
+        TransportKind::Tmux | TransportKind::AppServer => {
+            Err("TRANSPORT_UNSUPPORTED: tmux has no Codex thread archive operation".into())
+        }
+        // A dsh agent's lifecycle belongs to the gateway: collab never archives
+        // or retires it.
+        TransportKind::Dsh => Err(
+            "TRANSPORT_UNSUPPORTED: a dsh agent's lifecycle is owned by the gateway, not by collab"
+                .into(),
+        ),
     })
 }
 

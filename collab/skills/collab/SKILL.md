@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "Collab: 只跑 collab context, 自动查身份/恢复/注册/补齐上下文+角色操作。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, master 或满足收口条件的 peer merge 后 task integrated 才能 close (TASK_MERGE_PENDING); peer merge 失败上报 master。见 context/status/longhorizon/idle wake。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
+description: "Collab: 只跑 collab context 一条命令, 自动查身份/恢复/注册/补齐上下文+角色操作, 并在同一快照返回 peers/master/scheduling/env; 身份需修复时返回 requires_identity_update (reason/action/exact_error)。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, master 或满足收口条件的 peer merge 后 task integrated 才能 close (TASK_MERGE_PENDING); peer merge 失败上报 master。见 context/status/longhorizon/idle wake。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
 ---
 
 # Collab
@@ -821,16 +821,16 @@ is an observation, never task or control truth.
 
 | Intent | Command |
 |---|---|
-| Bootstrap, recover, or re-locate this agent | `collab context` |
+| Bootstrap, recover, or re-locate this agent; read peers, master, scheduling state, and env | `collab context` |
 | Notify a peer now | `collab sendmessage --to <peer> --subject <short-topic> "<original message>"` |
 | Receive and consume notifications | `collab recv` |
 | Read one notification without consuming | `collab msg <notification-id>` |
 | List unread messages | `collab inbox` |
 | Recover an already-delivered notification | `collab ack <id>` or `collab ack --all` |
 | Inspect worker health and notification status | `collab worker status [id]` |
-| List peers | `collab who` |
+| List peers (operator diagnostic; also in `collab context`) | `collab who` |
 | Check own subscriptions | `collab notify status` |
-| Inspect live master | `collab master status` |
+| Inspect live master (operator diagnostic; also in `collab context`) | `collab master status` |
 | Promote this peer when no live master exists | `collab master promote --approval "<user text>"` |
 | Delegate live master to another peer | `collab master delegate <peer>` |
 | Split work to a registered peer | `collab sendmessage --to <peer> --subject <topic> "<assignment with delivery and test conditions>"` |
@@ -850,36 +850,61 @@ creates a missing baseline, starts a stopped daemon, restores identity and
 registration, re-arms the default direct-message lease, and returns the
 authoritative snapshot plus the current role's `operations`.
 
+That one snapshot is also the agent's complete state read. It carries the
+projections that used to require separate calls, so no agent flow needs to run
+`collab who`, `collab status --all`, `collab master status`, or a shell
+`env | rg` probe first:
+
+| Snapshot field | Replaces | Contents |
+|---|---|---|
+| `master`, `recorded_unusable` | `collab master status` | live master, assignment grant, approval, `master_wake` |
+| `peers`, `peer_count` | `collab who` | every registered peer with role and presence |
+| `summary`, `master_wake`, `subagents` | `collab status --all` | worker/message/task/subagent counts and the scheduling state |
+| `pending_merges` | `collab status --all` | durable merge obligations |
+| `env` | `env \| rg '(COLLAB\|APPSDK\|CODEX\|HOME\|USER)'` | the identity-relevant variables of this agent's own process |
+| `operations`, `next_actions` | — | the current role's required actions |
+| `requires_identity_update` | — | present only when the agent must repair its identity; see below |
+
 | Situation | Do this | Never do this |
 |---|---|---|
 | First time in a project | `collab context` | `collab init`, `collab whoami` |
 | Thread/session changed, or after daemon restart | `collab context` (rebinds in place) | `collab worker recover`, `collab down`/`up` |
-| Token mismatch, `PROJECT_SCOPE_UNKNOWN`, or route loss | preserve the exact error, run `collab context` from the canonical main tree | edit token/route state, copy identity, reset the project |
-| `collab context` fails with `IDENTITY_REBIND_UNPROVEN` / cross-project route | run `collab context` from the canonical main tree; if it still fails, preserve the exact error and worker_id; for `IDENTITY_REBIND_UNPROVEN` report them with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker "<exact error; worker_id; cause; decision needed>"`, or through a healthy peer/human if that command cannot authenticate; for `IDENTITY_RESTORE_CROSS_PROJECT` report out-of-band through a healthy peer/human instead of retrying sendmessage through the same failing identity path | edit routes/token state, copy identity, run `collab worker recover`, start a second daemon |
+| Need peer list, master state, scheduling state, or env | read them from the single `collab context` snapshot | call `collab who`, `collab status --all`, `collab master status`, or grep the environment as a separate step |
+| `requires_identity_update` is present | read `reason`, `action`, and `exact_error` from the field; run the named `action` from the canonical project main checkout with a live runtime anchor; if it persists, report `exact_error` + `worker_id` to the live master | treat exit 0 as "identity is fine"; ignore the field and continue |
+| `collab context` exits non-zero with `COLLAB_CONTEXT_UNRESOLVED` | preserve the error, run `collab context` from the canonical main tree | edit routes/token state, copy identity, reset the project |
 | Default lease looks stopped | `collab context` re-arms it unless the owner explicitly unsubscribed | probe sockets, call a transport directly |
-| Unsure whether a live master exists | `collab master status` from the canonical root | infer "no master" from a failed context or a missing `who.master` |
 | Notification arrived | `collab msg <id>`, then act; `collab recv` consumes | ACK-only, or treat submission as consumption |
-| Master has a pending merge | `collab status --all` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
+| Master has a pending merge | `collab context` → `pending_merges`, merge the candidate, then `collab task integrated` | rely on a remembered message, or try to close first |
 
 Only these are operator-facing diagnostics and are not part of the agent flow:
 `collab init`, `collab whoami`, `collab worker recover`, `collab route resolve`,
-`collab down`/`up`, and any direct transport or socket call.
+`collab down`/`up`, `collab who`, `collab status --all`, `collab master status`,
+and any direct transport or socket call. `collab master status` remains the
+authority when an operator must adjudicate master promotion by hand; a live
+agent reads the same fields from `collab context`.
 
 ### Context 状态与终点（DAGpipe：单源单汇）
 
 `context_request` 是唯一入口，`state_snapshot` 是唯一成功出口，中间节点按
 DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动守护 → 装载/创建身份
-→ 校验令牌 → 注册/重建对端 → 恢复默认订阅 → 查找主控 → 输出快照。失败终点显式
-报错，不允许把失败当作成功快照：
+→ 校验令牌 → 注册/重建对端 → 恢复默认订阅 → 查找主控 → 输出快照。身份无法装载、
+注册或验真时进入 `identity_update` 终点：退出码仍为 0，但 `registered` 为 false、
+`identity` 为 null，且 `requires_identity_update` 给出 `reason` / `action` /
+`exact_error`；同一响应仍携带只读的 peers/master/status/env 投影，便于一次调用同时
+回答"项目状态是什么"和"我的身份要修什么"。根解析失败仍显式非零退出，不允许把失败
+当作成功快照：
 
 | 状态/终态 | 含义 | Agent 动作 |
 | --- | --- | --- |
-| `state_snapshot` | 引导成功；含 role/operations/master/peers/inbox/worktrees/tasks | 读快照执行当前角色的 `operations` |
-| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根 | 保留错误，改在 canonical main 再跑 `collab context` |
-| 拒绝在 playground 创建基线 | 在 worktree 内引导 | 回到项目 main 根执行，不删旧身份 |
-| `TOKEN_MISMATCH` | 身份无法验真 | 保留错误并报告 live master，不复制 token、不 mint 新身份 |
-| `IDENTITY_REBIND_UNPROVEN` | 存在无法匹配但可能存活的对端 | 保留错误并报告 live master；`collab context` 会自动归档可证已死的旧 peer，只有仍可达/不可验的对端才保持 fail-closed |
+| `state_snapshot` | 引导成功；含 role/operations/master/peers/peer_count/summary/master_wake/subagents/inbox/worktrees/tasks/env | 读快照执行当前角色的 `operations`；无需再跑 who/status/master status |
+| `identity_update` | 身份装载/注册/验真失败；`registered=false`，`requires_identity_update.required=true` | 读 `reason`/`action`/`exact_error`；在 canonical main 且带 live runtime anchor 时执行 `action`；仍失败则携 `exact_error` 与 `worker_id` 报告 live master；不复制 token、不 mint 新身份 |
+| `COLLAB_CONTEXT_UNRESOLVED` | 无 route、无 baseline、无 git 根（非零退出） | 保留错误，改在 canonical main 再跑 `collab context` |
+| 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 回到项目 main 根执行，不删旧身份 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
+
+`requires_identity_update.reason` 保留精确错误前缀（如 `TOKEN_MISMATCH`、
+`IDENTITY_REBIND_UNPROVEN`、`IDENTITY_RESTORE_CROSS_PROJECT`），调用方可直接分支，
+不需要解析自然语言；`requires_approval` 显式说明是否需要人工授权。
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`

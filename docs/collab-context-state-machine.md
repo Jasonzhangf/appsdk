@@ -5,6 +5,14 @@
 重试以新的 attempt 身份开始，不允许在图上画回边。机器可校验的 SESE 图见
 `docs/dagpipe/collab-context.graph.json`，可用 `dagpipe graph validate` 检查。
 
+`state_snapshot` 同时是 Agent 的完整状态读取：除 bootstrap/identity/daemon/
+subscriptions/master/operations 外，还含 `peers`/`peer_count`、`summary`/
+`master_wake`/`subagents`/`pending_merges`、`env`，因此不再需要额外调用
+`collab who`、`collab status --all`、`collab master status` 或 shell `env` 探测。
+身份无法装载、注册或验真时**不新增第二个出口**：仍是同一个 `state_snapshot`
+出口，但 `registered=false`、`identity=null`，并带 `requires_identity_update`
+（`reason`/`action`/`exact_error`），同时保留只读的 peers/master/status/env 投影。
+
 ## 边界与角色
 
 本状态机覆盖 `collab context` 的完整 Agent 引导路径。它不覆盖
@@ -36,7 +44,8 @@
 | `identity_hit` | Identity | Token 校验 | 身份被当前锚点匹配 | 继续 | worker id + token |
 | `identity_missing` | Identity | 注册 | 无匹配身份 | 创建 worker id + token | 身份文件 |
 | `token_ok` | Server verify | 注册 | token 匹配 | 继续 | worker id |
-| `token_mismatch` | Server verify | Agent | token 不匹配 | 失败 `TOKEN_MISMATCH`，状态不变 | 错误码 |
+| `token_mismatch` | Server verify | 身份修复 | token 不匹配 | 进入 `identity_update`，退出码 0，状态不变 | 错误码 |
+| `identity_unresolved` | Identity / Register | 身份修复 | 身份无法装载或注册 | 进入 `identity_update`，退出码 0，不 mint 新身份 | 错误码 + worker id |
 | `registration_matched` | Register | 订阅恢复 | route 与身份匹配 | 沿用注册 | route |
 | `registration_rebound` | Register | 订阅恢复 | 线程/会话变化 | 原地重建 | route |
 | `registration_recreated` | Register | 订阅恢复 | 身份存在但路由不可用 | 新建注册 | route |
@@ -66,13 +75,15 @@ stateDiagram-v2
     启动守护 --> 装载身份 : 守护启动完成
     装载身份 --> 身份命中 : 身份已存在
     装载身份 --> 创建身份 : 身份缺失
+    装载身份 --> 身份修复 : 身份无法装载
     创建身份 --> 注册对端
     身份命中 --> 校验令牌
     校验令牌 --> 注册对端 : 令牌匹配
-    校验令牌 --> [*] : 报错 TOKEN_MISMATCH
+    校验令牌 --> 身份修复 : 令牌不匹配
     注册对端 --> 沿用注册 : 身份与路由匹配
     注册对端 --> 原地重建 : 线程或会话已变化
     注册对端 --> 新建注册 : 身份存在但路由不可用
+    注册对端 --> 身份修复 : 注册失败
     沿用注册 --> 恢复默认订阅
     原地重建 --> 恢复默认订阅
     新建注册 --> 恢复默认订阅
@@ -84,6 +95,7 @@ stateDiagram-v2
     查找主控 --> 输出无主控快照 : 主控记录为空
     输出快照 --> [*]
     输出无主控快照 --> [*]
+    身份修复 --> [*] : 输出 requires_identity_update 快照
 ```
 
 ### 转移表（状态 → 事件 → 下一状态 / 终点）
@@ -102,18 +114,21 @@ stateDiagram-v2
 | 启动守护 | 守护启动完成 | 装载身份 |
 | 装载身份 | `identity_hit` | 校验令牌 |
 | 装载身份 | `identity_missing` | 创建身份 |
+| 装载身份 | `identity_unresolved` | 身份修复终点 `identity_update` |
 | 创建身份 | 身份创建完成 | 注册对端 |
 | 校验令牌 | `token_ok` | 注册对端 |
-| 校验令牌 | `token_mismatch` | 失败 `TOKEN_MISMATCH` |
+| 校验令牌 | `token_mismatch` | 身份修复终点 `identity_update` |
 | 注册对端 | `registration_matched` | 恢复默认订阅 |
 | 注册对端 | `registration_rebound` | 恢复默认订阅 |
 | 注册对端 | `registration_recreated` | 恢复默认订阅 |
+| 注册对端 | `identity_unresolved` | 身份修复终点 `identity_update` |
 | 恢复默认订阅 | `lease_needs_rearm` | 默认订阅待命 |
 | 恢复默认订阅 | `lease_removed_explicitly` | 默认订阅已停 |
 | 默认订阅待命 / 默认订阅已停 | 订阅状态确定 | 查找主控 |
 | 查找主控 | `master_found` | 输出快照 |
 | 查找主控 | `master_absent` | 输出无主控快照 |
 | 输出快照 / 输出无主控快照 | 快照完成 | 成功终点 `state_snapshot` |
+| 身份修复 | 装载只读投影并写入修复请求 | 终点 `state_snapshot`（`registered=false` + `requires_identity_update`） |
 
 ## DAG 与数据契约（SESE）
 
@@ -146,10 +161,13 @@ ARC 契约：
 | `registered_route` | Object | route/transport 注册完成 |
 | `notify_state` | Object | 默认订阅状态 |
 | `master_grant` | Object | live master grant 或空 |
-| `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/inbox/worktrees/tasks |
+| `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/env；身份修复时另有 requires_identity_update 且 registered=false |
 
 失败终点不进入成功 DAG，作为 attempt 终态显式存在：
-`路径未识别`、`拒绝在 playground`、`TOKEN_MISMATCH`。
+`路径未识别`、`拒绝在 playground`。身份类失败（`TOKEN_MISMATCH`、
+`IDENTITY_REBIND_UNPROVEN`、`IDENTITY_RESTORE_CROSS_PROJECT`）不另设终点，统一走
+`identity_update` → 同一个 `state_snapshot` 出口，由 `requires_identity_update`
+显式承载失败事实。
 
 ## 节点 owner 映射
 
@@ -165,6 +183,9 @@ ARC 契约：
 | 恢复默认订阅 | `appsdk.collab_context.restore_default_lease` | `default_direct_message_events` / `collab/src/server/mod.rs` |
 | 查找主控 | `appsdk.collab_context.find_master` | `current_master_worker_id` / `current_master_grant` / `collab/src/server/mod.rs` |
 | 输出快照 | `appsdk.collab_context.emit_snapshot` | `handle_context` / `collab/src/server/mod.rs` |
+| 只读投影（peers/master/status） | `appsdk.collab_context.read_only_state` | `read_only_project_state` / `collab/src/main_context.rs` |
+| 环境投影 | `appsdk.collab_context.env_view` | `context_env_view` / `collab/src/main_context.rs` |
+| 身份修复终点 | `appsdk.collab_context.identity_update` | `identity_update_view` / `identity_update_snapshot` / `collab/src/main_context.rs` |
 
 ## 变更边界
 
@@ -172,10 +193,15 @@ ARC 契约：
   `collab/skills/collab/SKILL.md`、CLI/MCP 描述、全局 AGENTS.md 表述收敛到单一入口。
 - 范围外：不新增独立 `collab init / whoami / worker recover / route resolve` Agent 流程；
   不修改 daemon 派单、task、mailbox 数据模型；不把 tmux/AppServer 作为可替换 fallback。
+- 单一入口收敛：`collab who`、`collab status --all`、`collab master status` 的字段已并入
+  `collab context` 快照，这三条命令降级为 operator 诊断；Agent 流程不再单独调用它们，
+  也不再用 shell `env` 探测身份相关变量。
 
 ## Agent-facing rule（与 Skill 同构）
 
 只执行 `collab context` 一次；线程/会话变化、daemon 重启、身份/token/route 异常时
 再次执行 `collab context`。其余动作读返回快照后执行。`collab init`、`collab whoami`、
-`collab worker recover`、`collab route resolve`、`collab down`/`up` 是 operator 诊断，
-不是 Agent 引导路径。
+`collab worker recover`、`collab route resolve`、`collab down`/`up`、`collab who`、
+`collab status --all`、`collab master status` 是 operator 诊断，不是 Agent 引导路径。
+快照带 `requires_identity_update` 时，Agent 按其中的 `action` 修复身份；退出码 0
+不代表身份已验真，`registered` 与 `requires_identity_update` 才是判据。

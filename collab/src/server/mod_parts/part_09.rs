@@ -1254,6 +1254,14 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
     let master_assigned_ms = master_grant.as_ref().map(|grant| grant.granted_at_ms);
     let master_wake = st.master_wake.clone();
     let pending_merges = pending_merge_views(&st);
+    // `collab context` is the single agent bootstrap read, so the projections
+    // that `collab status --all` and `collab who` expose belong to the same
+    // snapshot instead of a second call. They are captured here because `st` is
+    // released before the transport probes below.
+    let message_count = st.msgs.len();
+    let task_count = st.tasks.len();
+    let mut subagents: Vec<crate::subagent::Record> = st.subagents.values().cloned().collect();
+    subagents.sort_by(|left, right| left.id.cmp(&right.id));
     drop(st);
 
     let (presence, agent) = worker_presence_with_view(server, &worker);
@@ -1389,6 +1397,7 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         }
         operations
     };
+    let peer_count = peers.len();
     Resp::data(json!({
         "schema_version": 1,
         "registration": registration,
@@ -1422,6 +1431,16 @@ fn handle_context(server: &Server, worker_id: String, token: String) -> Resp {
         "worktrees": worktrees,
         "subscriptions": subscriptions,
         "peers": peers,
+        "peer_count": peer_count,
+        "master_wake": master_wake,
+        "subagents": subagents,
+        "summary": {
+            "workers": peer_count,
+            "messages": message_count,
+            "tasks": task_count,
+            "subagents": subagents.len(),
+            "now": iso(now_ms()),
+        },
         "inbox": {
             "unread": unread_count,
             "messages": inbox_messages,

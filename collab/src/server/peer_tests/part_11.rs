@@ -396,3 +396,36 @@ async fn recv_clears_keepalive_unacked_counter() {
     assert!(!record.suspected_offline);
     std::fs::remove_dir_all(root).ok();
 }
+
+/// `collab context` is the single agent bootstrap read, so the projections that
+/// `collab who` (`count`) and `collab status --all` (`summary`, `master_wake`,
+/// `subagents`) expose must be part of the same snapshot. Without them the agent
+/// has to issue three more calls to answer "who is here, and what is the
+/// scheduling state".
+#[test]
+fn context_snapshot_carries_peer_status_and_scheduling_state() {
+    let (server, root) = test_server();
+    for (id, pane) in [("peer-a", "%1"), ("peer-b", "%2")] {
+        let response = register(&server, id, pane);
+        assert!(response.ok, "registering {id} failed: {:?}", response.error);
+    }
+
+    let response = handle_context(&server, "peer-a".into(), "token-peer-a".into());
+    assert!(response.ok, "context failed: {:?}", response.error);
+    let data = &response.data;
+
+    assert_eq!(data["registered"], true);
+    assert_eq!(data["peer_count"], 2);
+    assert_eq!(data["peers"].as_array().unwrap().len(), 2);
+    assert_eq!(data["summary"]["workers"], 2);
+    assert_eq!(data["summary"]["tasks"], 0);
+    assert_eq!(data["summary"]["subagents"], 0);
+    assert!(data["summary"]["now"].is_string(), "{data}");
+    assert!(
+        data["master_wake"].is_object(),
+        "the scheduling projection must travel with the context snapshot: {data}"
+    );
+    assert!(data["subagents"].is_array(), "{data}");
+
+    std::fs::remove_dir_all(root).ok();
+}

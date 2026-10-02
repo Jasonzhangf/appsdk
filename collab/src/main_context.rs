@@ -13,10 +13,10 @@ pub(crate) fn cli_project_context(root: &std::path::Path) -> anyhow::Result<Proj
 }
 
 pub(crate) struct ContextBootstrap {
-    scope: Scope,
-    project_root_resolution: &'static str,
-    baseline_created: bool,
-    daemon_started: bool,
+    pub(crate) scope: Scope,
+    pub(crate) project_root_resolution: &'static str,
+    pub(crate) baseline_created: bool,
+    pub(crate) daemon_started: bool,
 }
 
 pub(crate) fn resolve_context_root(
@@ -100,33 +100,199 @@ pub(crate) fn context_may_retire_foreign_anchor(worker: Option<&str>) -> bool {
     worker.is_some()
 }
 
+/// Environment keys that describe the agent's own Collab/Codex runtime. The
+/// daemon cannot see the caller's environment, so this projection is built
+/// client-side and replaces the manual `env | rg` probe with one snapshot
+/// field. Only these keys and prefixes are exposed; every unrelated value,
+/// including any secret, stays out of the snapshot.
+const CONTEXT_ENV_KEYS: &[&str] = &["HOME", "USER", "LOGNAME", "CARGO_HOME"];
+const CONTEXT_ENV_PREFIXES: &[&str] = &["COLLAB_", "APPSDK_", "CODEX_"];
+
+pub(crate) fn context_env_view() -> serde_json::Value {
+    let mut selected = std::collections::BTreeMap::new();
+    for (key, value) in std::env::vars() {
+        if CONTEXT_ENV_KEYS.contains(&key.as_str())
+            || CONTEXT_ENV_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        {
+            selected.insert(key, value);
+        }
+    }
+    serde_json::to_value(selected).unwrap_or(serde_json::Value::Null)
+}
+
+/// `DAEMON_*` is the client's own transport prefix: it means the request never
+/// reached a daemon that could judge the identity. Relabelling that as an
+/// identity-update request would make the field lie, so it keeps propagating as
+/// an ordinary failure.
+pub(crate) fn is_daemon_transport_error(error: &anyhow::Error) -> bool {
+    error.to_string().starts_with("DAEMON_")
+}
+
+/// The single, copyable instruction an agent needs when `collab context`
+/// cannot prove or restore its identity. The reason keeps the exact error
+/// prefix so a caller can branch without parsing prose, and `requires_approval`
+/// stays explicit so no caller has to guess whether a human gate applies.
+pub(crate) fn identity_update_view(
+    error: &anyhow::Error,
+    requested_worker: Option<&str>,
+) -> serde_json::Value {
+    let exact_error = error.to_string();
+    let reason = exact_error
+        .split([':', ' '])
+        .next()
+        .filter(|token| {
+            !token.is_empty()
+                && token
+                    .chars()
+                    .all(|character| character.is_ascii_uppercase() || character == '_')
+        })
+        .unwrap_or("IDENTITY_UNPROVEN")
+        .to_owned();
+    let action = match requested_worker {
+        Some(worker) => format!("collab context --worker {worker}"),
+        None => "collab context".to_owned(),
+    };
+    json!({
+        "required": true,
+        "reason": reason,
+        "exact_error": exact_error,
+        "worker_id": requested_worker,
+        "action": action,
+        "requires_approval": false,
+        "next": "re-run the action from the canonical project main checkout with a live runtime anchor; if the same error persists, preserve exact_error and worker_id and report them to the live master; do not edit routes, copy tokens, or start a second daemon",
+    })
+}
+
+/// Read-only daemon projections that need no worker token. They stay available
+/// while the identity path fails closed, so one `collab context` still answers
+/// both questions an agent has at bootstrap: what is the durable project state,
+/// and what must I do about my identity.
+fn read_only_project_state(scope: &Scope) -> anyhow::Result<serde_json::Value> {
+    let context = Some(cli_project_context(&scope.root)?);
+    let workers: serde_json::Value =
+        client::call_with_context(&scope.sock_path(), &Req::Workers, context.clone())?;
+    let status: serde_json::Value =
+        client::call_with_context(&scope.sock_path(), &Req::StatusAll, context.clone())?;
+    let master: serde_json::Value =
+        client::call_with_context(&scope.sock_path(), &Req::MasterStatus, context)?;
+    Ok(json!({
+        "peers": workers["workers"].clone(),
+        "peer_count": workers["count"].clone(),
+        "tasks": status["tasks"].clone(),
+        "subagents": status["subagents"].clone(),
+        "master_wake": status["master_wake"].clone(),
+        "summary": status["summary"].clone(),
+        "pending_merges": status["pending_merges"].clone(),
+        "master": master["master"].clone(),
+        "recorded_unusable": master["recorded_unusable"].clone(),
+    }))
+}
+
+/// The identity terminal of the `collab context` state machine. It never
+/// fabricates a registered snapshot: `registered` stays false, `identity`
+/// stays null, and `requires_identity_update` carries the exact reason plus the
+/// one action that can restore the identity.
+pub(crate) fn identity_update_snapshot(
+    bootstrap: &ContextBootstrap,
+    error: &anyhow::Error,
+    requested_worker: Option<&str>,
+) -> serde_json::Value {
+    let mut snapshot = read_only_project_state(&bootstrap.scope).unwrap_or_else(|read_error| {
+        json!({
+            "read_only_state_unavailable": true,
+            "exact_error": read_error.to_string(),
+        })
+    });
+    let requires_identity_update = identity_update_view(error, requested_worker);
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert("schema_version".to_owned(), json!(1));
+        object.insert("project_root".to_owned(), json!(bootstrap.scope.root));
+        object.insert("registered".to_owned(), json!(false));
+        object.insert("identity".to_owned(), serde_json::Value::Null);
+        object.insert("env".to_owned(), context_env_view());
+        object.insert(
+            "bootstrap".to_owned(),
+            json!({
+                "project_root_resolution": bootstrap.project_root_resolution,
+                "baseline_created": bootstrap.baseline_created,
+                "daemon_started": bootstrap.daemon_started,
+                "identity": "unresolved",
+                "registered": false,
+            }),
+        );
+        object.insert(
+            "requires_identity_update".to_owned(),
+            requires_identity_update,
+        );
+    }
+    snapshot
+}
+
 pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_json::Value> {
     let host_paths = scope::HostPaths::resolve()?;
     let cwd = std::env::current_dir()?;
     let bootstrap = context_bootstrap(&host_paths, &cwd)?;
-    let scope = bootstrap.scope;
-    let retire_foreign_anchor = context_may_retire_foreign_anchor(worker.as_deref());
-    let mut ident = identity::load_or_create_for_context(&scope, worker)?;
+    let scope = bootstrap.scope.clone();
+    let requested_worker = worker.clone();
+    let requested_worker = requested_worker.as_deref();
+    let retire_foreign_anchor = context_may_retire_foreign_anchor(requested_worker);
+    let mut ident = match identity::load_or_create_for_context(&scope, worker) {
+        Ok(ident) => ident,
+        Err(error) => {
+            return Ok(identity_update_snapshot(
+                &bootstrap,
+                &error,
+                requested_worker,
+            ))
+        }
+    };
     if retire_foreign_anchor {
         crate::set_context_registration_requested(true);
     }
-    let result = ensure_registration_with_outcome(&scope, &mut ident);
+    let registration = ensure_registration_with_outcome(&scope, &mut ident);
     crate::set_context_registration_requested(false);
-    let (_, identity_state) = result?;
+    let (_, identity_state) = match registration {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Ok(identity_update_snapshot(
+                &bootstrap,
+                &error,
+                requested_worker,
+            ))
+        }
+    };
     let identity_state = match identity_state {
         RegistrationOutcome::Created => "created",
         RegistrationOutcome::Reused => "reused",
         RegistrationOutcome::Recovered => "recovered",
         RegistrationOutcome::Recreated => "recreated",
     };
-    let mut v: serde_json::Value = call_project(
+    // A registered identity can still be rejected by the daemon when its token
+    // no longer owns the worker id. That is the same identity-update terminal,
+    // not a generic failure: the read-only projection above still answers.
+    // `DAEMON_*` is the client's own transport prefix, meaning the request never
+    // reached a daemon that could judge the identity; relabelling that as an
+    // identity problem would make the field lie, so it keeps propagating.
+    let mut v: serde_json::Value = match call_project(
         &scope,
         &ident,
         &Req::Context {
             worker_id: ident.worker_id.clone(),
             token: ident.token.clone(),
         },
-    )?;
+    ) {
+        Ok(value) => value,
+        Err(error) if !is_daemon_transport_error(&error) => {
+            return Ok(identity_update_snapshot(
+                &bootstrap,
+                &error,
+                requested_worker,
+            ))
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(value) = v.as_object_mut() {
         value.insert(
             "bootstrap".to_string(),
@@ -138,6 +304,7 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
                 "registered": true,
             }),
         );
+        value.insert("env".to_string(), context_env_view());
     }
     Ok(v)
 }

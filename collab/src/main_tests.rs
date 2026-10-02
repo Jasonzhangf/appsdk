@@ -1037,6 +1037,149 @@ fn context_daemon_down_marker_fails_closed_and_preserves_marker() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// `collab context` is the single bootstrap read, so the identity-relevant
+/// variables an agent previously grepped out of its own shell must be part of
+/// the snapshot. Unrelated values must not leak: this projection is the one
+/// place the caller's environment enters a Collab response.
+#[test]
+fn context_env_view_selects_only_collab_identity_variables() {
+    // A pre-existing environment-sensitive test can panic while holding this
+    // lock; take the poisoned guard instead of turning that into a new failure.
+    let _guard = crate::scope::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = [
+        (
+            "COLLAB_TEST_ENV_MARKER",
+            std::env::var_os("COLLAB_TEST_ENV_MARKER"),
+        ),
+        (
+            "CODEX_TEST_ENV_MARKER",
+            std::env::var_os("CODEX_TEST_ENV_MARKER"),
+        ),
+        (
+            "APPSDK_TEST_ENV_MARKER",
+            std::env::var_os("APPSDK_TEST_ENV_MARKER"),
+        ),
+        (
+            "AWS_SECRET_ACCESS_KEY",
+            std::env::var_os("AWS_SECRET_ACCESS_KEY"),
+        ),
+    ];
+    std::env::set_var("COLLAB_TEST_ENV_MARKER", "collab-value");
+    std::env::set_var("CODEX_TEST_ENV_MARKER", "codex-value");
+    std::env::set_var("APPSDK_TEST_ENV_MARKER", "appsdk-value");
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", "must-not-leak");
+
+    let view = crate::main_context::context_env_view();
+
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    assert_eq!(view["COLLAB_TEST_ENV_MARKER"], "collab-value");
+    assert_eq!(view["CODEX_TEST_ENV_MARKER"], "codex-value");
+    assert_eq!(view["APPSDK_TEST_ENV_MARKER"], "appsdk-value");
+    assert!(
+        view.get("AWS_SECRET_ACCESS_KEY").is_none(),
+        "unrelated secrets must stay out of the context snapshot: {view}"
+    );
+    assert!(
+        view.get("HOME").is_some(),
+        "the home directory is part of the identity probe: {view}"
+    );
+}
+
+/// The identity terminal must name the exact failure and the one action that
+/// can restore the identity. A bare prose error would put the agent back in the
+/// status-hunt this consolidation removes.
+#[test]
+fn identity_update_view_names_the_reason_and_the_recovery_action() {
+    let error = anyhow::anyhow!(
+        "IDENTITY_REBIND_UNPROVEN: worker codex-%3 has a reachable anchor that cannot be proven"
+    );
+    let view = crate::main_context::identity_update_view(&error, Some("codex-%3"));
+    assert_eq!(view["required"], true);
+    assert_eq!(view["reason"], "IDENTITY_REBIND_UNPROVEN");
+    assert_eq!(view["worker_id"], "codex-%3");
+    assert_eq!(view["action"], "collab context --worker codex-%3");
+    assert_eq!(view["requires_approval"], false);
+    assert!(
+        view["exact_error"]
+            .as_str()
+            .unwrap()
+            .contains("IDENTITY_REBIND_UNPROVEN"),
+        "{view}"
+    );
+
+    let unnamed = crate::main_context::identity_update_view(&error, None);
+    assert_eq!(unnamed["action"], "collab context");
+    assert!(unnamed["worker_id"].is_null());
+}
+
+/// The identity terminal is an explicit snapshot, never a fabricated success:
+/// `registered` stays false, `identity` stays null, and the recovery request is
+/// present so one call still answers "what is the project state" and "what must
+/// I fix about my identity".
+#[test]
+fn identity_update_snapshot_is_explicit_and_not_a_registered_snapshot() {
+    let root = test_root("context-identity-terminal");
+    let bootstrap = crate::main_context::ContextBootstrap {
+        scope: Scope { root: root.clone() },
+        project_root_resolution: "cwd",
+        baseline_created: false,
+        daemon_started: false,
+    };
+    let error = anyhow::anyhow!("TOKEN_MISMATCH: identity does not own this worker_id");
+    let snapshot =
+        crate::main_context::identity_update_snapshot(&bootstrap, &error, Some("codex-%9"));
+
+    assert_eq!(snapshot["registered"], false);
+    assert!(snapshot["identity"].is_null());
+    assert_eq!(snapshot["requires_identity_update"]["required"], true);
+    assert_eq!(
+        snapshot["requires_identity_update"]["reason"],
+        "TOKEN_MISMATCH"
+    );
+    assert_eq!(snapshot["bootstrap"]["identity"], "unresolved");
+    assert_eq!(snapshot["bootstrap"]["registered"], false);
+    assert!(
+        snapshot.get("env").is_some(),
+        "the identity terminal still carries the environment probe: {snapshot}"
+    );
+    assert!(
+        snapshot["requires_identity_update"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("live master"),
+        "{snapshot}"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A daemon that could not be reached never judged the identity, so it must not
+/// be reported as an identity-update request. Only a reached daemon's own
+/// rejection belongs in `requires_identity_update`.
+#[test]
+fn only_a_reached_daemon_rejection_is_an_identity_problem() {
+    assert!(crate::main_context::is_daemon_transport_error(
+        &anyhow::anyhow!("DAEMON_UNKNOWN: failed to send request to /tmp/server.sock")
+    ));
+    assert!(crate::main_context::is_daemon_transport_error(
+        &anyhow::anyhow!("DAEMON_UNAVAILABLE: no daemon at /tmp/server.sock")
+    ));
+    assert!(!crate::main_context::is_daemon_transport_error(
+        &anyhow::anyhow!("token mismatch: identity does not own this worker_id")
+    ));
+    assert!(!crate::main_context::is_daemon_transport_error(
+        &anyhow::anyhow!("IDENTITY_REBIND_UNPROVEN: no current anchor")
+    ));
+}
+
 #[test]
 fn cli_error_decorates_route_resolve_not_found_from_current_and_legacy_daemons() {
     for error in [

@@ -1,6 +1,7 @@
 {
   "id": "appsdk-collab-context",
   "version": "0.1.0",
+  "description": "F1, the automatic identity recovery slice from docs/design/identity-governance-recovery-design.md section 5.2: `collab context` resolves the canonical scope, guarantees the daemon, loads and verifies the durable identity, registers the route, restores the default lease, finds the master, and emits the snapshot. One entry (the context request), one exit (the snapshot); refusal and conflict branches terminate at the section 3.3 failure terminals instead of continuing. The manual adjudication slice (F2) is a separate graph, appsdk-collab-identity-adjudication. T0 status: the explicit `--worker` override is F2's entry point and it is the only path that sets Req::Register.retire_cross_project_anchor, which ensure_registration applies; the implicit F1 path never crosses project scope and fails closed at IDENTITY_RESTORE_CROSS_PROJECT. Crossing scope without an operator declaration, retiring a foreign anchor transactionally, and the adjudication receipt are T1 items G-1/G-3 in section 8.2 of that design.",
   "inputs": [
     {
       "id": "context_request",

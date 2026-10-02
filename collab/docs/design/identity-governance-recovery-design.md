@@ -91,7 +91,7 @@
 | 项 | 定义 |
 |---|---|
 | 唯一键 | `receipt_id` |
-| 创建入口 | 仅交互式 CLI：`collab identity adjudicate --worker <id> --scope <root>` |
+| 创建入口 | 仅交互式 CLI：`collab identity adjudicate --worker <id> --scope <root>`（T1；T0 期入口为 `collab context --worker <id>`，见 §3.2 T0 实现状态） |
 | 产出 | `AdjudicationReceipt{receipt_id, operator, at_ms, principal_id, source_scope, target_scope, generation_before/after, inherited_subscriptions, ttl_ms, revoked_ms}` |
 | 基数 | N receipt : 1 principal（每次裁决一条，可审计） |
 | 判死条件 | TTL 到期或显式撤销（`collab identity revoke <receipt-id>`） |
@@ -114,7 +114,7 @@
 
 ### 3.1 恢复入口
 
-**唯一入口**：`collab context`（含 `--worker` / `--scope` 参数）。其他路径（MCP、daemon 内部、后台同步）不得成为独立入口，只能触发同一入口的既有分支。
+**唯一入口**：`collab context`（T0 只有 `--worker`；`--scope` 与独立裁决入口 `collab identity adjudicate` 属 T1，见 §3.2 T0 实现状态）。其他路径（MCP、daemon 内部、后台同步）不得成为独立入口，只能触发同一入口的既有分支。
 
 后台自动恢复（R5）走 F1（§5.2），不需要用户触发；需要额外信息时由 peer 侧在下一次 `collab context` 提供。
 
@@ -126,14 +126,20 @@
 |---|---|---|---|---|
 | R-1 | credential 已撤销 / security deny | 拒绝 | `IDENTITY_REVOKED` | 需新建 principal |
 | R-2 | nonce/replay 失败，或同 binding 多 principal，或不同 subject claims | Conflict | `IDENTITY_CONFLICT` | 需裁决 |
-| R-3 | 记录 `project_scope` ≠ 当前 scope，且无显式裁决 | 自动：同锚点全部 duplicate 可证 Dead → retire + mint；否则 fail-closed | `IDENTITY_CROSS_PROJECT` | 需裁决或等 retire |
+| R-3 | 记录 `project_scope` ≠ 当前 scope，且无显式裁决 | **目标**：同锚点全部 duplicate 可证 Dead → retire + mint，否则 fail-closed。**T0 现状**：自动路径不跨 scope，一律 fail-closed 并指向 `--worker`（见 §6.1 T0-1） | `IDENTITY_CROSS_PROJECT` | 需裁决；dead-only 自动 retire 属 T1 |
 | R-4 | 存在 live owner（他 scope 或同 scope）claim 同一锚点 | fail-closed | `IDENTITY_AMBIGUOUS` | 需裁决 |
 | R-5 | 无当前锚点（TMUX_PANE / CODEX_SESSION_ID / CODEX_THREAD_ID 全空）且未命名 | 未认证 | `IDENTITY_ANCHOR_MISSING` | 提供锚点或裁决 |
-| R-6 | 显式裁决：`--worker <id> --scope <root>` 齐备 | 手动裁决 | `ADJUDICATED` | — |
+| R-6 | 显式裁决：`--worker <id>`（T0）/ `--worker <id> --scope <root>`（T1，M2） | 手动裁决 | `ADJUDICATED` | — |
 | R-7 | 证据域 < 2，或证据过期 / Unknown | Unproven | `IDENTITY_UNPROVEN` | 重新 challenge |
 | R-8 | 全部必选证据通过且 quorum 达标 | Accepted | `ACCEPTED` | — |
 
 **R-6 的边界（关键约束）**：手动裁决只能越过 **R-3 / R-4 / R-5**（锚点与 scope 类）。**不能越过 R-1 / R-2**（凭据撤销与声明冲突）——被撤销的凭据不能靠人声明复活，声明冲突也不能靠人声明掩盖。这一条修正了"裁决可越过一切"的宽松表述。
+
+**T0 实现状态（本设计落盘时点的真实契约）**：F2 的独立入口 `collab identity adjudicate`、`--scope` 声明（M2）与 durable receipt（M3）尚未实现；T0 期的手动裁决借用既有 `collab context --worker <id>`，其 scope 由 cwd/route 派生。因此 T0 的对外契约是：
+
+- **F1（无 `--worker`）不跨 scope**：跨 scope 记录一律 fail-closed 到 `IDENTITY_CROSS_PROJECT`，错误文本把用户指向 `--worker`。这与 `c5007ad` 的 ledger 契约一致（"the implicit path is unchanged: it never crosses scope"）。
+- `Req::Register.retire_cross_project_anchor` **只在显式 `--worker` 时置位**；F1 路径不得置位，否则会跳过同 scope 的 live 冲突拒绝（`retire_cross_project_anchor_candidate` 对同 scope binding 是 no-op）。
+- M2/M3 的强制、dead-only 自动 retire、以及退休的事务性（retire 与 binding 原子提交 + tombstone + 失败回滚）属 T1，缺口与证据见 §8.2。
 
 ### 3.3 失败终态（必须可修复）
 
@@ -143,7 +149,7 @@
 |---|---|---|---|
 | `IDENTITY_REVOKED` | 凭据已撤销 | 是（需新建） | `collab identity create` |
 | `IDENTITY_CONFLICT` | 声明冲突 / 多 principal | 是 | 冲突清单 + `collab identity adjudicate` |
-| `IDENTITY_CROSS_PROJECT` | 跨 scope 且无裁决 | 是 | `collab identity adjudicate --worker <id> --scope <root>` |
+| `IDENTITY_CROSS_PROJECT` | 跨 scope 且无裁决 | 是 | T0：`collab context --worker <id>`（scope 由 cwd/route 派生）；T1：`collab identity adjudicate --worker <id> --scope <root>` |
 | `IDENTITY_AMBIGUOUS` | live owner 占用锚点 | 是 | 同上（输出 owner 摘要） |
 | `IDENTITY_ANCHOR_MISSING` | 无锚点且未命名 | 是 | 提供锚点，或显式裁决 |
 | `IDENTITY_UNPROVEN` | 证据不足 / 过期 / Unknown | 是 | 重新 challenge（`collab context` 重跑） |
@@ -235,7 +241,7 @@
 | 功能 | 源（唯一入口） | 汇（唯一出口） | 授权来源 |
 |---|---|---|---|
 | **F1 自动准入恢复** | `collab context`（无 `--worker`/`--scope`） | `ACCEPTED` 或 §3.3 失败终态 | 证据 quorum |
-| **F2 手动裁决恢复** | `collab identity adjudicate`（显式 `--worker` + `--scope`） | `ADJUDICATED` receipt | 操作者声明 |
+| **F2 手动裁决恢复** | `collab identity adjudicate`（显式 `--worker` + `--scope`）；T0 期由 `collab context --worker` 承担，见 §3.2 T0 实现状态 | `ADJUDICATED` receipt | 操作者声明 |
 
 **共享 sink**：`identity/binding` 写入点。约束：
 - sink 必须是幂等 CAS（`expected_revision` + `expected_generation`），两个功能都只能通过它写入；
@@ -260,7 +266,7 @@
 
 | 节点 | owner | 输入 | 输出 | 说明 |
 |---|---|---|---|---|
-| A1 parse_declaration | CLI | `--worker` + `--scope` | declaration | 缺一即拒（M2） |
+| A1 parse_declaration | CLI | `--worker` + `--scope` | declaration | 缺一即拒（M2）；T0 期入口是 `collab context --worker`，`--scope` 派生自 cwd/route |
 | A2 load_target | identity | declaration | target principal/binding | 按路径直读，不做 liveness probe（I4） |
 | A3 collect_inherited | state | target principal | 订阅/lease 清单 | §3.4；用于 receipt 与提示 |
 | A4 write_receipt | identity | declaration + target + 继承清单 | receipt | M3；TTL 由配置给定 |
@@ -308,7 +314,7 @@
 
 | 任务 | 文件 | 交付条件 | 测试条件（red test） |
 |---|---|---|---|
-| T0-1（F-02） | `collab/src/main.rs:226-237` 把 `thread_local!` 提到 module scope，getter/setter 共用同一 static；核对 `collab/src/main_context.rs:100,102` 与 `collab/src/main.rs:275` 的读写配对 | 跨 scope `collab context` 的请求中 `retire_cross_project_anchor == true`；daemon 产生 archived receipt；unnamed 跨 scope 不再永久停在 `IDENTITY_RESTORE_CROSS_PROJECT` | 单测：setter→getter 同一 cell；集成：CLI→server 断言字段为 true 且有 receipt（**当前该路径零覆盖**） |
+| T0-1（F-02） | `collab/src/main.rs` 把 `thread_local!` 提到 module scope，getter/setter 共用同一 static；`collab/src/main_context.rs` 只在显式 `--worker` 时置位；核对读写配对 | getter/setter 共用同一 cell；显式 `--worker` 的注册请求 `retire_cross_project_anchor == true`，daemon 退休 foreign route 且当前 scope 取得锚点；F1（无 `--worker`）恒 `false`，跨 scope 仍 fail-closed 到 `IDENTITY_CROSS_PROJECT`（与 `c5007ad` 契约一致） | 单测：setter→getter 同一 cell；单测：gate 仅对 `Some(worker)` 为真；集成（`ProjectRuntimeManager`）：flag=true 时 foreign route 被退休且当前 scope 持有锚点，flag=false 时被拒（**该路径原先零覆盖**） |
 | T0-2（F-03） | `collab/src/server/mod_parts/part_07.rs:140-147` 缺 `thread/status/type` 归 `Unknown`，与 `collab/src/identity.rs` 的 `classify_thread_status` 对齐 | 畸形/缺字段响应不再产生 `Present` | 三条断言：缺 status → `Unknown`；`notLoaded` → `Cold`；`systemError` → `Missing` |
 | T0-3（F-04） | `collab/src/server/mod_parts/part_04.rs:582-593`、`:650-658` 删除手写比较，统一调用 `collab/src/adapters/tmux.rs:308-314` 的 `same_pane_route` | pane 同一性判定只有唯一实现；`pane_pid` 变化不再被误认 | 两处调用点各一条：pane id 相同、`pane_pid` 不同 → 判不同 |
 | T0-4（F-08） | `collab/src/adapters/mod.rs:1-2` 注释与实现对齐（AppServer adapter 未退役、非 `cfg(test)`、生产路径在用）；若确实要退役，必须先迁移 `candidate_from_env`/`verify_candidate` 的生产调用点 | 注释、`cfg` 属性、生产调用三者一致 | 针对性检查 + 断言生产调用存在 |
@@ -340,15 +346,16 @@ T1 新模型（`identity/model.rs`）+ policy validator（拒绝 floor 下调）
 
 | 类型 | 检查 | 正向/反向验收 |
 |---|---|---|
-| 接线（T0-1） | CLI→server 的 `retire_cross_project_anchor` | 修复前恒 `false`（反向）；修复后为 `true` 且有 archived receipt |
+| 接线（T0-1） | `retire_cross_project_anchor` 的置位条件 | 修复前恒 `false`（反向）；修复后仅显式 `--worker` 为 `true`，F1 恒 `false` |
 | 单测（T0-1） | getter/setter 同一 static | setter(true) 后 getter() 为 true |
+| 集成（T0-1） | daemon 退休 foreign route | flag=true：foreign route 消失且当前 scope 持有锚点；flag=false：拒绝且不退休 |
 | 黑盒 AppServer（T0-2） | 缺 `thread/status/type` | 必须 `Unknown`；不得 `Present` |
 | 黑盒 tmux（T0-3） | pane id 相同、`pane_pid` 变化 | 判不同 pane；两处调用点各一条 |
 | 契约（T0-4） | 注释/`cfg`/生产调用一致 | 三者一致；生产调用存在 |
 | 恢复判定顺序 | §3.2 的 R-1..R-8 | 每行一条：构造该条件，断言终态码唯一且优先级正确；R-6 不得越过 R-1/R-2 |
 | 失败终态 | §3.3 | 每个终态码都携 reason + repair_required + 命令模板 |
 | 不变量 | I1–I8 | 各一条测试；删除实现必须变红 |
-| 裁决约束 | M1–M7 | 缺 `--scope` 拒绝；非交互入口无法触发；`revoke` 可撤销且不回退 generation；不得写 grant |
+| 裁决约束 | M1–M7 | 缺 `--scope` 拒绝；非交互入口无法触发；`revoke` 可撤销且不回退 generation；不得写 grant（M1–M7 属 T1；T0 的裁决入口只有 `--worker`，见 §3.2 T0 实现状态） |
 | 订阅归属 | §3.4 | 恢复同一 principal 订阅延续；顶替时 receipt 列出继承清单；`--no-inherit-subscriptions` 生效 |
 | 零锚点 | R4 | 有 tmux 走 pane 锚点；无 tmux 显式报错，不静默 mint |
 | 证据域 | D1–D5 | 同进程多字段只算一组；`min_independent_groups=1` 被 validator 拒绝 |
@@ -367,5 +374,15 @@ T1 新模型（`identity/model.rs`）+ policy validator（拒绝 floor 下调）
 **留白（需用户确认）**：
 1. `AdjudicationReceipt` 的 TTL 默认值与保留期。
 2. `--no-inherit-subscriptions` 是否作为默认行为（当前设计：默认继承但必须打印清单）。
-3. AppServer adapter 的真实状态（退役 vs 生产在用）——T0-4 前必须先确认。
+3. AppServer adapter 的真实状态（退役 vs 生产在用）——**已确认：生产在用**（`verify_candidate`、`read_thread_status`、`archive_thread`、`start_thread`、`immediate_notify` 均在生产路径），T0-4 已按此对齐注释。
 4. `pane_pid` 复用语义的跨平台一致性（已列为 T0-3 的必测项）。
+
+### 8.2 T1 缺口（独立 review 证据，必须在 T1 关闭）
+
+| # | 缺口 | 证据 | 关闭条件 |
+|---|---|---|---|
+| G-1 | 自动路径（F1）无法恢复跨 scope 记录 | `identity.rs::identity_by_current_anchors_same_scope_at` 在发请求前就 bail `IDENTITY_RESTORE_CROSS_PROJECT`；而 daemon 侧的 dead-only retire 对同 pane 的 foreign duplicate 无解——它探测到的是**同一个 live pane**，永远不判 Dead | F1 实现 dead-only 判定并放开客户端 same-scope guard；补 unnamed dead 跨 scope 的 CLI→server 回归 |
+| G-2 | 裁决入口未强制 `--scope`，也无 durable receipt（M2/M3） | `Cmd::Context` 只暴露 `--worker`（`main.rs:170-173`），scope 由 cwd/route 派生；`collab identity adjudicate` 不存在 | 实现 §5.3 F2 DAG 的 A1/A4 节点，强制 M2/M3 |
+| G-3 | 退休不具事务性，且无 tombstone | `retire_cross_project_anchor_candidate` 在注册被接纳前就 commit `GlobalCurrentThreadRouteRetired`；后续失败时 `registration_rollback_state` 只快照当前 scope/worker 的 binding，不恢复被退休的 foreign route；退休不写 tombstone，compaction 后 replay 的 `restore_unique_current_thread_routes_from_bindings` 可能复活该 binding | retire 与 replacement binding 原子提交（含 tombstone / archived receipt），或失败时快照并恢复；补失败注入与 replay/compaction 回归 |
+
+G-1/G-2/G-3 都是 T1 的关闭项，不阻断 T0 已交付的机械修复；但它们决定了"任何情况下都能恢复"这一目标尚未达成。

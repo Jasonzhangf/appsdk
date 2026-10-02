@@ -487,3 +487,107 @@ fn context_records_peer_presence_transitions_like_status_all() {
     drop(state);
     std::fs::remove_dir_all(root).ok();
 }
+
+fn approve_promotion(server: &Arc<Server>, worker_id: &str) -> Resp {
+    dispatch(
+        server,
+        Req::MasterPromote {
+            worker_id: worker_id.into(),
+            token: format!("token-{worker_id}"),
+            approval: "user approval".into(),
+        },
+    )
+}
+
+/// `live_master_id` decides liveness from a pane probe, and a pane's shell
+/// survives a Codex restart inside that pane. When another registration takes
+/// the recorded master's pane, the master is still reported live but can no
+/// longer act on its anchor. The owner's explicit approval must still be able
+/// to replace it, otherwise the project is left with an authority that can
+/// neither act, nor be recovered, nor be replaced.
+#[test]
+fn user_approved_promotion_replaces_a_master_whose_anchor_was_taken() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_single(&root);
+    let server = Arc::new(server);
+
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-old-master".into());
+    endpoint.codex_thread_id = Some("thread-old-master".into());
+    assert!(register_tmux(&server, "old-master", endpoint.clone()).ok);
+    let master_binding = registered_binding(&server, "old-master");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding,
+        }])
+        .unwrap();
+    assert!(approve_promotion(&server, "old-master").ok);
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "old-master"
+    );
+
+    // A later Codex thread takes the same pane. The pane shell keeps its pid,
+    // so the recorded master still probes present.
+    let mut taker = endpoint.clone();
+    taker.codex_session_id = Some("session-taker".into());
+    taker.codex_thread_id = Some("thread-taker".into());
+    assert!(register_tmux(&server, "taker", taker).ok);
+    let taker_binding = registered_binding(&server, "taker");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: taker_binding,
+        }])
+        .unwrap();
+
+    // The recorded master is still reported live. That is exactly why the
+    // repair has to consult the anchor, not the presence probe.
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "old-master"
+    );
+
+    let promoted = approve_promotion(&server, "taker");
+    assert!(promoted.ok, "{promoted:?}");
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "taker"
+    );
+    drop(tmux);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The repair must not become a coup: while the recorded master still owns its
+/// anchor, an approved promotion is still refused.
+#[test]
+fn user_approved_promotion_still_refuses_a_master_that_owns_its_anchor() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_single(&root);
+    let server = Arc::new(server);
+
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-master".into());
+    endpoint.codex_thread_id = Some("thread-master".into());
+    assert!(register_tmux(&server, "master", endpoint.clone()).ok);
+    let master_binding = registered_binding(&server, "master");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding,
+        }])
+        .unwrap();
+    assert!(approve_promotion(&server, "master").ok);
+
+    let mut other = tmux.add_session();
+    other.codex_session_id = Some("session-other".into());
+    other.codex_thread_id = Some("thread-other".into());
+    assert!(register_tmux(&server, "other", other).ok);
+
+    let refused = approve_promotion(&server, "other");
+    assert!(!refused.ok, "{refused:?}");
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "master"
+    );
+    drop(tmux);
+    std::fs::remove_dir_all(root).ok();
+}

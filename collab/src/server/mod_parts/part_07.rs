@@ -1222,6 +1222,44 @@ fn verify_master_actor(
     }
 }
 
+/// Whether the recorded master no longer owns its tmux anchor.
+///
+/// A pane's `pane_pid` is the pane shell, so it survives a Codex restart inside
+/// that pane: the pane probe behind `live_master_id` proves the *pane* is alive,
+/// never that the recorded master still owns it. Once another registration
+/// takes that pane, or the anchor has no registered route at all, the recorded
+/// master can no longer act on its anchor.
+fn master_anchor_is_superseded(server: &Server, state: &State, master_worker_id: &str) -> bool {
+    let Ok(route_scope) = server_route_scope(server, state) else {
+        return false;
+    };
+    let Some(grant) = current_master_grant(state, route_scope.as_ref()) else {
+        return false;
+    };
+    if grant.agent_id.as_str() != master_worker_id {
+        return false;
+    }
+    let Some(endpoint) = state
+        .global
+        .lookup_binding_for(
+            &RouteScope {
+                app_scope_id: grant.app_scope_id.clone(),
+                project_scope_id: grant.project_scope.clone(),
+            },
+            &grant.binding_id,
+        )
+        .and_then(|binding| binding.tmux_endpoint.as_ref())
+    else {
+        // A transport without a pane anchor has no anchor for another
+        // registration to take over.
+        return false;
+    };
+    !state
+        .global
+        .lookup_unique_tmux_pane_route(endpoint)
+        .is_some_and(|route| route.binding_id == grant.binding_id)
+}
+
 fn handle_master_promote(
     server: &Server,
     worker_id: String,
@@ -1239,8 +1277,17 @@ fn handle_master_promote(
         return Resp::err("master promotion requires explicit user approval");
     }
     match live_master_id(server, &state) {
-        Ok(Some(_)) => {
-            return Resp::err("master already exists; only the registered master may delegate")
+        Ok(Some(master)) => {
+            if !master_anchor_is_superseded(server, &state, &master) {
+                return Resp::err("master already exists; only the registered master may delegate");
+            }
+            // The recorded master no longer owns its anchor. A pane's
+            // `pane_pid` is the pane shell, so it survives a Codex restart in
+            // that pane; `live_master_id` therefore still reports the recorded
+            // master live. Letting that veto stand leaves the project with an
+            // authority that can neither act on its anchor, nor be recovered,
+            // nor be replaced. The explicit approval checked above is what
+            // authorizes this repair.
         }
         Err(error) => return Resp::err(error),
         Ok(None) => {}

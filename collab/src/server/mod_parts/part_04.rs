@@ -583,12 +583,11 @@ impl ProjectRuntimeManager {
                     // A live native thread is authoritative. The tmux pane is
                     // only a recovery anchor when both Codex IDs are absent,
                     // so a shared pane cannot block a second App Server peer.
+                    // Pane identity has one owner (`same_pane_route`): socket,
+                    // server pid, session, pane id and pane pid.
                     endpoint.codex_session_id.is_none()
                         && endpoint.codex_thread_id.is_none()
-                        && previous.socket_path == endpoint.socket_path
-                        && previous.server_pid == endpoint.server_pid
-                        && previous.tmux_session_id == endpoint.tmux_session_id
-                        && previous.pane_id == endpoint.pane_id
+                        && crate::client::adapters::tmux::same_pane_route(previous, endpoint)
                 });
                 if (same_codex_session || same_codex_thread || same_tmux_pane)
                     && !anchor_matches.iter().any(|existing| existing == binding)
@@ -651,10 +650,7 @@ impl ProjectRuntimeManager {
             previous.session_id.as_ref() == Some(session_id)
                 && previous.native_thread_id.as_ref() == Some(native_thread_id)
                 && previous.tmux_endpoint.as_ref().is_some_and(|endpoint| {
-                    endpoint.socket_path == candidate.socket_path
-                        && endpoint.server_pid == candidate.server_pid
-                        && endpoint.tmux_session_id == candidate.tmux_session_id
-                        && endpoint.pane_id == candidate.pane_id
+                    crate::client::adapters::tmux::same_pane_route(endpoint, candidate)
                 })
         };
         self.host

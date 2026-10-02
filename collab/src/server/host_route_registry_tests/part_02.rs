@@ -2441,3 +2441,82 @@
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }
+
+    /// tmux reuses pane ids after a server restart, so a shared `pane_id` with a
+    /// different `pane_pid` is a different pane. The cross-project anchor match
+    /// in `validate_current_thread_candidate` must compare the whole endpoint
+    /// (`same_pane_route`): a hand-written subset that omits `pane_pid` rejects
+    /// a fresh peer as "already bound" to a dead pane.
+    #[tokio::test]
+    async fn pane_anchor_match_requires_the_same_pane_pid() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let context = context_with_app(&root, app);
+
+        let candidates_a = test_candidates("thread-pane-pid-a").unwrap();
+        let anchor = candidates_a.tmux.as_ref().unwrap().endpoint.clone();
+        let (_, first) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register(
+                "pane-pid-a".into(),
+                "token-pane-pid-a".into(),
+                root.display().to_string(),
+                Some(candidates_a),
+            ),
+        );
+        assert!(first.ok, "{first:?}");
+
+        // A pane anchor only applies when both Codex IDs are absent, so the
+        // probe candidate carries no native thread and differs only in pane pid.
+        let pane_candidate = |pane_pid: u32| {
+            let mut candidates = test_candidates("thread-pane-pid-b").unwrap();
+            let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
+            endpoint.socket_path = anchor.socket_path.clone();
+            endpoint.server_pid = anchor.server_pid;
+            endpoint.tmux_session_id = anchor.tmux_session_id.clone();
+            endpoint.pane_id = anchor.pane_id.clone();
+            endpoint.pane_pid = pane_pid;
+            endpoint.codex_session_id = None;
+            endpoint.codex_thread_id = None;
+            candidates
+        };
+
+        // Same pane id and pane pid: the anchor really is taken, so the second
+        // peer must still be rejected.
+        let duplicate = manager.validate_current_thread_candidate(
+            &context,
+            &Req::register(
+                "pane-pid-b".into(),
+                "token-pane-pid-b".into(),
+                root.display().to_string(),
+                Some(pane_candidate(anchor.pane_pid)),
+            ),
+        );
+        assert!(
+            duplicate
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("already bound")),
+            "{duplicate:?}"
+        );
+
+        // Reused pane id with a new pane pid: a different pane, so the fresh
+        // peer must not inherit the dead pane's owner.
+        let reused = manager.validate_current_thread_candidate(
+            &context,
+            &Req::register(
+                "pane-pid-c".into(),
+                "token-pane-pid-c".into(),
+                root.display().to_string(),
+                Some(pane_candidate(anchor.pane_pid + 1)),
+            ),
+        );
+        assert!(
+            reused.is_ok(),
+            "a new pane pid must not inherit the old pane's anchor: {reused:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }

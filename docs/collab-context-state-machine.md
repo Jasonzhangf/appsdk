@@ -54,6 +54,9 @@ subscriptions/master/operations 外，还含 `peers`/`peer_count`、`summary`/
 | `master_found` | Master lookup | 快照 | live master 存在 | `state_snapshot` 含主控 | master grant |
 | `master_absent` | Master lookup | 快照 | 无 live master | `state_snapshot` 主控为空 | 空 grant |
 
+`token_mismatch` 与 `identity_unresolved` 只在失败可归入闭集身份码时触发；route、
+runtime binding、transport 等非身份失败不产生这两个事件，也不进入 `identity_update`。
+
 ## 状态机
 
 ```mermaid
@@ -164,10 +167,13 @@ ARC 契约：
 | `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/env；身份修复时另有 requires_identity_update 且 registered=false |
 
 失败终点不进入成功 DAG，作为 attempt 终态显式存在：
-`路径未识别`、`拒绝在 playground`。身份类失败（`TOKEN_MISMATCH`、
-`IDENTITY_REBIND_UNPROVEN`、`IDENTITY_RESTORE_CROSS_PROJECT`）不另设终点，统一走
-`identity_update` → 同一个 `state_snapshot` 出口，由 `requires_identity_update`
-显式承载失败事实。
+`路径未识别`、`拒绝在 playground`。只有**已分类的身份失败**
+（`TOKEN_MISMATCH`、`IDENTITY_REBIND_UNPROVEN`、`IDENTITY_RESTORE_CROSS_PROJECT`、
+`COLLAB_IDENTITY_ANCHOR_MISSING`）不另设终点，统一走 `identity_update` →
+同一个 `state_snapshot` 出口，由 `requires_identity_update` 显式承载失败事实。
+route / runtime binding / transport（`DAEMON_*`）等非身份失败**不进入**
+`identity_update`：它们保留原始错误并非零退出，避免 `requires_identity_update`
+掩盖真实故障。
 
 ## 节点 owner 映射
 
@@ -184,8 +190,8 @@ ARC 契约：
 | 查找主控 | `appsdk.collab_context.find_master` | `current_master_worker_id` / `current_master_grant` / `collab/src/server/mod.rs` |
 | 输出快照 | `appsdk.collab_context.emit_snapshot` | `handle_context` / `collab/src/server/mod.rs` |
 | 只读投影（peers/master/status） | `appsdk.collab_context.read_only_state` | `read_only_project_state` / `collab/src/main_context.rs` |
-| 环境投影 | `appsdk.collab_context.env_view` | `context_env_view` / `collab/src/main_context.rs` |
-| 身份修复终点 | `appsdk.collab_context.identity_update` | `identity_update_view` / `identity_update_snapshot` / `collab/src/main_context.rs` |
+| 环境投影 | `appsdk.collab_context.env_view` | `context_env_view` / `collab/src/main_context.rs`；只取 `HOME`/`USER`/`LOGNAME`/`CARGO_HOME` 与 `COLLAB_`/`APPSDK_`/`CODEX_` 前缀，名字含 TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL 的键一律丢弃 |
+| 身份修复终点 | `appsdk.collab_context.identity_update` | `IdentityFailure::classify` / `identity_terminal` / `identity_update_view` / `identity_update_snapshot` / `collab/src/main_context.rs`；只有闭集身份码进入，其余失败原样上抛 |
 
 ## 变更边界
 

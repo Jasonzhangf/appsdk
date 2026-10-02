@@ -861,7 +861,7 @@ projections that used to require separate calls, so no agent flow needs to run
 | `peers`, `peer_count` | `collab who` | every registered peer with role and presence |
 | `summary`, `master_wake`, `subagents` | `collab status --all` | worker/message/task/subagent counts and the scheduling state |
 | `pending_merges` | `collab status --all` | durable merge obligations |
-| `env` | `env \| rg '(COLLAB\|APPSDK\|CODEX\|HOME\|USER)'` | the identity-relevant variables of this agent's own process |
+| `env` | `env \| rg '(COLLAB\|APPSDK\|CODEX\|HOME\|USER)'` | the identity-relevant variables of this agent's own process; credential-shaped names (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`) are dropped, so `CODEX_API_KEY` never appears |
 | `operations`, `next_actions` | — | the current role's required actions |
 | `requires_identity_update` | — | present only when the agent must repair its identity; see below |
 
@@ -902,9 +902,17 @@ DAGpipe 顺序执行：解析项目根 → 检查/创建基线 → 检查/启动
 | 拒绝在 playground 创建基线 | 在 worktree 内引导（非零退出） | 回到项目 main 根执行，不删旧身份 |
 | 默认订阅已停 | owner 显式 unsubscribe 持久生效 | 需要再收消息时用 `collab notify subscribe --event direct-message` 重订阅 |
 
-`requires_identity_update.reason` 保留精确错误前缀（如 `TOKEN_MISMATCH`、
-`IDENTITY_REBIND_UNPROVEN`、`IDENTITY_RESTORE_CROSS_PROJECT`），调用方可直接分支，
-不需要解析自然语言；`requires_approval` 显式说明是否需要人工授权。
+`requires_identity_update.reason` is the classified failure code, not a slice of
+prose: `TOKEN_MISMATCH`, `IDENTITY_REBIND_UNPROVEN`,
+`IDENTITY_RESTORE_CROSS_PROJECT`, or `COLLAB_IDENTITY_ANCHOR_MISSING`. A caller
+can branch on it without parsing natural language. `requires_approval` says
+whether a human decision is part of the action (`IDENTITY_RESTORE_CROSS_PROJECT`
+is the one that needs an operator-declared `--worker`, so its `action` names
+`collab context --worker <worker_id>` even when you passed no `--worker`).
+
+Only these classified identity failures reach the `identity_update` exit. A
+route, runtime-binding, or transport failure is a different problem: it keeps its
+original error and a non-zero exit, so `requires_identity_update` never masks it.
 
 完整语义图、转移表和 owner 映射见 `docs/collab-context-state-machine.md`；
 机器可校验 SESE 图见 `docs/dagpipe/collab-context.graph.json`

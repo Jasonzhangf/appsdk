@@ -103,66 +103,135 @@ pub(crate) fn context_may_retire_foreign_anchor(worker: Option<&str>) -> bool {
 /// Environment keys that describe the agent's own Collab/Codex runtime. The
 /// daemon cannot see the caller's environment, so this projection is built
 /// client-side and replaces the manual `env | rg` probe with one snapshot
-/// field. Only these keys and prefixes are exposed; every unrelated value,
-/// including any secret, stays out of the snapshot.
+/// field.
 const CONTEXT_ENV_KEYS: &[&str] = &["HOME", "USER", "LOGNAME", "CARGO_HOME"];
 const CONTEXT_ENV_PREFIXES: &[&str] = &["COLLAB_", "APPSDK_", "CODEX_"];
+
+/// Name fragments that mark a credential. `collab context` is the one place the
+/// caller's environment enters a Collab response, and `CODEX_API_KEY`-shaped
+/// variables are real, so a name-selected key is still dropped when it looks
+/// like a credential instead of being copied into every snapshot.
+const CONTEXT_ENV_SECRET_MARKERS: &[&str] = &["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"];
+
+fn context_env_key_is_secret(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    CONTEXT_ENV_SECRET_MARKERS
+        .iter()
+        .any(|marker| upper.contains(marker))
+}
 
 pub(crate) fn context_env_view() -> serde_json::Value {
     let mut selected = std::collections::BTreeMap::new();
     for (key, value) in std::env::vars() {
-        if CONTEXT_ENV_KEYS.contains(&key.as_str())
+        let named = CONTEXT_ENV_KEYS.contains(&key.as_str())
             || CONTEXT_ENV_PREFIXES
                 .iter()
-                .any(|prefix| key.starts_with(prefix))
-        {
+                .any(|prefix| key.starts_with(prefix));
+        if named && !context_env_key_is_secret(&key) {
             selected.insert(key, value);
         }
     }
     serde_json::to_value(selected).unwrap_or(serde_json::Value::Null)
 }
 
-/// `DAEMON_*` is the client's own transport prefix: it means the request never
-/// reached a daemon that could judge the identity. Relabelling that as an
-/// identity-update request would make the field lie, so it keeps propagating as
-/// an ordinary failure.
-pub(crate) fn is_daemon_transport_error(error: &anyhow::Error) -> bool {
-    error.to_string().starts_with("DAEMON_")
+/// The closed set of failures that mean this peer's identity cannot be proven,
+/// restored, or authenticated. These — and only these — are answered with the
+/// identity terminal. A route, runtime-binding, or transport failure is a
+/// different problem, so it keeps failing closed with a non-zero exit instead
+/// of being relabelled as an identity request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum IdentityFailure {
+    TokenMismatch,
+    RebindUnproven,
+    CrossProjectRestore,
+    AnchorMissing,
+}
+
+impl IdentityFailure {
+    /// Classify against the exact strings the identity layer and the daemon
+    /// actually produce. An unrecognised failure returns `None` on purpose: an
+    /// open-ended default would silently absorb unrelated failures.
+    pub(crate) fn classify(error: &str) -> Option<Self> {
+        if error.starts_with("token mismatch")
+            || error.starts_with("RUNTIME_BINDING_REJECTED: worker token does not match")
+        {
+            return Some(Self::TokenMismatch);
+        }
+        if error.starts_with("IDENTITY_REBIND_UNPROVEN:") {
+            return Some(Self::RebindUnproven);
+        }
+        if error.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:") {
+            return Some(Self::CrossProjectRestore);
+        }
+        if error.starts_with("COLLAB_IDENTITY_ANCHOR_MISSING:") {
+            return Some(Self::AnchorMissing);
+        }
+        None
+    }
+
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::TokenMismatch => "TOKEN_MISMATCH",
+            Self::RebindUnproven => "IDENTITY_REBIND_UNPROVEN",
+            Self::CrossProjectRestore => "IDENTITY_RESTORE_CROSS_PROJECT",
+            Self::AnchorMissing => "COLLAB_IDENTITY_ANCHOR_MISSING",
+        }
+    }
+
+    /// Cross-project adjudication is the one repair that must not be inferred:
+    /// the identity design requires an operator-declared `--worker`, so the
+    /// caller is told a human decision is part of the action.
+    pub(crate) fn requires_approval(self) -> bool {
+        matches!(self, Self::CrossProjectRestore)
+    }
+
+    pub(crate) fn action(self, worker: Option<&str>) -> String {
+        match worker {
+            Some(worker) => format!("collab context --worker {worker}"),
+            None if self == Self::CrossProjectRestore => {
+                "collab context --worker <worker_id>".to_owned()
+            }
+            None => "collab context".to_owned(),
+        }
+    }
 }
 
 /// The single, copyable instruction an agent needs when `collab context`
-/// cannot prove or restore its identity. The reason keeps the exact error
-/// prefix so a caller can branch without parsing prose, and `requires_approval`
-/// stays explicit so no caller has to guess whether a human gate applies.
+/// cannot prove or restore its identity. The reason is the classified code so a
+/// caller can branch without parsing prose, and `requires_approval` is derived
+/// per reason so no caller has to guess whether a human gate applies.
 pub(crate) fn identity_update_view(
     error: &anyhow::Error,
+    failure: IdentityFailure,
     requested_worker: Option<&str>,
 ) -> serde_json::Value {
-    let exact_error = error.to_string();
-    let reason = exact_error
-        .split([':', ' '])
-        .next()
-        .filter(|token| {
-            !token.is_empty()
-                && token
-                    .chars()
-                    .all(|character| character.is_ascii_uppercase() || character == '_')
-        })
-        .unwrap_or("IDENTITY_UNPROVEN")
-        .to_owned();
-    let action = match requested_worker {
-        Some(worker) => format!("collab context --worker {worker}"),
-        None => "collab context".to_owned(),
-    };
     json!({
         "required": true,
-        "reason": reason,
-        "exact_error": exact_error,
+        "reason": failure.code(),
+        "exact_error": error.to_string(),
         "worker_id": requested_worker,
-        "action": action,
-        "requires_approval": false,
+        "action": failure.action(requested_worker),
+        "requires_approval": failure.requires_approval(),
         "next": "re-run the action from the canonical project main checkout with a live runtime anchor; if the same error persists, preserve exact_error and worker_id and report them to the live master; do not edit routes, copy tokens, or start a second daemon",
     })
+}
+
+/// The identity terminal is entered only for a classified identity failure.
+/// Everything else keeps its original error and a non-zero exit.
+fn identity_terminal(
+    bootstrap: &ContextBootstrap,
+    error: anyhow::Error,
+    requested_worker: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    match IdentityFailure::classify(&error.to_string()) {
+        Some(failure) => Ok(identity_update_snapshot(
+            bootstrap,
+            &error,
+            failure,
+            requested_worker,
+        )),
+        None => Err(error),
+    }
 }
 
 /// Read-only daemon projections that need no worker token. They stay available
@@ -197,6 +266,7 @@ fn read_only_project_state(scope: &Scope) -> anyhow::Result<serde_json::Value> {
 pub(crate) fn identity_update_snapshot(
     bootstrap: &ContextBootstrap,
     error: &anyhow::Error,
+    failure: IdentityFailure,
     requested_worker: Option<&str>,
 ) -> serde_json::Value {
     let mut snapshot = read_only_project_state(&bootstrap.scope).unwrap_or_else(|read_error| {
@@ -205,7 +275,7 @@ pub(crate) fn identity_update_snapshot(
             "exact_error": read_error.to_string(),
         })
     });
-    let requires_identity_update = identity_update_view(error, requested_worker);
+    let requires_identity_update = identity_update_view(error, failure, requested_worker);
     if let Some(object) = snapshot.as_object_mut() {
         object.insert("schema_version".to_owned(), json!(1));
         object.insert("project_root".to_owned(), json!(bootstrap.scope.root));
@@ -240,13 +310,7 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
     let retire_foreign_anchor = context_may_retire_foreign_anchor(requested_worker);
     let mut ident = match identity::load_or_create_for_context(&scope, worker) {
         Ok(ident) => ident,
-        Err(error) => {
-            return Ok(identity_update_snapshot(
-                &bootstrap,
-                &error,
-                requested_worker,
-            ))
-        }
+        Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
     };
     if retire_foreign_anchor {
         crate::set_context_registration_requested(true);
@@ -255,13 +319,7 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
     crate::set_context_registration_requested(false);
     let (_, identity_state) = match registration {
         Ok(outcome) => outcome,
-        Err(error) => {
-            return Ok(identity_update_snapshot(
-                &bootstrap,
-                &error,
-                requested_worker,
-            ))
-        }
+        Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
     };
     let identity_state = match identity_state {
         RegistrationOutcome::Created => "created",
@@ -270,11 +328,9 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
         RegistrationOutcome::Recreated => "recreated",
     };
     // A registered identity can still be rejected by the daemon when its token
-    // no longer owns the worker id. That is the same identity-update terminal,
-    // not a generic failure: the read-only projection above still answers.
-    // `DAEMON_*` is the client's own transport prefix, meaning the request never
-    // reached a daemon that could judge the identity; relabelling that as an
-    // identity problem would make the field lie, so it keeps propagating.
+    // no longer owns the worker id. `identity_terminal` decides whether that
+    // rejection is a classified identity failure or an unrelated one that must
+    // keep failing closed.
     let mut v: serde_json::Value = match call_project(
         &scope,
         &ident,
@@ -284,14 +340,7 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
         },
     ) {
         Ok(value) => value,
-        Err(error) if !is_daemon_transport_error(&error) => {
-            return Ok(identity_update_snapshot(
-                &bootstrap,
-                &error,
-                requested_worker,
-            ))
-        }
-        Err(error) => return Err(error),
+        Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
     };
     if let Some(value) = v.as_object_mut() {
         value.insert(

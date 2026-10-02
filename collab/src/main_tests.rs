@@ -1065,11 +1065,15 @@ fn context_env_view_selects_only_collab_identity_variables() {
             "AWS_SECRET_ACCESS_KEY",
             std::env::var_os("AWS_SECRET_ACCESS_KEY"),
         ),
+        ("CODEX_API_KEY", std::env::var_os("CODEX_API_KEY")),
+        ("COLLAB_TOKEN", std::env::var_os("COLLAB_TOKEN")),
     ];
     std::env::set_var("COLLAB_TEST_ENV_MARKER", "collab-value");
     std::env::set_var("CODEX_TEST_ENV_MARKER", "codex-value");
     std::env::set_var("APPSDK_TEST_ENV_MARKER", "appsdk-value");
     std::env::set_var("AWS_SECRET_ACCESS_KEY", "must-not-leak");
+    std::env::set_var("CODEX_API_KEY", "must-not-leak-either");
+    std::env::set_var("COLLAB_TOKEN", "must-not-leak-either");
 
     let view = crate::main_context::context_env_view();
 
@@ -1087,10 +1091,63 @@ fn context_env_view_selects_only_collab_identity_variables() {
         view.get("AWS_SECRET_ACCESS_KEY").is_none(),
         "unrelated secrets must stay out of the context snapshot: {view}"
     );
+    // A selected prefix is not enough: `CODEX_API_KEY` and `COLLAB_TOKEN` are
+    // real credential shapes under those prefixes, and this snapshot is written
+    // on every bootstrap.
+    assert!(
+        view.get("CODEX_API_KEY").is_none(),
+        "a credential under a selected prefix must not be emitted: {view}"
+    );
+    assert!(
+        view.get("COLLAB_TOKEN").is_none(),
+        "a credential under a selected prefix must not be emitted: {view}"
+    );
     assert!(
         view.get("HOME").is_some(),
         "the home directory is part of the identity probe: {view}"
     );
+}
+
+/// Only the closed set of identity failures enters the identity terminal. A
+/// route, runtime-binding, or transport failure is a different problem and must
+/// keep failing closed rather than being reported as an identity request.
+#[test]
+fn only_classified_identity_failures_enter_the_identity_terminal() {
+    use crate::main_context::IdentityFailure;
+
+    // The real daemon strings, not fabricated uppercase variants.
+    assert_eq!(
+        IdentityFailure::classify("token mismatch: identity does not own this worker_id"),
+        Some(IdentityFailure::TokenMismatch)
+    );
+    assert_eq!(
+        IdentityFailure::classify(
+            "IDENTITY_REBIND_UNPROVEN: no current anchor; pass --worker to explicitly recover a durable identity"
+        ),
+        Some(IdentityFailure::RebindUnproven)
+    );
+    assert_eq!(
+        IdentityFailure::classify("IDENTITY_RESTORE_CROSS_PROJECT: refused"),
+        Some(IdentityFailure::CrossProjectRestore)
+    );
+    assert_eq!(
+        IdentityFailure::classify("COLLAB_IDENTITY_ANCHOR_MISSING: identity requires a tmux pane"),
+        Some(IdentityFailure::AnchorMissing)
+    );
+
+    for unrelated in [
+        "DAEMON_UNKNOWN: failed to send request to /tmp/server.sock",
+        "DAEMON_UNAVAILABLE: no daemon at /tmp/server.sock",
+        "PROJECT_ROUTE_NOT_READY/UNSUPPORTED: worker has no registered runtime binding",
+        "RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker codex-%8",
+        "RECOVERY_RECONCILE_REQUIRED: host route is not at project generation 22",
+    ] {
+        assert_eq!(
+            IdentityFailure::classify(unrelated),
+            None,
+            "{unrelated} is not an identity failure and must propagate"
+        );
+    }
 }
 
 /// The identity terminal must name the exact failure and the one action that
@@ -1098,10 +1155,16 @@ fn context_env_view_selects_only_collab_identity_variables() {
 /// status-hunt this consolidation removes.
 #[test]
 fn identity_update_view_names_the_reason_and_the_recovery_action() {
+    use crate::main_context::IdentityFailure;
+
     let error = anyhow::anyhow!(
         "IDENTITY_REBIND_UNPROVEN: worker codex-%3 has a reachable anchor that cannot be proven"
     );
-    let view = crate::main_context::identity_update_view(&error, Some("codex-%3"));
+    let view = crate::main_context::identity_update_view(
+        &error,
+        IdentityFailure::RebindUnproven,
+        Some("codex-%3"),
+    );
     assert_eq!(view["required"], true);
     assert_eq!(view["reason"], "IDENTITY_REBIND_UNPROVEN");
     assert_eq!(view["worker_id"], "codex-%3");
@@ -1115,9 +1178,31 @@ fn identity_update_view_names_the_reason_and_the_recovery_action() {
         "{view}"
     );
 
-    let unnamed = crate::main_context::identity_update_view(&error, None);
+    let unnamed =
+        crate::main_context::identity_update_view(&error, IdentityFailure::RebindUnproven, None);
     assert_eq!(unnamed["action"], "collab context");
     assert!(unnamed["worker_id"].is_null());
+
+    // Cross-project adjudication is the one repair that requires an operator to
+    // declare the identity, so the action must name `--worker` even when the
+    // caller supplied none, and approval must be explicit.
+    let cross = crate::main_context::identity_update_view(
+        &anyhow::anyhow!("IDENTITY_RESTORE_CROSS_PROJECT: refused without an operator declaration"),
+        IdentityFailure::CrossProjectRestore,
+        None,
+    );
+    assert_eq!(cross["requires_approval"], true);
+    assert_eq!(cross["action"], "collab context --worker <worker_id>");
+
+    // The real daemon rejection is lowercase prose; the reason must still be the
+    // stable code the skill documents.
+    let mismatch = crate::main_context::identity_update_view(
+        &anyhow::anyhow!("token mismatch: identity does not own this worker_id"),
+        IdentityFailure::TokenMismatch,
+        None,
+    );
+    assert_eq!(mismatch["reason"], "TOKEN_MISMATCH");
+    assert_eq!(mismatch["requires_approval"], false);
 }
 
 /// The identity terminal is an explicit snapshot, never a fabricated success:
@@ -1133,9 +1218,13 @@ fn identity_update_snapshot_is_explicit_and_not_a_registered_snapshot() {
         baseline_created: false,
         daemon_started: false,
     };
-    let error = anyhow::anyhow!("TOKEN_MISMATCH: identity does not own this worker_id");
-    let snapshot =
-        crate::main_context::identity_update_snapshot(&bootstrap, &error, Some("codex-%9"));
+    let error = anyhow::anyhow!("token mismatch: identity does not own this worker_id");
+    let snapshot = crate::main_context::identity_update_snapshot(
+        &bootstrap,
+        &error,
+        crate::main_context::IdentityFailure::TokenMismatch,
+        Some("codex-%9"),
+    );
 
     assert_eq!(snapshot["registered"], false);
     assert!(snapshot["identity"].is_null());
@@ -1159,25 +1248,6 @@ fn identity_update_snapshot_is_explicit_and_not_a_registered_snapshot() {
     );
 
     std::fs::remove_dir_all(root).ok();
-}
-
-/// A daemon that could not be reached never judged the identity, so it must not
-/// be reported as an identity-update request. Only a reached daemon's own
-/// rejection belongs in `requires_identity_update`.
-#[test]
-fn only_a_reached_daemon_rejection_is_an_identity_problem() {
-    assert!(crate::main_context::is_daemon_transport_error(
-        &anyhow::anyhow!("DAEMON_UNKNOWN: failed to send request to /tmp/server.sock")
-    ));
-    assert!(crate::main_context::is_daemon_transport_error(
-        &anyhow::anyhow!("DAEMON_UNAVAILABLE: no daemon at /tmp/server.sock")
-    ));
-    assert!(!crate::main_context::is_daemon_transport_error(
-        &anyhow::anyhow!("token mismatch: identity does not own this worker_id")
-    ));
-    assert!(!crate::main_context::is_daemon_transport_error(
-        &anyhow::anyhow!("IDENTITY_REBIND_UNPROVEN: no current anchor")
-    ));
 }
 
 #[test]

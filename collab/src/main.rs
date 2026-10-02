@@ -223,17 +223,21 @@ fn register(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::V
     register_with_runtime(scope, ident, context_runtime)
 }
 
+thread_local! {
+    /// Set for the duration of one `collab context` registration so the client
+    /// asks the daemon to retire a provably dead cross-project anchor instead of
+    /// failing closed. The getter and the setter below must share this single
+    /// cell: a second `thread_local!` in either one would be a different cell,
+    /// and `Req::Register` would then always carry
+    /// `retire_cross_project_anchor: false`.
+    static CONTEXT_RETIRE_CROSS_PROJECT: Cell<bool> = const { Cell::new(false) };
+}
+
 fn context_registration_requested() -> bool {
-    thread_local! {
-        static CONTEXT_RETIRE_CROSS_PROJECT: Cell<bool> = const { Cell::new(false) };
-    }
     CONTEXT_RETIRE_CROSS_PROJECT.with(Cell::get)
 }
 
 pub(crate) fn set_context_registration_requested(value: bool) {
-    thread_local! {
-        static CONTEXT_RETIRE_CROSS_PROJECT: Cell<bool> = const { Cell::new(false) };
-    }
     CONTEXT_RETIRE_CROSS_PROJECT.with(|flag| flag.set(value));
 }
 

@@ -111,6 +111,7 @@
         endpoint.codex_thread_id = Some(thread_id.to_owned());
         Some(TransportCandidates {
             appserver: None,
+            dsh: None,
             tmux: Some(crate::proto::TmuxCandidate {
                 endpoint,
                 cwd: env!("CARGO_MANIFEST_DIR").into(),
@@ -293,6 +294,7 @@
             .unwrap();
         Some(TransportCandidates {
             appserver: None,
+            dsh: None,
             tmux: Some(crate::proto::TmuxCandidate {
                 endpoint: binding.tmux_endpoint?,
                 cwd: root.display().to_string(),
@@ -331,6 +333,7 @@
             &server,
             &TransportCandidates {
                 appserver: Some(appserver),
+                dsh: None,
                 tmux: None,
             },
             root.to_str().unwrap(),
@@ -360,6 +363,7 @@
                     thread_id: "thread-1".into(),
                     cwd: root.display().to_string(),
                 }),
+                dsh: None,
                 tmux: None,
             },
             root.to_str().unwrap(),
@@ -383,6 +387,7 @@
             &server,
             &TransportCandidates {
                 appserver: None,
+                dsh: None,
                 tmux: None,
             },
             root.to_str().unwrap(),
@@ -404,6 +409,7 @@
             &server,
             &TransportCandidates {
                 appserver: None,
+                dsh: None,
                 tmux: Some(crate::proto::TmuxCandidate {
                     endpoint: crate::proto::TmuxEndpoint {
                         socket_path: "/tmp/collab-test-tmux.sock".into(),

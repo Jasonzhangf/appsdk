@@ -218,6 +218,7 @@ pub(super) fn register_tmux(
         Some(AppServerId::new("tui-default").unwrap()),
         Some(TransportCandidates {
             appserver: None,
+            dsh: None,
             tmux: Some(crate::proto::TmuxCandidate {
                 endpoint,
                 cwd: server.root.display().to_string(),

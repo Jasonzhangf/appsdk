@@ -244,7 +244,7 @@ impl NotificationSubscription {
         self.worker_id == worker_id
             && self.event == event
             && self.subject.as_deref() == subject
-            && matches!(self.method.as_str(), "appserver" | "tmux")
+            && crate::proto::TransportKind::from_method(self.method.as_str()).is_some()
             && self.status == "armed"
             && self.expires_ms > now
     }

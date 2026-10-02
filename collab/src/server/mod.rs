@@ -66,6 +66,10 @@ mod startup_tests;
 mod scheduler_admission_tests;
 
 #[cfg(test)]
+#[path = "dsh_channel_tests.rs"]
+mod dsh_channel_tests;
+
+#[cfg(test)]
 pub(crate) mod peer_tests;
 include!("mod_parts/part_01.rs");
 include!("mod_parts/part_02.rs");

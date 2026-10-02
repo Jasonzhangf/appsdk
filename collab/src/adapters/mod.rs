@@ -12,6 +12,7 @@
 //! scope/role from business payloads.
 
 pub mod codex_app_server;
+pub mod dsh;
 pub mod tmux;
 
 pub use codex_app_server::{candidate_from_env, immediate_notify, verify_candidate};
@@ -205,7 +206,7 @@ mod legacy {
         }
     }
 
-    const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 7] = [
+    const KNOWN_NOT_DELIVERED_PREFIXES: [&str; 9] = [
         "ADAPTER_ROUTE_UNAVAILABLE:",
         "ADAPTER_ENDPOINT_UNAVAILABLE:",
         "ADAPTER_UNKNOWN_ENDPOINT:",
@@ -213,6 +214,12 @@ mod legacy {
         "ADAPTER_INVALID_BINDING:",
         "ADAPTER_STALE_BINDING:",
         "ADAPTER_WRONG_TURN:",
+        // dsh: the control socket could not be opened, or the gateway refused
+        // the enqueue. `DSH_ENDPOINT_UNKNOWN` is deliberately absent: a timeout
+        // or malformed reply means the message may already be queued, so it
+        // stays `Unknown` and is never resent.
+        "DSH_ENDPOINT_REJECTED:",
+        "DSH_ENDPOINT_BLOCKED:",
     ];
 
     /// Classify a sink error by the exact `AdapterError` display contract.

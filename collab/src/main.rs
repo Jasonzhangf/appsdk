@@ -257,14 +257,30 @@ fn register_with_runtime(
     context_runtime: RuntimeIdentity,
 ) -> anyhow::Result<serde_json::Value> {
     let cwd = scope.root.display().to_string();
-    let appserver_candidate = if ident
+    // Candidate collection yields at most one channel family.
+    //
+    // dsh is mutually exclusive with the pane transports (design F1), and a
+    // persisted binding keeps its own channel: collecting a pane candidate for
+    // a persisted dsh peer would silently migrate it onto another transport.
+    //
+    // This CLI never produces a dsh candidate. Every dsh field comes from the
+    // gateway's own registry (design section 3.1) and DSH exposes no ambient
+    // agent/session identity to derive it from, so the gateway supplies the
+    // candidate through its own client path (design section 7.2) instead.
+    let persisted_kind = ident
         .transport
         .as_ref()
-        .is_some_and(|transport| transport.kind == proto::TransportKind::Tmux)
-    {
-        None
-    } else {
-        crate::client::adapters::candidate_from_env().map_err(anyhow::Error::msg)?
+        .map(|transport| transport.kind.clone());
+    let (appserver_candidate, tmux_candidate) = match persisted_kind {
+        Some(proto::TransportKind::Dsh) => (None, None),
+        Some(proto::TransportKind::Tmux) => (
+            None,
+            crate::client::adapters::tmux::candidate_from_env().ok(),
+        ),
+        _ => (
+            crate::client::adapters::candidate_from_env().map_err(anyhow::Error::msg)?,
+            crate::client::adapters::tmux::candidate_from_env().ok(),
+        ),
     };
     let response: serde_json::Value = client::call_with_runtime_identity_at_root_daemon(
         &scope.sock_path(),
@@ -274,7 +290,8 @@ fn register_with_runtime(
             cwd,
             candidates: Some(proto::TransportCandidates {
                 appserver: appserver_candidate,
-                tmux: crate::client::adapters::tmux::candidate_from_env().ok(),
+                tmux: tmux_candidate,
+                dsh: None,
             }),
             retire_cross_project_anchor: context_registration_requested(),
         },
@@ -570,6 +587,50 @@ fn registered_runtime_projection(
                 "namespace": transport.namespace,
                 "sessionId": session,
                 "threadId": thread,
+                "projectRoot": project_root,
+                "capabilities": transport.capabilities,
+                "processId": daemon_pid,
+            }))
+        }
+        crate::proto::TransportKind::Dsh => {
+            let endpoint = transport.endpoint.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("registered dsh transport is missing its gateway endpoint")
+            })?;
+            let gateway_runtime = transport.namespace.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("registered dsh transport is missing its gateway runtime id")
+            })?;
+            let agent = transport.thread_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("registered dsh transport is missing its agent id")
+            })?;
+            let session = transport.session_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("registered dsh transport is missing its session id")
+            })?;
+            // The route key is reused, not new: the dsh agent id is carried as
+            // `native_thread_id` and the dsh session id as `session_id`, so the
+            // typed binding is checked the same way as the other transports.
+            if runtime
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref()
+                != Some(session)
+                || runtime
+                    .native_thread_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    != Some(agent)
+            {
+                anyhow::bail!("registered dsh transport does not match its runtime route");
+            }
+            Ok(json!({
+                "runtimeId": runtime.runtime_id,
+                "appserverId": runtime.appserver_id,
+                "transport": "dsh",
+                "endpoint": endpoint,
+                "gatewayRuntimeId": gateway_runtime,
+                "agentId": agent,
+                "sessionId": session,
                 "projectRoot": project_root,
                 "capabilities": transport.capabilities,
                 "processId": daemon_pid,

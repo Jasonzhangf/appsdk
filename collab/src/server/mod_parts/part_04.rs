@@ -1033,6 +1033,38 @@ impl ProjectRuntimeManager {
                     )
                 })?;
             }
+            TransportKind::Dsh => {
+                // Re-verification for a dsh peer is a fresh single-use challenge
+                // against the gateway, never a pane comparison: there is no pane.
+                if requested_tmux_endpoint.is_some() {
+                    return Err(format!(
+                        "ROUTE_RESOLVE_NOT_FOUND: address {native_thread_id} is not registered with a tmux endpoint"
+                    ));
+                }
+                let endpoint = transport.endpoint.ok_or_else(|| {
+                    format!("ROUTE_RESOLVE_INVALID: current route state for dsh agent {native_thread_id} has no endpoint")
+                })?;
+                let runtime_id = transport.namespace.ok_or_else(|| {
+                    format!("ROUTE_RESOLVE_INVALID: current route state for dsh agent {native_thread_id} has no gateway runtime id")
+                })?;
+                match crate::client::adapters::dsh::probe(
+                    &endpoint,
+                    &runtime_id,
+                    native_thread_id.as_str(),
+                ) {
+                    crate::client::adapters::dsh::PeerPresence::Live => {}
+                    crate::client::adapters::dsh::PeerPresence::Absent => {
+                        return Err(format!(
+                            "ROUTE_RESOLVE_NOT_FOUND: gateway does not know dsh agent {native_thread_id}"
+                        ));
+                    }
+                    crate::client::adapters::dsh::PeerPresence::Unknown => {
+                        return Err(format!(
+                            "ROUTE_RESOLVE_UNKNOWN: dsh agent {native_thread_id} liveness is uncertain"
+                        ));
+                    }
+                }
+            }
         }
         let route = RouteResolution {
             app_scope_id: binding.app_scope_id,

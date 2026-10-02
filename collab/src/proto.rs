@@ -12,6 +12,8 @@ pub enum TransportKind {
     AppServer,
     #[serde(rename = "tmux")]
     Tmux,
+    #[serde(rename = "dsh")]
+    Dsh,
 }
 
 impl TransportKind {
@@ -19,7 +21,19 @@ impl TransportKind {
         match self {
             Self::AppServer => "appserver",
             Self::Tmux => "tmux",
+            Self::Dsh => "dsh",
         }
+    }
+
+    /// Every kind, so callers that must accept "any known transport" can ask
+    /// the enum instead of keeping their own list of strings.
+    pub const ALL: [TransportKind; 3] = [Self::AppServer, Self::Tmux, Self::Dsh];
+
+    /// Parses the `as_str` form. Kept next to `as_str` on purpose: the two are
+    /// one contract, and a subscription whose `method` is a string was the
+    /// place a new kind silently became unrecognised.
+    pub fn from_method(method: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == method)
     }
 }
 
@@ -51,12 +65,23 @@ pub struct AppServerCandidate {
     pub cwd: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DshCandidate {
+    pub endpoint: String,
+    pub runtime_id: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub cwd: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportCandidates {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appserver: Option<AppServerCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh: Option<DshCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

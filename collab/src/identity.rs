@@ -1452,9 +1452,6 @@ fn identity_for_scope_rebind_at(
     scope: &Scope,
     selected_worker: Option<&str>,
 ) -> anyhow::Result<ScopeRebindOutcome> {
-    let project_scope = scope
-        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
-        .project_scope_id;
     // The explicit override names the durable identity to recover, so it is
     // resolved first, directly by path, before any anchor or liveness work: it
     // exists precisely to bypass an ambiguous anchor or a stale/silent peer, so
@@ -1462,21 +1459,16 @@ fn identity_for_scope_rebind_at(
     // probe timeout or fail it outright. A name with no record is
     // `NoCandidate`; the caller decides whether that may mint.
     if let Some(selected) = selected_worker {
-        let Some(identity) = read_identity(&identity_path_at(host_paths, selected)?)? else {
-            return Ok(ScopeRebindOutcome::NoCandidate);
-        };
-        // Cross-project recovery is never an implicit scope override. A
-        // durable identity records the project it was registered in; naming it
-        // from a different project must fail closed instead of adopting a
-        // foreign credential. Same-scope explicit recovery stays direct and
-        // does not require anchor or liveness probing.
-        if identity.project_scope.as_ref() != Some(&project_scope) {
-            return Ok(ScopeRebindOutcome::Unproven(format!(
-                "selected worker {selected} belongs to another project scope; cross-project identity recovery fails closed"
-            )));
-        }
-        return Ok(ScopeRebindOutcome::Adopted(identity));
+        return Ok(
+            match read_identity(&identity_path_at(host_paths, selected)?)? {
+                Some(identity) => ScopeRebindOutcome::Adopted(identity),
+                None => ScopeRebindOutcome::NoCandidate,
+            },
+        );
     }
+    let project_scope = scope
+        .route_scope(AppServerId::new(CLI_APP_SERVER_ID)?)?
+        .project_scope_id;
     // Adopting a persisted peer only re-anchors it, so a caller must hold a
     // current anchor to ask for one. Without any pane, Codex session or thread
     // address the caller stays unauthenticated and only an explicit `--worker`

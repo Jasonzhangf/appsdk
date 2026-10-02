@@ -137,6 +137,11 @@ chosen by a single ordered decision, not by a per-binding generation:
    recovered without a liveness probe, so anchor ambiguity, a cross-project
    record, and a live duplicate all yield to the named identity instead of
    blocking it. Without `--worker` the live conflict still fails closed.
+   `--worker` is the user's adjudication channel (user requirement:
+   "冲突由用户裁决，可以顶替冲突身份"), so a record whose `project_scope`
+   is another project is still recoverable by name — a moved checkout or
+   renamed project must be able to recover its own durable identity and
+   subscriptions instead of minting a new one (`explicit_worker_recovers_a_cross_project_identity_by_name`).
 2. **Then scope preference.** Restrict to records whose `project_scope` is the
    current project. A foreign duplicate can never shadow, or be retired in
    place of, a current-scope match.

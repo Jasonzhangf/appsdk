@@ -911,6 +911,58 @@ fn multiple_non_dead_peers_never_auto_adopt_without_anchor_evidence() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// The explicit `--worker` override still fails closed when the named durable
+/// identity belongs to another project scope. Cross-project recovery is never
+/// an implicit scope override, even when the user names the peer directly.
+#[test]
+fn explicit_worker_rejects_a_cross_project_durable_identity() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = short_test_root();
+    std::fs::create_dir_all(root.join(".agent-collab")).unwrap();
+    let state_root = root.join("global");
+    std::fs::create_dir_all(&state_root).unwrap();
+    let scope = test_scope(root.clone());
+    let foreign_root = short_test_root();
+    std::fs::create_dir_all(foreign_root.join(".agent-collab")).unwrap();
+    let foreign_scope = test_scope(foreign_root.clone());
+    let host_paths = HostPaths::for_state_root(&state_root).unwrap();
+    persist_peer_at(
+        &host_paths,
+        &foreign_scope,
+        "foreign-agent",
+        "session-foreign",
+        "thread-foreign",
+        1,
+    );
+    persist_peer_at(
+        &host_paths,
+        &scope,
+        "current-agent",
+        "session-current",
+        "thread-current",
+        1,
+    );
+
+    // Same-scope explicit recovery still adopts the named durable identity.
+    match identity_for_scope_rebind_at(&host_paths, &scope, Some("current-agent")).unwrap() {
+        ScopeRebindOutcome::Adopted(identity) => assert_eq!(identity.worker_id, "current-agent"),
+        other => panic!("same-scope --worker must adopt: {other:?}"),
+    }
+
+    // A foreign-scope durable identity is never adopted from this project.
+    let rejected =
+        identity_for_scope_rebind_at(&host_paths, &scope, Some("foreign-agent")).unwrap();
+    match rejected {
+        ScopeRebindOutcome::Unproven(detail) => {
+            assert!(detail.contains("another project scope"), "{detail}");
+        }
+        other => panic!("cross-project --worker must fail closed: {other:?}"),
+    }
+    std::fs::remove_dir_all(state_root).ok();
+    std::fs::remove_dir_all(root).ok();
+    std::fs::remove_dir_all(foreign_root).ok();
+}
+
 /// When several records claim the same drifted anchor and none is live, they
 /// are this peer's own registrations: recovery adopts one deterministically and
 /// the explicit `--worker` override can still pick a specific one.

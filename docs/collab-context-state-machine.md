@@ -148,8 +148,15 @@ flowchart LR
     V --> G[注册/重建对端]
     G --> N[恢复默认订阅]
     N --> M[查找主控]
-    M --> O[state_snapshot]
+    M --> U[身份修复判定]
+    U --> P[只读投影]
+    P --> E[环境投影]
+    E --> O[state_snapshot]
 ```
+
+该图的契约要求每个节点恰好一个输入、每条 ARC 恰好一个汇，因此拓扑是一条链：
+`identity_update` 是链上的身份修复判定阶段，由它内部决定走已分类失败的修复投影
+还是成功快照，而不是在图上分出第二个出口。
 
 ARC 契约：
 
@@ -164,6 +171,9 @@ ARC 契约：
 | `registered_route` | Object | route/transport 注册完成 |
 | `notify_state` | Object | 默认订阅状态 |
 | `master_grant` | Object | live master grant 或空 |
+| `identity_repair_request` | Object | 身份修复判定阶段输出；只有已分类身份失败才继续走修复投影 |
+| `read_only_projection` | Object | peers / master / status 只读投影 |
+| `env_projection` | Object | 过滤后的 shell 环境子集（凭据形状的键已丢弃） |
 | `state_snapshot` | Object | 唯一出口，含 bootstrap/identity/daemon/route/subscriptions/master/operations/peers/peer_count/summary/master_wake/subagents/pending_merges/inbox/worktrees/tasks/env；身份修复时另有 requires_identity_update 且 registered=false |
 
 失败终点不进入成功 DAG，作为 attempt 终态显式存在：

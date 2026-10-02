@@ -8,6 +8,23 @@ fn fix_and_notification_graphs_are_single_source_single_sink() {
     }
 }
 
+/// `validate_graph_contracts()` is short-circuited by a pre-existing manifest
+/// count mismatch (the manifest declares appsdk-collab-identity-adjudication,
+/// which `embedded_graph_paths()` does not embed). The collab context graph
+/// still has to satisfy the contract it will be judged by once that mismatch is
+/// resolved, so this checks it directly: one entry, one exit, exactly one input
+/// per node, exactly one sink per arc, and only registered design operators.
+#[test]
+fn collab_context_design_graph_is_single_source_single_sink_and_registered() {
+    let (_, source) = embedded_graph_paths()
+        .into_iter()
+        .find(|(path, _)| *path == "docs/dagpipe/collab-context.graph.json")
+        .expect("the collab context graph is embedded");
+    let graph = parse_graph_json(source).unwrap();
+    ensure_single_source_single_sink(&graph).unwrap();
+    validate_graph_registry(&graph).unwrap();
+}
+
 #[test]
 fn graph_manifest_covers_every_embedded_graph_and_validate_reports_contracted_designs() {
     let result = validate_graph_contracts().unwrap();

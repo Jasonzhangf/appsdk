@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/records/worktree-record.schema.json",
+  "type": "object",
+  "required": ["worktree_id", "issue_id", "module_id", "base_ref", "base_commit", "branch", "head_commit", "initial_clean", "final_clean", "isolation_mode", "scope_hash", "created_at"],
+  "allOf": [
+    {
+      "if": {
+        "required": ["issue_id"],
+        "properties": {
+          "issue_id": {
+            "type": "string",
+            "minLength": 1,
+            "not": {"pattern": "^(?:none$|legacy-)"}
+          }
+        }
+      },
+      "then": {"required": ["bug_triage", "bug_triage_query_binding"]}
+    }
+  ],
+  "properties": {
+    "worktree_id": {"type": "string"},
+    "milestone_id": {"type": "string"},
+    "issue_id": {"type": "string"},
+    "goal_issue_id": {"type": "string"},
+    "goal_issue_binding": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "module_id": {"type": "string"},
+    "base_ref": {"type": "string"},
+    "base_commit": {"type": "string"},
+    "branch": {"type": "string"},
+    "head_commit": {"type": "string"},
+    "initial_clean": {"const": true},
+    "final_clean": {"const": true},
+    "isolation_mode": {"const": "isolated_worktree"},
+    "scope_hash": {"type": "string"},
+    "bug_triage": {
+      "type": "object",
+      "required": ["query_executed", "query", "query_result", "mode", "reopened_from_issue_id"],
+      "properties": {
+        "query_executed": {"const": true},
+        "query": {"type": "string", "minLength": 1},
+        "mode": {"enum": ["new_confirmed", "reused", "reopened", "reopened_same_record", "historical_legacy"]},
+        "reopened_from_issue_id": {"type": ["string", "null"]},
+        "matched_issue_id": {"type": ["string", "null"]},
+        "matched_title": {"type": ["string", "null"]},
+        "matched_classification": {"type": ["string", "null"]},
+        "query_result": {
+          "type": "object",
+          "required": ["records", "query_result_hash"],
+          "properties": {
+            "records": {"type": "array"},
+            "query_result_hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+          }
+        }
+      }
+    },
+    "bug_triage_query_binding": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "created_at": {"type": "string"}
+  }
+}

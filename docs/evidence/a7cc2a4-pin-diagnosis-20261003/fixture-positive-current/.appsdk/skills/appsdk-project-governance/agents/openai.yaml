@@ -1,0 +1,4 @@
+interface:
+  display_name: "AppSDK Project Governance"
+  short_description: "Guide and govern the full project lifecycle"
+  default_prompt: "Use $appsdk-project-governance. Existing projects may rerun appsdk init and use read-only bootstrap intake to compare current rules with the versioned standard template; retain project decisions and apply only user-approved upgrades. Then initialize the task plan, execute the next legal step, verify evidence, deliver, freeze, and clean up."

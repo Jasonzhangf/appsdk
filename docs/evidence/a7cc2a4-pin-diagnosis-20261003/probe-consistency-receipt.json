@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "kind": "owned-synthetic-public-cli-diagnostic-probe",
+  "not_a_fix": true,
+  "genuine_input_not_mutated": true,
+  "purpose": "Test the r1 review hypothesis that a genuinely admitted historical custom-map record would later fail SDK_MIGRATION_TARGET_MAP_MISMATCH in migrate_governance_maps.",
+  "app_sdk_base": "e4479efaee9be8817f52298812342ec1aa80a3bb",
+  "agentteams_input": {
+    "repo": "/Volumes/extension/code/AgentTeams",
+    "commit": "de099b79f153e6fd220b98d5ee89f4777b7cfb53",
+    "tree": "c8ec9ba3d97d922f6c13262009aa71295cd0075c"
+  },
+  "probe_mutation": {
+    "file": ".appsdk/migrations/0.1.5-to-0.1.6/record.json",
+    "operation": "for every map entry, set canonical_target_digest to that entry target_digest",
+    "intentionally_bypasses": "historical target authorization guard only",
+    "result_sha256": "sha256:e4a633da6dfcfef3fb1c35ae39619e87f8ad65750f1bd2797308e29bcb39aa33"
+  },
+  "binary": {
+    "path": "runtime/probe-target/debug/appsdk",
+    "sha256": "sha256:cb4c26d50c6fc41bfbef5273ef7d55b1de4b26cfc17eb4e0e0033a83822acf80",
+    "source": "AppSDK base e4479ef, unmodified product source build"
+  },
+  "run": {
+    "command": "env APPSDK_HOME=<runtime/registry-baseline-1> <binary> pin-lock <runtime/probe-baseline-1> --binary <binary>",
+    "exit_code": 0,
+    "stdout": "pinned <binary>",
+    "second_guard_observed": false,
+    "second_guard_expected_by_r1": "SDK_MIGRATION_TARGET_MAP_MISMATCH"
+  },
+  "post_pin_facts": {
+    "project_sdk_version": "0.1.0010",
+    "lock_version": "0.1.0010",
+    "lock_previous_bundle_digests": [
+      "sha256:e9a816589ce03740b30bf847be4fbb6c4203c70d39b11ada2b723dc966d0a091"
+    ],
+    "current_record": ".appsdk/migrations/0.1.0009-to-0.1.0010/record.json",
+    "current_record_sha256": "sha256:a825bcd532465cb0034b4d200a590d18298ddb4268df13b6ec6eba2bb5c8ca04",
+    "current_record_target_digest_equals_live_custom_map": true,
+    "live_custom_map_digests": {
+      "function-map.json": "sha256:5a89f81462ad34d831bf1da9e82d690a1f9653added723cb4a99618149a3d16e",
+      "mainline-call-map.json": "sha256:b6c41f115941405eeef0116ef602b390d04b6080fdf284b3a1b14a47fdd97d03",
+      "resource-map.json": "sha256:44e8135acede8ae3bf4aa7f5aa5c4c2f62cdef5abc2ea9f8f43b873f5976f9c8",
+      "verification-map.json": "sha256:21ae8fcd3aa3d017321e5bb5ee3a9606fdf561f9d69348802f1bcd1a12bef3a7"
+    },
+    "baseline_module_registry_sha256": "sha256:e02c62e52b81c230eceb3745f713148f3629490f519e531b7d4fae09bf05cd0b",
+    "missing_module_registry_from_committed_subset": {
+      "observed_error": "MISSING_GOVERNANCE_MAP:module-registry.json",
+      "meaning": "the committed fixture-genuine evidence archive is a 14-file subset, not the full historical project"
+    },
+    "ordinary_verify": {
+      "exit_code": 1,
+      "stderr": "INVALID_DECLARED_ZONE_CONTRACT",
+      "cause": "historical project declares contracts/transitions/zone-transition-manifest.json while current bundle installs contracts/transitions/zone-transition.manifest.json",
+      "validator": "rust/src/main/governance.rs:1280-1324",
+      "classification": "separate unresolved dependency for the green verify path; not target-map mismatch evidence"
+    }
+  },
+  "conclusion": {
+    "historical_target_authorization_still_required": true,
+    "r1_second_guard_hypothesis": "refuted by public CLI",
+    "current_step_invariant_observed": "target_digest follows the actual live custom-map bytes while canonical target provenance is retained",
+    "not_claimed": [
+      "product fix",
+      "genuine unchanged archive pin-lock success",
+      "genuine ordinary verify success",
+      "independent review PASS"
+    ]
+  },
+  "cleanup": {
+    "remove_after_capture": [
+      "runtime/probe-baseline-1",
+      "runtime/probe-consistency",
+      "runtime/registry-baseline-1",
+      "runtime/registry-consistency",
+      "runtime/probe-target"
+    ],
+    "removed_at": "2026-10-03T02:18:00-07:00",
+    "removal_method": "scoped find -delete plus cargo clean --manifest-path rust/Cargo.toml --target-dir for the owned build cache",
+    "retained": [
+      "report.md",
+      "run-notes.md",
+      "fixture-genuine",
+      "fixture-positive-current",
+      "positive-control-binary-cleanup.json",
+      "probe-consistency-receipt.json",
+      "docs/dagpipe/sdk-pin-history.graph.json"
+    ]
+  }
+}

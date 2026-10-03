@@ -1,0 +1,716 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/communication/communication-request.schema.json",
+  "type": "object",
+  "required": ["op"],
+  "properties": {
+    "op": {
+      "enum": [
+        "capabilities",
+        "status",
+        "register_runtime",
+        "register-runtime",
+        "register_adapter",
+        "register-adapter",
+        "register_scope",
+        "register-scope",
+        "register_agent",
+        "register-agent",
+        "refresh_agent",
+        "refresh-agent",
+        "rebind_agent",
+        "rebind-agent",
+        "send",
+        "record_delivery",
+        "record-delivery",
+        "set_agent_state",
+        "set-agent-state",
+        "tick",
+        "flush_notifications",
+        "flush-notifications",
+        "report_bug",
+        "report-bug",
+        "update_bug",
+        "update-bug",
+        "create_loop",
+        "create-loop",
+        "advance_loop",
+        "advance-loop",
+        "record_error",
+        "record-error",
+        "accumulate_wake",
+        "accumulate-wake",
+        "record_wake",
+        "record-wake",
+        "master_wake_decide",
+        "master-wake-decide"
+      ]
+    },
+    "address": {"$ref": "#/$defs/address"},
+    "message": {
+      "oneOf": [
+        {"$ref": "#/$defs/message"},
+        {"type": "string", "minLength": 1}
+      ]
+    },
+    "scope": {"$ref": "#/$defs/scope"},
+    "agent": {"$ref": "#/$defs/agent"},
+    "rebind": {"$ref": "#/$defs/rebind"},
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "delivery": {"$ref": "#/$defs/delivery"},
+    "adapter": {"$ref": "#/$defs/adapter"},
+    "bug": {"$ref": "#/$defs/bugRequest"},
+    "loop": {"$ref": "#/$defs/loopRequest"},
+    "actor": {"$ref": "#/$defs/address"},
+    "master": {"$ref": "#/$defs/address"},
+    "signal": {"$ref": "#/$defs/masterWakeSignalRequest"},
+    "runtimeId": {"type": "string", "minLength": 1},
+    "appserverId": {"type": "string", "minLength": 1},
+    "namespace": {"enum": ["codex_app", "codex_tui"]},
+    "endpoint": {"type": "string", "minLength": 1},
+    "projectRoot": {"type": "string", "minLength": 1},
+    "capabilities": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "processId": {"type": "integer", "minimum": 1},
+    "adapterId": {"type": "string", "minLength": 1},
+    "kind": {"type": "string", "minLength": 1},
+    "target": {"type": ["string", "null"]},
+    "enabled": {"type": ["boolean", "null"]},
+    "execute": {"type": ["boolean", "null"]},
+    "recipient": {"$ref": "#/$defs/address"},
+    "scopeId": {"type": "string", "minLength": 1},
+    "sessionIds": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "sessionId": {"type": "string", "minLength": 1},
+    "agentId": {"type": "string", "minLength": 1},
+    "role": {"enum": ["master", "peer", "subagent"]},
+    "masterGrant": {"type": ["string", "null"]},
+    "parent": {"$ref": "#/$defs/address"},
+    "leaseMs": {"type": ["integer", "null"], "minimum": 1000},
+    "from": {"$ref": "#/$defs/address"},
+    "to": {"$ref": "#/$defs/address"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "body": {"type": "string", "minLength": 1},
+    "coalesceKey": {"type": "string", "minLength": 1},
+    "issueId": {"type": ["string", "null"]},
+    "conversationId": {"type": ["string", "null"]},
+    "messageId": {"type": ["string", "null"]},
+    "createdAt": {"type": ["string", "null"]},
+    "attemptId": {"type": "string", "minLength": 1},
+    "nonce": {"type": "string", "minLength": 1},
+    "state": {"type": "string", "minLength": 1},
+    "observedAt": {"type": ["string", "null"], "format": "date-time"},
+    "bugId": {"type": "string", "minLength": 1},
+    "bug_id": {"type": "string", "minLength": 1},
+    "description": {"type": "string", "minLength": 1},
+    "reporter": {"$ref": "#/$defs/address"},
+    "worktreeId": {"type": ["string", "null"]},
+    "loopId": {"type": "string", "minLength": 1},
+    "loop_id": {"type": "string", "minLength": 1},
+    "owner": {"$ref": "#/$defs/address"},
+    "trigger": {"type": "string", "minLength": 1},
+    "work": {"type": "string", "minLength": 1},
+    "gate": {"type": "string", "minLength": 1},
+    "stop": {"type": "string", "minLength": 1},
+    "maxIterations": {"type": "integer", "minimum": 1},
+    "deadlineAt": {"type": ["string", "null"], "format": "date-time"},
+    "complete": {"type": "boolean"},
+    "blocked": {"type": "boolean"},
+    "code": {"type": "string", "minLength": 1},
+    "context": true,
+    "signalId": {"type": "string", "minLength": 1},
+    "key": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "source": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]},
+    "generation": {"type": "integer", "minimum": 0},
+    "action": {"enum": ["hold", "dispatch", "handled", "complete", "completed", "schedule"]},
+    "status": {"enum": ["active", "resolved", "closed"]},
+    "now": {"type": "string", "format": "date-time"},
+    "at": {"type": ["string", "null"], "format": "date-time"},
+    "evidence": {"type": "object", "minProperties": 1},
+    "priority": {"$ref": "#/$defs/priority"},
+    "deliveryMode": {"$ref": "#/$defs/deliveryMode"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["register_runtime", "register-runtime"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["runtime"]},
+          {
+            "required": ["runtimeId", "appserverId", "namespace", "endpoint", "projectRoot", "processId"],
+            "not": {"required": ["runtime"]}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["register_adapter", "register-adapter"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["adapter"]},
+          {
+            "required": ["adapterId", "kind"],
+            "not": {"required": ["adapter"]},
+            "properties": {"kind": {"enum": ["mailbox", "appserver"]}}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["register_scope", "register-scope"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["scope"]},
+          {
+            "required": ["scopeId", "appserverId", "namespace", "endpoint", "projectRoot", "runtimeId"],
+            "not": {"required": ["scope"]}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["register_agent", "register-agent"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["agent"]},
+          {
+            "required": ["scopeId", "sessionId", "agentId", "runtimeId"],
+            "not": {"required": ["agent"]}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["send"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "required": ["message"],
+            "properties": {"message": {"$ref": "#/$defs/message"}}
+          },
+          {
+            "required": ["from", "to", "title", "priority", "body"],
+            "not": {"required": ["message"]}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["record_delivery", "record-delivery"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["delivery"]},
+          {
+            "required": ["messageId", "attemptId", "nonce", "state", "runtimeId", "evidence"],
+            "not": {"required": ["delivery"]},
+            "properties": {
+              "messageId": {"type": "string", "minLength": 1},
+              "attemptId": {"type": "string", "minLength": 1},
+              "nonce": {"type": "string", "minLength": 1},
+              "state": {"enum": ["delivered", "executed", "replied", "read", "consumed", "unknown"]},
+              "runtimeId": {"type": "string", "minLength": 1},
+              "evidence": {"type": "object", "minProperties": 1}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["report_bug", "report-bug"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["bug"]},
+          {
+            "required": ["scopeId", "title", "priority", "description", "reporter"],
+            "not": {"required": ["bug"]},
+            "oneOf": [
+              {"required": ["bugId"]},
+              {"required": ["bug_id"]}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["create_loop", "create-loop"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["loop"]},
+          {
+            "required": ["kind", "owner", "trigger", "work", "gate", "state", "stop"],
+            "not": {"required": ["loop"]},
+            "oneOf": [
+              {"required": ["loopId"]},
+              {"required": ["loop_id"]}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["refresh_agent", "refresh-agent"]}
+        },
+        "required": ["op"]
+      },
+      "then": {"required": ["address"]}
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["rebind_agent", "rebind-agent"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["rebind"]},
+          {
+            "required": ["from", "to", "runtimeId"],
+            "not": {"required": ["rebind"]}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["set_agent_state", "set-agent-state"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "required": ["address", "state"],
+        "properties": {"state": {"enum": ["working", "idle"]}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["update_bug", "update-bug"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["bugId", "status", "actor"]},
+          {"required": ["bug_id", "status", "actor"]}
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["advance_loop", "advance-loop"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "oneOf": [
+          {"required": ["loopId"]},
+          {"required": ["loop_id"]}
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["record_error", "record-error"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "required": ["code", "message"],
+        "properties": {"message": {"type": "string", "minLength": 1}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {
+            "enum": [
+              "accumulate_wake",
+              "accumulate-wake",
+              "record_wake",
+              "record-wake"
+            ]
+          }
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "anyOf": [{"required": ["master"]}, {"required": ["address"]}],
+        "oneOf": [
+          {"required": ["signal"]},
+          {
+            "required": ["key", "kind", "title", "priority", "summary"],
+            "not": {"required": ["signal"]}
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "op": {"enum": ["master_wake_decide", "master-wake-decide"]}
+        },
+        "required": ["op"]
+      },
+      "then": {
+        "required": ["generation", "action"],
+        "anyOf": [{"required": ["master"]}, {"required": ["address"]}]
+      }
+    },
+    {
+      "if": {
+        "required": ["op", "complete"],
+        "properties": {
+          "op": {"enum": ["advance_loop", "advance-loop"]},
+          "complete": {"const": true}
+        }
+      },
+      "then": {
+        "required": ["evidence"],
+        "properties": {
+          "evidence": {"$ref": "#/$defs/loopCompletionEvidence"}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["op", "status"],
+        "properties": {
+          "op": {"enum": ["update_bug", "update-bug"]},
+          "status": {"enum": ["resolved", "closed"]}
+        }
+      },
+      "then": {
+        "required": ["evidence"],
+        "properties": {
+          "evidence": {"$ref": "#/$defs/bugResolutionEvidence"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "evidenceValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/evidenceString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
+      ]
+    },
+    "passingEvidenceValue": {
+      "const": true
+    },
+    "evidenceResultValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/evidencePassingString"},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidenceResultValue"}
+        },
+        {"$ref": "#/$defs/evidenceResultObject"}
+      ]
+    },
+    "evidenceResultObject": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "status": {"$ref": "#/$defs/evidenceResultValue"},
+        "result": {"$ref": "#/$defs/evidenceResultValue"},
+        "outcome": {"$ref": "#/$defs/evidenceResultValue"},
+        "state": {"$ref": "#/$defs/evidenceResultValue"},
+        "passed": {"$ref": "#/$defs/passingEvidenceValue"},
+        "success": {"$ref": "#/$defs/passingEvidenceValue"},
+        "ok": {"$ref": "#/$defs/passingEvidenceValue"},
+        "verified": {"$ref": "#/$defs/passingEvidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["status"]},
+        {"required": ["result"]},
+        {"required": ["outcome"]},
+        {"required": ["state"]},
+        {"required": ["passed"]},
+        {"required": ["success"]},
+        {"required": ["ok"]},
+        {"required": ["verified"]}
+      ],
+      "additionalProperties": true
+    },
+    "evidencePassingString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\s*(?:[pP][aA][sS][sS][eE][dD]|[pP][aA][sS][sS]|[sS][uU][cC][cC][eE][sS][sS]|[oO][kK]|[vV][eE][rR][iI][fF][iI][eE][dD]|[tT][rR][uU][eE])\\s*$"
+    },
+    "evidenceString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "allOf": [
+        {"not": {"pattern": "^\\s*[uU][nN][kK][nN][oO][wW][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[pP][eE][nN][dD][iI][nN][gG]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL][eE][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL][uU][rR][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][iI][lL]\\s*$"}},
+        {"not": {"pattern": "^\\s*[eE][rR][rR][oO][rR]\\s*$"}},
+        {"not": {"pattern": "^\\s*[iI][nN][vV][aA][lL][iI][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[fF][aA][lL][sS][eE]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][uU][lL][lL]\\s*$"}},
+        {"not": {"pattern": "^\\s*[uU][nN][vV][eE][rR][iI][fF][iI][eE][dD]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][oO][tT]_[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[nN][oO][tT]\\s+[rR][uU][nN]\\s*$"}},
+        {"not": {"pattern": "^\\s*[tT][iI][mM][eE][oO][uU][tT]\\s*$"}},
+        {"not": {"pattern": "^\\s*[bB][lL][oO][cC][kK][eE][dD]\\s*$"}}
+      ]
+    },
+    "loopCompletionEvidence": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "gate": {"$ref": "#/$defs/evidenceValue"},
+        "verification": {"$ref": "#/$defs/evidenceValue"}
+      },
+      "anyOf": [
+        {"required": ["gate"]},
+        {"required": ["verification"]}
+      ],
+      "additionalProperties": true
+    },
+    "bugResolutionEvidence": {
+      "type": "object",
+      "required": ["fix", "verification", "merge"],
+      "properties": {
+        "fix": {"$ref": "#/$defs/evidenceValue"},
+        "verification": {"$ref": "#/$defs/evidenceValue"},
+        "merge": {"$ref": "#/$defs/evidenceValue"}
+      },
+      "additionalProperties": true
+    },
+    "address": {
+      "type": "object",
+      "required": ["scopeId", "sessionId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "priority": {"enum": ["p0", "p1", "p2", "p3"]},
+    "deliveryMode": {"enum": ["direct", "idle", "batched"]},
+    "message": {
+      "type": "object",
+      "required": ["from", "to", "title", "priority", "body"],
+      "properties": {
+        "from": {"$ref": "#/$defs/address"},
+        "to": {"$ref": "#/$defs/address"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"$ref": "#/$defs/priority"},
+        "body": {"type": "string", "minLength": 1},
+        "deliveryMode": {"$ref": "#/$defs/deliveryMode"},
+        "coalesceKey": {"type": "string", "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "conversationId": {"type": ["string", "null"]},
+        "messageId": {"type": ["string", "null"]},
+        "createdAt": {"type": ["string", "null"]},
+        "adapterId": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["scopeId", "appserverId", "namespace", "endpoint", "projectRoot", "runtimeId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "appserverId": {"type": "string", "minLength": 1},
+        "namespace": {"enum": ["codex_app", "codex_tui"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "projectRoot": {"type": "string", "minLength": 1},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "sessionIds": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "required": ["scopeId", "sessionId", "agentId", "runtimeId"],
+      "properties": {
+        "scopeId": {"type": "string", "minLength": 1},
+        "sessionId": {"type": "string", "minLength": 1},
+        "agentId": {"type": "string", "minLength": 1},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "role": {"enum": ["master", "peer", "subagent"]},
+        "masterGrant": {"type": ["string", "null"]},
+        "parent": {"$ref": "#/$defs/address"},
+        "leaseMs": {"type": ["integer", "null"], "minimum": 1000}
+      },
+      "additionalProperties": false
+    },
+    "rebind": {
+      "type": "object",
+      "required": ["from", "to", "runtimeId"],
+      "properties": {
+        "from": {"$ref": "#/$defs/address"},
+        "to": {"$ref": "#/$defs/address"},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["runtimeId", "appserverId", "namespace", "endpoint", "projectRoot", "processId"],
+      "properties": {
+        "runtimeId": {"type": "string", "minLength": 1},
+        "appserverId": {"type": "string", "minLength": 1},
+        "namespace": {"enum": ["codex_app", "codex_tui"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "projectRoot": {"type": "string", "minLength": 1},
+        "capabilities": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        },
+        "processId": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "required": ["messageId", "attemptId", "nonce", "state", "runtimeId", "evidence"],
+      "properties": {
+        "messageId": {"type": "string", "minLength": 1},
+        "attemptId": {"type": "string", "minLength": 1},
+        "nonce": {"type": "string", "minLength": 1},
+        "state": {"enum": ["delivered", "executed", "replied", "read", "consumed", "unknown"]},
+        "runtimeId": {"type": "string", "minLength": 1},
+        "evidence": {"type": "object", "minProperties": 1},
+        "observedAt": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "bugRequest": {
+      "type": "object",
+      "required": ["scopeId", "title", "priority", "description", "reporter"],
+      "properties": {
+        "bugId": {"type": "string", "minLength": 1},
+        "bug_id": {"type": "string", "minLength": 1},
+        "scopeId": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "priority": {"$ref": "#/$defs/priority"},
+        "description": {"type": "string", "minLength": 1},
+        "reporter": {"$ref": "#/$defs/address"},
+        "worktreeId": {"type": ["string", "null"]}
+      },
+      "oneOf": [
+        {"required": ["bugId"]},
+        {"required": ["bug_id"]}
+      ],
+      "additionalProperties": false
+    },
+    "loopRequest": {
+      "type": "object",
+      "required": ["kind", "owner", "trigger", "work", "gate", "state", "stop"],
+      "properties": {
+        "loopId": {"type": "string", "minLength": 1},
+        "loop_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "owner": {"$ref": "#/$defs/address"},
+        "trigger": {"type": "string", "minLength": 1},
+        "work": {"type": "string", "minLength": 1},
+        "gate": {"type": "string", "minLength": 1},
+        "state": {"type": "string", "minLength": 1},
+        "stop": {"type": "string", "minLength": 1},
+        "maxIterations": {"type": "integer", "minimum": 1},
+        "deadlineAt": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "oneOf": [
+        {"required": ["loopId"]},
+        {"required": ["loop_id"]}
+      ],
+      "additionalProperties": false
+    },
+    "adapter": {
+      "type": "object",
+      "required": ["adapterId", "kind"],
+      "properties": {
+        "adapterId": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["mailbox", "appserver"]},
+        "target": {"type": ["string", "null"]},
+        "enabled": {"type": ["boolean", "null"]},
+        "execute": {"type": ["boolean", "null"]},
+        "recipient": {"$ref": "#/$defs/address"}
+      },
+      "additionalProperties": false
+    },
+    "masterWakeSignalRequest": {
+      "type": "object",
+      "required": ["key", "kind", "title", "priority", "summary"],
+      "properties": {
+        "signalId": {"type": "string", "minLength": 1},
+        "key": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "priority": {"$ref": "#/$defs/priority"},
+        "summary": {"type": "string", "minLength": 1},
+        "issueId": {"type": ["string", "null"]},
+        "source": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/address"}]
+        },
+        "observedAt": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

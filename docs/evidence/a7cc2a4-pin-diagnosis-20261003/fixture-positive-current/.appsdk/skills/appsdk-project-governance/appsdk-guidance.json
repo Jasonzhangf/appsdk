@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "skill_id": "appsdk-project-governance",
+  "guidance_version": "1",
+  "rules": [
+    {"rule_id": "use-declared-sources", "severity": "forbidden", "description": "Read only rule sources declared by the project contract."},
+    {"rule_id": "adjacent-transition", "severity": "forbidden", "description": "Execute only the projected node and adjacent workflow edges."},
+    {"rule_id": "evidence-required", "severity": "forbidden", "description": "A passing required step must bind evidence."},
+    {"rule_id": "context-drift", "severity": "forbidden", "description": "Revise the plan after project, goal, source, scope, owner, or rule-context drift."},
+    {"rule_id": "append-only-history", "severity": "forbidden", "description": "Do not overwrite or delete plan revisions and execution events."},
+    {"rule_id": "lifecycle-truth", "severity": "forbidden", "description": "Do not claim lifecycle completion before canonical AppSDK gates pass."},
+    {"rule_id": "changed-scope-control-truth", "severity": "forbidden", "description": "New or changed control and configuration behavior must use declared typed control resources, error chains, or project configuration sources, never payloads, metadata, debug logs, or implicit context."},
+    {"rule_id": "changed-scope-single-owner", "severity": "forbidden", "description": "New or changed behavior must retain one semantic owner and one implementation, with no duplicate path, fallback, or temporary bypass."},
+    {"rule_id": "changed-scope-configured-orchestration", "severity": "forbidden", "description": "Preserve fixed operation/hook/gate boundaries only where the project declares them. Missing required capabilities fail explicitly; never mock success."},
+    {"rule_id": "changed-scope-ablation-and-sharing", "severity": "advisory", "description": "Compare deletion, reuse and direct implementation by actual complexity. Optional simplification does not block; concrete quality, safety or ownership regressions remain forbidden."},
+    {"rule_id": "historical-architecture-debt", "severity": "advisory", "description": "Report untouched historical violations as recommendations; do not block the candidate unless they enter changed scope or affect safety, ownership, evidence truth, or required delivery."},
+    {"rule_id": "project-context-binding", "severity": "warning", "description": "Locate feature and debug work in the declared function and verification maps before implementation."},
+    {"rule_id": "debug-notes-required", "severity": "warning", "description": "During debug exploration, append observations, hypotheses, and evidence to the active run notes before resolution."},
+    {"rule_id": "map-gate-update", "severity": "advisory", "description": "Update function ownership and verification gates in the same change when the implementation changes them."},
+    {"rule_id": "recommended-design", "severity": "warning", "description": "Record requirement, architecture, and detailed-design closure before feature implementation."},
+    {"rule_id": "prior-record-search", "severity": "advisory", "description": "Check prior verified successes and failures before repeating exploration."}
+  ],
+  "workflows": [
+    {
+      "domain": "bootstrap",
+      "objective": "Enter AppSDK governance without destroying existing project truth.",
+      "entry_node": "prepare",
+      "nodes": [
+        {"node_id": "prepare", "instruction": "Run prepare and confirm scope, roots, boundaries, and acceptance.", "owner": "project", "evidence": ["preparation-record"]},
+        {"node_id": "initialize", "instruction": "Run idempotent initialization for the confirmed project root.", "owner": "project", "evidence": ["initialized-layout"]},
+        {"node_id": "baseline_verify", "instruction": "Verify the initialized governance baseline.", "owner": "project", "evidence": ["verify-result"]}
+      ],
+      "edges": [{"from": "prepare", "to": "initialize"}, {"from": "initialize", "to": "baseline_verify"}]
+    },
+    {
+      "domain": "migration",
+      "objective": "Reconcile or reset legacy governance through an explicit, auditable route.",
+      "entry_node": "inspect_legacy",
+      "nodes": [
+        {"node_id": "inspect_legacy", "instruction": "Inventory old governance truth and disposable runtime state.", "owner": "project", "evidence": ["legacy-inventory"]},
+        {"node_id": "choose_route", "instruction": "Choose preserve-and-migrate or the explicitly authorized clean-epoch reset for each named control-plane owner.", "owner": "project", "evidence": ["migration-route"]},
+        {"node_id": "apply_route", "instruction": "Execute the canonical AppSDK migration/reset and the separate Collab migration/reset through their respective owners; never substitute one transaction for the other.", "owner": "project", "evidence": ["migration-record"]},
+        {"node_id": "migration_verify", "instruction": "Verify the resulting single governance truth.", "owner": "project", "evidence": ["verify-result"]}
+      ],
+      "edges": [{"from": "inspect_legacy", "to": "choose_route"}, {"from": "choose_route", "to": "apply_route"}, {"from": "apply_route", "to": "migration_verify"}]
+    },
+    {
+      "domain": "governance-preflight",
+      "objective": "Bind goal, module, owner, maps, worktree, and required gates before code work.",
+      "entry_node": "goal_scope",
+      "nodes": [
+        {"node_id": "goal_scope", "instruction": "Confirm objective, scope, acceptance, non-goals, and owner.", "owner": "project", "evidence": ["goal-record"]},
+        {"node_id": "architecture_maps", "instruction": "Bind resource, function, mainline, verification, and module maps.", "owner": "project", "evidence": ["map-check"]},
+        {"node_id": "owner_worktree", "instruction": "Create the clean owner worktree from latest origin/main.", "owner": "project", "evidence": ["worktree-record"]},
+        {"node_id": "preflight_verify", "instruction": "Run the applicable AppSDK and project preflight checks.", "owner": "project", "evidence": ["verify-result"]}
+      ],
+      "edges": [{"from": "goal_scope", "to": "architecture_maps"}, {"from": "architecture_maps", "to": "owner_worktree"}, {"from": "owner_worktree", "to": "preflight_verify"}]
+    },
+    {
+      "domain": "develop",
+      "objective": "Develop features through project context, proportionate design, exact validation, and verified cleanup.",
+      "entry_node": "requirements",
+      "nodes": [
+        {"node_id": "requirements", "instruction": "Define the user-visible contract, scope, non-goals, acceptance, and required evidence; reuse an existing confirmed decision when present.", "owner": "project", "evidence": ["requirements"]},
+        {"node_id": "map_check", "instruction": "Read the declared function and verification maps, bind the owner, allowed and forbidden paths, required gates, and prior records, and note any map entry that the change must add.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
+        {"node_id": "architecture", "instruction": "For a new project or meaningful cross-module or semantic change, close top-down modules, resources, boundaries, and mainline flow; otherwise record why existing architecture is sufficient.", "owner": "project", "evidence": ["architecture-design"]},
+        {"node_id": "detailed_design", "instruction": "When the change introduces non-trivial behavior, close calls, data, errors, and verification mapping before implementation.", "owner": "project", "evidence": ["detailed-design"]},
+        {"node_id": "implementation", "instruction": "Implement the smallest change through the mapped owner in a clean owner worktree.", "owner": "project", "evidence": ["source-diff", "worktree-record"]},
+        {"node_id": "candidate", "instruction": "Create and bind the exact candidate commit and tree.", "owner": "project", "evidence": ["candidate-record"]},
+        {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then add build, install, restart, and same-entry replay only when the change affects those surfaces.", "owner": "project", "evidence": ["validation-record"]},
+        {"node_id": "map_update", "instruction": "Update declared function ownership, paths, call edges, and verification gates when the validated change altered them.", "owner": "project", "evidence": ["function-map-binding", "verification-map-binding"]},
+        {"node_id": "review", "instruction": "Review the validated candidate against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
+        {"node_id": "effectiveness", "instruction": "Check effectiveness identity and freshness; reuse valid unchanged candidate evidence and rerun only affected checks on drift.", "owner": "project", "evidence": ["effectiveness-record"]},
+        {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact integration tree.", "owner": "project", "evidence": ["mainline-receipt"]},
+        {"node_id": "promotion", "instruction": "Compile, publish Active, archive Protected, and freeze when required.", "owner": "project", "evidence": ["freeze-record"]},
+        {"node_id": "cleanup", "instruction": "Record actual retained resources and owner or verified authorized removal. Delivery can complete with retention; do not claim Collab resource close before its cleanup requirements pass.", "owner": "project", "evidence": ["cleanup-record"]}
+      ],
+      "edges": [
+        {"from": "requirements", "to": "map_check"},
+        {"from": "map_check", "to": "architecture"}, {"from": "map_check", "to": "implementation"},
+        {"from": "architecture", "to": "detailed_design"}, {"from": "architecture", "to": "implementation"},
+        {"from": "detailed_design", "to": "implementation"}, {"from": "implementation", "to": "candidate"},
+        {"from": "candidate", "to": "validation"}, {"from": "validation", "to": "map_update"},
+        {"from": "validation", "to": "review"}, {"from": "map_update", "to": "review"},
+        {"from": "review", "to": "effectiveness"}, {"from": "effectiveness", "to": "integration"},
+        {"from": "integration", "to": "promotion"}, {"from": "integration", "to": "cleanup"}, {"from": "promotion", "to": "cleanup"}
+      ]
+    },
+    {
+      "domain": "debug",
+      "objective": "Orient to project truth, record evidence while exploring, and resolve through the unique mapped owner.",
+      "entry_node": "orient",
+      "nodes": [
+        {"node_id": "orient", "instruction": "Read project AGENTS, declared function and verification maps, and existing run notes and records; bind the failing request to an owner and required gates.", "owner": "project", "evidence": ["orientation-record", "function-map-binding", "verification-map-binding"]},
+        {"node_id": "explore", "instruction": "Append observations, one active hypothesis, confirmation and falsification signals, and evidence to run notes; reproduce when feasible and locate the first semantic divergence.", "owner": "project", "evidence": ["exploration-record", "debug-notes"]},
+        {"node_id": "resolve", "instruction": "After causal evidence, fix the unique mapped owner, add proportionate regression coverage, and update maps or gates when their truth changed.", "owner": "project", "evidence": ["resolution-record", "red-green-test"]},
+        {"node_id": "candidate", "instruction": "Create and bind the exact fix candidate.", "owner": "project", "evidence": ["candidate-record"]},
+        {"node_id": "validation", "instruction": "Run focused tests and mapped gates, then choose build, install, restart, and original-input replay according to runtime impact.", "owner": "project", "evidence": ["validation-record"]},
+        {"node_id": "review", "instruction": "Review the validated fix against applicable quality, safety, evidence and owner contracts. Block concrete regressions; optional simplification and unrelated historical debt are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
+        {"node_id": "integration", "instruction": "Integrate on latest main and verify the exact tree.", "owner": "project", "evidence": ["mainline-receipt"]},
+        {"node_id": "cleanup", "instruction": "Record evidence and actual retained resources or verified authorized removal; delivery and resource closure are separate.", "owner": "project", "evidence": ["cleanup-record"]}
+      ],
+      "edges": [
+        {"from": "orient", "to": "explore"}, {"from": "explore", "to": "resolve"},
+        {"from": "resolve", "to": "candidate"}, {"from": "candidate", "to": "validation"},
+        {"from": "validation", "to": "review"}, {"from": "review", "to": "integration"},
+        {"from": "integration", "to": "cleanup"}
+      ]
+    },
+    {
+      "domain": "review",
+      "objective": "Admit and review the exact evidence-bound candidate.",
+      "entry_node": "review_admission",
+      "nodes": [
+        {"node_id": "review_admission", "instruction": "Pass AppSDK review admission for the exact candidate.", "owner": "project", "evidence": ["pre-review-validation"]},
+        {"node_id": "architecture_review", "instruction": "Run the user-selected or configured review route. Block concrete quality, safety, contract and material structural regressions; optional simplifications are advisory.", "owner": "project", "evidence": ["architecture-conformance", "review-record"], "reminders": [{"kind": "memory_review", "blocking": false, "command": "project-memory review --run <run-id>"}]},
+        {"node_id": "unchanged_effectiveness", "instruction": "Replay effectiveness without source drift.", "owner": "project", "evidence": ["effectiveness-record"]}
+      ],
+      "edges": [{"from": "review_admission", "to": "architecture_review"}, {"from": "architecture_review", "to": "unchanged_effectiveness"}]
+    },
+    {
+      "domain": "delivery",
+      "objective": "Prove the candidate through its real deployed entrypoint.",
+      "entry_node": "whitebox",
+      "nodes": [
+        {"node_id": "whitebox", "instruction": "Run project-owned internal validation.", "owner": "project", "evidence": ["whitebox-evidence"]},
+        {"node_id": "build", "instruction": "Build the exact candidate artifact.", "owner": "project", "evidence": ["artifact"]},
+        {"node_id": "install", "instruction": "Install the exact artifact into the declared environment.", "owner": "project", "evidence": ["install-receipt"]},
+        {"node_id": "restart", "instruction": "Restart the declared runtime when required.", "owner": "project", "evidence": ["restart-receipt"]},
+        {"node_id": "blackbox", "instruction": "Replay through the public deployed entrypoint.", "owner": "project", "evidence": ["blackbox-evidence"]},
+        {"node_id": "bind_validation", "instruction": "Bind whitebox, artifact, deployment, and blackbox evidence.", "owner": "project", "evidence": ["pre-review-validation"]}
+      ],
+      "edges": [{"from": "whitebox", "to": "build"}, {"from": "build", "to": "install"}, {"from": "build", "to": "restart"}, {"from": "build", "to": "blackbox"}, {"from": "install", "to": "restart"}, {"from": "install", "to": "blackbox"}, {"from": "restart", "to": "blackbox"}, {"from": "blackbox", "to": "bind_validation"}]
+    },
+    {
+      "domain": "communication-recovery",
+      "objective": "Restore communication after an exact route, identity, daemon, or transport failure and prove the original native path again.",
+      "entry_node": "preserve_error",
+      "nodes": [
+        {"node_id": "preserve_error", "instruction": "Persist the exact error, durable IDs, source commit, installed binary, daemon PID/socket, and current task/bug binding; do not classify ACK, notification acceptance, health, or timeout as delivery.", "owner": "project", "evidence": ["communication-failure-record"]},
+        {"node_id": "inspect_state", "instruction": "Run `collab context` and inspect the named identity, route, daemon, task, and inbox state; use `collab master status` separately when master state is needed.", "owner": "project", "evidence": ["communication-state"]},
+        {"node_id": "recover_route", "instruction": "After a daemon restart, identity mismatch, or missing route, run `collab worker recover` only from the canonical project main tree; never edit routes, journal, mailbox, tokens, or start a second daemon.", "owner": "project", "evidence": ["recovery-receipt"]},
+        {"node_id": "verify_route", "instruction": "Run `collab context` again and send one bounded recovery report request; preserve failure and stop if the route is still unknown, ambiguous, foreign, or not live.", "owner": "project", "evidence": ["recovered-route"]},
+        {"node_id": "replay_native", "instruction": "Replay the same native target through the installed binary and record the target result item; queue acceptance or a daemon health response alone is insufficient.", "owner": "project", "evidence": ["native-target-result"]},
+        {"node_id": "consume_receipt", "instruction": "Consume the durable receipt for the target result through the canonical receive/consume operation; read-only inspection alone does not close. Update the bound bug or feature record and close only when the result and receipt evidence are present.", "owner": "project", "evidence": ["durable-receipt", "issue-update"]}
+      ],
+      "edges": [
+        {"from": "preserve_error", "to": "inspect_state"},
+        {"from": "inspect_state", "to": "recover_route"},
+        {"from": "recover_route", "to": "verify_route"},
+        {"from": "verify_route", "to": "replay_native"},
+        {"from": "replay_native", "to": "consume_receipt"}
+      ]
+    },
+    {
+      "domain": "integration",
+      "objective": "Merge only an exact candidate verified against latest main.",
+      "entry_node": "refresh_main",
+      "nodes": [
+        {"node_id": "refresh_main", "instruction": "Fetch latest origin/main and refresh the integration base.", "owner": "project", "evidence": ["main-base"]},
+        {"node_id": "integration_verify", "instruction": "Verify the exact integrated tree and affected gates.", "owner": "project", "evidence": ["integration-record"]},
+        {"node_id": "merge_push", "instruction": "Merge and push through the protected mainline route.", "owner": "project", "evidence": ["merge-record"]},
+        {"node_id": "remote_receipt", "instruction": "Observe the remote main ref and bind its receipt.", "owner": "project", "evidence": ["mainline-receipt"]}
+      ],
+      "edges": [{"from": "refresh_main", "to": "integration_verify"}, {"from": "integration_verify", "to": "merge_push"}, {"from": "merge_push", "to": "remote_receipt"}]
+    },
+    {
+      "domain": "promotion",
+      "objective": "Turn a verified mainline source into immutable consumable output.",
+      "entry_node": "regression",
+      "nodes": [
+        {"node_id": "regression", "instruction": "Run and bind the required merged-source regression suite.", "owner": "project", "evidence": ["regression-report"]},
+        {"node_id": "compile", "instruction": "Compile the canonical merged project artifact.", "owner": "project", "evidence": ["compiled-artifact"]},
+        {"node_id": "publish", "instruction": "Publish the immutable Active artifact.", "owner": "project", "evidence": ["promotion-record"]}
+      ],
+      "edges": [{"from": "regression", "to": "compile"}, {"from": "compile", "to": "publish"}]
+    },
+    {
+      "domain": "freeze",
+      "objective": "Protect the exact published source, contracts, and artifact.",
+      "entry_node": "archive",
+      "nodes": [
+        {"node_id": "archive", "instruction": "Create the canonical Protected archive.", "owner": "project", "evidence": ["protected-archive"]},
+        {"node_id": "freeze_record", "instruction": "Bind source, artifact, API, regression, and promotion truth.", "owner": "project", "evidence": ["freeze-record"]},
+        {"node_id": "freeze_verify", "instruction": "Verify Active and Protected immutability.", "owner": "project", "evidence": ["verify-result"]}
+      ],
+      "edges": [{"from": "archive", "to": "freeze_record"}, {"from": "freeze_record", "to": "freeze_verify"}]
+    },
+    {
+      "domain": "cleanup",
+      "objective": "Release only resources whose delivery and retention evidence is complete.",
+      "entry_node": "cleanup_record",
+      "nodes": [
+        {"node_id": "cleanup_record", "instruction": "Record retained evidence and disposable state.", "owner": "project", "evidence": ["cleanup-record"]},
+        {"node_id": "remove_worktree", "instruction": "Remove the merged clean owner worktree and branch.", "owner": "project", "evidence": ["worktree-removal"]},
+        {"node_id": "release_claim", "instruction": "Release the task claim after worktree cleanup.", "owner": "project", "evidence": ["claim-release"]}
+      ],
+      "edges": [{"from": "cleanup_record", "to": "remove_worktree"}, {"from": "remove_worktree", "to": "release_claim"}]
+    }
+  ]
+}

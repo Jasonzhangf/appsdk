@@ -1,0 +1,81 @@
+{
+  "id": "appsdk-sdk-pin-history",
+  "version": "0.1.0",
+  "description": "Official SDK pin request through historical provenance, canonical reconciliation, current-step migration, immutable retention verification, pin/version publication, and a single final result with explicit cleanup or correction retention.",
+  "inputs": [
+    {
+      "id": "official_pin_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "load_and_authenticate_request",
+      "operator": "appsdk.sdk_pin.authenticate_request",
+      "operator_version": "1",
+      "inputs": ["official_pin_request"],
+      "output": {"id": "authenticated_request", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "authenticate_historical_record",
+      "operator": "appsdk.sdk_pin.authenticate_historical_record",
+      "operator_version": "1",
+      "inputs": ["authenticated_request"],
+      "output": {"id": "historical_provenance", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_canonical_history",
+      "operator": "appsdk.sdk_pin.reconcile_history",
+      "operator_version": "1",
+      "inputs": ["historical_provenance"],
+      "output": {"id": "canonical_history", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "materialize_current_step",
+      "operator": "appsdk.sdk_pin.materialize_current_step",
+      "operator_version": "1",
+      "inputs": ["canonical_history"],
+      "output": {"id": "current_step_state", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_immutable_retention",
+      "operator": "appsdk.sdk_pin.verify_retention",
+      "operator_version": "1",
+      "inputs": ["current_step_state"],
+      "output": {"id": "retention_receipt", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_pin_and_final_outcome",
+      "operator": "appsdk.sdk_pin.publish_pin_outcome",
+      "operator_version": "1",
+      "inputs": ["retention_receipt"],
+      "output": {"id": "pin_result", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "load_and_authenticate_request", "to": "authenticate_historical_record", "arc_id": "authenticated_request"},
+    {"from": "authenticate_historical_record", "to": "reconcile_canonical_history", "arc_id": "historical_provenance"},
+    {"from": "reconcile_canonical_history", "to": "materialize_current_step", "arc_id": "canonical_history"},
+    {"from": "materialize_current_step", "to": "verify_immutable_retention", "arc_id": "current_step_state"},
+    {"from": "verify_immutable_retention", "to": "publish_pin_and_final_outcome", "arc_id": "retention_receipt"}
+  ],
+  "outputs": ["pin_result"]
+}

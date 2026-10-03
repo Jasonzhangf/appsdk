@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://appsdk.local/contracts/records/test-scenario-result-record.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "result_id",
+    "object_id",
+    "scenario_id",
+    "graph_id",
+    "graph_version",
+    "candidate_commit",
+    "status",
+    "entrypoint",
+    "environment",
+    "cleanup_result",
+    "producer",
+    "started_at",
+    "finished_at"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "result_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
+    "object_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
+    "scenario_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
+    "graph_id": {"type": "string", "minLength": 1},
+    "graph_version": {"type": "string", "minLength": 1},
+    "candidate_commit": {"type": "string", "minLength": 1},
+    "status": {"enum": ["planned", "passed", "failed", "blocked"]},
+    "entrypoint": {"type": "string", "minLength": 1},
+    "environment": {"type": "string", "minLength": 1},
+    "evidence_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
+    "effect_authorization_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
+    "cleanup_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "detail"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "not_required", "blocked"]},
+        "detail": {"type": "string", "minLength": 1}
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "identity"],
+      "properties": {
+        "adapter": {"type": "string", "minLength": 1},
+        "identity": {"type": "string", "minLength": 1}
+      }
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
+      "then": {"required": ["evidence_id"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "planned"}}, "required": ["status"]},
+      "then": {"not": {"required": ["evidence_id"]}}
+    }
+  ]
+}

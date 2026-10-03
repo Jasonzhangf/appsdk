@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-03T07:44:43.625Z",
+  "owner": "desktop-primary/a7cc2a4",
+  "resource": "docs/evidence/a7cc2a4-pin-diagnosis-20261003/fixture-positive-current/.appsdk/sdk.bin",
+  "bytes": 13985424,
+  "sha256": "d7a67ef2db80c9721b1d68e595e9f51e24e1d879f3de8397f1cc525338c5a160",
+  "canonical": "/Users/fanzhang/.cargo/bin/appsdk",
+  "canonical_sha256": "d7a67ef2db80c9721b1d68e595e9f51e24e1d879f3de8397f1cc525338c5a160",
+  "reason": "rebuildable positive-control binary copy; identical canonical byte source and worker event evidence retained; archived config is not an installed runtime",
+  "recreate": "official appsdk new plus pin-lock in a new task-owned fixture",
+  "unique_genuine_fixture": "retained unchanged"
+}

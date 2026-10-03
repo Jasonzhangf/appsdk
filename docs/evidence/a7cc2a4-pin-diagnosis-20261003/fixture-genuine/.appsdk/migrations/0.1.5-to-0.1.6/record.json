@@ -1,0 +1,44 @@
+{
+  "bundle_digest": "sha256:e9a816589ce03740b30bf847be4fbb6c4203c70d39b11ada2b723dc966d0a091",
+  "created_at": "2026-09-12T14:27:03.775218+00:00",
+  "frozen_reviews": [],
+  "legacy_reconciled_reviews": [],
+  "maps": [
+    {
+      "canonical_source_digest": "sha256:67f189bf15330e542bc82349b78a1d7e29ec050b112ecffa165173b078d9204e",
+      "canonical_target_digest": "sha256:f6ff22e82ace1fd33cb92b520f1332f323a87d0ea40a6a6464159c274baf5eca",
+      "name": "resource-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.5-to-0.1.6/maps/resource-map.json",
+      "source_digest": "sha256:44e8135acede8ae3bf4aa7f5aa5c4c2f62cdef5abc2ea9f8f43b873f5976f9c8",
+      "target_digest": "sha256:44e8135acede8ae3bf4aa7f5aa5c4c2f62cdef5abc2ea9f8f43b873f5976f9c8"
+    },
+    {
+      "canonical_source_digest": "sha256:69f16dfe5d056634f6164cd325dbdbdf134588890b69f101c0d9045e6a01d776",
+      "canonical_target_digest": "sha256:5ea77dd1ccd571d468ed85e0379db24cdec89e4b3598ed11f8b37492d2e05d9f",
+      "name": "function-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.5-to-0.1.6/maps/function-map.json",
+      "source_digest": "sha256:5a89f81462ad34d831bf1da9e82d690a1f9653added723cb4a99618149a3d16e",
+      "target_digest": "sha256:5a89f81462ad34d831bf1da9e82d690a1f9653added723cb4a99618149a3d16e"
+    },
+    {
+      "canonical_source_digest": "sha256:c36e4f9d5cff527d7f98b339772a53c87f420db58bb2215b6b68210e01124673",
+      "canonical_target_digest": "sha256:e8b576c660a4d283614a24a8778ea4f333d3cda3571c360f586142414a1dde84",
+      "name": "mainline-call-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.5-to-0.1.6/maps/mainline-call-map.json",
+      "source_digest": "sha256:b6c41f115941405eeef0116ef602b390d04b6080fdf284b3a1b14a47fdd97d03",
+      "target_digest": "sha256:b6c41f115941405eeef0116ef602b390d04b6080fdf284b3a1b14a47fdd97d03"
+    },
+    {
+      "canonical_source_digest": "sha256:8dcc1e9444f62f7e407fa1e37a6c8d004de55587950f8e600dc5f3c711981230",
+      "canonical_target_digest": "sha256:8c05c47cb1af6c67e33670cfdf45a6d82da0a3e43152bfd2870e912a2e43a5fe",
+      "name": "verification-map.json",
+      "snapshot_path": ".appsdk/migrations/0.1.5-to-0.1.6/maps/verification-map.json",
+      "source_digest": "sha256:21ae8fcd3aa3d017321e5bb5ee3a9606fdf561f9d69348802f1bcd1a12bef3a7",
+      "target_digest": "sha256:21ae8fcd3aa3d017321e5bb5ee3a9606fdf561f9d69348802f1bcd1a12bef3a7"
+    }
+  ],
+  "migration_id": "appsdk-0.1.5-to-0.1.6",
+  "schema_version": 1,
+  "source_version": "0.1.5",
+  "target_version": "0.1.6"
+}

@@ -1,0 +1,511 @@
+# AppSDK Project Integration
+
+AppSDK is an external governance implementation. A new project consumes its CLI/compiler and commits only project-specific governance data.
+
+## Repository boundary
+
+### Module dependency artifacts
+
+Declare modules in dependency-first order. During development, `compile-module`
+requires each dependency's compiled artifact to exist and match its current
+module contract, source, output bytes and transitive dependency hashes. Missing
+or stale dependency artifacts fail explicitly; compile the dependency first, or
+use the ordered project `compile` command. Admission uses the same freshness
+owner without building or repairing artifacts. Self-dependencies and reverse
+dependency edges fail before recursive hashing.
+
+Development admission is not publication. `freeze` requires every dependency
+to be frozen before it reads or creates publication records. Frozen dependencies
+retain the existing immutable artifact verification; development compilation
+does not manufacture a FreezeRecord or alter Active/Protected.
+
+If a clean checkout is missing a retained frozen projection, restore it with
+the explicit `appsdk rehydrate-frozen --module <id>` command. The command
+validates the retained freeze/promotion graph and rebuilds the generated
+projection under the current project root. `verify`, `compile`, and Active
+index generation remain read-only with respect to protected/history state and
+must not silently copy artifacts or publish a replacement. Only after the
+rehydration receipt is present may the invalidated compile and downstream
+verification stages be rerun.
+
+```text
+external AppSDK installation
+  -> versioned Bundle: CLI / compiler / contracts / docs / rules / skills
+  -> .appsdk project contract + sdk.lock
+  -> compiled manifest and verified artifact
+  -> project runtime consumes Active
+```
+
+The business project must not copy AppSDK source, compiler, or harness into its own source tree.
+
+Project-scoped CLI commands use the process `cwd` as the default project root.
+An explicit project argument is optional for out-of-directory operator use.
+Projects and Skills must not require a project-root environment variable, and
+help output must remain available without loading project state.
+
+## Governance preflight ownership
+
+Governance readiness is part of the implementation task. Missing contracts,
+maps, records, SDK locks, clean worktrees, claims, adapters, or required
+evidence are owned project-management defects. The worker stops business-code
+debugging, repairs the first failing governance node through its canonical
+owner, and reruns preflight before continuing. External tooling or network
+failures may describe the immediate symptom, but never justify skipping,
+weakening, or bypassing the governance lifecycle.
+
+## Collaboration operating contract
+
+Lifecycle mutations run only from a clean named branch in a worktree below the
+main worktree's `playground/` directory. The main worktree is an inspection
+surface, never a development or lifecycle-write surface. The worker fetches
+latest `origin/main`, creates the worktree, reproduces, modifies, builds,
+commits, pushes, integrates the exact candidate with latest main, verifies the
+integration, fast-forwards remote main, validates it with `git ls-remote`, and
+then cleans only the merged worktree and branch. AppSDK rejects mutation
+commands on branch `main`; `verify` remains read-only.
+
+Existing projects retain valid historical governance. Version migration
+preserves immutable historical evidence, but unified AppSDK + dispersed Collab
+upgrade is an authorized ownership-transfer operation. The two control planes
+are inspected and snapshotted independently, mapped explicitly, and reconciled
+only after Jason authorizes control of the named objects. Authorized cleanup
+may remove proven-stale staging and disposable runtime projections; it must not
+delete audit history or referenced immutable artifacts. After reconciliation,
+only authorized runtime/temporary state is reset to zero and the new unified
+truth is verified from a clean initial state. Historical constraints that are
+stricter than the target version are warnings during transition; integrity,
+ownership, isolation, hash, Protected/Active immutability, ambiguous mapping,
+duplicate writers, unauthorized cleanup, and remote-main receipt failures
+remain forbidden.
+
+The migration contract is:
+
+```text
+inspect AppSDK truth + every Collab initialization root
+  -> freeze and independently snapshot both planes
+  -> map exact matches, one-sided legacy state, and conflicts
+  -> design the complete compliant reconciliation route
+  -> request approval for the exact ownership-transfer/destructive step
+  -> execute the approved route; keep unapproved destructive steps frozen
+  -> clean only authorized stale disposable state
+  -> install/pin new AppSDK and run official Collab v1 migration
+  -> verify one owner/one truth, then zero runtime state
+```
+
+Do not directly merge Collab persistence directories or hand-edit task, claim,
+mailbox, identity, migration, hash, Active, or Protected records. A Collab-only
+object without an authorized owner receives a proposed disposition and mapping
+route; it is not automatically adopted or deleted. A conflict requires the
+worker to provide the target truth, exact object operations, rollback boundary,
+and verification gates before requesting approval. Approval is an execution
+gate, not a report-and-wait terminal state.
+
+## Project layout
+
+```text
+project/
+  .appsdk/
+    project.json
+    goal.json
+    sdk.lock
+    maps/
+    architecture/
+    verification/
+    records/
+  .appsdk-control/       # local only; ignored
+  playground/experiments/
+  active/lib/
+  protected/source/
+  protected/contracts/
+  protected/history/
+  generated/              # indexes or project-declared artifact surface
+```
+
+## Git policy
+
+Commit:
+
+- `.appsdk/project.json`;
+- `.appsdk/goal.json`;
+- `.appsdk/sdk.lock`;
+- project resource/function/mainline/verification maps;
+- Evidence, Review, Promotion, and Freeze records;
+- project architecture and verification contracts;
+- Active and Protected content when the project uses Git as its artifact/archive store.
+
+Ignore:
+
+```gitignore
+.appsdk-control/
+```
+
+`.appsdk-control/` may contain local review sessions, worker heartbeat, temporary harness output, and caches. It must not contain project truth, immutable rules, SDK lock, maps, or lifecycle records.
+
+## SDK Bundle and lock
+
+消费者只使用全局安装的 AppSDK Bundle。Bundle 版本必须同时绑定 Rust CLI、machine contracts、文档、规则和 skills；不能让项目自行扫描一个不受版本控制的全局目录。Bundle manifest 是机器真源，`init`/`new` 将其中声明的 Skill、规则和文档安装到项目 `.appsdk/`，并生成 `.appsdk/sdk-resources.json`。
+
+项目中的手动合同（例如 `project.json`、records、maps）由 AI/开发者维护，SDK 只校验 schema、引用、owner、scope 和生命周期关系。`.appsdk/sdk-resources.json` 是自动生成文件，只能由 SDK 重建；`verify` 会校验资源文件摘要和 Bundle digest，发现手工改写立即 fail-fast。
+
+`contracts/sdk-bundle.manifest.json` 声明当前 Bundle 的资源集合和安装位置；
+初始化后项目内的机器真源位于
+`.appsdk/contracts/sdk-bundle.manifest.json`。`init`/`new` 直接把当前
+Bundle digest、manifest digest 和资源集合写入锁。`pin-lock` 只用于受支持
+的旧版本 migration；该命令仍要求执行中的 binary 与 `--binary` 指向的文件
+字节一致，防止旧 CLI 把新 binary 与旧 embedded Bundle 拼成伪迁移。
+
+`.appsdk/sdk.lock` binds the project to the external implementation:
+
+```json
+{
+  "sdk": "appsdk",
+  "version": "0.1.6",
+  "bundle_digest": "sha256:<current-bundle-digest>",
+  "bundle_manifest_digest": "sha256:<current-manifest-digest>",
+  "bundle_resources": {"contracts": [], "docs": [], "rules": [], "skills": []},
+  "contract_schema": 1
+}
+```
+
+The lock is committed and is not bound to the bytes of the currently running
+AppSDK executable. Optional `digest`, `compiler_digest`, and `binary_ref` fields
+may remain as historical migration witnesses, but they do not gate ordinary
+development. `verify` always checks the project version/schema and exact current
+Bundle/manifest/resource binding.
+
+Running AppSDK 0.1.6 `pin-lock` is the explicit supported migration from project
+SDK 0.1.5 to 0.1.6, not a new-project initialization step. SDK canonical maps
+and project governance maps are separate resources. Before changing live maps,
+`pin-lock` classifies each map set: an exact 0.1.5 SDK canonical set is migrated
+to the 0.1.6 canonical set; a custom project set is snapshotted and retained in
+place. It validates frozen ReviewRecord bindings, persists one immutable
+`.appsdk/migrations/0.1.5-to-0.1.6/` snapshot/record, then installs the 0.1.6
+Bundle and writes the lock and project version. It must never overwrite custom
+project maps or hand-edit ReviewRecord hashes. Missing, mixed, drifted, or
+ambiguous migration truth fails closed.
+
+For a later bundle refresh, a historical custom map's canonical target may
+differ from the current SDK manifest only when the lock witnesses the original
+bundle. The historical record and snapshot remain immutable, and each live
+custom map must still match its recorded target digest. A repeated pin uses the
+same previous-bundle witness; missing witnesses, malformed digests, altered
+snapshots and changed live maps fail explicitly.
+
+## Optional black-box test governance
+
+AppSDK is the only owner of optional black-box test governance selection,
+scope confirmation, scenario contracts, trusted runner references, effect
+authorization, result evidence binding and final object admission. Missing or
+`mode: "off"` test governance is compatible with the current project schema
+and does not make `compile` or ordinary `verify` depend on a test manifest.
+When `mode` is `selected`, the project contract requires a committed manifest
+path under `contracts/test-governance.schema.json`, and selected scenario
+results live under
+`.appsdk/records/test-scenario-results/<object_id>/<scenario_id>.json`.
+
+`appsdk verify --test-admission` lists selected object status without executing
+tests. `appsdk verify --admission` applies the selected-object test-admission
+gate; ordinary `appsdk verify` reports `not_selected`, `passed`, or `blocked`
+without requiring tests to pass. `compile` intentionally does not load the
+optional test manifest. Governance records and result records never include
+executable shell strings; scenarios are bound only to trusted `runner_ref`
+entries. DAGpipe CLI remains graph-only and is not a substitute for AppSDK test
+evidence or admission. Existing module blackbox gates are unchanged.
+
+## Runtime boundary
+
+Runtime may consume only the compiled manifest and verified Active artifact. Runtime must not scan `.appsdk-control/`, Playground, Protected source, or arbitrary instruction files to reconstruct capability.
+
+## Development Process Control Harness
+
+The Harness is an agent-facing governance control plane, not a business runtime
+capability. `.appsdk/project.json#/guidance/rule_sources` explicitly declares
+project AGENTS, Skills, and their machine JSON contracts. `appsdk guide compile`
+reads only those paths and writes deterministic `.appsdk/guidance/compiled.json`.
+Markdown is digest-bound context for the agent; AppSDK validates only declared
+JSON nodes, edges, severity, and evidence contracts.
+
+Active PlanRecord and append-only PlanRevisionRecord/StepExecutionRecord events
+live under ignored `.appsdk-control/guidance/<task-id>/`. Existing AppSDK records
+remain the lifecycle truth. Missing Harness state does not block ordinary
+`verify` or `compile`; projects opt in and default to advisory guidance.
+
+After `new`, or `init` on a project with an approved Guidance declaration,
+follow the printed onboarding route:
+
+```bash
+appsdk guide compile <project>
+appsdk guide init <project> --task <task-id> --mode <develop|debug> --module <module-id>
+```
+
+The read-only intake names declared AGENTS/local Skill sources, questions still
+requiring user confirmation, exact Skill invocation suggestions, and the next
+guide commands. It never scans undeclared directories or writes an intake
+record. The Agent asks only unresolved questions and persists the confirmed
+technical plan through `appsdk guide plan`.
+
+If an existing governed project has no Guide declaration, rerun `appsdk init`
+idempotently. It preserves existing project/maps/records/Active/Protected truth,
+installs missing Guide resources, and prints:
+
+```bash
+appsdk guide init <project> --task guidance-setup --mode bootstrap --module <module-id>
+```
+
+The Agent reads the returned root AGENTS, bundled AppSDK Skill, and direct
+project-local Skill candidates, then proposes reusable workflows, project
+commands, evidence, severity, and source ownership. No durable rule is written
+or compiled before explicit user approval. After approval, update AGENTS, the
+project-local Skill and machine contract, and
+`.appsdk/project.json#/guidance/rule_sources` in a clean owner worktree; then run
+`appsdk guide compile` and `appsdk verify`. This setup proposal is project-level
+and must not be replaced by a task PlanProposal.
+
+`appsdk init` is also the single Collab bootstrap entry for a live Codex App
+Server Agent.
+After AppSDK-owned resources are installed, it invokes the official
+`collab init` once with the same process environment. Collab—not AppSDK—resolves
+the project root from the exact process cwd, starts or reuses the single daemon,
+registers the current peer, and creates or refreshes its finite default
+`direct-message` subscription. Do not follow `appsdk init` with a second
+`collab init`, `collab whoami`, or manual ordinary-message subscription.
+
+Without a live Codex App Server sessionID binding, no Agent peer exists to
+register. AppSDK keeps governance initialization usable and prints an explicit
+Collab-pending result; it does not fabricate identity/subscription state. In a
+live App Server context, missing Collab or a failed official Collab
+initialization reports `COLLAB_INIT_*` and collaboration unavailable.
+Independent AppSDK work continues; dependent shared writes wait for reliable
+task/file ownership. No failed registration is reported as successful.
+
+Frozen artifacts must be reproducible across clean worktree locations. The canonical module build runner appends a Rust `--remap-path-prefix` from the current project root to a stable logical path while preserving existing `RUSTFLAGS`. This removes absolute checkout paths from compiler metadata without changing source, payload, or lifecycle hashes. `rehydrate-frozen` and normal module compilation use the same runner; a path-dependent artifact is rejected rather than reconciled by copying or editing a frozen hash.
+
+## Bootstrap
+
+初始化前先创建需求准备文档：
+
+```bash
+appsdk prepare ./existing-workspace
+```
+
+AI 使用 `.appsdk-prepare.json` 模板向用户确认：这是新项目、模块重构、项目重构还是 debug；新项目根目录是什么；旧代码和 V3 等 legacy roots 是什么；新代码、Protected 和禁止修改边界是什么。用户确认后将 `status` 更新为 `confirmed`，然后才能执行 `init`。没有确认记录时，`init` 会 fail-fast。
+
+已经存在 `.appsdk/project.json` 的治理根可以直接幂等重跑 `appsdk init`，用于补齐
+当前 SDK 的 Guide 等 bundle 资源。此路径以现有项目合同作为 root 真源，不要求重新
+创建 preparation record，也不覆盖项目合同或 lifecycle truth。新建、迁移到新 root、
+或通过 `--project-root` 创建尚不存在的治理根仍必须走 confirmed preparation。
+
+如果旧 migration witness、reset receipt 或 control-plane 记录已经阻断当前 `verify`，
+且用户明确选择“忽略历史包袱、按当前版本重新开始”，使用显式 fresh 初始化入口：
+
+```bash
+appsdk init ./existing-project --fresh --discard-legacy
+```
+
+这不是普通 `init` 的隐式行为。它只接受已有 `.appsdk/project.json` 的项目，并且必须在
+clean、非 `main`/`master` worktree 执行；缺少 `--discard-legacy`、项目不存在、主分支或
+dirty worktree 都 fail-closed，拒绝写入。命令只通过 AppSDK 的 canonical reset owner
+移除旧的 `.appsdk/` 控制面、`.appsdk-control/` 和声明的 generated root；它会先验证并
+把现有 `.appsdk/project.json` 的项目合同语义带入新的 `.appsdk`；支持的旧 SDK pin 只在 staging
+中规范为当前 SDK 版本，不会用 `change-me/app-core` scaffold 覆盖项目身份、模块 owner、build 或生命周期边界。业务源码、
+runtime、`active/`、`protected/` 与人类文档继续保留，随后重建当前 `.appsdk` contract 和
+`contracts/records/**`、`contracts/transitions/**` projection，并写入
+`.appsdk/records/reset-governance-record.json`（`mode: "fresh_init"`）。
+
+fresh 初始化不会复制旧 migration witness、reset receipt、PASS、hash、review 或
+lifecycle record；新的 `verify`、`guide compile`、`compile` 和下游 candidate evidence
+必须从当前版本重新产生。重复执行仍然是一次新的、明确授权的 reset，普通 `init` 和
+`reset-governance --discard-legacy` 的既有幂等语义不变。
+
+对已有工作区，confirmed preparation 后必须先进入旧状态迁移预检：
+
+```text
+confirmed preparation
+  -> inspect 旧 AppSDK truth + 每个分散 Collab 初始化根
+  -> 冻结并分别生成快照
+  -> 设计控制权转移/冲突消解路线
+  -> 请求精确接管、清理、清零动作的授权
+  -> 执行已批准迁移并验证统一运行态归零
+  -> appsdk init ./existing-workspace --project-root new-code
+```
+
+这是初始化流程的一部分，不是初始化后的可选升级。没有 legacy root
+的新空项目只跳过 legacy inspection 分支；已有项目不能用 `init` 隐藏未解决的旧状态或冲突。
+
+已有项目先执行：
+
+```bash
+appsdk init ./existing-workspace --project-root new-code
+```
+
+`init` 的第一个参数是已有工作区，`--project-root` 是新 AppSDK 项目的相对根目录。这样旧代码可以留在工作区，新代码和治理面进入独立子目录。它是幂等操作：创建 `playground/`、`active/lib/`、`protected/`、`generated/`、`.appsdk/` 和 `.appsdk-control/`，只补齐缺失的治理合同，并向新项目根目录的 `.gitignore` 追加一次 SDK 管理区块。在 live Codex App Server Agent 中，它还以同一环境调用一次官方 `collab init`，由 Collab 完成 daemon、peer 与默认 `direct-message` 订阅；不需要第二次初始化。它不覆盖已有项目文件，也不覆盖已有 Git 忽略规则；绝对路径和 `..` 路径会被拒绝。
+
+新项目执行：
+
+```bash
+appsdk new ./my-app
+appsdk verify ./my-app
+```
+
+初始化会自动安装 `.appsdk/docs/`、`.appsdk/rules/` 和 `.appsdk/skills/`。这些是项目治理输入，不是 runtime capability；runtime 只消费编译后的 manifest 和 Active library。
+
+Then fill and confirm `.appsdk/goal.json`, bind project maps and module ownership, and follow the promotion contract. Template creation requires an empty, non-symlinked destination.
+
+Review 是必需生命周期门禁，但工具不固定。若 Jason 指定 review 工具，且该工具提供只读、可观测、结构化 verdict，则必须使用指定工具；未指定时使用配置的默认 review 路由。记录工具、exact commit、scope、verdict 和 evidence。指定工具不可用时不得静默替换。
+
+### Admission adapter contract and deterministic recovery
+
+Admission is a read-only gate. It never manufactures a lifecycle record from a
+missing file. When a required record is absent, the command emits a structured
+`REVIEW_ADMISSION_BLOCKED` object containing the module, every missing and
+present producer input, the single next action, `retry_allowed: false`, and the
+forbidden shortcuts. Repeating the command before that external state changes
+is idempotent and must produce the same blocked state; agents must not poll or
+retry it.
+
+The project owns adapters that observe reality; AppSDK owns record schema,
+identity binding, causal ordering, and final admission. The supported sequence
+is:
+
+```text
+clean owner worktree + candidate commit
+  -> appsdk produce-lifecycle-records --module <id> --input <declaration.json>
+  -> WorktreeRecord + ReproductionRecord + baseline EvidenceRecord
+  -> lifecycle adapter binds FixCandidateRecord
+  -> whitebox adapter runs and records the actual whitebox result
+  -> deployment adapter performs module.deployment_operations and records applicable receipts
+  -> blackbox adapter exercises the deployed public entrypoint
+  -> lifecycle adapter binds PreReviewValidationRecord
+  -> appsdk verify --review-admission <project> --module <id>
+```
+
+Each adapter is rerunnable for the same candidate without changing a PASS
+record. A changed candidate, artifact, environment, entrypoint, or input starts
+a new evidence set and invalidates the old one. A valid PASS projection skips
+the external action that produced it; the adapter still performs the lightweight
+identity, scope, integrity, and freshness checks required to trust the record.
+No adapter may accept a hand-entered hash, relabel whitebox output as blackbox
+output, or use an artifact from another worktree/project/version.
+
+For the downstream lifecycle records, the typed AppSDK adapter is
+`produce-lifecycle-chain`. It is invoked once per phase (`architecture`,
+`effectiveness`, `merge`, or `promotion`) with an observation declaration. The
+adapter reads the already-produced candidate/evidence records, rechecks their
+commit, tree, scope, expiry, and real Git/mainline identity, and computes the
+new record IDs and cross-record bindings. It does not execute a review, invent
+evidence, or treat the observation declaration as evidence. A missing or stale
+upstream record fails closed. Freeze and Active publication remain owned by the
+existing lifecycle adapter, which performs their real artifact and VCS gates.
+
+#### Stage execution, re-entry, and reuse
+
+The chain is a sequence of independently persisted phases. A phase has one
+projection and an input identity covering the candidate/tree, module scope,
+dependency records, artifact and environment bindings, map hashes, evidence
+references, and (where applicable) the mainline or cleanup identity.
+
+On every invocation AppSDK first validates the current projection and the
+upstream graph. If the projection is PASS, the identity is unchanged, and all
+referenced evidence is still valid, it returns `"reused": true` and skips the
+external phase action. This is a cache hit for that exact phase identity; it is
+not a claim that tests or deployment were executed again. `verify` remains a
+read-only integrity/freshness check and may read the whole graph without
+rerunning those external actions.
+
+If an input, dependency, map, artifact, environment, or evidence freshness
+changes, the current phase and its downstream phases are no longer reusable.
+The immutable PASS projection is retained and the adapter fails closed until a
+new candidate-bound projection is produced. A non-PASS projection is never a
+PASS cache entry: the same identity returns `LIFECYCLE_CHAIN_STAGE_NOT_PASS`,
+while a changed identity archives the old attempt and permits a new phase
+attempt. Attempts are append-only under
+`.appsdk/records/attempts/<module>/<phase>.jsonl`; malformed or conflicting
+entries fail closed.
+
+The initial `produce-lifecycle-records` phase follows the same rule for its
+Worktree, Reproduction, and baseline EvidenceRecord set. All three records
+must be present and match the complete declaration, identity, command, and
+freshness checks before the baseline command is skipped. A partial set is an
+explicit error; it is never silently completed from a cache.
+
+`produce-lifecycle-records` accepts a declaration containing the confirmed
+`goal_id`, the module and issue scope, bug-triage evidence, and a baseline
+command with a non-zero expected exit status plus an `expected_error_token`.
+It observes the current branch, HEAD, base ref, commit ancestry, complete Git
+cleanliness, and registered worktree path; the command runs in a temporary
+checkout of the declared base commit. The exit status and error token must both
+match, and its output is hashed, before the three records are written. The
+caller’s result, timestamps, record IDs, input hashes, producer identity, and
+Git fields are never trusted: timestamps, input hashes, path-safe IDs, and the
+fixed `appsdk-lifecycle-record-producer` identity are generated after those
+observations. Records are installed with create-new semantics as a group. A
+complete matching set is reused; a partial set, identity drift, expired
+evidence, validation failure, or installation failure remains an explicit error
+and does not publish a new record.
+
+For an upgrade, run `appsdk prepare`/`init` idempotently, inspect and snapshot
+the old project and legacy roots, obtain explicit ownership-transfer approval,
+run the pinned target binary's migration command, then execute the adapter
+sequence above. Only after admission passes may runtime review and applicable
+merge/promotion/freeze proceed. Installation needed for admission runs before
+admission. A blocked required adapter is an actionable
+external capability gap, not permission to edit records manually.
+
+`init` intentionally leaves a project at `draft`. The required promotion before
+compilation is explicit: confirm the goal, promote the project to
+`source_implemented`, bind the module contract, promote the project to
+`contract_bound`, and only then run `compile`. If compilation is attempted
+early, AppSDK returns `COMPILE_BLOCKED` with this exact ordered continuation and
+`retry_allowed: false`; it does not create a partial module artifact.
+
+## Lifecycle
+
+新项目和涉及实质架构变化的 feature 先确认相称设计；局部变更复用已有设计。
+下面是需要完整设计时的参考流程，不强制每个任务另写计划或使用 Guidance：
+
+```text
+需求与验收标准
+  -> goal/scope/non-goals 确认
+  -> 自上而下 module/resource map
+  -> 概要设计
+  -> 详细设计与调用/数据流绑定
+  -> requirements -> design -> module -> verification 一致性检查
+  -> 干净 worktree 开发
+```
+
+每个需求必须有唯一 owner module，每个设计元素必须落在允许边界内，
+每个验收标准必须有 verification gate。设计缺失或矛盾是 worker 自身的
+治理前置失败，不得先写业务代码。
+
+Debug 保留可复核的决策摘要、错误证据、实验条件与结果；长任务按需保存交接。
+合并前检查本次涉及的
+对集成后的 tree 重新做 resource/function/mainline/module map、边界、
+payload/control 隔离、owner 唯一和重复实现架构检查。
+
+```text
+goal clarification
+  -> confirmed/admitted
+  -> one semantic claim + one clean isolated worktree per worker
+  -> baseline reproduction
+  -> committed fix candidate + positive/negative evidence
+  -> development whitebox PASS
+  -> build + applicable install/restart
+  -> deployed public-entrypoint blackbox PASS
+  -> PreReviewValidationRecord + `appsdk verify --review-admission` PASS
+  -> architecture boundary check
+  -> selected review tool ReviewRecord PASS
+  -> unchanged-source effectiveness evidence PASS (reuse valid evidence)
+  -> one independently verifiable milestone per clean worktree
+  -> commit + serial merge queue + tested integration for every milestone
+  -> start the next milestone only after the predecessor remote-main receipt
+  -> verified local and remote mainline receipt
+  -> PromotionRecord
+  -> Active library
+  -> Protected source/contracts
+  -> FreezeRecord
+```
+
+The project contract is auditable and committed; the SDK implementation is
+external, while `sdk.lock` binds the project to the declared AppSDK
+version/schema and Bundle resources rather than a particular executable digest.
+Local control state is disposable and ignored.

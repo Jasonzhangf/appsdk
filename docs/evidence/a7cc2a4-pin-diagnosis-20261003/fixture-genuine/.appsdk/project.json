@@ -1,0 +1,266 @@
+{
+  "access": {
+    "protected_paths": [
+      ".appsdk/**",
+      "generated/**",
+      "protected/source/**"
+    ]
+  },
+  "development_scenarios": {
+    "enabled": [],
+    "manifest": ".appsdk/contracts/development-scenarios.manifest.json"
+  },
+  "governance": {
+    "active_kind": "immutable_consumable_library",
+    "active_root": "active/lib/**",
+    "debug_merge_comment_required": true,
+    "freeze_requirements": [
+      "git_clean",
+      "source_commit_or_tag",
+      "library_hash",
+      "public_api_hash",
+      "review_pass",
+      "previous_active_immutable"
+    ],
+    "generated_kinds": [
+      "compiler_output",
+      "indexes"
+    ],
+    "generated_root": "generated/**",
+    "playground_retention": "archive_then_remove",
+    "playground_root": "playground/experiments/**",
+    "promotion_requires": [
+      "experiment_evidence",
+      "architecture_review_pass",
+      "unique_owner",
+      "required_gates"
+    ],
+    "protected_kinds": [
+      "source",
+      "contracts",
+      "history"
+    ],
+    "protected_root": "protected/**",
+    "record_contracts": [
+      "contracts/records/worktree-record.schema.json",
+      "contracts/records/reproduction-record.schema.json",
+      "contracts/records/evidence-record.schema.json",
+      "contracts/records/fix-candidate-record.schema.json",
+      "contracts/records/goal-clarification-record.schema.json",
+      "contracts/records/review-record.schema.json",
+      "contracts/records/effectiveness-record.schema.json",
+      "contracts/records/pre-review-validation-record.schema.json",
+      "contracts/records/collaboration-record.schema.json",
+      "contracts/records/collaboration-index.schema.json",
+      "contracts/records/merge-queue-record.schema.json",
+      "contracts/records/merge-queue-state.schema.json",
+      "contracts/records/integration-record.schema.json",
+      "contracts/records/mainline-receipt-record.schema.json",
+      "contracts/records/merge-record.schema.json",
+      "contracts/records/promotion-record.schema.json",
+      "contracts/records/regression-report.schema.json",
+      "contracts/records/freeze-record.schema.json",
+      "contracts/records/record-graph.contract.json"
+    ],
+    "runtime_forbidden_roots": [
+      "playground/**",
+      "generated/**"
+    ],
+    "zone_transition_contract": "contracts/transitions/zone-transition-manifest.json"
+  },
+  "guidance": {
+    "compiled_manifest": ".appsdk/guidance/compiled.json",
+    "enforcement": "advisory",
+    "rule_sources": [
+      {
+        "kind": "agents",
+        "path": "AGENTS.md",
+        "precedence": 100,
+        "required": true,
+        "source_id": "project-agents"
+      },
+      {
+        "contract_path": ".appsdk/skills/appsdk-project-governance/appsdk-guidance.json",
+        "kind": "skill",
+        "path": ".appsdk/skills/appsdk-project-governance/SKILL.md",
+        "precedence": 200,
+        "required": true,
+        "source_id": "appsdk-governance-skill"
+      }
+    ]
+  },
+  "lifecycle": {
+    "stage": "contract_bound"
+  },
+  "lifecycles": {
+    "artifact": "generated",
+    "issue": "open",
+    "library": "draft",
+    "source_snapshot": "mutable"
+  },
+  "modules": [
+    {
+      "active_artifact": "active/lib/teams-source/**",
+      "artifact_paths": [
+        "opencode-adapter/index.mjs",
+        "opencode-adapter/index.d.mts",
+        "console-host/index.mjs",
+        "console-host/index.d.mts",
+        "static/console.html",
+        "static/console-entry.js",
+        "runtime/network/wss-connection.js",
+        "runtime/network/relay-login.js",
+        "runtime/runtime/console-runtime.js",
+        "runtime/runtime/console-process.js",
+        "runtime/runtime/local-config.js",
+        "runtime/runtime/local-process.js",
+        "runtime/runtime/local-supervisor.js",
+        "runtime/server/relay.js",
+        "runtime/server/relay-process.js",
+        "runtime/runtime/agent-process.js",
+        "runtime/agent/work-resource.js",
+        "runtime/config/runtime-config.js"
+      ],
+      "build": {
+        "args": [
+          "build:governance"
+        ],
+        "program": "pnpm",
+        "working_directory": "."
+      },
+      "contract_paths": [
+        "docs/architecture/**",
+        ".appsdk/project.json",
+        ".appsdk/goal.json",
+        "contracts/records/**",
+        "contracts/transitions/**"
+      ],
+      "dependency_modules": [],
+      "deployment_operations": [
+        "install",
+        "restart"
+      ],
+      "generated_outputs": [
+        "generated/modules/teams-source/**"
+      ],
+      "module_id": "teams-source",
+      "owned_paths": [
+        "agent/**",
+        "agent-host/**",
+        "cli-adapter/**",
+        "endpoint/**",
+        "config/**",
+        "control-protocol/**",
+        "network/**",
+        "runtime/**",
+        "server/**",
+        "opencode-adapter/src/**",
+        "opencode-adapter/tests/**",
+        "opencode-adapter/separator.spec.ts",
+        "opencode-adapter/package.json",
+        "opencode-adapter/tsconfig.json",
+        "opencode-adapter/tsdown.config.ts",
+        "console-host/src/**",
+        "console-host/tests/**",
+        "console-host/static/**",
+        "console-host/package.json",
+        "console-host/tsconfig.json",
+        "console-host/vitest.config.ts",
+        "ui/teams-console/src/**",
+        "ui/teams-console/tests/**",
+        "ui/teams-console/package.json",
+        "ui/teams-console/tsconfig.json",
+        "ui/teams-console/vitest.config.ts",
+        "ui/teams-console/tsconfig.build.json",
+        "ui/teams-console/fixture/**",
+        "ui/teams-console/assets/**",
+        "dsh-adapter/**",
+        "memory-plugin/**",
+        "search-plugin/**",
+        "docs/**",
+        "scripts/**",
+        "AGENTS.md",
+        "README.md",
+        "package.json",
+        "pnpm-workspace.yaml",
+        "pnpm-lock.yaml",
+        "tsconfig.json",
+        "tsconfig.runtime.json",
+        "vitest.config.ts",
+        ".gitignore"
+      ],
+      "regression": {
+        "allow_skipped": false,
+        "command": {
+          "args": [
+            "test"
+          ],
+          "program": "pnpm",
+          "working_directory": "."
+        },
+        "input_paths": [
+          "agent/**",
+          "agent-host/**",
+          "endpoint/**",
+          "config/**",
+          "control-protocol/**",
+          "network/**",
+          "runtime/**",
+          "server/**",
+          "opencode-adapter/src/**",
+          "opencode-adapter/tests/**",
+          "opencode-adapter/separator.spec.ts",
+          "opencode-adapter/package.json",
+          "opencode-adapter/tsconfig.json",
+          "opencode-adapter/tsdown.config.ts",
+          "console-host/src/**",
+          "console-host/tests/**",
+          "console-host/static/**",
+          "console-host/package.json",
+          "console-host/tsconfig.json",
+          "console-host/vitest.config.ts",
+          "ui/teams-console/src/**",
+          "ui/teams-console/tests/**",
+          "ui/teams-console/package.json",
+          "ui/teams-console/tsconfig.json",
+          "ui/teams-console/vitest.config.ts",
+          "ui/teams-console/tsconfig.build.json",
+          "ui/teams-console/fixture/**",
+          "ui/teams-console/assets/**",
+          "dsh-adapter/**",
+          "memory-plugin/**",
+          "search-plugin/**",
+          "scripts/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          "tsconfig.json",
+          "tsconfig.runtime.json",
+          "vitest.config.ts",
+          "docs/architecture/**"
+        ],
+        "minimum_test_count": 304,
+        "ordinary_mode_after_freeze": "disabled",
+        "reenable_on": [
+          "source_change",
+          "contract_change",
+          "public_api_change",
+          "artifact_change",
+          "dependency_change"
+        ],
+        "required_before_freeze": true,
+        "suite_id": "teams-source-regression"
+      },
+      "source_owner": "teams-source",
+      "stage": "source_implemented"
+    }
+  ],
+  "project_id": "agentteams",
+  "schema_version": 1,
+  "sdk": {
+    "bundle_manifest": ".appsdk/contracts/sdk-bundle.manifest.json",
+    "name": "appsdk",
+    "resource_record": ".appsdk/sdk-resources.json",
+    "version": "0.1.6"
+  }
+}

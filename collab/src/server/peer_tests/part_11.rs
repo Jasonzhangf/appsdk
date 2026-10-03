@@ -396,3 +396,198 @@ async fn recv_clears_keepalive_unacked_counter() {
     assert!(!record.suspected_offline);
     std::fs::remove_dir_all(root).ok();
 }
+
+/// `collab context` is the single agent bootstrap read, so the projections that
+/// `collab who` (`count`) and `collab status --all` (`summary`, `master_wake`,
+/// `subagents`) expose must be part of the same snapshot. Without them the agent
+/// has to issue three more calls to answer "who is here, and what is the
+/// scheduling state".
+#[test]
+fn context_snapshot_carries_peer_status_and_scheduling_state() {
+    let (server, root) = test_server();
+    for (id, pane) in [("peer-a", "%1"), ("peer-b", "%2")] {
+        let response = register(&server, id, pane);
+        assert!(response.ok, "registering {id} failed: {:?}", response.error);
+    }
+
+    let response = handle_context(&server, "peer-a".into(), "token-peer-a".into());
+    assert!(response.ok, "context failed: {:?}", response.error);
+    let data = &response.data;
+
+    assert_eq!(data["registered"], true);
+    assert_eq!(data["peer_count"], 2);
+    assert_eq!(data["peers"].as_array().unwrap().len(), 2);
+    assert_eq!(data["summary"]["workers"], 2);
+    assert_eq!(data["summary"]["tasks"], 0);
+    assert_eq!(data["summary"]["subagents"], 0);
+    assert!(data["summary"]["now"].is_string(), "{data}");
+    assert!(
+        data["master_wake"].is_object(),
+        "the scheduling projection must travel with the context snapshot: {data}"
+    );
+    assert!(data["subagents"].is_array(), "{data}");
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// `collab context` replaces `collab who` / `collab status --all` for agents,
+/// and `Workers` / `StatusAll` were the calls that recorded ordinary-peer
+/// presence edges. Driving the same transition through the consolidated entry
+/// must still emit the recovery notification, or the wake loop silently
+/// degrades as soon as agents stop calling the demoted commands.
+#[test]
+fn context_records_peer_presence_transitions_like_status_all() {
+    let (server, root) = test_server();
+    register(&server, "master-worker", "thread-master");
+    register(&server, "cold-worker", "thread-cold");
+    kill_registered_worker_pane(&server, "cold-worker");
+    let server_arc = std::sync::Arc::new(server);
+    let promoted = dispatch(
+        &server_arc,
+        Req::MasterPromote {
+            worker_id: "master-worker".into(),
+            token: "token-master-worker".into(),
+            approval: "approved".into(),
+        },
+    );
+    assert!(promoted.ok, "{promoted:?}");
+
+    // The first read only establishes the offline baseline; it must not notify.
+    let baseline = handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    assert!(baseline.ok, "{baseline:?}");
+    {
+        let state = server_arc.state.lock().unwrap();
+        assert_eq!(state.keepalives["cold-worker"].notified_presence, "offline");
+        assert!(state.msgs.values().all(|m| {
+            !(m.to == "master-worker"
+                && m.subject == Some("worker-unresponsive: cold-worker".into()))
+        }));
+    }
+
+    assert!(register(&server_arc, "cold-worker", "thread-cold").ok);
+    let recovered =
+        handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    assert!(recovered.ok, "{recovered:?}");
+    let repeated = handle_context(&server_arc, "master-worker".into(), "token-master-worker".into());
+    assert!(repeated.ok, "{repeated:?}");
+
+    let state = server_arc.state.lock().unwrap();
+    assert_eq!(
+        state
+            .msgs
+            .values()
+            .filter(|m| {
+                m.to == "master-worker" && m.subject == Some("worker-recovered: cold-worker".into())
+            })
+            .count(),
+        1,
+        "the offline->online edge must still notify exactly once through collab context"
+    );
+    assert_eq!(state.keepalives["cold-worker"].notified_presence, "online");
+    drop(state);
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn approve_promotion(server: &Arc<Server>, worker_id: &str) -> Resp {
+    dispatch(
+        server,
+        Req::MasterPromote {
+            worker_id: worker_id.into(),
+            token: format!("token-{worker_id}"),
+            approval: "user approval".into(),
+        },
+    )
+}
+
+/// `live_master_id` decides liveness from a pane probe, and a pane's shell
+/// survives a Codex restart inside that pane. When another registration takes
+/// the recorded master's pane, the master is still reported live but can no
+/// longer act on its anchor. The owner's explicit approval must still be able
+/// to replace it, otherwise the project is left with an authority that can
+/// neither act, nor be recovered, nor be replaced.
+#[test]
+fn user_approved_promotion_replaces_a_master_whose_anchor_was_taken() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_single(&root);
+    let server = Arc::new(server);
+
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-old-master".into());
+    endpoint.codex_thread_id = Some("thread-old-master".into());
+    assert!(register_tmux(&server, "old-master", endpoint.clone()).ok);
+    let master_binding = registered_binding(&server, "old-master");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding,
+        }])
+        .unwrap();
+    assert!(approve_promotion(&server, "old-master").ok);
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "old-master"
+    );
+
+    // A later Codex thread takes the same pane. The pane shell keeps its pid,
+    // so the recorded master still probes present.
+    let mut taker = endpoint.clone();
+    taker.codex_session_id = Some("session-taker".into());
+    taker.codex_thread_id = Some("thread-taker".into());
+    assert!(register_tmux(&server, "taker", taker).ok);
+    let taker_binding = registered_binding(&server, "taker");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: taker_binding,
+        }])
+        .unwrap();
+
+    // The recorded master is still reported live. That is exactly why the
+    // repair has to consult the anchor, not the presence probe.
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "old-master"
+    );
+
+    let promoted = approve_promotion(&server, "taker");
+    assert!(promoted.ok, "{promoted:?}");
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "taker"
+    );
+    drop(tmux);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The repair must not become a coup: while the recorded master still owns its
+/// anchor, an approved promotion is still refused.
+#[test]
+fn user_approved_promotion_still_refuses_a_master_that_owns_its_anchor() {
+    let (server, root) = test_server();
+    let tmux = IsolatedTmux::start_single(&root);
+    let server = Arc::new(server);
+
+    let mut endpoint = tmux.endpoints().remove(0);
+    endpoint.codex_session_id = Some("session-master".into());
+    endpoint.codex_thread_id = Some("thread-master".into());
+    assert!(register_tmux(&server, "master", endpoint.clone()).ok);
+    let master_binding = registered_binding(&server, "master");
+    server
+        .commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding,
+        }])
+        .unwrap();
+    assert!(approve_promotion(&server, "master").ok);
+
+    let mut other = tmux.add_session();
+    other.codex_session_id = Some("session-other".into());
+    other.codex_thread_id = Some("thread-other".into());
+    assert!(register_tmux(&server, "other", other).ok);
+
+    let refused = approve_promotion(&server, "other");
+    assert!(!refused.ok, "{refused:?}");
+    assert_eq!(
+        dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
+        "master"
+    );
+    drop(tmux);
+    std::fs::remove_dir_all(root).ok();
+}

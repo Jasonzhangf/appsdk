@@ -300,3 +300,117 @@ fn context_recovers_archived_master_in_the_same_live_pane() {
     let status = fixture.run_ok(&["msg", message_id], Some(&new));
     assert_eq!(status["consumed_by_recv"], true);
 }
+
+/// The implicit bootstrap path — `collab context` run from a pane with no
+/// `--worker` and no `COLLAB_WORKER` — resolves its durable identity from the
+/// live anchor and can then be rejected by the daemon. The terminal must name
+/// that resolved identity: before, it echoed the caller's optional `--worker`,
+/// which is absent on this path, so the agent got `worker_id: null` plus a
+/// `<worker_id>` placeholder and could not run the repair it was handed.
+#[test]
+fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_token() {
+    let root = unique_root();
+    let host_state = root.join("h");
+    let tmux_socket = root.join("t.sock");
+    std::fs::create_dir_all(&root).expect("create isolated project root");
+    std::fs::create_dir_all(&host_state).expect("create isolated host state root");
+    let mut fixture = Fixture {
+        binary: PathBuf::from(env!("CARGO_BIN_EXE_collab")),
+        root: root.clone(),
+        host_state: host_state.clone(),
+        tmux_socket: tmux_socket.clone(),
+        initialized: false,
+    };
+    tmux(
+        &tmux_socket,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "collab-implicit-context",
+            "sleep 600",
+        ],
+    );
+    let server_pid =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+    let pane_id =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+    let worker_id = format!("codex-{pane_id}");
+    let pane = Pane {
+        server_pid,
+        pane_id: pane_id.clone(),
+        session_anchor: "session-implicit".into(),
+        thread_anchor: "thread-implicit".into(),
+        worker_id: worker_id.clone(),
+    };
+    fixture.initialized = true;
+    fixture.run_ok(&["init"], Some(&pane));
+
+    // Durable identity exists and is registered; now make its token unusable so
+    // the daemon rejects the first authenticated call.
+    let identity_path = host_state
+        .join("identities")
+        .join(&worker_id)
+        .join("identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    identity["token"] = Value::String("not-the-recorded-token".into());
+    std::fs::write(
+        &identity_path,
+        serde_json::to_vec_pretty(&identity).unwrap(),
+    )
+    .unwrap();
+
+    // Implicit: no `--worker`, and COLLAB_WORKER is deliberately removed while
+    // the tmux anchor stays, so the identity is resolved from the anchor alone.
+    let output = Command::new(&fixture.binary)
+        .arg("context")
+        .current_dir(&fixture.root)
+        .env("COLLAB_STATE_DIR", &fixture.host_state)
+        .env(
+            "TMUX",
+            format!("{},{},0", tmux_socket.display(), pane.server_pid),
+        )
+        .env("TMUX_PANE", &pane.pane_id)
+        .env("CODEX_SESSION_ID", &pane.session_anchor)
+        .env("CODEX_THREAD_ID", &pane.thread_anchor)
+        .env_remove("COLLAB_WORKER")
+        .output()
+        .expect("run implicit collab context");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "a classified identity failure must still exit 0: stdout={stdout} stderr={stderr}"
+    );
+    let snapshot: Value = serde_json::from_str(&stdout).expect("context emits JSON");
+    let update = &snapshot["requires_identity_update"];
+    assert_eq!(
+        snapshot["registered"], false,
+        "the terminal is not a registered snapshot: {snapshot}"
+    );
+    assert_eq!(
+        update["reason"], "TOKEN_MISMATCH",
+        "the daemon rejection must be classified: {snapshot}"
+    );
+    assert_eq!(
+        update["worker_id"], worker_id,
+        "the implicit path must name the identity it resolved and had rejected: {snapshot}"
+    );
+    let action = update["action"].as_str().unwrap();
+    assert!(
+        action.contains(&worker_id),
+        "the escalation must carry the concrete worker: {snapshot}"
+    );
+    assert!(
+        !action.contains("<worker_id>"),
+        "no placeholder on the resolved path: {snapshot}"
+    );
+}

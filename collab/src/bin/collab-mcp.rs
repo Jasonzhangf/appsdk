@@ -151,7 +151,7 @@ fn tools() -> Value {
         ),
         tool(
             "collab_context",
-            "The single agent bootstrap entry. Automatically resolves the canonical project root, creates a missing baseline, starts a stopped daemon, restores identity and registration, re-arms the default direct-message lease unless the owner explicitly unsubscribed, and returns the authoritative snapshot plus the current role's operations. Idempotent; call it on bootstrap, thread/session change, daemon restart, identity mismatch, or route loss. Do not use init, whoami, worker recover, route resolve, or down/up for this.",
+            "The single agent bootstrap entry. Automatically resolves the canonical project root, creates a missing baseline, starts a stopped daemon, restores identity and registration, re-arms the default direct-message lease unless the owner explicitly unsubscribed, and returns the authoritative snapshot plus the current role's operations. An identity failure is NOT a failed call: it succeeds with registered=false, identity=null, and requires_identity_update carrying reason/action/exact_error alongside the read-only peers/master/status/env projection, so branch on those fields instead of on the call's success. Idempotent; call it on bootstrap, thread/session change, daemon restart, identity mismatch, or route loss. Do not use init, whoami, worker recover, route resolve, or down/up for this.",
             json!({}),
             &[]
         ),

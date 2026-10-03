@@ -297,7 +297,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 7] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 9] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -327,20 +327,30 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 7] {
             "docs/dagpipe/merge-pending.graph.json",
             include_str!("../../docs/dagpipe/merge-pending.graph.json"),
         ),
+        (
+            "docs/dagpipe/collab-identity-adjudication.graph.json",
+            include_str!("../../docs/dagpipe/collab-identity-adjudication.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-dsh-channel.graph.json",
+            include_str!("../../docs/dagpipe/collab-dsh-channel.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 5] {
+fn design_graph_ids() -> [&'static str; 7] {
     [
         "appsdk-collab-context",
         "appsdk-collab-appserver-route-repair",
         "appsdk-collab-subscription-lifecycle",
         "appsdk-collab-notification-consumption",
         "appsdk-collab-merge-pending",
+        "appsdk-collab-identity-adjudication",
+        "appsdk-collab-dsh-channel",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 27] {
+fn design_graph_operator_names() -> [&'static str; 41] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -369,6 +379,20 @@ fn design_graph_operator_names() -> [&'static str; 27] {
         "appsdk.collab_merge.integrate_main",
         "appsdk.collab_merge.resolve_pending",
         "appsdk.collab_merge.close_task",
+        "appsdk.collab_adjudication.parse_declaration",
+        "appsdk.collab_adjudication.load_target",
+        "appsdk.collab_adjudication.collect_inherited",
+        "appsdk.collab_adjudication.write_receipt",
+        "appsdk.collab_adjudication.rebind_identity",
+        "appsdk.collab_adjudication.emit_outcome",
+        "appsdk.collab_dsh_channel.build_dsh_candidate",
+        "appsdk.collab_dsh_channel.admit_dsh_transport",
+        "appsdk.collab_dsh_channel.bind_and_receipt",
+        "appsdk.collab_dsh_channel.publish_route",
+        "appsdk.collab_dsh_channel.arm_default_lease",
+        "appsdk.collab_dsh_channel.project_presence",
+        "appsdk.collab_dsh_channel.deliver_wake",
+        "appsdk.collab_dsh_channel.send_to_peer",
     ]
 }
 

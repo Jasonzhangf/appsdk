@@ -1,0 +1,13 @@
+Input:
+post-fix working tree
+CARGO_TARGET_DIR=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/target
+APPSDK_HOME=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/home
+TMPDIR=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/tmp
+Working directory:
+/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/tmp
+
+CLI/parse command:
+env APPSDK_HOME=<owned> TMPDIR=<owned> /Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/target/debug/appsdk dagpipe validate | jq -c --slurpfile manifest /Volumes/Intel/playground/appsdk/b160ada-registry-20261003/docs/dagpipe/manifest.json '.graphs | map(.id) as $ids | ($manifest[0].graphs | map(.id)) as $expected | {match: (($ids | length) == 9 and ($ids | unique | length) == 9 and $ids == $expected), count: ($ids | length), ids: $ids}'
+Exit: 0
+Output:
+{"match":true,"count":9,"ids":["appsdk-fix-lifecycle","appsdk-notification-object","appsdk-collab-context","appsdk-collab-appserver-route-repair","appsdk-collab-subscription-lifecycle","appsdk-collab-notification-consumption","appsdk-collab-merge-pending","appsdk-collab-identity-adjudication","appsdk-collab-dsh-channel"]}

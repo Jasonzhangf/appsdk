@@ -1309,8 +1309,24 @@ fn dagpipe_validate_reports_every_embedded_graph_as_single_source_single_sink() 
         .iter()
         .map(|graph| graph["id"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(ids.contains(&"appsdk-fix-lifecycle"));
-    assert!(ids.contains(&"appsdk-notification-object"));
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/dagpipe/manifest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(manifest_path).unwrap()).unwrap();
+    let expected_ids = manifest["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|graph| graph["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), expected_ids.len());
+    assert!(ids.contains(&"appsdk-collab-identity-adjudication"));
+    assert!(ids.contains(&"appsdk-collab-dsh-channel"));
+    assert_eq!(
+        ids.into_iter().collect::<std::collections::BTreeSet<_>>(),
+        expected_ids
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
 }
 
 fn dagpipe_address(session: &str) -> Value {

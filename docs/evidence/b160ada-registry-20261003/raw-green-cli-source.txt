@@ -1,0 +1,139 @@
+Input:
+post-fix working tree
+CARGO_TARGET_DIR=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/target
+APPSDK_HOME=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/home
+TMPDIR=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/tmp
+
+Build command:
+env CARGO_TARGET_DIR=<owned> APPSDK_HOME=<owned> TMPDIR=<owned> cargo build --manifest-path rust/Cargo.toml
+Build exit: 0
+
+CLI command from source cwd:
+env APPSDK_HOME=<owned> TMPDIR=<owned> .b160ada-owned/target/debug/appsdk dagpipe validate
+CLI exit: 0
+Raw JSON:
+{
+  "compiled_registry": true,
+  "graphs": [
+    {
+      "id": "appsdk-fix-lifecycle",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-notification-object",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-context",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.3.0"
+    },
+    {
+      "id": "appsdk-collab-appserver-route-repair",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-collab-subscription-lifecycle",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-collab-notification-consumption",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.2.0"
+    },
+    {
+      "id": "appsdk-collab-merge-pending",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-identity-adjudication",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    },
+    {
+      "id": "appsdk-collab-dsh-channel",
+      "single_source_single_sink": {
+        "inputs": 1,
+        "outputs": 1
+      },
+      "version": "0.1.0"
+    }
+  ],
+  "manifest": {
+    "graphs": [
+      {
+        "id": "appsdk-fix-lifecycle",
+        "path": "contracts/dagpipe/fix-lifecycle.graph.json"
+      },
+      {
+        "id": "appsdk-notification-object",
+        "path": "contracts/dagpipe/notification.graph.json"
+      },
+      {
+        "id": "appsdk-collab-context",
+        "path": "docs/dagpipe/collab-context.graph.json"
+      },
+      {
+        "id": "appsdk-collab-appserver-route-repair",
+        "path": "docs/dagpipe/appserver-route-repair.graph.json"
+      },
+      {
+        "id": "appsdk-collab-subscription-lifecycle",
+        "path": "docs/dagpipe/collab-subscription-lifecycle.graph.json"
+      },
+      {
+        "id": "appsdk-collab-notification-consumption",
+        "path": "docs/dagpipe/collab-notification-consumption.graph.json"
+      },
+      {
+        "id": "appsdk-collab-merge-pending",
+        "path": "docs/dagpipe/merge-pending.graph.json"
+      },
+      {
+        "id": "appsdk-collab-identity-adjudication",
+        "path": "docs/dagpipe/collab-identity-adjudication.graph.json"
+      },
+      {
+        "id": "appsdk-collab-dsh-channel",
+        "path": "docs/dagpipe/collab-dsh-channel.graph.json"
+      }
+    ],
+    "schema_version": 1
+  },
+  "single_source_single_sink": true
+}
+
+Parse/compare command:
+env APPSDK_HOME=<owned> TMPDIR=<owned> .b160ada-owned/target/debug/appsdk dagpipe validate | jq -c --slurpfile manifest docs/dagpipe/manifest.json '.graphs | map(.id) as $ids | ($manifest[0].graphs | map(.id)) as $expected | {match: (($ids | length) == 9 and ($ids | unique | length) == 9 and $ids == $expected), count: ($ids | length), ids: $ids}'
+Exit: 0
+Output:
+{"match":true,"count":9,"ids":["appsdk-fix-lifecycle","appsdk-notification-object","appsdk-collab-context","appsdk-collab-appserver-route-repair","appsdk-collab-subscription-lifecycle","appsdk-collab-notification-consumption","appsdk-collab-merge-pending","appsdk-collab-identity-adjudication","appsdk-collab-dsh-channel"]}

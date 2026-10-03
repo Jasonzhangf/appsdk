@@ -1,0 +1,45 @@
+Focused public CLI test:
+env CARGO_TARGET_DIR=<owned> APPSDK_HOME=<owned> TMPDIR=<owned> cargo test --manifest-path rust/Cargo.toml --test cli_smoke dagpipe_validate_reports_every_embedded_graph_as_single_source_single_sink -- --exact
+Exit: 0
+Output summary:
+test dagpipe_validate_reports_every_embedded_graph_as_single_source_single_sink ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 320 filtered out; finished in 3.00s
+
+Focused part_17 dagpipe_fix_ tests:
+env CARGO_TARGET_DIR=<owned> APPSDK_HOME=<owned> TMPDIR=<owned> cargo test --manifest-path rust/Cargo.toml --test cli_smoke dagpipe_fix_
+Exit: 0
+Output summary:
+test dagpipe_fix_lifecycle_runs_the_declared_graph_and_state_machine ... ok
+test dagpipe_fix_rejects_candidate_record_module_mismatch ... ok
+test dagpipe_fix_rejects_worktree_record_module_mismatch ... ok
+test dagpipe_fix_is_advisory_and_authoritative_verify_still_fails_on_missing_evidence ... ok
+test dagpipe_fix_rejects_path_traversal_module_identifier ... ok
+test dagpipe_fix_rejects_promotion_gate_result_not_pass ... ok
+test dagpipe_fix_lifecycle_fails_closed_on_invalid_record_chain ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 314 filtered out; finished in 29.65s
+
+Focused registry rejection unit tests:
+env CARGO_TARGET_DIR=<owned> APPSDK_HOME=<owned> TMPDIR=<owned> cargo test --manifest-path rust/Cargo.toml --bin appsdk validate_graph_registry_rejects
+Exit: 0
+Output summary:
+test dagpipe::tests::validate_graph_registry_rejects_design_operator_on_non_design_graph ... ok
+test dagpipe::tests::validate_graph_registry_rejects_design_operator_on_executable_graph ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.01s
+
+Format:
+cargo fmt --manifest-path rust/Cargo.toml -- --check
+Exit: 0
+
+Diff whitespace:
+git diff --check
+Exit: 0
+
+Candidate hashes:
+e6a278cfd1546a3f3e2a2141352a3596f02c6540baa4f557ee7806936b83caf7  rust/src/dagpipe.rs
+f98e68f2320176a9d56e3c80affe3d766e2930383c15f9804e8123342952fc93  rust/tests/cli_smoke/part_17.rs
+8419cb040acf5a36b452032e8b38e5ce5ddc8a321c3874fe61c9a58b13dd99d6  docs/dagpipe/manifest.json
+0be394ed9330a76c09684467cf4d574cadf11eb4a364a9b54f716b7f372ea75b  docs/dagpipe/collab-identity-adjudication.graph.json
+d72fc3127d58acd094c569c7ca2f276e4df78dd8d15884ff12274fc9358113d6  docs/dagpipe/collab-dsh-channel.graph.json
+12c61087ebbf769f1d5d4733efaa10907a2a6020e4804d1723ddd6cb1c73f613  .b160ada-owned/target/debug/appsdk
+Tracked candidate diff hash:
+d8738e4feaa911a38db3426416980b61478a4f9aa7e1276ee0d008cface66efd

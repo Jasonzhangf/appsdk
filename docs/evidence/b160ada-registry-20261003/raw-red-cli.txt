@@ -1,0 +1,15 @@
+Input:
+base commit bb9168d86342c7cfe910e1124b25e6bb7a8cffd9
+CARGO_TARGET_DIR=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/target
+APPSDK_HOME=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/home
+TMPDIR=/Volumes/Intel/playground/appsdk/b160ada-registry-20261003/.b160ada-owned/tmp
+
+Build command:
+env CARGO_TARGET_DIR=<owned> APPSDK_HOME=<owned> TMPDIR=<owned> cargo build --manifest-path rust/Cargo.toml
+Build exit: 0
+
+CLI command from source cwd:
+env APPSDK_HOME=<owned> TMPDIR=<owned> .b160ada-owned/target/debug/appsdk dagpipe validate
+CLI exit: 1
+stdout/stderr:
+DAGPIPE_GRAPH_VALIDATION_FAILED:DAGPIPE_GRAPH_MANIFEST_MISMATCH:manifest=9 embedded=7

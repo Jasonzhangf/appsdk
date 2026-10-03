@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "receipt_id": "1a21b0c-causal-intervention",
+  "status": "causal_intervention_passed",
+  "worktree": "/Volumes/Intel/playground/appsdk/1a21b0c-transition-diagnosis-20261003",
+  "base_commit": "bb9168d86342c7cfe910e1124b25e6bb7a8cffd9",
+  "input_identity": {
+    "archive_sha256": "2d91c66612c307e2ba76ceba188ca613e557840d69b9ef1568bb33825e68db50",
+    "candidate_binary_sha256": "86b7228db3e67495e922bd3ec092541a6384fc0bc8f6edd981b432ab1154dacc"
+  },
+  "fixture": {
+    "extracted_path": ".tmp/fixture-intervention",
+    "file_count": 1044,
+    "file_count_method": "Regular-file entries in the retained pre-pin input archive, counted by tar -tvzf entry type; not post-pin generated files.",
+    "input_archive_directory_count": 171,
+    "appsdk_home": ".tmp/appsdk-home-intervention",
+    "tmpdir": ".tmp/tmp-intervention",
+    "pre_intervention_diff_against_original": "clean"
+  },
+  "intervention": {
+    "description": "Replace only the two root zone-transition runtime files with the current source canonical runtime.",
+    "source_path": "contracts/transitions/zone-transition.manifest.json",
+    "source_sha256": "ae910c4426c8bccc22c9e2256e8ca9842eb39c2caa783428afec5c9a2d44c5d5",
+    "targets": [
+      {
+        "path": ".tmp/fixture-intervention/contracts/transitions/zone-transition-manifest.json",
+        "sha256_after": "ae910c4426c8bccc22c9e2256e8ca9842eb39c2caa783428afec5c9a2d44c5d5"
+      },
+      {
+        "path": ".tmp/fixture-intervention/contracts/transitions/zone-transition.manifest.json",
+        "sha256_after": "ae910c4426c8bccc22c9e2256e8ca9842eb39c2caa783428afec5c9a2d44c5d5"
+      }
+    ],
+    "not_changed": [
+      "candidate binary",
+      "archive",
+      "validator",
+      "map migration behavior",
+      "historical migration records",
+      "historical migration snapshots"
+    ]
+  },
+  "commands": [
+    {
+      "name": "pin-lock",
+      "argv": [
+        ".tmp/input/appsdk-candidate",
+        "pin-lock",
+        ".tmp/fixture-intervention",
+        "--binary",
+        ".tmp/input/appsdk-candidate"
+      ],
+      "exit_code": 0,
+      "stdout": "pinned /Volumes/Intel/playground/appsdk/1a21b0c-transition-diagnosis-20261003/.tmp/input/appsdk-candidate",
+      "stderr": "",
+      "log": "logs/intervention-pin-lock.log"
+    },
+    {
+      "name": "verify",
+      "argv": [
+        ".tmp/input/appsdk-candidate",
+        "verify",
+        ".tmp/fixture-intervention"
+      ],
+      "exit_code": 0,
+      "stdout_json": {
+        "baseline_status": "current",
+        "command_ok": true,
+        "delivery_assessed": false,
+        "delivery_verified": false,
+        "development_ready": true,
+        "ok": false,
+        "project_id": "agentteams",
+        "reason": "delivery_not_evaluated",
+        "stage": "contract_bound",
+        "test_governance": {
+          "mode": "off",
+          "objects": [],
+          "status": "not_selected"
+        }
+      },
+      "stderr": "",
+      "log": "logs/intervention-verify.log"
+    }
+  ],
+  "comparison": {
+    "original_verify_exit_code": 1,
+    "original_verify_error": "INVALID_DECLARED_ZONE_CONTRACT",
+    "intervention_verify_exit_code": 0,
+    "changed_factor": "declared root transition runtime content",
+    "conclusion": "The final validator is a symptom; the missing publication is the root transition runtime refresh in pin-lock."
+  }
+}

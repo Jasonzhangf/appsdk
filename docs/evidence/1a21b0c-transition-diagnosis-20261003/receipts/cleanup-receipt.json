@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "receipt_id": "1a21b0c-cleanup",
+  "status": "cleaned",
+  "worktree": "/Volumes/Intel/playground/appsdk/1a21b0c-transition-diagnosis-20261003",
+  "removed": {
+    "path": ".tmp",
+    "size_before_cleanup": "121M",
+    "entries": [
+      ".tmp/appsdk-home-intervention",
+      ".tmp/appsdk-home-original",
+      ".tmp/current-record-resources.txt",
+      ".tmp/fixture-intervention",
+      ".tmp/fixture-original",
+      ".tmp/fixture-record-resources.txt",
+      ".tmp/input",
+      ".tmp/tmp-intervention",
+      ".tmp/tmp-original"
+    ],
+    "included": [
+      "copied archive",
+      "copied candidate binary",
+      "original fixture",
+      "intervention fixture",
+      "APPSDK_HOME directories",
+      "TMPDIR directories",
+      "temporary resource lists"
+    ]
+  },
+  "retained": {
+    "worktree": "/Volumes/Intel/playground/appsdk/1a21b0c-transition-diagnosis-20261003",
+    "evidence": "docs/evidence/1a21b0c-transition-diagnosis-20261003/**",
+    "note": "The worktree is retained for parent design review and later reclamation."
+  },
+  "checks": {
+    "tmp_removed": true,
+    "status_after_cleanup": [
+      "?? docs/evidence/1a21b0c-transition-diagnosis-20261003/"
+    ],
+    "tracked_source_diff": "none",
+    "own_long_lived_processes": "none"
+  }
+}

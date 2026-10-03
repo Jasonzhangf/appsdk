@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "receipt_id": "1a21b0c-targeted-checks",
+  "status": "passed",
+  "worktree": "/Volumes/Intel/playground/appsdk/1a21b0c-transition-diagnosis-20261003",
+  "base_commit": "bb9168d86342c7cfe910e1124b25e6bb7a8cffd9",
+  "checks": {
+    "git_diff_check": {
+      "command": "git diff --check",
+      "result": "pass"
+    },
+    "tracked_source_unchanged": {
+      "command": "git diff --name-only HEAD",
+      "result": "empty",
+      "conclusion": "No tracked product source, test, contract, manifest, or release metadata changed."
+    },
+    "allowed_paths": {
+      "command": "git status --porcelain=v1",
+      "result": [
+        "?? .tmp/",
+        "?? docs/evidence/1a21b0c-transition-diagnosis-20261003/"
+      ],
+      "conclusion": "Only task-owned temporary input and the allowed evidence directory are untracked."
+    },
+    "markdown_fences": {
+      "file": "docs/evidence/1a21b0c-transition-diagnosis-20261003/report.md",
+      "fence_count": 28,
+      "result": "balanced"
+    },
+    "markdown_relative_links": {
+      "file": "docs/evidence/1a21b0c-transition-diagnosis-20261003/report.md",
+      "result": "all linked evidence and receipt paths exist",
+      "note": "Final link recheck passed after this receipt was created."
+    },
+    "receipt_json": {
+      "command": "jq empty receipts/*.json",
+      "result": "pass"
+    },
+    "existing_graph_validation": {
+      "graph": "docs/dagpipe/sdk-pin-history.graph.json",
+      "result": "valid DAG: appsdk-sdk-pin-history@0.1.0 (6 nodes, 5 edges, 6 waves)",
+      "log": "logs/sdk-pin-history-graph-validate.log",
+      "reused_not_rerun": true
+    },
+    "source_hashes_unchanged": {
+      "method": "HEAD equals the task base and no tracked diff is present",
+      "result": "pass"
+    },
+    "own_processes": {
+      "result": "No long-lived task-owned candidate process; only the short-lived public CLI commands were executed."
+    }
+  },
+  "remaining": {
+    "cleanup": "completed; see receipts/cleanup-receipt.json"
+  }
+}

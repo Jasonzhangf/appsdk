@@ -217,4 +217,7 @@ route / runtime binding / transport（`DAEMON_*`）等非身份失败**不进入
 不代表身份已验真，`registered` 与 `requires_identity_update` 才是判据。
 `action` 永不是刚失败的那条调用（否则跟随即死循环）：身份未确立的三类返回
 `collab context --worker <worker_id>` 并要求 operator 声明（`requires_approval=true`），
-`TOKEN_MISMATCH` 返回向 live master 的 blocker 上报（`requires_approval=false`）。
+`TOKEN_MISMATCH` 返回带具体 `worker_id` 的带外升级 —— 报 `exact_error` 与 `worker_id`
+给项目 owner，或经健康 peer 报给 live master（`requires_approval=false`）。该 worker
+身份下任何 `collab` 命令都会经 `me()` 重新认证并重发已被拒绝的 token，因此没有任何
+命令能构成修复，这条建议不命名为命令。

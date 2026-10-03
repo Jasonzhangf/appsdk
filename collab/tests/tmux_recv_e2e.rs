@@ -323,21 +323,25 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
     };
     tmux(
         &tmux_socket,
-        &["new-session", "-d", "-s", "collab-implicit-context", "sleep 600"],
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "collab-implicit-context",
+            "sleep 600",
+        ],
     );
-    let server_pid = String::from_utf8(
-        tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout,
-    )
-    .unwrap()
-    .trim()
-    .parse::<u32>()
-    .unwrap();
-    let pane_id = String::from_utf8(
-        tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
+    let server_pid =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pid}"]).stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+    let pane_id =
+        String::from_utf8(tmux(&tmux_socket, &["display-message", "-p", "#{pane_id}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
     let worker_id = format!("codex-{pane_id}");
     let pane = Pane {
         server_pid,
@@ -351,11 +355,18 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
 
     // Durable identity exists and is registered; now make its token unusable so
     // the daemon rejects the first authenticated call.
-    let identity_path = host_state.join("identities").join(&worker_id).join("identity.json");
+    let identity_path = host_state
+        .join("identities")
+        .join(&worker_id)
+        .join("identity.json");
     let mut identity: Value =
         serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
     identity["token"] = Value::String("not-the-recorded-token".into());
-    std::fs::write(&identity_path, serde_json::to_vec_pretty(&identity).unwrap()).unwrap();
+    std::fs::write(
+        &identity_path,
+        serde_json::to_vec_pretty(&identity).unwrap(),
+    )
+    .unwrap();
 
     // Implicit: no `--worker`, and COLLAB_WORKER is deliberately removed while
     // the tmux anchor stays, so the identity is resolved from the anchor alone.
@@ -363,7 +374,10 @@ fn implicit_context_names_the_resolved_identity_when_the_daemon_rejects_its_toke
         .arg("context")
         .current_dir(&fixture.root)
         .env("COLLAB_STATE_DIR", &fixture.host_state)
-        .env("TMUX", format!("{},{},0", tmux_socket.display(), pane.server_pid))
+        .env(
+            "TMUX",
+            format!("{},{},0", tmux_socket.display(), pane.server_pid),
+        )
         .env("TMUX_PANE", &pane.pane_id)
         .env("CODEX_SESSION_ID", &pane.session_anchor)
         .env("CODEX_THREAD_ID", &pane.thread_anchor)

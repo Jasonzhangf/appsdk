@@ -677,13 +677,13 @@ fn validate_cli_register_rebind(
         if persisted_worker.is_some_and(|worker| worker.token != token) {
             let Some(candidates) = candidates.as_ref() else {
                 return Err(
-                    "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane"
+                    "RUNTIME_BINDING_REJECTED: CLI rebind requires the peer's current transport candidate"
                         .to_owned(),
                 );
             };
             if candidates.appserver.is_some() {
                 return Err(
-                    "TRANSPORT_UNSUPPORTED: App Server rebind is retired; register the current tmux pane"
+                    "TRANSPORT_UNSUPPORTED: App Server rebind is retired; register the peer's current transport instead"
                         .to_owned(),
                 );
             }
@@ -765,12 +765,20 @@ fn validate_cli_register_rebind(
 
     let state = server.state.lock().unwrap();
     let candidates = candidates.as_ref().ok_or_else(|| {
-        "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned()
+        "RUNTIME_BINDING_REJECTED: CLI rebind requires the peer's current transport candidate"
+            .to_owned()
     })?;
     let Some(candidate) = candidates.tmux.as_ref() else {
-        return Err(
-            "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned(),
-        );
+        // A dsh peer arrives here with a dsh candidate and no pane. Its
+        // lifecycle belongs to the gateway, so the CLI cannot rebind it; say
+        // that instead of sending the operator after a tmux pane that does not
+        // exist for this transport.
+        return Err(if candidates.dsh.is_some() {
+            "RUNTIME_BINDING_REJECTED: a dsh agent's lifecycle is owned by the gateway; collab cannot rebind it from the CLI"
+                .to_owned()
+        } else {
+            "RUNTIME_BINDING_REJECTED: CLI rebind requires the current tmux pane".to_owned()
+        });
     };
     let candidate_binding = state.global.lookup_tmux_route(&candidate.endpoint).or_else(|| {
         state

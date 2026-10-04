@@ -200,6 +200,7 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                         gateway_mode,
                         source_thread_id.unwrap_or("collab"),
                         body,
+                        message_id,
                     )
                     .map_err(|error| error.to_string())?;
                     if let Some(object) = receipt.as_object_mut() {

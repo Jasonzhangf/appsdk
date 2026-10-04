@@ -1,5 +1,5 @@
 use super::*;
-use crate::proto::{DshCandidate, TransportCandidates, TransportKind};
+use crate::proto::{DshCandidate, ProjectContext, TransportCandidates, TransportKind};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -650,6 +650,7 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
         "followup",
         "codex-%1",
         "hello",
+        "m1759420000000-1",
     )
     .expect("enqueue must be admitted");
 
@@ -662,6 +663,69 @@ fn dsh_wake_enqueue_maps_the_mode_and_returns_a_queue_receipt() {
     assert_eq!(requests[0]["params"]["agentId"], "ses-1");
     assert_eq!(requests[0]["params"]["content"][0]["type"], "text");
     assert_eq!(requests[0]["params"]["content"][0]["text"], "hello");
+    // The gateway deduplicates wakes on `messageId`, so collab must forward its
+    // own `msg_id` under the shape the gateway validates; a bare `m<ms>-<n>`
+    // would be rejected with `invalid-message-id` instead of being delivered.
+    let message_id = requests[0]["params"]["messageId"]
+        .as_str()
+        .expect("enqueue must carry a messageId");
+    assert!(
+        message_id.starts_with("collab:"),
+        "messageId must be namespaced: {message_id}"
+    );
+    assert!(
+        message_id.ends_with(":m1759420000000-1"),
+        "messageId must carry collab's own msg_id so replays deduplicate: {message_id}"
+    );
+    let (prefix, digest_and_id) = message_id
+        .trim_start_matches("collab:")
+        .split_once(':')
+        .expect("messageId must be collab:<digest>:<msg_id>");
+    assert_eq!(prefix.len(), 16, "digest prefix must be 64 bits: {message_id}");
+    assert!(
+        prefix.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "digest prefix must be lowercase hex: {message_id}"
+    );
+    assert_eq!(digest_and_id, "m1759420000000-1");
+}
+
+#[test]
+fn a_replayed_dsh_wake_reuses_the_same_gateway_message_id() {
+    // The gateway folds every `enqueue` on `messageId`. collab replays its own
+    // wakes (`daemon-live-closure`, `restart-replay-pending`), so a replay of
+    // one `msg_id` must present the same `messageId` or the gateway queues the
+    // message a second time and the agent sees it twice.
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let observer = Arc::clone(&seen);
+    let gateway = Gateway::start("replay", move |request| {
+        observer.lock().unwrap().push(request.clone());
+        wake_reply("msg-replay")
+    });
+    let mut message_id = |msg_id: &str| {
+        crate::client::adapters::dsh::notify(
+            &gateway.endpoint(),
+            "rt-1",
+            "ses-1",
+            "followup",
+            "codex-%1",
+            "body",
+            msg_id,
+        )
+        .expect("enqueue must be admitted");
+        seen.lock().unwrap().last().unwrap()["params"]["messageId"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let first = message_id("m1759420000000-7");
+    let replay = message_id("m1759420000000-7");
+    let other = message_id("m1759420000000-8");
+    assert_eq!(
+        first, replay,
+        "a replayed wake must deduplicate on the same gateway messageId"
+    );
+    assert_ne!(first, other, "a distinct wake must not collide");
 }
 
 #[test]
@@ -774,6 +838,7 @@ fn a_dsh_control_socket_is_only_ever_asked_for_read_only_or_enqueue_work() {
         "inject",
         "codex-%1",
         "body",
+        "m1759420000000-2",
     );
     assert_eq!(seen.lock().unwrap().clone(), vec!["enqueue".to_owned()]);
 }
@@ -1071,5 +1136,95 @@ fn a_refused_dsh_wake_is_labelled_as_a_dsh_rejection() {
     assert_eq!(sent.data["notification"], "subscribed-not-sent");
     assert_eq!(sent.data["repair_required"], true);
     drop((gateway_a, gateway_b));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion() {
+    // The dsh-gateway change request (2026-10-04, S23) claimed
+    // `same_pane_tmux_recovery` is always false for dsh, so a reconnecting dsh
+    // master would be refused with MASTER_RECOVERY_BLOCKED_LIVE against its own
+    // grant. The premise does not hold: that fence is only reached when
+    // `same_runtime_key` is false, and a dsh binding stores `tmux_endpoint` as
+    // `None` on both sides, so its runtime key reduces to (session_id,
+    // agent_id). An identical reconnect therefore short-circuits the fence
+    // before it is evaluated. This pins the real behaviour so that a later
+    // "pane-free recovery" arm cannot quietly replace the frozen route key with
+    // a weaker anchor.
+    let root = scratch("dsh-master-reconnect");
+    let gateway = Gateway::start("dsh-master-reconnect", {
+        let root = root.clone();
+        move |request| Some(facts_reply(&request, &root))
+    });
+    let server = test_server(&root);
+    let registered = register_dsh(&server, "dsh-master", &gateway.socket, "rt-1", "ses-1");
+    assert!(registered.ok, "{registered:?}");
+    let promoted = handle_master_promote(
+        &server,
+        "dsh-master".into(),
+        "token-dsh-master".into(),
+        "user approved dsh-master".into(),
+    );
+    assert!(promoted.ok, "{promoted:?}");
+
+    let reconnected = register_dsh(&server, "dsh-master", &gateway.socket, "rt-1", "ses-1");
+    assert!(
+        reconnected.ok,
+        "a dsh master must recover its own binding: {reconnected:?}"
+    );
+    assert!(
+        !reconnected
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MASTER_RECOVERY_BLOCKED"),
+        "{reconnected:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane() {
+    // S25: the rebind rejection used to read "requires the current tmux pane"
+    // even when the only candidate was a dsh peer, which sends the operator
+    // after a pane that does not exist for that transport. The rejection must
+    // still happen - collab does not own a dsh agent's lifecycle - but it must
+    // name the real owner.
+    let root = scratch("dsh-rebind-wording");
+    let gateway = Gateway::start("dsh-rebind-wording", {
+        let root = root.clone();
+        move |request| Some(facts_reply(&request, &root))
+    });
+    let server = test_server(&root);
+    let registered = register_dsh(&server, "dsh-rebind", &gateway.socket, "rt-1", "ses-1");
+    assert!(registered.ok, "{registered:?}");
+
+    let project_context = ProjectContext {
+        app_scope_id: crate::identity::AppServerId::new("tui-default").unwrap(),
+        canonical_root: server.root.display().to_string(),
+        project_scope: GlobalState::canonical_project_scope(&server.root).unwrap(),
+        runtime_context: None,
+    };
+    // The caller reaches this function for a provisional CLI runtime or a token
+    // mismatch. A mismatched token is refused earlier by the identity check, so
+    // the dsh-candidate branch is exercised with the peer's own token, which is
+    // the provisional-runtime shape.
+    let refused = validate_cli_register_rebind(
+        &server,
+        &project_context,
+        "dsh-rebind",
+        "token-dsh-rebind",
+        &Some(TransportCandidates {
+            appserver: None,
+            tmux: None,
+            dsh: Some(candidate(&gateway.socket, &root)),
+        }),
+    )
+    .expect_err("collab must not rebind a dsh peer from the CLI");
+    assert!(
+        !refused.contains("tmux"),
+        "a dsh rebind must not be blamed on a tmux pane: {refused}"
+    );
+    assert!(refused.contains("gateway"), "{refused}");
     let _ = std::fs::remove_dir_all(&root);
 }

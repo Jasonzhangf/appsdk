@@ -106,7 +106,17 @@ impl Server {
                             sanitize_identifier(session_id),
                             sanitize_identifier(thread_id)
                         ),
-                        _ => format!("runtime-{}-appserver", transport.kind.as_str()),
+                        // The fallback names the kinds that arrive without a
+                        // verified session/thread pair. App Server keeps its
+                        // historical label because existing registrations
+                        // already route on it; no other kind may claim an App
+                        // Server transport it does not have.
+                        _ => match &transport.kind {
+                            TransportKind::AppServer => {
+                                format!("runtime-{}-appserver", transport.kind.as_str())
+                            }
+                            other => format!("runtime-{}", other.as_str()),
+                        },
                     };
                     (runtime_text, 1)
                 }

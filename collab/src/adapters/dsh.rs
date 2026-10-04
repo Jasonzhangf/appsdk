@@ -19,6 +19,7 @@
 //! gateway restart retire a live peer, which is the one mistake this channel
 //! must not make.
 
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -276,6 +277,34 @@ pub fn probe(endpoint: &str, runtime_id: &str, agent_id: &str) -> PeerPresence {
     }
 }
 
+/// The `messageId` the gateway deduplicates wakes on.
+///
+/// The gateway folds every `enqueue` on this id, and collab replays its own
+/// wakes (`daemon-live-closure`, `restart-replay-pending`), so the id must be
+/// derived from collab's own `msg_id` rather than minted per attempt. The state
+/// root namespaces it, because two collab instances on one host may otherwise
+/// mint the same `m<ms>-<n>`; the digest is 64 bits wide because a narrower
+/// prefix re-introduces birthday collisions, and a collision silently drops the
+/// second message under "first enqueue wins".
+///
+/// The gateway validates the shape `^collab:[0-9a-f]{16}:m[0-9]+-[0-9]+$` and
+/// answers `invalid-message-id` otherwise, so a wrong namespace is a loud
+/// failure rather than a silent loss.
+pub fn wake_message_id(msg_id: &str) -> Result<String, ControlError> {
+    let paths = crate::scope::HostPaths::resolve().map_err(|error| ControlError::Unusable {
+        detail: format!("collab state root is unavailable for the dsh messageId: {error}"),
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(paths.state_root().to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut prefix = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write;
+        write!(&mut prefix, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(format!("collab:{prefix}:{msg_id}"))
+}
+
 /// Delivers one wake to a single agent through `enqueue`.
 ///
 /// The reply is a local admission receipt only: a `messageId` means the gateway
@@ -287,6 +316,7 @@ pub fn notify(
     mode: &str,
     sender_id: &str,
     text: &str,
+    msg_id: &str,
 ) -> Result<serde_json::Value, ControlError> {
     let socket = control_socket(endpoint)?;
     let result = round_trip(
@@ -298,6 +328,7 @@ pub fn notify(
             "mode": mode,
             "content": [{"type": "text", "text": text}],
             "sender": {"runtimeId": "collab", "id": sender_id, "name": "collab"},
+            "messageId": wake_message_id(msg_id)?,
         }),
     )?;
     let message_id = result

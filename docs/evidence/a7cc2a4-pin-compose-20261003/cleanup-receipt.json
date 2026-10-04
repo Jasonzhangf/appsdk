@@ -1,0 +1,23 @@
+{
+  "worktree": "/Volumes/Intel/playground/appsdk/a7cc2a4-pin-compose-20261003",
+  "base": "61e8c534b5295fb0f60a6634ad3cf99d99f12a4c",
+  "retained": {
+    "candidate_binary": "docs/evidence/a7cc2a4-pin-compose-20261003/candidate-appsdk",
+    "candidate_binary_sha256": "da7cfdefa7c68ab342ae9858bd7515a12a7d93869b57847bb87673d8068ea558",
+    "fixture_archive": "docs/evidence/a7cc2a4-pin-impl-20261003/fixture-agentteams-de099b79.tar.gz",
+    "fixture_archive_sha256": "2d91c66612c307e2ba76ceba188ca613e557840d69b9ef1568bb33825e68db50",
+    "source_delta": "docs/evidence/a7cc2a4-pin-compose-20261003/source-delta.patch"
+  },
+  "removed": {
+    "path": ".a7cc2a4-owned",
+    "kind": "task-owned cargo target, extracted fixtures, registries, and temporary directories",
+    "size_before_removal": "899M",
+    "absent_after_removal": true
+  },
+  "untouched": [
+    "/Volumes/Intel/playground/appsdk/a7cc2a4-pin-impl-20261003",
+    "/Volumes/Intel/playground/appsdk/1a21b0c-transition-impl-20261003"
+  ],
+  "processes_removed": [],
+  "result": "cleanup complete"
+}

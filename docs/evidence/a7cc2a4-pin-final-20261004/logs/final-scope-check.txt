@@ -1,0 +1,51 @@
+candidate_product_tree=98b94df3431e495456fdd5fb41b381bc71191668
+staged_tree_before_final_scope_evidence=b168d59887d7c117213abefeff0d06587740cb0f
+diff_from_candidate_product_tree:
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/appsdk-dagpipe-validate.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/appsdk-dagpipe-validate.ids
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/appsdk-dagpipe-validate.ids-cmp.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/appsdk-dagpipe-validate.json
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/appsdk-dagpipe-validate.stderr
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/candidate-binary.sha256
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/candidate-binding.txt
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-build.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-build.log
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-fmt-check.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-fmt-check.log
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-test-pin-lock.decompressed.sha256
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-test-pin-lock.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-test-pin-lock.gz.sha256
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-test-pin-lock.log.gz
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-test-pin-lock.raw.bytes
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-test-pin-lock.raw.sha256
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/cargo-version.txt
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/dagpipe-graph-validate.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/dagpipe-graph-validate.stderr
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/dagpipe-graph-validate.stdout
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/environment.txt
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/final-staged-diff-check.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/final-staged-diff-check.stderr
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/final-staged-diff-check.stdout
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/frozen-product-diff.formatting.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/frozen-product-diff.formatting.txt
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/frozen-product-hashes.diff
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/frozen-product-hashes.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/lossless-compression-check.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/manifest.ids
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/retained-binary.sha256
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/rustc-version.txt
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/source-fingerprints.sha256
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/source-registry.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/source-registry.stderr
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/source-registry.stdout
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/staged-diff-check.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/staged-diff-check.stderr
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/staged-diff-check.stdout
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/test-count-check.exit
+A	docs/evidence/a7cc2a4-pin-final-20261004/logs/test-count-check.txt
+A	docs/evidence/a7cc2a4-pin-final-20261004/run-notes.md
+unstaged_name_status:
+untracked_non_ignored:
+docs/evidence/a7cc2a4-pin-final-20261004/logs/final-scope-check.txt
+staged_check:
+staged_check_exit=0

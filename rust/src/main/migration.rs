@@ -409,6 +409,28 @@ pub(super) fn valid_bundle_digest(digest: &str) -> bool {
         .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+fn sdk_map_migration_historical_target_authorized(
+    declared: &Value,
+    bundle_digest: &str,
+    target_digest: &Value,
+) -> bool {
+    let Some(target_digest) = target_digest
+        .as_str()
+        .filter(|digest| valid_bundle_digest(digest))
+    else {
+        return false;
+    };
+    declared
+        .get("historical_target_digests")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("bundle_digest").and_then(Value::as_str) == Some(bundle_digest)
+                    && entry.get("target_digest").and_then(Value::as_str) == Some(target_digest)
+            })
+        })
+}
+
 pub(super) fn migration_bundle_transition_digest(root: &Path, record: &Value) -> Option<String> {
     let record_bundle = record
         .get("bundle_digest")
@@ -666,6 +688,10 @@ pub(super) fn assert_sdk_migration_record(
     if maps.len() != GOVERNANCE_MAP_NAMES.len() {
         fail("INVALID_SDK_MIGRATION_RECORD");
     }
+    let record_bundle = record
+        .get("bundle_digest")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| fail("INVALID_SDK_MIGRATION_RECORD"));
     let bundle_transition = migration_bundle_transition_digest(root, &record).is_some();
     for name in GOVERNANCE_MAP_NAMES {
         let declared = sdk_map_migration_entry(&manifest, name);
@@ -688,6 +714,16 @@ pub(super) fn assert_sdk_migration_record(
         let explicit_custom_target = entry
             .get("canonical_target_digest")
             .is_some_and(|value| !value.is_null());
+        let historical_target_authorized = bundle_transition
+            && !sdk_map_migration_checks_live_target(step)
+            && explicit_custom_source
+            && explicit_custom_target
+            && Some(canonical_source) == declared.get("source_digest")
+            && sdk_map_migration_historical_target_authorized(
+                declared,
+                record_bundle,
+                canonical_target,
+            );
         if entry
             .get("canonical_source_digest")
             .is_some_and(|value| !value.is_null() && Some(value) != declared.get("source_digest"))
@@ -699,7 +735,8 @@ pub(super) fn assert_sdk_migration_record(
                     && Some(canonical_target) != declared.get("target_digest"))
                 && !(bundle_transition
                     && Some(canonical_target) == entry.get("target_digest")
-                    && canonical_target.as_str().is_some_and(valid_bundle_digest)))
+                    && canonical_target.as_str().is_some_and(valid_bundle_digest))
+                && !historical_target_authorized)
             || entry.get("snapshot_path").and_then(Value::as_str)
                 != Some(expected_snapshot.as_str())
         {

@@ -1,0 +1,48 @@
+{
+  "at": "2026-10-03T15:55:41.941Z",
+  "reason": "preserve raw evidence without raw whitespace failures in staged text",
+  "entries": [
+    {
+      "original": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-complete-historical.log",
+      "current": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-complete-historical.log.gz",
+      "originalSha256": "62a8d15a20595b06508e2753a0be2e587d4a9da6493c7382ab9e5eb3ebd6e12b",
+      "gzipSha256": "7558f7ff60a2b0ab0a27668f2ac2cb1ef7768f1c3a4bc153f14ae3ca21d9c76e",
+      "roundTripIdentical": true
+    },
+    {
+      "original": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-dagpipe-manifest-registry.log",
+      "current": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-dagpipe-manifest-registry.log.gz",
+      "originalSha256": "a1b92173dd0a13906efe24baf8ebc1c59297a7797be576bb32fe44e14bf8d4b3",
+      "gzipSha256": "947d75cccd3b039c122001fbc7331af82a0b7d60ef9ce2740678916af264828a",
+      "roundTripIdentical": true
+    },
+    {
+      "original": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-historical-custom-maps.log",
+      "current": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-historical-custom-maps.log.gz",
+      "originalSha256": "d43b182989f05a649f7a57e0d048ebe9115ce1a3da76f76bd8c50efc7ca6b237",
+      "gzipSha256": "d9535b10dea59b9f0ac3843b50bd44a04ba12d167f43530e1b3e5188b6bcd14a",
+      "roundTripIdentical": true
+    },
+    {
+      "original": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-historical-custom-target.log",
+      "current": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-historical-custom-target.log.gz",
+      "originalSha256": "1fb4a220aca5c936fd62bbfbbc987d38f3bb41aaa73ad1e3a345a910e3518792",
+      "gzipSha256": "3d59173817e547ba825fb77d7a376f367653c9a52ee63df3a448dc86499d65c2",
+      "roundTripIdentical": true
+    },
+    {
+      "original": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-pin-lock-rejects.log",
+      "current": "docs/evidence/a7cc2a4-pin-compose-20261003/logs/test-pin-lock-rejects.log.gz",
+      "originalSha256": "31110b1b2cc0fd5616b453708aa8aab08c6c68d407a238e7284f1da629c5b18f",
+      "gzipSha256": "173967b66fc2c93759f4f904dcccd5e96915fadf7e95d99e5bd861b39b37bd10",
+      "roundTripIdentical": true
+    },
+    {
+      "original": "docs/evidence/a7cc2a4-pin-compose-20261003/source-delta.patch",
+      "current": "docs/evidence/a7cc2a4-pin-compose-20261003/source-delta.patch.gz",
+      "originalSha256": "d7b57ea30112fa14680b405a368d90a21626d441816e7995e1b9b23a546f1302",
+      "gzipSha256": "367dba8d8f63d2659946d3bcff66dbde7b5db4ff16142550dbd0f09664e09c3c",
+      "roundTripIdentical": true
+    }
+  ]
+}

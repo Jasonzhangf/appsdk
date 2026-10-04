@@ -1,0 +1,7 @@
+8a6ecdfcae0d23f4c07b800a16ff80d287e83905eeeb3dcdc7a006036755e626  contracts/migrations/sdk-0.1.5-to-0.1.6.json
+aa00bcc953a8716398fa592712fdb49450f36de1cf9d8dfc6cae4038bf0136cc  docs/dagpipe/manifest.json
+6761008bbe142f4db6089ce8494eca6d6176f14f8315896264c7a974ba387c08  rust/src/dagpipe.rs
+d266fd578be85616ad2579a7e1c90afef4359d8a95d2dee67284b42c0f097936  rust/src/main/migration.rs
+3ef3df11f58b1e9bb93d1ee4b0aaad056ed93a42d634a5e699f9b23081462461  rust/tests/cli_smoke/main.rs
+03cd9167699260c99d37c6d96bd5372ed6b0fba5db1a45681a4b621166ae9d09  rust/tests/cli_smoke/part_21.rs
+2d91c66612c307e2ba76ceba188ca613e557840d69b9ef1568bb33825e68db50  docs/evidence/a7cc2a4-pin-impl-20261003/fixture-agentteams-de099b79.tar.gz

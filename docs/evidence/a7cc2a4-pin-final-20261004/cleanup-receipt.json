@@ -1,0 +1,11 @@
+{
+  "task": "a7cc2a4-pin-final-20261004",
+  "ownedCachePath": "/Volumes/Intel/playground/appsdk/a7cc2a4-pin-final-20261004-cache",
+  "ownedCacheRemoved": true,
+  "ownedCacheExistsAfterCleanup": false,
+  "retainedBinaryPath": "$HOME/.codex/task-evidence/agentteams/receipts/a7cc2a4-pin-final-20261004/retained/appsdk",
+  "retainedBinarySha256": "b12b6e796e5ef168e28ccbc51947aed84c7a74b934d90a72539628f43086a7ec",
+  "sourceWorktreePreserved": true,
+  "priorResourcesPreserved": true,
+  "retainedCleanupObligation": "Keep the retained tested executable available for the primary's independent review/integration path; no owned cache or fixture remains."
+}

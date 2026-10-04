@@ -297,7 +297,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 9] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 10] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -335,10 +335,14 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 9] {
             "docs/dagpipe/collab-dsh-channel.graph.json",
             include_str!("../../docs/dagpipe/collab-dsh-channel.graph.json"),
         ),
+        (
+            "docs/dagpipe/sdk-pin-history.graph.json",
+            include_str!("../../docs/dagpipe/sdk-pin-history.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 7] {
+fn design_graph_ids() -> [&'static str; 8] {
     [
         "appsdk-collab-context",
         "appsdk-collab-appserver-route-repair",
@@ -347,10 +351,11 @@ fn design_graph_ids() -> [&'static str; 7] {
         "appsdk-collab-merge-pending",
         "appsdk-collab-identity-adjudication",
         "appsdk-collab-dsh-channel",
+        "appsdk-sdk-pin-history",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 41] {
+fn design_graph_operator_names() -> [&'static str; 47] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -393,6 +398,12 @@ fn design_graph_operator_names() -> [&'static str; 41] {
         "appsdk.collab_dsh_channel.project_presence",
         "appsdk.collab_dsh_channel.deliver_wake",
         "appsdk.collab_dsh_channel.send_to_peer",
+        "appsdk.sdk_pin.authenticate_request",
+        "appsdk.sdk_pin.authenticate_historical_record",
+        "appsdk.sdk_pin.reconcile_history",
+        "appsdk.sdk_pin.materialize_current_step",
+        "appsdk.sdk_pin.verify_retention",
+        "appsdk.sdk_pin.publish_pin_outcome",
     ]
 }
 

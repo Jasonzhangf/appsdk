@@ -36,6 +36,10 @@
     {
       "id": "appsdk-collab-dsh-channel",
       "path": "docs/dagpipe/collab-dsh-channel.graph.json"
+    },
+    {
+      "id": "appsdk-sdk-pin-history",
+      "path": "docs/dagpipe/sdk-pin-history.graph.json"
     }
   ]
 }

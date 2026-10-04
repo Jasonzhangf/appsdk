@@ -1,0 +1,10 @@
+{
+  "capturePolicy": "explicit allowlist; never full environment",
+  "base": "7a23f539610cec728ec983619c6b10c7f10055d7",
+  "platform": "macOS",
+  "worktree": "/Volumes/Intel/playground/appsdk/a7cc2a4-pin-final-20261004",
+  "cargoTarget": "owned external cache; removed after build/test",
+  "serviceMutation": false,
+  "credentialsIncluded": false,
+  "versions": "rustc-version.txt and cargo-version.txt"
+}

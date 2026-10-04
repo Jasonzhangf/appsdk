@@ -1,0 +1,5 @@
+$ test -d .tmp/retained && find .tmp/retained -depth -delete
+$ test -d .tmp && find .tmp -maxdepth 0 -empty -delete
+$ git status --short --untracked-files=all -- .tmp
+$ /tmp/appsdk-1a21b0c-final/target/debug/appsdk verify-sdk-source-registry .
+SDK_SOURCE_LINE_LIMIT:collab/src/identity.rs:1826>1500

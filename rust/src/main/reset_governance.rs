@@ -16,6 +16,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
             project_version, SDK_VERSION
         ));
     }
+    let transition_contracts = preflight_current_transition_contracts(root, &project);
     let previous_bundle_digests = sdk_migration_bundle_witnesses(root);
     let binary = binary
         .canonicalize()
@@ -69,6 +70,7 @@ pub(super) fn pin_lock(root: &Path, binary: &Path) {
     migrate_governance_maps(root, &current_project, "0.1.0009-to-0.1.0010");
     let migrated_project = read_project(root);
     install_current_record_contracts(root);
+    install_current_transition_contracts(root, &transition_contracts);
     project = migrated_project;
     project["sdk"]["version"] = Value::String(SDK_VERSION.into());
     project["governance"]["record_contracts"] = Value::Array(

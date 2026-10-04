@@ -1,0 +1,233 @@
+===== pinned_sdk_witness_is_executable_and_resolvable_in_a_fresh_worktree =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.07s
+     Running tests/cli_smoke/main.rs (.tmp/cargo-target/debug/deps/cli_smoke-ab5bf4c04dc582cc)
+
+running 1 test
+Initialized empty Git repository in /Volumes/Intel/playground/appsdk/1a21b0c-transition-impl-20261003/.tmp/tmp/appsdk-rust-sdk-witness-main-7982-1791044325154480000/.git/
+[main (root-commit) 17ba547] baseline
+ 136 files changed, 13382 insertions(+)
+ create mode 100644 .appsdk/contracts/communication/communication-capabilities.schema.json
+ create mode 100644 .appsdk/contracts/communication/communication-event.schema.json
+ create mode 100644 .appsdk/contracts/communication/communication-request.schema.json
+ create mode 100644 .appsdk/contracts/dagpipe/fix-lifecycle.graph.json
+ create mode 100644 .appsdk/contracts/dagpipe/notification.graph.json
+ create mode 100644 .appsdk/contracts/development-scenarios.manifest.json
+ create mode 100644 .appsdk/contracts/guidance/guidance-manifest.schema.json
+ create mode 100644 .appsdk/contracts/guidance/tour-review.schema.json
+ create mode 100644 .appsdk/contracts/lifecycle-state-machines.manifest.json
+ create mode 100644 .appsdk/contracts/maps/function-map.json
+ create mode 100644 .appsdk/contracts/maps/mainline-call-map.json
+ create mode 100644 .appsdk/contracts/maps/resource-map.json
+ create mode 100644 .appsdk/contracts/maps/verification-map.json
+ create mode 100644 .appsdk/contracts/memory/memory-entry.schema.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0007/governance-maps/function-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0007/governance-maps/mainline-call-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0007/governance-maps/resource-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0007/governance-maps/verification-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0008/governance-maps/function-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0008/governance-maps/mainline-call-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0008/governance-maps/resource-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0008/governance-maps/verification-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0009/governance-maps/function-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0009/governance-maps/mainline-call-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0009/governance-maps/resource-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.0009/governance-maps/verification-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.5/governance-maps/function-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.5/governance-maps/mainline-call-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.5/governance-maps/resource-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.5/governance-maps/verification-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.6/governance-maps/function-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.6/governance-maps/mainline-call-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.6/governance-maps/resource-map.json
+ create mode 100644 .appsdk/contracts/migrations/0.1.6/governance-maps/verification-map.json
+ create mode 100644 .appsdk/contracts/migrations/sdk-0.1.0007-to-0.1.0008.json
+ create mode 100644 .appsdk/contracts/migrations/sdk-0.1.0008-to-0.1.0009.json
+ create mode 100644 .appsdk/contracts/migrations/sdk-0.1.0009-to-0.1.0010.json
+ create mode 100644 .appsdk/contracts/migrations/sdk-0.1.5-to-0.1.6.json
+ create mode 100644 .appsdk/contracts/migrations/sdk-0.1.6-to-0.1.0007.json
+ create mode 100644 .appsdk/contracts/project.schema.json
+ create mode 100644 .appsdk/contracts/records/collab-live-closure-record.schema.json
+ create mode 100644 .appsdk/contracts/records/collaboration-index.schema.json
+ create mode 100644 .appsdk/contracts/records/collaboration-record.schema.json
+ create mode 100644 .appsdk/contracts/records/effectiveness-record.schema.json
+ create mode 100644 .appsdk/contracts/records/evidence-record.schema.json
+ create mode 100644 .appsdk/contracts/records/fix-candidate-record.schema.json
+ create mode 100644 .appsdk/contracts/records/freeze-record.schema.json
+ create mode 100644 .appsdk/contracts/records/goal-clarification-record.schema.json
+ create mode 100644 .appsdk/contracts/records/integration-record.schema.json
+ create mode 100644 .appsdk/contracts/records/mainline-receipt-record.schema.json
+ create mode 100644 .appsdk/contracts/records/merge-queue-record.schema.json
+ create mode 100644 .appsdk/contracts/records/merge-queue-state.schema.json
+ create mode 100644 .appsdk/contracts/records/merge-record.schema.json
+ create mode 100644 .appsdk/contracts/records/plan-record.schema.json
+ create mode 100644 .appsdk/contracts/records/plan-revision-record.schema.json
+ create mode 100644 .appsdk/contracts/records/pre-review-validation-record.schema.json
+ create mode 100644 .appsdk/contracts/records/promotion-record.schema.json
+ create mode 100644 .appsdk/contracts/records/record-graph.contract.json
+ create mode 100644 .appsdk/contracts/records/regression-report.schema.json
+ create mode 100644 .appsdk/contracts/records/reproduction-record.schema.json
+ create mode 100644 .appsdk/contracts/records/review-record.schema.json
+ create mode 100644 .appsdk/contracts/records/step-execution-record.schema.json
+ create mode 100644 .appsdk/contracts/records/test-scenario-result-record.schema.json
+ create mode 100644 .appsdk/contracts/records/worktree-record.schema.json
+ create mode 100644 .appsdk/contracts/sdk-bundle.manifest.json
+ create mode 100644 .appsdk/contracts/test-governance.schema.json
+ create mode 100644 .appsdk/contracts/transitions/zone-transition.manifest.json
+ create mode 100644 .appsdk/docs/architecture/appsdk-governance-architecture.md
+ create mode 100644 .appsdk/docs/architecture/development-process-control-harness.md
+ create mode 100644 .appsdk/docs/design/apps-sdk-communication.md
+ create mode 100644 .appsdk/docs/design/appsdk-global-registry.md
+ create mode 100644 .appsdk/docs/design/appsdk-guidance-framework.md
+ create mode 100644 .appsdk/docs/design/appsdk-project-integration.md
+ create mode 100644 .appsdk/docs/design/development-scenarios.md
+ create mode 100644 .appsdk/docs/design/fix-lifecycle-v2.md
+ create mode 100644 .appsdk/docs/design/optional-test-governance.md
+ create mode 100644 .appsdk/docs/design/project-memory.md
+ create mode 100644 .appsdk/docs/test-design/appsdk-guidance-framework.md
+ create mode 100644 .appsdk/goal.json
+ create mode 100644 .appsdk/maps/function-map.json
+ create mode 100644 .appsdk/maps/mainline-call-map.json
+ create mode 100644 .appsdk/maps/module-registry.json
+ create mode 100644 .appsdk/maps/resource-map.json
+ create mode 100644 .appsdk/maps/verification-map.json
+ create mode 100644 .appsdk/project.json
+ create mode 100644 .appsdk/rules/appsdk-project-governance.md
+ create mode 100644 .appsdk/sdk-resources.json
+ create mode 100644 .appsdk/sdk.lock
+ create mode 100644 .appsdk/skills/appsdk-migration/SKILL.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/SKILL.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/agents/openai.yaml
+ create mode 100644 .appsdk/skills/appsdk-project-governance/appsdk-guidance.json
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/bootstrap-migration.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/command-surface.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/contracts-and-failures.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/development-debug.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/goal-prompt.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/init-prompts.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/process-control-harness.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/review-delivery.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/state-paths.md
+ create mode 100644 .appsdk/skills/appsdk-project-governance/references/subagents-config.md
+ create mode 100644 .appsdk/skills/project-memory/SKILL.md
+ create mode 100644 .appsdk/templates/minimal/AGENTS.md
+ create mode 100644 .gitignore
+ create mode 100644 AGENTS.md
+ create mode 100644 contracts/goal-clarification-state-machine.json
+ create mode 100644 contracts/lifecycle-state-machines.json
+ create mode 100644 contracts/lifecycle-state-machines.manifest.json
+ create mode 100644 contracts/records/collab-live-closure-record.schema.json
+ create mode 100644 contracts/records/collaboration-index.schema.json
+ create mode 100644 contracts/records/collaboration-record.schema.json
+ create mode 100644 contracts/records/effectiveness-record.schema.json
+ create mode 100644 contracts/records/evidence-record.schema.json
+ create mode 100644 contracts/records/fix-candidate-record.schema.json
+ create mode 100644 contracts/records/freeze-record.schema.json
+ create mode 100644 contracts/records/goal-clarification-record.schema.json
+ create mode 100644 contracts/records/integration-record.schema.json
+ create mode 100644 contracts/records/mainline-receipt-record.schema.json
+ create mode 100644 contracts/records/merge-queue-record.schema.json
+ create mode 100644 contracts/records/merge-queue-state.schema.json
+ create mode 100644 contracts/records/merge-record.schema.json
+ create mode 100644 contracts/records/plan-record.schema.json
+ create mode 100644 contracts/records/plan-revision-record.schema.json
+ create mode 100644 contracts/records/pre-review-validation-record.schema.json
+ create mode 100644 contracts/records/promotion-record.schema.json
+ create mode 100644 contracts/records/record-graph.contract.json
+ create mode 100644 contracts/records/regression-report.schema.json
+ create mode 100644 contracts/records/reproduction-record.schema.json
+ create mode 100644 contracts/records/review-record.schema.json
+ create mode 100644 contracts/records/step-execution-record.schema.json
+ create mode 100644 contracts/records/test-scenario-result-record.schema.json
+ create mode 100644 contracts/records/worktree-record.schema.json
+ create mode 100644 contracts/transitions/zone-transition-manifest.json
+ create mode 100644 contracts/transitions/zone-transition.manifest.json
+ create mode 100644 memory/index.md
+[codex/test 8a4405d] pin
+ 1 file changed, 3 insertions(+)
+Preparing worktree (detached HEAD 8a4405d)
+Updating files:  56% (77/136)Updating files:  57% (78/136)Updating files:  58% (79/136)Updating files:  59% (81/136)Updating files:  60% (82/136)Updating files:  61% (83/136)Updating files:  62% (85/136)Updating files:  63% (86/136)Updating files:  64% (88/136)Updating files:  65% (89/136)Updating files:  66% (90/136)Updating files:  67% (92/136)Updating files:  68% (93/136)Updating files:  69% (94/136)Updating files:  70% (96/136)Updating files:  71% (97/136)Updating files:  72% (98/136)Updating files:  73% (100/136)Updating files:  74% (101/136)Updating files:  75% (102/136)Updating files:  76% (104/136)Updating files:  77% (105/136)Updating files:  78% (107/136)Updating files:  79% (108/136)Updating files:  80% (109/136)Updating files:  81% (111/136)Updating files:  82% (112/136)Updating files:  83% (113/136)Updating files:  84% (115/136)Updating files:  85% (116/136)Updating files:  86% (117/136)Updating files:  87% (119/136)Updating files:  88% (120/136)Updating files:  89% (122/136)Updating files:  90% (123/136)Updating files:  91% (124/136)Updating files:  92% (126/136)Updating files:  93% (127/136)Updating files:  94% (128/136)Updating files:  95% (130/136)Updating files:  96% (131/136)Updating files:  97% (132/136)Updating files:  98% (134/136)Updating files:  99% (135/136)Updating files: 100% (136/136)Updating files: 100% (136/136), done.
+HEAD is now at 8a4405d pin
+test pinned_sdk_witness_is_executable_and_resolvable_in_a_fresh_worktree ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 327 filtered out; finished in 47.36s
+
+===== pin_lock_reconciles_matching_authoring_bundle_mirror =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.07s
+     Running tests/cli_smoke/main.rs (.tmp/cargo-target/debug/deps/cli_smoke-ab5bf4c04dc582cc)
+
+running 1 test
+test pin_lock_reconciles_matching_authoring_bundle_mirror ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 327 filtered out; finished in 18.18s
+
+===== pin_lock_rejects_drifted_authoring_bundle_mirror_before_migration =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.35s
+     Running tests/cli_smoke/main.rs (.tmp/cargo-target/debug/deps/cli_smoke-ab5bf4c04dc582cc)
+
+running 1 test
+test pin_lock_rejects_drifted_authoring_bundle_mirror_before_migration ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 327 filtered out; finished in 11.69s
+
+===== pin_lock_restores_missing_record_contract_directory =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.56s
+     Running tests/cli_smoke/main.rs (.tmp/cargo-target/debug/deps/cli_smoke-ab5bf4c04dc582cc)
+
+running 1 test
+test pin_lock_restores_missing_record_contract_directory ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 327 filtered out; finished in 14.44s
+
+===== pin_lock_migrates_stale_project_record_contracts =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.47s
+     Running tests/cli_smoke/main.rs (.tmp/cargo-target/debug/deps/cli_smoke-ab5bf4c04dc582cc)
+
+running 1 test
+test pin_lock_migrates_stale_project_record_contracts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 327 filtered out; finished in 12.29s

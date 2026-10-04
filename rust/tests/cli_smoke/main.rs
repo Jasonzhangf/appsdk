@@ -19,4 +19,5 @@ include!("part_16.rs");
 include!("part_17.rs");
 include!("part_18.rs");
 include!("part_19.rs");
+include!("part_20.rs");
 include!("part_21.rs");

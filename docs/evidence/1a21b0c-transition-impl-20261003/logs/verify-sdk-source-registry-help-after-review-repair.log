@@ -1,0 +1,7 @@
+$ .tmp/cargo-target/debug/appsdk verify-sdk-source-registry --help
+Usage: appsdk <command> [project] [options]
+
+Project-scoped commands default to the current working directory. An explicit project path remains optional.
+Managed child compatibility entry: appsdk subworker <start|list|status|snapshot|send|close> ...
+
+No project-root environment variable is required.

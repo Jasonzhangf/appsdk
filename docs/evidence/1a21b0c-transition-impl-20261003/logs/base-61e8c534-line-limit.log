@@ -1,0 +1,4 @@
+$ wc -l /tmp/appsdk-1a21b0c-base-check/collab/src/identity.rs
+    1826 /tmp/appsdk-1a21b0c-base-check/collab/src/identity.rs
+$ git show HEAD:collab/src/identity.rs | wc -l
+    1826

@@ -1,0 +1,285 @@
+===== pin_lock_refreshes_trusted_legacy_zone_transition_contracts =====
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling libc v0.2.189
+   Compiling autocfg v1.5.1
+   Compiling serde v1.0.229
+   Compiling cfg-if v1.0.4
+   Compiling zerocopy v0.8.56
+   Compiling memchr v2.8.3
+   Compiling getrandom v0.3.4
+   Compiling zmij v1.0.23
+   Compiling once_cell v1.21.4
+   Compiling serde_json v1.0.151
+   Compiling parking_lot_core v0.9.12
+   Compiling itoa v1.0.18
+   Compiling find-msvc-tools v0.1.10
+   Compiling shlex v2.0.1
+   Compiling regex-syntax v0.8.11
+   Compiling typenum v1.20.1
+   Compiling smallvec v1.16.0
+   Compiling ref-cast v1.0.27
+   Compiling scopeguard v1.2.0
+   Compiling vcpkg v0.2.15
+   Compiling pkg-config v0.3.34
+   Compiling allocator-api2 v0.2.21
+   Compiling heck v0.5.0
+   Compiling unicode-general-category v1.1.0
+   Compiling foldhash v0.2.0
+   Compiling borrow-or-share v0.2.4
+   Compiling equivalent v1.0.2
+   Compiling bit-vec v0.8.0
+   Compiling lock_api v0.4.14
+   Compiling num-cmp v0.1.0
+   Compiling bytecount v0.6.9
+   Compiling cc v1.4.2
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling bit-set v0.8.0
+   Compiling percent-encoding v2.3.2
+   Compiling micromap v0.3.0
+   Compiling bitflags v2.13.1
+   Compiling ahash v0.8.12
+   Compiling generic-array v0.14.7
+   Compiling data-encoding v2.11.1
+   Compiling appsdk v0.1.10 (/Volumes/Intel/playground/appsdk/1a21b0c-transition-impl-20261003/.tmp/red-base-20261003b/rust)
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling hashbrown v0.17.1
+   Compiling aho-corasick v1.1.5
+   Compiling iana-time-zone v0.1.65
+   Compiling num-traits v0.2.19
+   Compiling uuid-simd v0.8.0
+   Compiling libsqlite3-sys v0.30.1
+   Compiling regex-automata v0.4.18
+   Compiling jsonschema-regex v0.56.0
+   Compiling syn v3.0.3
+   Compiling syn v2.0.119
+   Compiling cpufeatures v0.2.17
+   Compiling parking_lot v0.12.5
+   Compiling fancy-regex v0.19.2
+   Compiling regex v1.13.1
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling strum_macros v0.28.0
+   Compiling serde_derive v1.0.229
+   Compiling ref-cast-impl v1.0.27
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling chrono v0.4.45
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling strum v0.28.0
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling fraction v0.17.0
+   Compiling fluent-uri v0.4.1
+   Compiling email_address v0.2.9
+   Compiling pipeline_runtime v0.1.1 (/Volumes/Intel/playground/appsdk/1a21b0c-transition-impl-20261003/.tmp/red-base-20261003b/dagpipe)
+   Compiling hashbrown v0.14.5
+   Compiling jsonschema-value v0.56.0
+   Compiling referencing v0.56.0
+   Compiling hashlink v0.9.1
+   Compiling jsonschema v0.56.0
+   Compiling rusqlite v0.32.1
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.01s
+     Running tests/cli_smoke/main.rs (../cargo-target-red-b/debug/deps/cli_smoke-b9f545db740f10ce)
+
+running 1 test
+test pin_lock_refreshes_trusted_legacy_zone_transition_contracts ... FAILED
+
+failures:
+
+---- pin_lock_refreshes_trusted_legacy_zone_transition_contracts stdout ----
+
+thread 'pin_lock_refreshes_trusted_legacy_zone_transition_contracts' (703911620) panicked at tests/cli_smoke/part_09.rs:1557:5:
+assertion `left == right` failed: contracts/transitions/zone-transition.manifest.json
+  left: "{\n  \"zones\": [\"playground\", \"active\", \"protected\", \"generated\"],\n  \"transitions\": [\n    {\"from\":\"playground\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"clean_worktree\",\"baseline_reproduction\",\"fix_candidate_verified\",\"architecture_review_pass\",\"post_architecture_effectiveness_pass\",\"mainline_merge_verified\",\"compile\",\"promotion_record\"],\"owner\":\"promotion_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"WorktreeRecord\",\"ReproductionRecord\",\"EvidenceRecordSet\",\"FixCandidateRecord\",\"ArchitectureReviewRecord\",\"EffectivenessRecord\",\"MergeRecord\",\"PromotionRecord\"]},\n    {\"from\":\"playground\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"audited_archive\",\"source_commit\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[\"new_change_workspace\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":true,\"artifact_required\":true,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"active\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"freeze_record\",\"git_clean\",\"source_commit_or_tag\",\"library_hash\",\"public_api_hash\"],\"owner\":\"freeze_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"FreezeRecord\"]},\n    {\"from\":\"active\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[\"new_change_workspace\",\"base_version\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"protected\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"artifact_verified\",\"publish_record\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\",\"PromotionRecord\"]},\n    {\"from\":\"generated\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"generated\",\"allowed\":true,\"requirements\":[\"compiler\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\"]}\n  ],\n  \"forbidden_runtime_edges\": [\n    {\"from\":\"playground\",\"to\":\"runtime\"},\n    {\"from\":\"protected\",\"to\":\"runtime\"},\n    {\"from\":\"generated\",\"to\":\"runtime\"}\n  ]\n}\n"
+ right: "{\n  \"zones\": [\"playground\", \"active\", \"protected\", \"generated\"],\n  \"transitions\": [\n    {\"from\":\"playground\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"clean_worktree\",\"baseline_reproduction\",\"fix_candidate_verified\",\"development_whitebox_pass\",\"deployed_blackbox_pass\",\"pre_review_validation_pass\",\"architecture_review_pass\",\"post_architecture_effectiveness_pass\",\"scenario_composition_verified\",\"merge_queue_admitted_when_parallel\",\"tested_integration_verified_when_parallel\",\"local_and_remote_mainline_receipt_when_parallel\",\"mainline_merge_verified\",\"compile\",\"promotion_record\"],\"owner\":\"promotion_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"WorktreeRecord\",\"ReproductionRecord\",\"EvidenceRecordSet\",\"FixCandidateRecord\",\"PreReviewValidationRecord\",\"ArchitectureReviewRecord\",\"EffectivenessRecord\",\"CollaborationRecordWhenParallel\",\"CollabLiveClosureRecordWhenParallel\",\"MergeQueueRecordWhenParallel\",\"IntegrationRecordWhenParallel\",\"MainlineReceiptRecordWhenParallel\",\"MergeRecord\",\"PromotionRecord\"]},\n    {\"from\":\"playground\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"audited_archive\",\"source_commit\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[\"new_change_workspace\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":true,\"artifact_required\":true,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"active\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"freeze_record\",\"git_clean\",\"source_commit_or_tag\",\"library_hash\",\"public_api_hash\"],\"owner\":\"freeze_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"FreezeRecord\"]},\n    {\"from\":\"active\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[\"new_change_workspace\",\"base_version\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"protected\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"artifact_verified\",\"publish_record\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\",\"PromotionRecord\"]},\n    {\"from\":\"generated\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"generated\",\"allowed\":true,\"requirements\":[\"compiler\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\"]}\n  ],\n  \"forbidden_runtime_edges\": [\n    {\"from\":\"playground\",\"to\":\"runtime\"},\n    {\"from\":\"protected\",\"to\":\"runtime\"},\n    {\"from\":\"generated\",\"to\":\"runtime\"}\n  ]\n}\n"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pin_lock_refreshes_trusted_legacy_zone_transition_contracts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out; finished in 4.32s
+
+error: test failed, to rerun pass `--test cli_smoke`
+RED_EXIT pin_lock_refreshes_trusted_legacy_zone_transition_contracts 101
+===== pin_lock_rejects_unknown_zone_transition_content =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/cli_smoke/main.rs (../cargo-target-red-b/debug/deps/cli_smoke-b9f545db740f10ce)
+
+running 1 test
+test pin_lock_rejects_unknown_zone_transition_content ... FAILED
+
+failures:
+
+---- pin_lock_rejects_unknown_zone_transition_content stdout ----
+
+thread 'pin_lock_rejects_unknown_zone_transition_content' (703922824) panicked at tests/cli_smoke/part_09.rs:1748:5:
+assertion failed: !rejected.status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pin_lock_rejects_unknown_zone_transition_content
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out; finished in 6.41s
+
+error: test failed, to rerun pass `--test cli_smoke`
+RED_EXIT pin_lock_rejects_unknown_zone_transition_content 101
+===== pin_lock_rejects_schema_shaped_zone_transition_alias =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/cli_smoke/main.rs (../cargo-target-red-b/debug/deps/cli_smoke-b9f545db740f10ce)
+
+running 1 test
+test pin_lock_rejects_schema_shaped_zone_transition_alias ... FAILED
+
+failures:
+
+---- pin_lock_rejects_schema_shaped_zone_transition_alias stdout ----
+
+thread 'pin_lock_rejects_schema_shaped_zone_transition_alias' (703937136) panicked at tests/cli_smoke/part_09.rs:1789:5:
+assertion failed: !rejected.status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pin_lock_rejects_schema_shaped_zone_transition_alias
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out; finished in 4.73s
+
+error: test failed, to rerun pass `--test cli_smoke`
+RED_EXIT pin_lock_rejects_schema_shaped_zone_transition_alias 101
+===== pin_lock_preserves_non_declared_schema_alias =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running tests/cli_smoke/main.rs (../cargo-target-red-b/debug/deps/cli_smoke-b9f545db740f10ce)
+
+running 1 test
+test pin_lock_preserves_non_declared_schema_alias ... FAILED
+
+failures:
+
+---- pin_lock_preserves_non_declared_schema_alias stdout ----
+
+thread 'pin_lock_preserves_non_declared_schema_alias' (703950350) panicked at tests/cli_smoke/part_09.rs:1557:5:
+assertion `left == right` failed: contracts/transitions/zone-transition.manifest.json
+  left: "{\n  \"zones\": [\"playground\", \"active\", \"protected\", \"generated\"],\n  \"transitions\": [\n    {\"from\":\"playground\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"clean_worktree\",\"baseline_reproduction\",\"fix_candidate_verified\",\"development_whitebox_pass\",\"deployed_blackbox_pass\",\"pre_review_validation_pass\",\"architecture_review_pass\",\"post_architecture_effectiveness_pass\",\"scenario_composition_verified\",\"merge_queue_admitted_when_parallel\",\"tested_integration_verified_when_parallel\",\"local_and_remote_mainline_receipt_when_parallel\",\"mainline_merge_verified\",\"compile\",\"promotion_record\"],\"owner\":\"promotion_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"WorktreeRecord\",\"ReproductionRecord\",\"EvidenceRecordSet\",\"FixCandidateRecord\",\"PreReviewValidationRecord\",\"ArchitectureReviewRecord\",\"EffectivenessRecord\",\"CollaborationRecordWhenParallel\",\"MergeQueueRecordWhenParallel\",\"IntegrationRecordWhenParallel\",\"MainlineReceiptRecordWhenParallel\",\"MergeRecord\",\"PromotionRecord\"]},\n    {\"from\":\"playground\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"audited_archive\",\"source_commit\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[\"new_change_workspace\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":true,\"artifact_required\":true,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"active\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"freeze_record\",\"git_clean\",\"source_commit_or_tag\",\"library_hash\",\"public_api_hash\"],\"owner\":\"freeze_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"FreezeRecord\"]},\n    {\"from\":\"active\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[\"new_change_workspace\",\"base_version\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"protected\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"artifact_verified\",\"publish_record\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\",\"PromotionRecord\"]},\n    {\"from\":\"generated\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"generated\",\"allowed\":true,\"requirements\":[\"compiler\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\"]}\n  ],\n  \"forbidden_runtime_edges\": [\n    {\"from\":\"playground\",\"to\":\"runtime\"},\n    {\"from\":\"protected\",\"to\":\"runtime\"},\n    {\"from\":\"generated\",\"to\":\"runtime\"}\n  ]\n}\n"
+ right: "{\n  \"zones\": [\"playground\", \"active\", \"protected\", \"generated\"],\n  \"transitions\": [\n    {\"from\":\"playground\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"clean_worktree\",\"baseline_reproduction\",\"fix_candidate_verified\",\"development_whitebox_pass\",\"deployed_blackbox_pass\",\"pre_review_validation_pass\",\"architecture_review_pass\",\"post_architecture_effectiveness_pass\",\"scenario_composition_verified\",\"merge_queue_admitted_when_parallel\",\"tested_integration_verified_when_parallel\",\"local_and_remote_mainline_receipt_when_parallel\",\"mainline_merge_verified\",\"compile\",\"promotion_record\"],\"owner\":\"promotion_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"WorktreeRecord\",\"ReproductionRecord\",\"EvidenceRecordSet\",\"FixCandidateRecord\",\"PreReviewValidationRecord\",\"ArchitectureReviewRecord\",\"EffectivenessRecord\",\"CollaborationRecordWhenParallel\",\"CollabLiveClosureRecordWhenParallel\",\"MergeQueueRecordWhenParallel\",\"IntegrationRecordWhenParallel\",\"MainlineReceiptRecordWhenParallel\",\"MergeRecord\",\"PromotionRecord\"]},\n    {\"from\":\"playground\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"audited_archive\",\"source_commit\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"EvidenceRecord\"]},\n    {\"from\":\"playground\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[\"new_change_workspace\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"active\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":true,\"artifact_required\":true,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"active\",\"to\":\"protected\",\"allowed\":true,\"requirements\":[\"freeze_record\",\"git_clean\",\"source_commit_or_tag\",\"library_hash\",\"public_api_hash\"],\"owner\":\"freeze_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"FreezeRecord\"]},\n    {\"from\":\"active\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"playground\",\"allowed\":true,\"requirements\":[\"new_change_workspace\",\"base_version\"],\"owner\":\"workspace_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[\"PromotionRecord\"]},\n    {\"from\":\"protected\",\"to\":\"active\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[\"new_version\"],\"owner\":\"vcs_adapter\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"protected\",\"to\":\"generated\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"playground\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"active\",\"allowed\":true,\"requirements\":[\"artifact_verified\",\"publish_record\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\",\"PromotionRecord\"]},\n    {\"from\":\"generated\",\"to\":\"protected\",\"allowed\":false,\"requirements\":[],\"owner\":\"architecture_gate\",\"runtime_allowed\":false,\"artifact_required\":false,\"record_required\":[]},\n    {\"from\":\"generated\",\"to\":\"generated\",\"allowed\":true,\"requirements\":[\"compiler\"],\"owner\":\"compiler_adapter\",\"runtime_allowed\":false,\"artifact_required\":true,\"record_required\":[\"EvidenceRecord\"]}\n  ],\n  \"forbidden_runtime_edges\": [\n    {\"from\":\"playground\",\"to\":\"runtime\"},\n    {\"from\":\"protected\",\"to\":\"runtime\"},\n    {\"from\":\"generated\",\"to\":\"runtime\"}\n  ]\n}\n"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pin_lock_preserves_non_declared_schema_alias
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out; finished in 4.64s
+
+error: test failed, to rerun pass `--test cli_smoke`
+RED_EXIT pin_lock_preserves_non_declared_schema_alias 101
+===== pin_lock_refresh_is_idempotent_and_preserves_migration_history =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/cli_smoke/main.rs (../cargo-target-red-b/debug/deps/cli_smoke-b9f545db740f10ce)
+
+running 1 test
+test pin_lock_refresh_is_idempotent_and_preserves_migration_history ... FAILED
+
+failures:
+
+---- pin_lock_refresh_is_idempotent_and_preserves_migration_history stdout ----
+
+thread 'pin_lock_refresh_is_idempotent_and_preserves_migration_history' (703962844) panicked at tests/cli_smoke/part_09.rs:1880:5:
+assertion failed: run(&["verify", root_text]).status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pin_lock_refresh_is_idempotent_and_preserves_migration_history
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out; finished in 6.62s
+
+error: test failed, to rerun pass `--test cli_smoke`
+RED_EXIT pin_lock_refresh_is_idempotent_and_preserves_migration_history 101
+===== pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair =====
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/cli_smoke/main.rs (../cargo-target-red-b/debug/deps/cli_smoke-b9f545db740f10ce)
+
+running 1 test
+test pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair ... FAILED
+
+failures:
+
+---- pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair stdout ----
+
+thread 'pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair' (703979708) panicked at tests/cli_smoke/part_09.rs:1952:5:
+assertion failed: !failed.status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out; finished in 4.77s
+
+error: test failed, to rerun pass `--test cli_smoke`
+RED_EXIT pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair 101

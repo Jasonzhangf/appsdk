@@ -1,0 +1,2 @@
+$ .tmp/cargo-target/debug/appsdk verify-sdk-source-registry .
+SDK_SOURCE_OWNER_CARDINALITY:.tmp/cargo-target/.rustc_info.json:

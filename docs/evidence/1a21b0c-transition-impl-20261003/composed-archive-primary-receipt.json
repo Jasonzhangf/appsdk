@@ -1,0 +1,21 @@
+{
+  "at": "2026-10-04T02:39:38.944800+00:00",
+  "state": "author-terminal-consumed/full-archive-pin-verify-green/baseline-source-gate-red",
+  "base": "61e8c534b5295fb0f60a6634ad3cf99d99f12a4c",
+  "issues": [
+    "a7cc2a4",
+    "1a21b0c",
+    "f7bf558"
+  ],
+  "workerExit": 0,
+  "pid7292": "ESRCH",
+  "evidence": "/Users/fanzhang/.codex/task-evidence/agentteams/receipts/composed-archive-20261004/evidence",
+  "binary": "/Users/fanzhang/.codex/task-evidence/agentteams/receipts/composed-archive-20261004/retained/appsdk-composed-acceptance",
+  "binarySha256": "3466d44ee61d8bdd9dbe7c60f33c2badd762b257a20c8232135d1c666f6bea72",
+  "copiedEvidenceByteEqual": true,
+  "binaryRemovedFromGitEvidence": true,
+  "delivery": false,
+  "sourceRegistry": "SDK_SOURCE_LINE_LIMIT:collab/src/identity.rs:1826>1500",
+  "retainedWorktree": "/Volumes/Intel/playground/appsdk/a7cc2a4-transition-acceptance-20261004",
+  "retainedObligation": "temporary composition patches and exported report path correction/normal removal after primary audit; never deliver mixed commit"
+}

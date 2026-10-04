@@ -1,0 +1,2 @@
+$ shasum -a 256 /tmp/appsdk-1a21b0c-registry-final/target/debug/appsdk
+730239ed8ae68dae35ffc16cb3efeda3a6af39d1e3d7fec40eba4c8d9d7b6220  /tmp/appsdk-1a21b0c-registry-final/target/debug/appsdk

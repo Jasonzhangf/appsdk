@@ -1,0 +1,23 @@
+# resource cleanup @ 2026-10-04T05:58:23Z
+no active cargo build/rustc compile (only pre-existing collab/rcc binaries matched)
+cargo clean aborted (exit 101, missing CACHEDIR.TAG); removed own temp target via find -delete
+PASS test ! -e /tmp/1a21b0c-final-20261004
+PASS test ! -e /tmp/1a21b0c-verify.RzLMjZ
+
+## retained evidence files
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/appsdk-dagpipe-validate.json
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/cargo-build-appsdk.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/cargo-fmt-check.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/cargo-target-cleanup.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/cli-smoke-pin-lock-list.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/cli-smoke-pin-lock-run.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/cli-smoke-pinned-sdk-witness.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/frozen-hashes-and-delta.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/git-diff-check.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/resource-cleanup.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/retained-appsdk-hash.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/sdk-pin-history-graph-validate.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/logs/verify-sdk-source-registry-from-root.log
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/receipts/author-implementation-receipt.json
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/retained/appsdk
+/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/docs/evidence/1a21b0c-transition-final-20261004/run-notes.md

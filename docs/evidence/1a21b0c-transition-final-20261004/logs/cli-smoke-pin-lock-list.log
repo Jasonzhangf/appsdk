@@ -1,0 +1,48 @@
+   Compiling appsdk v0.1.10 (/Volumes/Intel/playground/appsdk/1a21b0c-transition-final-20261004/rust)
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.95s
+     Running tests/cli_smoke/main.rs (/tmp/1a21b0c-final-20261004/target/debug/deps/cli_smoke-fd8aa9f697740f81)
+pin_lock_accepts_all_materialized_migration_bundle_witnesses: test
+pin_lock_accepts_chained_previous_bundle_witness_without_rewriting_migration_record: test
+pin_lock_accepts_complete_historical_agentteams_baseline: test
+pin_lock_accepts_historical_custom_target_different_from_canonical_target: test
+pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair: test
+pin_lock_creates_missing_supported_zone_transition_paths: test
+pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary: test
+pin_lock_migrates_stale_project_record_contracts: test
+pin_lock_preserves_historical_custom_maps_with_bundle_witness: test
+pin_lock_preserves_non_declared_schema_alias: test
+pin_lock_reconciles_matching_authoring_bundle_mirror: test
+pin_lock_reconciles_previous_bundle_target_without_rewriting_migration_record: test
+pin_lock_reconciliation_is_idempotent_and_snapshot_remains_immutable: test
+pin_lock_refresh_is_idempotent_and_preserves_migration_history: test
+pin_lock_refreshes_trusted_legacy_zone_transition_contracts: test
+pin_lock_rejects_absent_historical_agentteams_bundle_witness: test
+pin_lock_rejects_altered_historical_agentteams_snapshot: test
+pin_lock_rejects_changed_live_agentteams_map_after_current_record: test
+pin_lock_rejects_current_agentteams_target_live_mismatch: test
+pin_lock_rejects_current_maps_without_previous_bundle_witness: test
+pin_lock_rejects_custom_map_record_from_bundle_reconciliation: test
+pin_lock_rejects_drifted_authoring_bundle_mirror_before_migration: test
+pin_lock_rejects_equal_malformed_bundle_witness_without_overwrite: test
+pin_lock_rejects_invalid_chained_bundle_witness_without_overwrite: test
+pin_lock_rejects_malformed_historical_agentteams_metadata: test
+pin_lock_rejects_malformed_migration_record_bundle_digest: test
+pin_lock_rejects_malformed_plural_bundle_witnesses_without_overwrite: test
+pin_lock_rejects_migration_record_missing_required_map_digest: test
+pin_lock_rejects_schema_shaped_zone_transition_alias: test
+pin_lock_rejects_unknown_zone_transition_content: test
+pin_lock_rejects_unlisted_historical_agentteams_target_tuple: test
+pin_lock_rejects_unreconciled_live_map_without_overwrite: test
+pin_lock_requires_lock_anchor_for_materialized_migration_bundle_witnesses: test
+pin_lock_restores_missing_record_contract_directory: test
+
+34 tests, 0 benchmarks

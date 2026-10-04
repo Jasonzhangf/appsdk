@@ -1,0 +1,43 @@
+$ git status --short --untracked-files=all
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/cargo-build.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/cargo-fmt-check.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/dagpipe-validate-outside-source-cwd.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/dagpipe-validate-root-cwd.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/dagpipe-validate-source-cwd.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/existing-writer-regressions.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/full-archive-dependency-pin-lock.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/full-archive-dependency-verify.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/new-public-tests.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/red-before-fix.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/logs/sdk-pin-history-graph-validate.log
+A  docs/evidence/1a21b0c-transition-impl-20261003/receipts/checksums.txt
+A  docs/evidence/1a21b0c-transition-impl-20261003/receipts/implementation-receipt.json
+AM docs/evidence/1a21b0c-transition-impl-20261003/run-notes.md
+M  rust/src/main/migration.rs
+M  rust/src/main/producer.rs
+M  rust/src/main/reset_governance.rs
+M  rust/tests/cli_smoke/part_09.rs
+A  rust/tests/fixtures/zone-transition-0.1.3.json
+A  rust/tests/fixtures/zone-transition-0.1.4.json
+A  rust/tests/fixtures/zone-transition-0.1.5-0.1.6.json
+?? .tmp/retained/appsdk-1a21b0c-9e3b57da
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/cargo-build-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/cargo-fmt-check-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/focused-public-tests-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/frozen-hashes-final-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/git-diff-check-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/git-diff-check-final-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/resource-cleanup-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/resource-state-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/sdk-pin-history-graph-validate-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/source-line-counts-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/source-line-counts-final-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/test-list-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/verify-sdk-source-registry-after-review-repair.log
+?? docs/evidence/1a21b0c-transition-impl-20261003/logs/verify-sdk-source-registry-help-after-review-repair.log
+?? rust/tests/cli_smoke/part_20.rs
+$ find .tmp -maxdepth 3 -print | sort
+.tmp
+.tmp/retained
+.tmp/retained/appsdk-1a21b0c-9e3b57da
+$ find . -flags +uchg -print

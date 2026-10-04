@@ -1,0 +1,16 @@
+$ zig-wrapped CC with corrected target spelling; CARGO_TARGET_DIR=/tmp/appsdk-1a21b0c-linux-check/target cargo check --manifest-path rust/Cargo.toml --test cli_smoke --target x86_64-unknown-linux-gnu
+    Checking serde v1.0.229
+    Checking strum v0.28.0
+   Compiling libsqlite3-sys v0.30.1
+    Checking ahash v0.8.12
+    Checking fluent-uri v0.4.1
+    Checking email_address v0.2.9
+    Checking pipeline_runtime v0.1.1 (/Volumes/Intel/playground/appsdk/1a21b0c-transition-impl-20261003/dagpipe)
+    Checking hashbrown v0.14.5
+    Checking jsonschema-value v0.56.0
+    Checking referencing v0.56.0
+    Checking hashlink v0.9.1
+    Checking jsonschema v0.56.0
+    Checking rusqlite v0.32.1
+    Checking appsdk v0.1.10 (/Volumes/Intel/playground/appsdk/1a21b0c-transition-impl-20261003/rust)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.06s

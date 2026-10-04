@@ -1,0 +1,9 @@
+$ copy tested executable, remove Cargo target metadata/cache, then verify copied executable
+$ shasum -a 256 /tmp/appsdk-1a21b0c-final-executable/appsdk
+55b1428be7eda20f3aa5e58725e53e3020133b79123399b3a58c4e538ff05902  /tmp/appsdk-1a21b0c-final-executable/appsdk
+$ /tmp/appsdk-1a21b0c-final-executable/appsdk version
+appsdk 0.1.0010 (rust)
+$ find /tmp/appsdk-1a21b0c-final* -maxdepth 2 -print | sort
+/tmp/appsdk-1a21b0c-final
+/tmp/appsdk-1a21b0c-final-executable
+/tmp/appsdk-1a21b0c-final-executable/appsdk

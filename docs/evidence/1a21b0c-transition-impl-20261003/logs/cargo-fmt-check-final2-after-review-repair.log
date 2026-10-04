@@ -1,0 +1,1 @@
+$ cargo fmt --manifest-path rust/Cargo.toml -- --check

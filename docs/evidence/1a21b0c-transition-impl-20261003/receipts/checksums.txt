@@ -1,0 +1,29 @@
+# 1a21b0c transition-refresh source-review repair checksums
+
+Base: 61e8c534b5295fb0f60a6634ad3cf99d99f12a4c
+Branch: codex/1a21b0c-transition-impl-20261003
+Generated: 2026-10-03 11:00 PT
+
+## Final source and tests
+d5682cd93521773f520d405956600684ab7b609f691e72edc27efaa0222f0add  rust/src/main/migration.rs
+96a9de39e7d9312ceca1a71cc38b807cc0e41cc0bc7b43a16926f778727f7f6e  rust/src/main/producer.rs
+89f1f36fa9b55134f66b431abaf3d1d1683f40bc496dcc70339f67f605b8485b  rust/src/main/reset_governance.rs
+45b08425e4bda707fc0487cebcf0f117fe58576b8af535287018d138d133afeb  rust/tests/cli_smoke/part_09.rs
+3a1e73123b2f94406bb3a24fe4a2dbf022e6f5f5672c9c55e76f4cfd64bdfb45  rust/tests/cli_smoke/part_20.rs
+12181a18f694d3b4635314dad16665c41ea46626560609ea3a44f98115b00e90  rust/tests/cli_smoke/main.rs
+a6468f12b64d3e0125ddd77828a4eeeee48cf3a38a0ee6d5bfe56935cd8a1957  rust/tests/fixtures/zone-transition-0.1.3.json
+6c485a138ab5a657b760969be42b167ebd034f8a43446609505c2f5d16d5afab  rust/tests/fixtures/zone-transition-0.1.4.json
+4568668437b4e0b44db4709d27e31c2783c8a6e4ccd828273a4675775f69ca1f  rust/tests/fixtures/zone-transition-0.1.5-0.1.6.json
+
+## Final logs
+674bd55ebdbee34a4d71053850cb8021dd47565efa045120c1bc53751b2b83fb  docs/evidence/1a21b0c-transition-impl-20261003/logs/cargo-build-final-after-split.log
+bb1d8ec2c4c170b8a09e4fd5d5fe2d89b6ab558fc510261666bfc47ca5953703  docs/evidence/1a21b0c-transition-impl-20261003/logs/cargo-fmt-check-final2-after-review-repair.log
+a4de8ff36c58bf2c0b4f89eb370c3069dc251b165ec2c38db883c53665eb6493  docs/evidence/1a21b0c-transition-impl-20261003/logs/focused-public-tests-final2-after-review-repair.log
+bb41be4b4145e6b277cdbf7a36aa37f6261c74e575f0667b0ed74a15d29a25b8  docs/evidence/1a21b0c-transition-impl-20261003/logs/pinned-writer-regression-after-review-repair.log
+8d02f214e2bf606d9eba7707a76a0bb9a01e510e6daf17214499c309ff4e7281  docs/evidence/1a21b0c-transition-impl-20261003/logs/linux-cross-check-final2-after-review-repair.log
+e8c886bd84be9dbe20f97bf2941be049812d4916b249ab4d292701e8f802e5be  docs/evidence/1a21b0c-transition-impl-20261003/logs/verify-sdk-source-registry-retained-binary.log
+14db612a90f5ea8fa37137a63a409ee20e7643ef2bb3329fb39ea645b3a6133c  docs/evidence/1a21b0c-transition-impl-20261003/logs/sdk-pin-history-graph-validate-after-review-repair.log
+b21557f9cc127e44cf799fc8fd7b4eb3d743e6d656753a3b8c77104d6d7f40b6  docs/evidence/1a21b0c-transition-impl-20261003/logs/base-61e8c534-line-limit.log
+879e008fe676bac66c1c54cc5479e065cb44949e9198dff35a9c8e87520cb3df  docs/evidence/1a21b0c-transition-impl-20261003/logs/final-resource-cleanup-after-review-repair.log
+c2d9a2545295ac127c4ace8c0eb2de519f9cf4c0779dfecad89647140dda5430  docs/evidence/1a21b0c-transition-impl-20261003/logs/final-executable-retention-and-target-cleanup.log
+00e217e7ebe736e1ca80b3bbfc1691ac0ae0b9de2f6982864a9cc9a3e76ca43b  docs/evidence/1a21b0c-transition-impl-20261003/logs/linux-cross-cache-cleanup.log

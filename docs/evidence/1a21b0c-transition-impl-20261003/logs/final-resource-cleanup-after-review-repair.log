@@ -1,0 +1,12 @@
+$ test -d /tmp/appsdk-1a21b0c-final/home && find /tmp/appsdk-1a21b0c-final/home -depth -delete
+$ test -d /tmp/appsdk-1a21b0c-final/tmp && find /tmp/appsdk-1a21b0c-final/tmp -depth -delete
+$ find /tmp/appsdk-1a21b0c-final -maxdepth 2 -print | sort
+/tmp/appsdk-1a21b0c-final
+/tmp/appsdk-1a21b0c-final/target
+/tmp/appsdk-1a21b0c-final/target/.rustc_info.json
+/tmp/appsdk-1a21b0c-final/target/debug
+/tmp/appsdk-1a21b0c-final/target/tmp
+$ test ! -e .tmp && echo no_repository_tmp
+no_repository_tmp
+$ shasum -a 256 /tmp/appsdk-1a21b0c-final/target/debug/appsdk
+55b1428be7eda20f3aa5e58725e53e3020133b79123399b3a58c4e538ff05902  /tmp/appsdk-1a21b0c-final/target/debug/appsdk

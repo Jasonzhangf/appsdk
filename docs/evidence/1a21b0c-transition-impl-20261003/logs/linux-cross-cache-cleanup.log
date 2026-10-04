@@ -1,0 +1,6 @@
+$ find /tmp/appsdk-1a21b0c-linux-check -depth -delete
+$ test ! -e /tmp/appsdk-1a21b0c-linux-check
+cleanup_exit=0
+$ find . -flags +uchg -print
+$ shasum -a 256 /tmp/appsdk-1a21b0c-final-executable/appsdk
+55b1428be7eda20f3aa5e58725e53e3020133b79123399b3a58c4e538ff05902  /tmp/appsdk-1a21b0c-final-executable/appsdk

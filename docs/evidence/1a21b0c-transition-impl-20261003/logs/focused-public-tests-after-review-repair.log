@@ -1,0 +1,43 @@
+$ CARGO_TARGET_DIR=.tmp/cargo-target APPSDK_HOME=.tmp/appsdk-home TMPDIR=$PWD/.tmp/tmp cargo test --manifest-path rust/Cargo.toml --test cli_smoke pin_lock_
+warning: unused import: `super::validation::*`
+ --> src/communication/store_runtime.rs:2:5
+  |
+2 | use super::validation::*;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `appsdk` (bin "appsdk") generated 1 warning (run `cargo fix --bin "appsdk" -p appsdk` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/cli_smoke/main.rs (.tmp/cargo-target/debug/deps/cli_smoke-ab5bf4c04dc582cc)
+
+running 27 tests
+test pin_lock_rejects_schema_shaped_zone_transition_alias ... ok
+test pin_lock_rejects_unknown_zone_transition_content ... ok
+test pin_lock_rejects_malformed_plural_bundle_witnesses_without_overwrite ... ok
+test pin_lock_rejects_custom_map_record_from_bundle_reconciliation ... ok
+test pin_lock_rejects_drifted_authoring_bundle_mirror_before_migration ... ok
+test pin_lock_rejects_equal_malformed_bundle_witness_without_overwrite ... ok
+test pin_lock_rejects_malformed_migration_record_bundle_digest ... ok
+test pin_lock_migrates_stale_project_record_contracts ... ok
+test pin_lock_rejects_unreconciled_live_map_without_overwrite ... ok
+test pin_lock_rejects_current_maps_without_previous_bundle_witness ... ok
+test pin_lock_requires_lock_anchor_for_materialized_migration_bundle_witnesses ... ok
+test pin_lock_restores_missing_record_contract_directory ... ok
+test pin_lock_reconciles_previous_bundle_target_without_rewriting_migration_record ... ok
+test pin_lock_accepts_all_materialized_migration_bundle_witnesses ... ok
+test pin_lock_accepts_chained_previous_bundle_witness_without_rewriting_migration_record ... ok
+test pin_lock_accepts_historical_custom_target_different_from_canonical_target ... ok
+test pin_lock_reconciles_matching_authoring_bundle_mirror ... ok
+test pin_lock_rejects_migration_record_missing_required_map_digest ... ok
+test pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair ... ok
+test pin_lock_rejects_invalid_chained_bundle_witness_without_overwrite ... ok
+test pin_lock_creates_missing_supported_zone_transition_paths ... ok
+test pin_lock_preserves_non_declared_schema_alias ... ok
+test pin_lock_reconciliation_is_idempotent_and_snapshot_remains_immutable ... ok
+test pin_lock_refresh_is_idempotent_and_preserves_migration_history ... ok
+test pin_lock_refreshes_trusted_legacy_zone_transition_contracts ... ok
+test pin_lock_migrates_only_supported_sdk_and_matching_bundle_binary ... ok
+test pin_lock_preserves_historical_custom_maps_with_bundle_witness ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 301 filtered out; finished in 22.88s

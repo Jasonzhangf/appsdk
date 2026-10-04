@@ -1,0 +1,133 @@
+{
+    "task": "1a21b0c-transition-impl-20261003",
+    "status": "scope_two_review_defects_fixed_focused_public_gates_green_release_registry_incomplete_dependency_retained",
+    "branch": "codex/1a21b0c-transition-impl-20261003",
+    "base_sha": "61e8c534b5295fb0f60a6634ad3cf99d99f12a4c",
+    "origin_main_sha": "61e8c534b5295fb0f60a6634ad3cf99d99f12a4c",
+    "admitted_design_tree": "3391baa9633124da5e982f93fe00114152fafad1",
+    "candidate_binary": {
+        "path": "/tmp/appsdk-1a21b0c-final-executable/appsdk",
+        "original_build_path_removed": "/tmp/appsdk-1a21b0c-final/target",
+        "sha256": "55b1428be7eda20f3aa5e58725e53e3020133b79123399b3a58c4e538ff05902",
+        "version": "appsdk 0.1.0010 (rust)"
+    },
+    "source_sha256": {
+        "rust/src/main/migration.rs": "d5682cd93521773f520d405956600684ab7b609f691e72edc27efaa0222f0add",
+        "rust/src/main/producer.rs": "96a9de39e7d9312ceca1a71cc38b807cc0e41cc0bc7b43a16926f778727f7f6e",
+        "rust/src/main/reset_governance.rs": "89f1f36fa9b55134f66b431abaf3d1d1683f40bc496dcc70339f67f605b8485b",
+        "rust/tests/cli_smoke/part_09.rs": "45b08425e4bda707fc0487cebcf0f117fe58576b8af535287018d138d133afeb",
+        "rust/tests/cli_smoke/part_20.rs": "3a1e73123b2f94406bb3a24fe4a2dbf022e6f5f5672c9c55e76f4cfd64bdfb45",
+        "rust/tests/cli_smoke/main.rs": "12181a18f694d3b4635314dad16665c41ea46626560609ea3a44f98115b00e90"
+    },
+    "fixture_sha256": {
+        "rust/tests/fixtures/zone-transition-0.1.3.json": "a6468f12b64d3e0125ddd77828a4eeeee48cf3a38a0ee6d5bfe56935cd8a1957",
+        "rust/tests/fixtures/zone-transition-0.1.4.json": "6c485a138ab5a657b760969be42b167ebd034f8a43446609505c2f5d16d5afab",
+        "rust/tests/fixtures/zone-transition-0.1.5-0.1.6.json": "4568668437b4e0b44db4709d27e31c2783c8a6e4ccd828273a4675775f69ca1f"
+    },
+    "new_public_tests": {
+        "log": "docs/evidence/1a21b0c-transition-impl-20261003/logs/focused-public-tests-final2-after-review-repair.log",
+        "result": "27 passed; 0 failed for the public `pin_lock_` filter, including all 7 new tests and 4 mapped pin-lock writer regressions",
+        "file": "rust/tests/cli_smoke/part_20.rs",
+        "line_count": 571,
+        "tests": [
+            "pin_lock_refreshes_trusted_legacy_zone_transition_contracts",
+            "pin_lock_rejects_unknown_zone_transition_content",
+            "pin_lock_rejects_schema_shaped_zone_transition_alias",
+            "pin_lock_preserves_non_declared_schema_alias",
+            "pin_lock_refresh_is_idempotent_and_preserves_migration_history",
+            "pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair",
+            "pin_lock_creates_missing_supported_zone_transition_paths"
+        ],
+        "portable_tests": [
+            "pin_lock_refreshes_trusted_legacy_zone_transition_contracts",
+            "pin_lock_rejects_unknown_zone_transition_content",
+            "pin_lock_rejects_schema_shaped_zone_transition_alias",
+            "pin_lock_preserves_non_declared_schema_alias",
+            "pin_lock_refresh_is_idempotent_and_preserves_migration_history",
+            "pin_lock_creates_missing_supported_zone_transition_paths"
+        ],
+        "macos_only_tests": [
+            "pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair"
+        ],
+        "linux_execution_claimed": false
+    },
+    "red_before_fix": {
+        "log": "docs/evidence/1a21b0c-transition-impl-20261003/logs/red-before-fix.log",
+        "base_production_source": "git archive HEAD with the prior new part_09.rs tests and fixtures only",
+        "result": "6 design gates failed with exit 101 against pre-fix production code",
+        "tests": [
+            "pin_lock_refreshes_trusted_legacy_zone_transition_contracts",
+            "pin_lock_rejects_unknown_zone_transition_content",
+            "pin_lock_rejects_schema_shaped_zone_transition_alias",
+            "pin_lock_preserves_non_declared_schema_alias",
+            "pin_lock_refresh_is_idempotent_and_preserves_migration_history",
+            "pin_lock_cleans_failed_transition_staging_and_resumes_partial_pair"
+        ]
+    },
+    "existing_writer_regressions": {
+        "log": "docs/evidence/1a21b0c-transition-impl-20261003/logs/pinned-writer-regression-after-review-repair.log",
+        "result": "5 passed; 0 failed",
+        "tests": [
+            "pinned_sdk_witness_is_executable_and_resolvable_in_a_fresh_worktree",
+            "pin_lock_reconciles_matching_authoring_bundle_mirror",
+            "pin_lock_rejects_drifted_authoring_bundle_mirror_before_migration",
+            "pin_lock_restores_missing_record_contract_directory",
+            "pin_lock_migrates_stale_project_record_contracts"
+        ]
+    },
+    "static_checks": {
+        "cargo_fmt_check": "exit 0; logs/cargo-fmt-check-final2-after-review-repair.log",
+        "cargo_build_bin_appsdk": "exit 0; one pre-existing unrelated unused-import warning in communication/store_runtime.rs; logs/cargo-build-final-after-split.log",
+        "linux_cross_check": "exit 0; cargo check --test cli_smoke --target x86_64-unknown-linux-gnu with zig cc; compile-only, no Linux execution claim; logs/linux-cross-check-final2-after-review-repair.log",
+        "git_diff_check": "exit 0 for unstaged and cached; logs/git-diff-check-final-after-review-repair.log",
+        "dagpipe_validate": "exit 0 from source cwd, parent cwd, and /; 9 manifest IDs exactly once",
+        "dagpipe_graph_validate_sdk_pin_history": "exit 0; valid DAG appsdk-sdk-pin-history@0.1.0 (6 nodes, 5 edges, 6 waves); logs/sdk-pin-history-graph-validate-after-review-repair.log"
+    },
+    "source_line_review_repair": {
+        "part_09": {
+            "path": "rust/tests/cli_smoke/part_09.rs",
+            "line_count": 1492,
+            "base_blob": "e31bdceeeafba628bc38c2d4b29e5016b1a0ca18",
+            "sha256": "45b08425e4bda707fc0487cebcf0f117fe58576b8af535287018d138d133afeb",
+            "result": "restored exactly to base; candidate tests moved only"
+        },
+        "part_20": {
+            "path": "rust/tests/cli_smoke/part_20.rs",
+            "line_count": 571,
+            "git_blob": "0125f0b57750c9ffbbd8f19d04d1e33229e89f99",
+            "sha256": "3a1e73123b2f94406bb3a24fe4a2dbf022e6f5f5672c9c55e76f4cfd64bdfb45",
+            "result": "contains the prior candidate addition"
+        }
+    },
+    "release_source_registry": {
+        "command": "/tmp/appsdk-1a21b0c-final-executable/appsdk verify-sdk-source-registry .",
+        "exit": 1,
+        "stderr": "SDK_SOURCE_LINE_LIMIT:collab/src/identity.rs:1826>1500",
+        "log": "docs/evidence/1a21b0c-transition-impl-20261003/logs/verify-sdk-source-registry-retained-binary.log",
+        "base_condition": "collab/src/identity.rs is 1,826 lines at base 61e8c534 and is unchanged by this candidate; contracts/maps/module-registry.json is also unchanged",
+        "scope": "outside allowed writes; release acceptance remains INCOMPLETE"
+    },
+    "full_archive_dependency_probe": {
+        "archive": "/Volumes/Intel/playground/appsdk/a7cc2a4-pin-impl-20261003/docs/evidence/a7cc2a4-pin-impl-20261003/fixture-agentteams-de099b79.tar.gz",
+        "archive_sha256": "2d91c66612c307e2ba76ceba188ca613e557840d69b9ef1568bb33825e68db50",
+        "pin_lock_exit": 1,
+        "pin_lock_stderr": "INVALID_SDK_MIGRATION_RECORD",
+        "verify_exit": 1,
+        "verify_stderr": "NON_CANONICAL_RECORD_CONTRACT_SET",
+        "project_json_unchanged_sha256": "5e87b3e29c43792078d09e6f0757ff3b64dc33f4778c52437e70c38e6b979e43",
+        "sdk_lock_unchanged_sha256": "930fb338517760fded3e7414d16e9e433f04624518f05f4dd9c01dc47af42c52",
+        "root_transition_hashes_after": {
+            "contracts/transitions/zone-transition-manifest.json": "4568668437b4e0b44db4709d27e31c2783c8a6e4ccd828273a4675775f69ca1f",
+            "contracts/transitions/zone-transition.manifest.json": "4568668437b4e0b44db4709d27e31c2783c8a6e4ccd828273a4675775f69ca1f"
+        },
+        "conclusion": "stopped at the distinct frozen historical-pin candidate dependency; no bypass, copy-in, or relabel"
+    },
+    "retained_obligations": [
+        "release source-registry gate blocked by unchanged base collab/src/identity.rs:1826>1500; needs separate owner/scoped repair",
+        "full unchanged-archive pin->verify acceptance after the separate pin source composes with latest main",
+        "one tested executable retained externally at /tmp/appsdk-1a21b0c-final-executable/appsdk with hash 55b1428be7eda20f3aa5e58725e53e3020133b79123399b3a58c4e538ff05902"
+    ],
+    "non_claims": [
+        "no commit, merge, push, architecture review, install, daemon restart, OTA, memory write, Teams admission, or full SDK closure"
+    ]
+}

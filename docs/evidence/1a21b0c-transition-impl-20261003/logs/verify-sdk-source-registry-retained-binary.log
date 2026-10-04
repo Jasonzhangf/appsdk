@@ -1,0 +1,2 @@
+$ /tmp/appsdk-1a21b0c-final-executable/appsdk verify-sdk-source-registry .
+SDK_SOURCE_LINE_LIMIT:collab/src/identity.rs:1826>1500

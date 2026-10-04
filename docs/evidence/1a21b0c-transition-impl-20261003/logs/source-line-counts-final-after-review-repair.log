@@ -1,0 +1,5 @@
+$ wc -l rust/tests/cli_smoke/part_09.rs rust/tests/cli_smoke/part_20.rs
+    2059 rust/tests/cli_smoke/part_09.rs
+     571 rust/tests/cli_smoke/part_20.rs
+    2630 total
+$ cmp -s <(git show HEAD:rust/tests/cli_smoke/part_09.rs) rust/tests/cli_smoke/part_09.rs && echo base-content-identical

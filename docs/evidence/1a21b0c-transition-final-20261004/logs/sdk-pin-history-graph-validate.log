@@ -1,0 +1,2 @@
+valid DAG: appsdk-sdk-pin-history@0.1.0 (6 nodes, 5 edges, 6 waves)
+operator bindings are syntactically present; project compile() remains the authoritative registry/schema/effect gate

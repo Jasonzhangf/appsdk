@@ -1,0 +1,2 @@
+$ /tmp/appsdk-1a21b0c-registry-final/target/debug/appsdk verify-sdk-source-registry .
+SDK_SOURCE_OWNER_CARDINALITY:.tmp/retained/appsdk-1a21b0c-9e3b57da:

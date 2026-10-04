@@ -12,8 +12,26 @@ pub(super) fn atomic_write_bytes(target: &Path, bytes: &[u8], error: &str) {
     {
         fail("GOVERNANCE_PATH_SYMLINK:staging");
     }
-    fs::write(&staging, bytes).unwrap_or_else(|_| fail(error));
-    fs::rename(&staging, target).unwrap_or_else(|_| fail(error));
+    if let Err(write_error) = fs::write(&staging, bytes) {
+        fail_after_staging_cleanup(&staging, error, &write_error);
+    }
+    if let Err(rename_error) = fs::rename(&staging, target) {
+        fail_after_staging_cleanup(&staging, error, &rename_error);
+    }
+}
+
+fn fail_after_staging_cleanup(staging: &Path, error: &str, original_error: &std::io::Error) -> ! {
+    match fs::remove_file(staging) {
+        Ok(()) => fail(error),
+        Err(cleanup_error) if cleanup_error.kind() == ErrorKind::NotFound => fail(error),
+        Err(cleanup_error) => fail(format!(
+            "{}:{};STAGING_CLEANUP_FAILED:{}:{}",
+            error,
+            original_error,
+            staging.display(),
+            cleanup_error
+        )),
+    }
 }
 
 /// Materialize the ignored `.appsdk/sdk.bin` witness from the exact pinned

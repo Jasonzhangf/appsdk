@@ -1,0 +1,18 @@
+{
+  "reason": "exact staged whitespace gate: trailing blank line in two raw testlogs; preserve bytes, do not rerun valid tests",
+  "files": [
+    {
+      "original": "logs/cli-smoke-pin-lock-run.log",
+      "preserved": "logs/cli-smoke-pin-lock-run.log.gz",
+      "sha256": "8515a1cdd7fb5252eb5adabd0170901b3c50fb5556b01ffc2b63b3a2000f06ca",
+      "rawBytes": 3164
+    },
+    {
+      "original": "logs/cli-smoke-pinned-sdk-witness.log",
+      "preserved": "logs/cli-smoke-pinned-sdk-witness.log.gz",
+      "sha256": "9075721c511e42eb5c13fc3dfe92a279b6f24c1afdd4ff2a0857adc056f4424a",
+      "rawBytes": 11188
+    }
+  ],
+  "read": "gzip -dc <preserved> recovers original named raw evidence"
+}

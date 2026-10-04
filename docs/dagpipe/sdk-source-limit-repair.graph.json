@@ -1,0 +1,112 @@
+{
+  "id": "appsdk-sdk-source-limit-repair-v1",
+  "version": "0.1.0",
+  "description": "SDK 源码候选准入证据流：登记源码所有权、真实行数上限及最小抽取范围，完成候选测试、严格注册门禁和真实公开消费者回归，回收测试夹具后产出候选准入结果。静态治理图，不声明可执行 Operator；不是产品行为图或整次交付终点。独立架构审查、集成、推送及候选 worktree 回收继续由既有交付契约收口。",
+  "inputs": [
+    {
+      "id": "sdk_tracked_sources",
+      "schema": "Object",
+      "semantic_label": "登记 SDK 已跟踪源码清单"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "resolve_module_registry",
+      "semantic_label": "读取并解析模块注册表",
+      "operator": "appsdk.sdk_source_limit.resolve_module_registry",
+      "operator_version": "1",
+      "inputs": ["sdk_tracked_sources"],
+      "output": {"id": "module_registry_resolved", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "match_unique_owners",
+      "semantic_label": "为每个源路径匹配唯一活跃 owner",
+      "operator": "appsdk.sdk_source_limit.match_unique_owners",
+      "operator_version": "1",
+      "inputs": ["module_registry_resolved"],
+      "output": {"id": "owner_assignment", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "compute_limits",
+      "semantic_label": "按 owner 专有上限计算行数阈值",
+      "operator": "appsdk.sdk_source_limit.compute_limits",
+      "operator_version": "1",
+      "inputs": ["owner_assignment"],
+      "output": {"id": "limit_matrix", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "enumerate_violations",
+      "semantic_label": "枚举所有超限 .rs 违规文件",
+      "operator": "appsdk.sdk_source_limit.enumerate_violations",
+      "operator_version": "1",
+      "inputs": ["limit_matrix"],
+      "output": {"id": "violation_inventory", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "lock_extraction",
+      "semantic_label": "锁定最小自然文件抽取边界",
+      "operator": "appsdk.sdk_source_limit.lock_extraction",
+      "operator_version": "1",
+      "inputs": ["violation_inventory"],
+      "output": {"id": "extraction_plan", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_candidate_suite",
+      "semantic_label": "构建并运行定向测试与格式门禁",
+      "operator": "appsdk.sdk_source_limit.verify_candidate_suite",
+      "operator_version": "1",
+      "inputs": ["extraction_plan"],
+      "output": {"id": "candidate_suite_pass", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "run_strict_registry_gate",
+      "semantic_label": "以严格 1500/3500 规则复核源码注册门禁",
+      "operator": "appsdk.sdk_source_limit.run_strict_registry_gate",
+      "operator_version": "1",
+      "inputs": ["candidate_suite_pass"],
+      "output": {"id": "registry_gate_green", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    },
+    {
+      "id": "reconcile_consumer_and_cleanup",
+      "semantic_label": "复核公开消费者并回收测试夹具，记录候选准入回执",
+      "operator": "appsdk.sdk_source_limit.reconcile_consumer_and_cleanup",
+      "operator_version": "1",
+      "inputs": ["registry_gate_green"],
+      "output": {"id": "repair_acceptance", "schema": "Object"},
+      "input_selector": {"include": [], "exclude": [], "predicate": null},
+      "output_selector": {"include": [], "exclude": [], "predicate": null},
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {"from": "resolve_module_registry", "to": "match_unique_owners", "arc_id": "module_registry_resolved"},
+    {"from": "match_unique_owners", "to": "compute_limits", "arc_id": "owner_assignment"},
+    {"from": "compute_limits", "to": "enumerate_violations", "arc_id": "limit_matrix"},
+    {"from": "enumerate_violations", "to": "lock_extraction", "arc_id": "violation_inventory"},
+    {"from": "lock_extraction", "to": "verify_candidate_suite", "arc_id": "extraction_plan"},
+    {"from": "verify_candidate_suite", "to": "run_strict_registry_gate", "arc_id": "candidate_suite_pass"},
+    {"from": "run_strict_registry_gate", "to": "reconcile_consumer_and_cleanup", "arc_id": "registry_gate_green"}
+  ],
+  "outputs": ["repair_acceptance"]
+}

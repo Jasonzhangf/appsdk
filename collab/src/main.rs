@@ -661,34 +661,7 @@ const LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE: &str = "recovery: run `collab cont
 const IDENTITY_REBIND_UNPROVEN_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout; if the same identity error persists, report the exact error and worker_id to the live master with `COLLAB_WORKER=<worker_id> collab sendmessage --from <worker_id> --to <master> --subject blocker \"<exact error; worker_id=<worker_id>; cause; decision needed>\"`; if that also fails, report out-of-band through a healthy peer or the human; do not edit routes, copy tokens, or start a second daemon";
 const IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY: &str = "recovery: run `collab context` from the canonical project main checkout for the current project; if it persists, preserve the exact error and worker_id and report out-of-band to the live master through a healthy peer or the human; do not try `collab sendmessage` through the same failing identity path; do not edit routes, copy tokens, or start a second daemon";
 
-fn format_cli_error(error: &str) -> String {
-    let decorated = if error.starts_with("ROUTE_RESOLVE_NOT_FOUND:")
-        && !error.contains(crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY)
-        && !error.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE)
-    {
-        if error.contains(LEGACY_ROUTE_RESOLVE_NOT_FOUND_RECOVERY) {
-            format!("{error}; {LEGACY_ROUTE_RESOLVE_NOT_FOUND_UPGRADE}")
-        } else {
-            format!(
-                "{error}; {}",
-                crate::server::ROUTE_RESOLVE_NOT_FOUND_RECOVERY
-            )
-        }
-    } else {
-        error.to_owned()
-    };
-    if decorated.starts_with("IDENTITY_REBIND_UNPROVEN:")
-        && !decorated.contains(IDENTITY_REBIND_UNPROVEN_RECOVERY)
-    {
-        return format!("{decorated}; {IDENTITY_REBIND_UNPROVEN_RECOVERY}");
-    }
-    if decorated.starts_with("IDENTITY_RESTORE_CROSS_PROJECT:")
-        && !decorated.contains(IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY)
-    {
-        return format!("{decorated}; {IDENTITY_RESTORE_CROSS_PROJECT_RECOVERY}");
-    }
-    decorated
-}
+include!("main_error_format.rs");
 
 fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {

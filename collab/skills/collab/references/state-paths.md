@@ -30,15 +30,27 @@ Usage:
   Stale or missing-root routes are retired only through the Collab
   migration/reset owner.
 
-For an explicitly authorized legacy reset, use:
+For an explicitly authorized reset, name the level. Exactly one level is
+required, and `--storage-root` is required for `--routes` and `--host`:
 
 ```sh
 collab down
-collab reset --discard-legacy --approval "<explicit user authorization>"
+# project control plane; run from the project root
+collab reset --project --discard-legacy --approval "<explicit user authorization>"
+# duplicate pane route claimants; --keep repeats once per ambiguous pane
+collab reset --routes --storage-root <project root> \
+  --keep <binding_id> --discard-legacy --approval "<explicit user authorization>"
+# host control plane
+collab reset --host --storage-root <project root> --discard-legacy \
+  --approval "<explicit user authorization>"
 collab up
 collab init
 collab status --all
 ```
+
+`--host` keeps `reset.jsonl` and `archives/`, which are the audit trail, and it
+keeps the project business payload under `.agent-collab/`. Retire that payload
+with `--project`.
 
 Do not `cp`, `grep`, `mv`, truncate, or edit `routes.jsonl`; that bypasses the
 owner and destroys route provenance. If existing `.agent-collab/` state must be

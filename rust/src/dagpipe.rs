@@ -297,7 +297,7 @@ fn ensure_graph_nodes_use_registered_operators(
 mod notification;
 use notification::{register_notification_operator, validate_notification_objects};
 
-fn embedded_graph_paths() -> [(&'static str, &'static str); 10] {
+fn embedded_graph_paths() -> [(&'static str, &'static str); 13] {
     [
         (
             "contracts/dagpipe/fix-lifecycle.graph.json",
@@ -339,10 +339,22 @@ fn embedded_graph_paths() -> [(&'static str, &'static str); 10] {
             "docs/dagpipe/sdk-pin-history.graph.json",
             include_str!("../../docs/dagpipe/sdk-pin-history.graph.json"),
         ),
+        (
+            "docs/dagpipe/collab-dashboard.graph.json",
+            include_str!("../../docs/dagpipe/collab-dashboard.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-control-plane-reset.graph.json",
+            include_str!("../../docs/dagpipe/collab-control-plane-reset.graph.json"),
+        ),
+        (
+            "docs/dagpipe/collab-pane-route-reconcile.graph.json",
+            include_str!("../../docs/dagpipe/collab-pane-route-reconcile.graph.json"),
+        ),
     ]
 }
 
-fn design_graph_ids() -> [&'static str; 8] {
+fn design_graph_ids() -> [&'static str; 11] {
     [
         "appsdk-collab-context",
         "appsdk-collab-appserver-route-repair",
@@ -352,10 +364,13 @@ fn design_graph_ids() -> [&'static str; 8] {
         "appsdk-collab-identity-adjudication",
         "appsdk-collab-dsh-channel",
         "appsdk-sdk-pin-history",
+        "appsdk-collab-dashboard-operation",
+        "appsdk-collab-control-plane-reset",
+        "appsdk-collab-pane-route-reconcile",
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 47] {
+fn design_graph_operator_names() -> [&'static str; 63] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -404,6 +419,22 @@ fn design_graph_operator_names() -> [&'static str; 47] {
         "appsdk.sdk_pin.materialize_current_step",
         "appsdk.sdk_pin.verify_retention",
         "appsdk.sdk_pin.publish_pin_outcome",
+        "appsdk.collab.board.admit_request",
+        "appsdk.collab.board.authorize",
+        "appsdk.collab.board.apply",
+        "appsdk.collab.board.project_result",
+        "appsdk.collab_control_plane.authorize_reset",
+        "appsdk.collab_control_plane.prove_exclusivity",
+        "appsdk.collab_control_plane.inventory_control_plane",
+        "appsdk.collab_control_plane.archive_inventory",
+        "appsdk.collab_control_plane.retire_selected_state",
+        "appsdk.collab_control_plane.rebuild_baseline",
+        "appsdk.collab_control_plane.record_reset_receipt",
+        "appsdk.collab_pane_route.classify_claimants",
+        "appsdk.collab_pane_route.resolve_owner_route",
+        "appsdk.collab_pane_route.publish_owner_route",
+        "appsdk.collab_pane_route.verify_scope_uniqueness",
+        "appsdk.collab_pane_route.emit_reconcile_receipt",
     ]
 }
 

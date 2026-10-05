@@ -406,17 +406,52 @@ remainder. A cross-scope claimant is not a conflict and never appears as one.
 
 | Id | Case | Expected |
 | --- | --- | --- |
-| A1 | Real routecodex master. Precondition recorded first: replaying the live host journal still shows 2 claimants on pane `$2:%2` and `collab context` still fails with `RECOVERY_RECONCILE_REQUIRED`. Then install the candidate, restart the daemon, and repeat | `collab context` in routecodex returns an identity with `registered: true`; `collab master status` reports the master; a window of >= 10 non-`Register` operations from routecodex adds **zero** `RECOVERY_RECONCILE_REQUIRED` lines to the routecodex project log and event stream (`<project>/.agent-collab/server/log.txt` and `events.jsonl`), with before/after counts recorded and a positive control: the same count before the fix is non-zero |
+| A1 | Real routecodex master. Precondition recorded first: replaying the live host journal still shows 2 claimants on pane `$2:%2` and `collab context` still fails with `RECOVERY_RECONCILE_REQUIRED`. Then install the candidate, restart the daemon, and repeat | `collab context` in routecodex reports the master live (`master.worker_id` and `endpoint_live: true`) and reports no `exact_error`; a window of >= 10 non-`Register` operations from routecodex adds **zero** `RECOVERY_RECONCILE_REQUIRED` lines to the routecodex project log and event stream (`<project>/.agent-collab/server/log.txt` and `events.jsonl`), with before/after counts recorded and a positive control: the same count before the fix is non-zero. Two further conditions need a registered tmux pane and are therefore recorded as environment-limited rather than met: `registered: true` and `collab master status`. Both answer from the caller's own pane, and the author's non-interactive shell has no Codex thread anchor, so it reports `IDENTITY_REBIND_UNPROVEN` and `TMUX_ENDPOINT_MISSING` for broken and unbroken projects alike |
 | A2 | Cross-scope pane sharing (`$2:%2`, `$138:%138`) | neither peer is fenced or retired; `collab context` succeeds in both scopes; the host index still shows both claimants |
 | A3 | Ambiguous same-scope pane (`$6:%6`, `$8:%8`, `$16:%16`) | the failure names the pane and each claimant with agent id, binding id, and generation, and names the remedy. It is not reported as a generation mismatch |
-| A4 | A project runtime that cannot be ensured at startup | the failure appears in `<state_root>/log.txt` and as an event. It is no longer discarded |
-| A5 | A daemon restart after a claimant lost its pane group | the reconciler does not republish that claimant, and a second restart produces the same index (no flip-flop) |
+| A4 | A project runtime that cannot be ensured at startup | the failure appears in `<state_root>/log.txt` with the route, the storage root, and the underlying error. It is no longer discarded. Delivery 1 keeps this a diagnostic line and does not add a journal event for it |
+| A5 | A daemon restart after a claimant lost its pane group | **moved to delivery 2.** Delivery 1 does not change the reconciler publish rule, and the durable-retirement rule that makes a lost claimant stay retired is a delivery 2 item (§5.5, B6). Delivery 1 verifies the weaker property it can own: two consecutive restarts produce an identical index |
 
 White-box regression gate (not a substitute for A1-A5): the full collab test
 suite stays green, including
 `superseded_same_pane_master_does_not_fence_project_route`,
 `same_pane_master_still_fences_when_host_route_is_missing`, and the existing
 reset tests.
+
+### 7.1.1 Recorded residuals
+
+The independent architecture review of the delivery 1 candidate returned PASS
+and raised these. None blocks delivery 1, and each is recorded here so it is
+fixed deliberately rather than forgotten.
+
+- **P2-1, same-class pane scan on the register path.**
+  `validate_current_thread_candidate` (`runtime_manager_setup.rs:498-595`) scans
+  `projects[*].runtime_bindings` across every runtime and rejects with
+  `RUNTIME_BINDING_REJECTED: tmux identity anchor matches multiple persisted
+  peers` when more than one binding matches. Its pane arm (`:549-558`) applies
+  when the candidate has no Codex ids, so a pane-only candidate counts a
+  claimant in another project on the same pane. That is the same class of
+  question delivery 1 made scope-local everywhere else. The fix is to count
+  ambiguity only among same-scope matches and to leave a single cross-scope
+  match on the existing `retire_cross_project_anchor` path, without changing
+  what retirement means. Delivery 2 owns this, because it also changes the
+  reconciler in the same file and the same invariant family.
+- **P3-1, a startup input class that changed direction.**
+  `reconcile_same_pane_master_routes` (`:321-377`) publishes a pending same-pane
+  master when the in-scope lookup finds no claimant (`:343-349`). When a scope
+  has exactly one claimant X that is not the pending binding, and another
+  project also claims the pane, the host-wide query used to return `None` and
+  publish, while the in-scope query now returns X and fails with
+  `host and project pane routes disagree`. The new direction is fail-closed and
+  it refuses to create a second in-scope claimant, which is the invariant
+  delivery 1 exists to protect, but it can stop the daemon from starting. The
+  input class does not occur in the live index. Delivery 2 owns it, together
+  with the durable-retirement rule.
+- **P3-4, the reconcile graph is ahead of the code.**
+  `docs/dagpipe/collab-pane-route-reconcile.graph.json` names
+  `resolve_owner_route` and `emit_reconcile_receipt` as nodes, but the
+  reconciler returns `Result` and there is no `ReconcileReceipt` type. Delivery 2
+  aligns the graph with the code it describes.
 
 ### 7.2 Delivery 2 (D5), black box
 

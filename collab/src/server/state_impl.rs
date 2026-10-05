@@ -1092,7 +1092,10 @@ impl State {
                 .map(|tombstone| Event::GlobalCurrentThreadRouteTombstoneSet { tombstone }),
         );
         // Retired claims are emitted after the route sets so the reducer removes
-        // the claim instead of re-installing it.
+        // the claim instead of re-installing it. The order is load-bearing:
+        // `set_current_thread_route` clears the retirement for the exact address
+        // it re-activates, so emitting a retirement before a route set for the
+        // same address would silently undo the retirement on replay.
         events.extend(
             self.global
                 .retired_route_claims

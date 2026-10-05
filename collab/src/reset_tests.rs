@@ -374,8 +374,7 @@ fn reset_rejects_symlink_inside_control_root_without_archiving() {
     let target = temp_root("symlink-control-entry-target");
     std::fs::create_dir_all(root.join(".agent-collab/server")).unwrap();
     std::fs::write(&target, b"external\n").unwrap();
-    std::os::unix::fs::symlink(&target, root.join(".agent-collab/server/journal.jsonl"))
-        .unwrap();
+    std::os::unix::fs::symlink(&target, root.join(".agent-collab/server/journal.jsonl")).unwrap();
 
     let state = temp_root("symlink-control-entry-state");
     std::fs::create_dir_all(&state).unwrap();
@@ -853,12 +852,69 @@ fn reset_level_flags_are_gated_per_level() {
     assert!(error.contains("RESET_LEVEL_FLAG_MISMATCH"), "{error}");
 }
 
+/// A fixture endpoint for one pane.
+///
+/// The socket, the server pid, and the pane pid are derived from the pane id, so
+/// two claimants of the same pane share all five pane fields and two different
+/// panes differ in all five. A fixture that reused one socket, server pid, and
+/// pane pid for every pane could not tell a five-field group key from a
+/// two-field one.
+fn route_endpoint(pane: &str, session: &str, thread: &str) -> crate::proto::TmuxEndpoint {
+    let number = pane
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>();
+    crate::proto::TmuxEndpoint {
+        socket_path: format!("/tmp/collab-reset-routes/pane-{number}"),
+        server_pid: 10_000 + number.parse::<u32>().unwrap_or_default(),
+        tmux_session_id: "$7".to_owned(),
+        pane_id: pane.to_owned(),
+        pane_pid: 20_000 + number.parse::<u32>().unwrap_or_default(),
+        codex_session_id: Some(session.to_owned()),
+        codex_thread_id: Some(thread.to_owned()),
+    }
+}
+
+/// An endpoint with every pane field chosen by the caller, for the cases that
+/// must control the socket, the server pid, and the pane pid separately.
+fn route_endpoint_fields(
+    pane_id: &str,
+    socket_path: &str,
+    server_pid: u32,
+    pane_pid: u32,
+    session: &str,
+    thread: &str,
+) -> crate::proto::TmuxEndpoint {
+    crate::proto::TmuxEndpoint {
+        socket_path: socket_path.to_owned(),
+        server_pid,
+        tmux_session_id: "$7".to_owned(),
+        pane_id: pane_id.to_owned(),
+        pane_pid,
+        codex_session_id: Some(session.to_owned()),
+        codex_thread_id: Some(thread.to_owned()),
+    }
+}
+
 fn route_binding(
     scope: &crate::server::global_state::RouteScope,
     agent: &str,
     session: &str,
     thread: &str,
     pane: &str,
+) -> crate::server::RuntimeBinding {
+    let endpoint = route_endpoint(pane, session, thread);
+    route_binding_at(scope, agent, session, thread, &endpoint)
+}
+
+/// The same fixture with the endpoint chosen by the test, so a case can prove
+/// that the group key sees every field of the pane identity.
+fn route_binding_at(
+    scope: &crate::server::global_state::RouteScope,
+    agent: &str,
+    session: &str,
+    thread: &str,
+    endpoint: &crate::proto::TmuxEndpoint,
 ) -> crate::server::RuntimeBinding {
     let mut binding = crate::server::RuntimeBinding::new_with_session(
         scope.project_scope_id.clone(),
@@ -871,15 +927,7 @@ fn route_binding(
         Some(crate::identity::NativeThreadId::new(thread).unwrap()),
     )
     .unwrap();
-    binding.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
-        socket_path: "/tmp/collab-reset-routes/t".to_owned(),
-        server_pid: 1,
-        tmux_session_id: "$7".to_owned(),
-        pane_id: pane.to_owned(),
-        pane_pid: 1,
-        codex_session_id: Some(session.to_owned()),
-        codex_thread_id: Some(thread.to_owned()),
-    });
+    binding.tmux_endpoint = Some(endpoint.clone());
     binding
 }
 
@@ -900,9 +948,21 @@ fn reset_routes_retires_each_ambiguous_pane_and_keeps_the_named_survivor() {
         project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
     };
     let keep_a = route_binding(&scope, "keep-a", "session-keep-a", "thread-keep-a", "%70");
-    let stale_a = route_binding(&scope, "stale-a", "session-stale-a", "thread-stale-a", "%70");
+    let stale_a = route_binding(
+        &scope,
+        "stale-a",
+        "session-stale-a",
+        "thread-stale-a",
+        "%70",
+    );
     let keep_b = route_binding(&scope, "keep-b", "session-keep-b", "thread-keep-b", "%71");
-    let stale_b = route_binding(&scope, "stale-b", "session-stale-b", "thread-stale-b", "%71");
+    let stale_b = route_binding(
+        &scope,
+        "stale-b",
+        "session-stale-b",
+        "thread-stale-b",
+        "%71",
+    );
     let mut lines = String::new();
     for binding in [&keep_a, &stale_a, &keep_b, &stale_b] {
         lines.push_str(
@@ -954,7 +1014,8 @@ fn reset_routes_retires_each_ambiguous_pane_and_keeps_the_named_survivor() {
 
     // The audit record names the authorization, the run, and both survivors.
     let reset_log = std::fs::read_to_string(host_paths.state_root().join("reset.jsonl")).unwrap();
-    let record: serde_json::Value = serde_json::from_str(reset_log.lines().last().unwrap()).unwrap();
+    let record: serde_json::Value =
+        serde_json::from_str(reset_log.lines().last().unwrap()).unwrap();
     assert_eq!(record["level"], json!("routes"));
     assert_eq!(
         record["approval"],
@@ -992,10 +1053,34 @@ fn reset_routes_refuses_an_unnamed_pane_without_touching_the_journal() {
             .unwrap(),
         project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
     };
-    let keep_a = route_binding(&scope, "conflict-a", "session-conflict-a", "thread-conflict-a", "%72");
-    let stale_a = route_binding(&scope, "conflict-b", "session-conflict-b", "thread-conflict-b", "%72");
-    let keep_b = route_binding(&scope, "conflict-c", "session-conflict-c", "thread-conflict-c", "%73");
-    let stale_b = route_binding(&scope, "conflict-d", "session-conflict-d", "thread-conflict-d", "%73");
+    let keep_a = route_binding(
+        &scope,
+        "conflict-a",
+        "session-conflict-a",
+        "thread-conflict-a",
+        "%72",
+    );
+    let stale_a = route_binding(
+        &scope,
+        "conflict-b",
+        "session-conflict-b",
+        "thread-conflict-b",
+        "%72",
+    );
+    let keep_b = route_binding(
+        &scope,
+        "conflict-c",
+        "session-conflict-c",
+        "thread-conflict-c",
+        "%73",
+    );
+    let stale_b = route_binding(
+        &scope,
+        "conflict-d",
+        "session-conflict-d",
+        "thread-conflict-d",
+        "%73",
+    );
     let mut lines = String::new();
     for binding in [&keep_a, &stale_a, &keep_b, &stale_b] {
         lines.push_str(
@@ -1027,7 +1112,10 @@ fn reset_routes_refuses_an_unnamed_pane_without_touching_the_journal() {
     .expect_err("an unnamed ambiguous pane must stop the run")
     .to_string();
     assert!(error.contains("RESET_KEEP_REQUIRED"), "{error}");
-    assert!(error.contains("%73"), "the error must name the pane: {error}");
+    assert!(
+        error.contains("%73"),
+        "the error must name the pane: {error}"
+    );
     assert!(
         error.contains("binding-conflict-c") && error.contains("binding-conflict-d"),
         "the error must list the claimants: {error}"
@@ -1160,7 +1248,9 @@ fn reset_project_refuses_the_root_that_holds_the_live_index() {
     let other = root.join("other");
     std::fs::create_dir_all(other.join(".agent-collab/server")).unwrap();
     run(
-        &Scope { root: other.clone() },
+        &Scope {
+            root: other.clone(),
+        },
         &host_paths,
         ResetRequest {
             approval: "operator authorized the project reset".into(),
@@ -1172,6 +1262,275 @@ fn reset_project_refuses_the_root_that_holds_the_live_index() {
     assert!(
         is_current_empty_baseline(&other.join(".agent-collab")),
         "the project level rebuilds an empty baseline"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A descriptor that exists but cannot be read, parsed, or resolved must fail
+/// closed. Collapsing it to "no resident root" would let the project level
+/// retire the daemon's own index root.
+#[test]
+fn reset_project_refuses_an_unresolvable_resident_index_descriptor() {
+    let root = temp_root("index-root-unresolved");
+    let project = root.join("project");
+    let state = root.join("state");
+    std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+
+    let bodies: Vec<(String, &str)> = vec![
+        ("{ this is not json".to_owned(), "not valid JSON"),
+        (
+            serde_json::to_string(&json!({"desired_state": "down", "generation": 1})).unwrap(),
+            "no service_scope_root",
+        ),
+        (
+            serde_json::to_string(&json!({
+                "desired_state": "down",
+                "generation": 1,
+                "service_scope_root": state.join("empty").display().to_string(),
+            }))
+            .unwrap(),
+            "cannot be resolved",
+        ),
+    ];
+    for (body, label) in bodies {
+        std::fs::write(state.join("service.json"), body).unwrap();
+        let host_paths = HostPaths::for_state_root(&state).unwrap();
+        let error = run(
+            &Scope {
+                root: project.clone(),
+            },
+            &host_paths,
+            ResetRequest {
+                approval: "operator authorized the project reset".into(),
+                discard_legacy: true,
+                ..ResetRequest::default()
+            },
+        )
+        .expect_err(&format!("a {label} descriptor must fail closed"))
+        .to_string();
+        assert!(
+            error.contains("RESET_INDEX_ROOT_UNRESOLVED"),
+            "a {label} descriptor must report RESET_INDEX_ROOT_UNRESOLVED: {error}"
+        );
+        assert!(
+            error.contains("service.json"),
+            "the error must name the descriptor: {error}"
+        );
+    }
+
+    // No descriptor at all is the other case: nothing holds the live index, so
+    // the project level runs.
+    std::fs::remove_file(state.join("service.json")).unwrap();
+    let host_paths = HostPaths::for_state_root(&state).unwrap();
+    run(
+        &Scope {
+            root: project.clone(),
+        },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the project reset".into(),
+            discard_legacy: true,
+            ..ResetRequest::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        is_current_empty_baseline(&project.join(".agent-collab")),
+        "without a descriptor the project level rebuilds an empty baseline"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Two claimants that share a session and pane number but sit on different tmux
+/// servers (or on a recreated pane) are different panes, so they must not be
+/// grouped and must not require a survivor.
+#[test]
+fn reset_routes_does_not_group_a_distinct_pane_with_the_same_session_and_pane_id() {
+    let root = temp_root("routes-distinct-pane");
+    let storage = root.join("storage");
+    let server_dir = storage.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let journal_path = server_dir.join("journal.jsonl");
+    std::fs::File::create(&journal_path).unwrap();
+
+    let scope = crate::server::global_state::RouteScope {
+        app_scope_id: crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .unwrap(),
+        project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
+    };
+    // Two claims that agree on the tmux session and the pane id but differ in
+    // the socket, the server pid, and the pane pid. They are different panes.
+    let first = route_binding_at(
+        &scope,
+        "server-one",
+        "session-one",
+        "thread-one",
+        &route_endpoint_fields("%70", "/tmp/collab-a", 11, 201, "session-one", "thread-one"),
+    );
+    let second = route_binding_at(
+        &scope,
+        "server-two",
+        "session-two",
+        "thread-two",
+        &route_endpoint_fields("%70", "/tmp/collab-b", 22, 202, "session-two", "thread-two"),
+    );
+    let mut lines = String::new();
+    for binding in [&first, &second] {
+        lines.push_str(
+            &serde_json::to_string(&crate::server::state::Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            })
+            .unwrap(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&journal_path, lines).unwrap();
+
+    // No `--keep`: with the old two-field key these two claims are one group
+    // and the run refuses. With the full pane identity each pane has one
+    // claimant, so the run is a no-op.
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    std::fs::create_dir_all(host_paths.state_root()).unwrap();
+    run(
+        &Scope { root: root.clone() },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the pane cleanup".into(),
+            discard_legacy: true,
+            level: ResetLevel::Routes,
+            storage_root: Some(storage.clone()),
+            keep: Vec::new(),
+            include_runs: false,
+        },
+    )
+    .expect("two distinct panes must not be reported as one ambiguous pane");
+
+    let record = read_last_reset_record(host_paths.state_root());
+    assert_eq!(record["retired_claims"], json!([]));
+
+    let after = crate::server::replay_host_index(&storage).unwrap();
+    assert_eq!(after.global.current_thread_routes.len(), 2);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// When one run retires two different panes the audit record must still say
+/// which is which, so the pane string carries the full five-field identity.
+#[test]
+fn reset_routes_records_the_full_pane_identity_per_retired_claim() {
+    let root = temp_root("routes-pane-string");
+    let storage = root.join("storage");
+    let server_dir = storage.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let journal_path = server_dir.join("journal.jsonl");
+    std::fs::File::create(&journal_path).unwrap();
+
+    let scope = crate::server::global_state::RouteScope {
+        app_scope_id: crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .unwrap(),
+        project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
+    };
+    let keep = route_binding_at(
+        &scope,
+        "keep-one",
+        "session-keep",
+        "thread-keep",
+        &route_endpoint_fields(
+            "%70",
+            "/tmp/collab-a",
+            11,
+            201,
+            "session-keep",
+            "thread-keep",
+        ),
+    );
+    let stale = route_binding_at(
+        &scope,
+        "stale-one",
+        "session-stale",
+        "thread-stale",
+        &route_endpoint_fields(
+            "%70",
+            "/tmp/collab-a",
+            11,
+            201,
+            "session-stale",
+            "thread-stale",
+        ),
+    );
+    let keep_two = route_binding_at(
+        &scope,
+        "keep-two",
+        "session-keep2",
+        "thread-keep2",
+        &route_endpoint_fields(
+            "%70",
+            "/tmp/collab-b",
+            22,
+            202,
+            "session-keep2",
+            "thread-keep2",
+        ),
+    );
+    let stale_two = route_binding_at(
+        &scope,
+        "stale-two",
+        "session-stale2",
+        "thread-stale2",
+        &route_endpoint_fields(
+            "%70",
+            "/tmp/collab-b",
+            22,
+            202,
+            "session-stale2",
+            "thread-stale2",
+        ),
+    );
+    let mut lines = String::new();
+    for binding in [&keep, &stale, &keep_two, &stale_two] {
+        lines.push_str(
+            &serde_json::to_string(&crate::server::state::Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            })
+            .unwrap(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&journal_path, lines).unwrap();
+
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    std::fs::create_dir_all(host_paths.state_root()).unwrap();
+    run(
+        &Scope { root: root.clone() },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the pane cleanup".into(),
+            discard_legacy: true,
+            level: ResetLevel::Routes,
+            storage_root: Some(storage.clone()),
+            keep: vec!["binding-keep-one".into(), "binding-keep-two".into()],
+            include_runs: false,
+        },
+    )
+    .unwrap();
+
+    let record = read_last_reset_record(host_paths.state_root());
+    let panes = record["retired_claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|claim| claim["pane"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        panes,
+        vec![
+            "socket=/tmp/collab-a server_pid=11 session=$7 pane=%70 pane_pid=201",
+            "socket=/tmp/collab-b server_pid=22 session=$7 pane=%70 pane_pid=202",
+        ],
+        "the retired claims must carry the full pane identity"
     );
 
     std::fs::remove_dir_all(root).ok();

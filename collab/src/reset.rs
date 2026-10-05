@@ -704,14 +704,62 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
 ///
 /// The host daemon records the root it was started from in `service.json`. That
 /// root's project journal is the index the daemon replays, so the project level
-/// must not retire it: the host level is the operation that owns it. When no
-/// daemon descriptor exists, no project root holds the live index and the
-/// project level is free to run.
-fn resident_index_root(host_paths: &HostPaths) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(host_paths.state_root().join("service.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let recorded = value.get("service_scope_root")?.as_str()?;
-    std::fs::canonicalize(recorded).ok()
+/// must not retire it: the host level is the operation that owns it.
+///
+/// `None` means only "no descriptor, so no root holds the live index": a fresh
+/// host with no `service.json` has no resident index and the project level is
+/// free to run. A descriptor that exists but cannot be read, parsed, or lacks a
+/// resolvable `service_scope_root` is an error, not `None`. Collapsing those to
+/// `None` would fail open and let the project level retire the daemon's own
+/// index root.
+fn resident_index_root(host_paths: &HostPaths) -> anyhow::Result<Option<PathBuf>> {
+    let path = host_paths.state_root().join("service.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "RESET_INDEX_ROOT_UNRESOLVED: {} cannot be read: {error}; the project level \
+                 cannot prove that {} is not the live index",
+                path.display(),
+                path.display()
+            ))
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "RESET_INDEX_ROOT_UNRESOLVED: {} is not valid JSON ({error}); the project level \
+                 cannot prove that {} is not the live index",
+                path.display(),
+                path.display()
+            ))
+        }
+    };
+    let Some(recorded) = value
+        .get("service_scope_root")
+        .and_then(|field| field.as_str())
+    else {
+        return Err(anyhow::anyhow!(
+            "RESET_INDEX_ROOT_UNRESOLVED: {} has no service_scope_root; the project level \
+             cannot prove that {} is not the live index",
+            path.display(),
+            path.display()
+        ));
+    };
+    let canonical = match std::fs::canonicalize(recorded) {
+        Ok(root) => root,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "RESET_INDEX_ROOT_UNRESOLVED: service_scope_root {} in {} cannot be resolved: \
+                 {error}",
+                recorded,
+                path.display()
+            ))
+        }
+    };
+    Ok(Some(canonical))
 }
 
 fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
@@ -731,7 +779,7 @@ fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) ->
             host_paths.socket_path().display()
         );
     }
-    if resident_index_root(host_paths).is_some_and(|owner| owner == root) {
+    if resident_index_root(host_paths)?.is_some_and(|owner| owner == root) {
         anyhow::bail!(
             "RESET_PROJECT_HOLDS_HOST_INDEX: {} is the storage root of the running daemon, so its \
              .agent-collab/ is the live route index; retire that index with `collab reset --host \
@@ -968,16 +1016,28 @@ fn resolve_index_root(
     Ok((storage_root, state))
 }
 
-/// Group live route claimants by route scope and pane.
+/// Group live route claimants by route scope and full pane identity.
 ///
 /// The grouping key is the route scope, which is the project plus the app
-/// scope, because the invariant is per project. Grouping by project alone would
-/// retire a claimant that another app scope legitimately owns on the same pane.
+/// scope, because the invariant is per route scope. Grouping by project alone
+/// would retire a claimant that another app scope legitimately owns on the same
+/// pane.
+///
+/// The pane half of the key is all five fields of the tmux endpoint, matching
+/// `same_pane_route` and `tmux_route_address`. Keying on `session:pane` alone
+/// merges two different panes that happen to reuse a session and pane number on
+/// separate tmux servers, or on a recreated pane, and the run would then force
+/// the operator to name a survivor over a set that is not a duplicate.
 fn pane_claimant_groups(
     state: &crate::server::state::State,
-) -> BTreeMap<(String, String, String, String), Vec<crate::server::RuntimeBinding>> {
-    let mut groups: BTreeMap<(String, String, String, String), Vec<crate::server::RuntimeBinding>> =
-        BTreeMap::new();
+) -> BTreeMap<
+    (String, String, String, u32, String, String, u32),
+    Vec<crate::server::RuntimeBinding>,
+> {
+    let mut groups: BTreeMap<
+        (String, String, String, u32, String, String, u32),
+        Vec<crate::server::RuntimeBinding>,
+    > = BTreeMap::new();
     for binding in state.global.current_thread_routes.values() {
         let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
             continue;
@@ -986,13 +1046,33 @@ fn pane_claimant_groups(
             .entry((
                 binding.project_scope.as_str().to_owned(),
                 binding.app_scope_id.as_str().to_owned(),
+                endpoint.socket_path.clone(),
+                endpoint.server_pid,
                 endpoint.tmux_session_id.clone(),
                 endpoint.pane_id.clone(),
+                endpoint.pane_pid,
             ))
             .or_default()
             .push(binding.clone());
     }
     groups
+}
+
+/// The full pane identity, in the same order as `same_pane_route` and
+/// `tmux_route_address`.
+///
+/// Two panes retired in one run can differ only in the socket, the server pid,
+/// or the pane pid, so the string must carry all five fields to stay
+/// distinguishable in the error and the audit record.
+fn describe_pane(endpoint: &crate::proto::TmuxEndpoint) -> String {
+    format!(
+        "socket={} server_pid={} session={} pane={} pane_pid={}",
+        endpoint.socket_path,
+        endpoint.server_pid,
+        endpoint.tmux_session_id,
+        endpoint.pane_id,
+        endpoint.pane_pid
+    )
 }
 
 fn describe_claimants(claims: &[crate::server::RuntimeBinding]) -> String {
@@ -1103,10 +1183,10 @@ fn verify_retirement(
 
 /// Level 1: retire duplicate route claimants in one route scope.
 ///
-/// The invariant is "a pane is addressable by exactly one live peer per
-/// project". This level restores it where a pane accumulated several claimants,
-/// and it records the retirement in the journal so the next start does not
-/// republish the claim.
+/// The invariant is "a pane is addressable by exactly one live peer per route
+/// scope (app scope plus project scope)". This level restores it where a pane
+/// accumulated several claimants, and it records the retirement in the journal
+/// so the next start does not republish the claim.
 ///
 /// The `--keep` selection is the authorization and the liveness decision. An
 /// offline reader cannot tell a live claimant from a stale one: both claimants
@@ -1130,7 +1210,7 @@ fn run_routes(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> 
 
     let mut targets: Vec<crate::server::RuntimeBinding> = Vec::new();
     let mut conflicts: Vec<String> = Vec::new();
-    for ((project_scope, app_scope, session, pane), claims) in pane_claimant_groups(&state) {
+    for ((project_scope, app_scope, ..), claims) in pane_claimant_groups(&state) {
         if claims.len() < 2 {
             continue;
         }
@@ -1157,8 +1237,14 @@ fn run_routes(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> 
                 )
             };
             conflicts.push(format!(
-                "{project_scope}/{app_scope} pane {session}:{pane} has {} claimants; {asked}name \
+                "{project_scope}/{app_scope} pane {} has {} claimants; {asked}name \
                  the one to keep with --keep <binding_id>: {}",
+                describe_pane(
+                    claims[0]
+                        .tmux_endpoint
+                        .as_ref()
+                        .expect("grouped claims carry a tmux endpoint")
+                ),
                 claims.len(),
                 describe_claimants(&claims)
             ));
@@ -1199,9 +1285,7 @@ fn run_routes(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> 
                 "project_scope": target.project_scope.as_str(),
                 "app_scope_id": target.app_scope_id.as_str(),
                 "endpoint_generation": target.endpoint_generation,
-                "pane": target.tmux_endpoint.as_ref().map(|endpoint| {
-                    format!("{}:{}", endpoint.tmux_session_id, endpoint.pane_id)
-                }),
+                "pane": target.tmux_endpoint.as_ref().map(describe_pane),
             }))
             .collect::<Vec<_>>(),
         "delivery_verified": true,

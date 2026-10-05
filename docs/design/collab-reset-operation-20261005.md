@@ -202,9 +202,16 @@ Steps:
 3. **Select.** Group the live routes by `(route_scope, pane)` through the same
    scope-local claimant scan delivery 1 introduced. `RouteScope` is the app scope
    plus the project scope, so two projects that share one pane are never one
-   group, and a scope-local decision stays scope-local. A group of one is not a
-   target. For each group of two or more, the single claimant named by `--keep`
-   is kept and every other claimant is a retirement target.
+   group, and a scope-local decision stays scope-local. "Pane" is the full tmux
+   pane identity — socket path, server pid, tmux session id, pane id, and pane
+   pid — matching `same_pane_route` and `tmux_route_address`. Keying on
+   `session:pane` alone would merge two different panes that reuse a session and
+   pane number on separate tmux servers, or on a recreated pane, and the run
+   would then force the operator to name a survivor over a set that is not a
+   duplicate. A group of one is not a target. For each group of two or more, the
+   single claimant named by `--keep` is kept and every other claimant is a
+   retirement target. The error and the audit record print all five fields, so
+   two panes retired in one run stay distinguishable.
 4. **No liveness gate.** L1 does not probe tmux and does not ask whether the
    target's worker is registered. Both claimants of one pane share the same pane
    and the same `pane_pid`; they differ only in their Codex address, and deciding
@@ -324,7 +331,12 @@ L2 keeps today's behavior and states its boundary:
   project are archived, not merged.
 - It refuses when the project holds the host index, because retiring that tree
   would delete the index the daemon replays. The refusal is
-  `RESET_PROJECT_HOLDS_HOST_INDEX` and points to L3. This is B4.
+  `RESET_PROJECT_HOLDS_HOST_INDEX` and points to L3. This is B4. The owner is
+  read from `service_scope_root` in `<state_root>/service.json`. A descriptor
+  that exists but cannot be read, parsed, or resolved is an error
+  (`RESET_INDEX_ROOT_UNRESOLVED`), not a silent "no owner": the level must not
+  fail open on a corrupt descriptor and retire the daemon's own index root. Only
+  an absent descriptor means no root holds the live index.
 - Existing safety checks stay: `reject_unsafe_control_roots`
   (`reset.rs:154`), `reject_symlinked_guidance` (`:225`), the reset lock and the
   legacy writer fence (`:444-447`).
@@ -414,6 +426,7 @@ Failure terminals, each a DAG node with acceptance evidence:
 | `RESET_DAEMON_LIVE` | A daemon answers on the socket |
 | `RESET_KEEP_REQUIRED` | An ambiguous pane has no single claimant named by `--keep` |
 | `RESET_PROJECT_HOLDS_HOST_INDEX` | L2 on the root that holds the index |
+| `RESET_INDEX_ROOT_UNRESOLVED` | L2 cannot read or resolve the daemon's `service.json` descriptor |
 | `RESET_VERIFY_FAILED` | Post-commit replay does not match the intent |
 
 There is no liveness terminal. L1 deliberately does not test whether a target is
@@ -490,7 +503,7 @@ Black box, from the real CLI entry.
 | B1 | `collab reset --routes` without `--storage-root`, while the live index is not at the state root | `RESET_STORAGE_ROOT_REQUIRED`; nothing changes |
 | B2 | `collab reset --routes --storage-root <root> --keep <binding_id> --approval <t>` on a state copy with a same-scope duplicate | after the daemon replays, the named claimant is retired, the kept one is the only claimant of that pane, business state and identities are unchanged, and a second run is a no-op |
 | B3 | The same command with an ambiguous pane that `--keep` does not resolve | nothing changes; every conflicting pane and its claimants are listed; the exit code is non-zero |
-| B4 | `collab reset --project` run from inside the storage root | refused with `RESET_PROJECT_HOLDS_HOST_INDEX`; the error points to L3 |
+| B4 | `collab reset --project` run from inside the storage root, and with a `service.json` that is unreadable, malformed, or has no resolvable `service_scope_root` | the first is refused with `RESET_PROJECT_HOLDS_HOST_INDEX` pointing to L3; the rest are refused with `RESET_INDEX_ROOT_UNRESOLVED` naming the descriptor. A project whose `service.json` is absent is retired normally |
 | B5 | `collab reset --project`, then `collab reset --host --storage-root <root>`, then `collab up` | L2 archives the project tree and rebuilds its baseline; L3 archives both control-plane roots and leaves no index; `reset.jsonl` holds both receipts with their approval text; `~/.collab/runs/` survives unless `--include-runs` was given |
 | B6 | Durability: after B2, start the daemon twice | the retired claim does not come back; the index fingerprint is identical across the two starts. The reconciler skip that prevents the republish is asserted by unit test, because an isolated fixture cannot register a peer on a live pane, so the reconciler has no binding to walk and the skip is not observable in the host log |
 | B7 | `collab reset --host --storage-root <a directory that is not a collab root>` | `RESET_STORAGE_ROOT_INVALID`; nothing is staged |

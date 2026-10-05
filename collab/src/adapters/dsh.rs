@@ -57,14 +57,21 @@ pub enum ControlError {
 }
 
 impl ControlError {
-    /// True only when the gateway explicitly denied knowing this runtime or
-    /// agent. A timeout, an unreachable socket or a failed nonce check all
-    /// leave the peer's state unknown, and unknown must never be read as gone.
+    /// True only when the gateway explicitly denied knowing this agent.
+    ///
+    /// `unknown-agent` is the gateway saying it does not know this agent at all,
+    /// which is the only answer that may retire a peer: the retirement path
+    /// deletes the route, and that is not reversible.
+    ///
+    /// `unknown-runtime` must **not** retire anything. It means "this gateway
+    /// cannot observe the agent right now": the runtime is not connected,
+    /// `agent/get` timed out, the runtime dropped mid-request, the reply was
+    /// malformed, or it carried no `agent`/`cwd`. A single transient failure
+    /// would otherwise delete a live peer's route. Timeouts, unreachable
+    /// sockets, failed nonce checks and every other refusal are likewise
+    /// `Unknown`, never `Absent`.
     pub fn is_definitely_absent(&self) -> bool {
-        matches!(
-            self,
-            Self::Rejected { code, .. } if code == "unknown-runtime" || code == "unknown-agent"
-        )
+        matches!(self, Self::Rejected { code, .. } if code == "unknown-agent")
     }
 
     /// True only when a wake provably did not reach the gateway's queue: the
@@ -91,10 +98,12 @@ impl std::fmt::Display for ControlError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerPresence {
     Live,
-    /// The gateway explicitly denies knowing this runtime or agent.
+    /// The gateway explicitly denies knowing this agent. `unknown-runtime` does
+    /// **not** qualify: it says the gateway cannot observe the agent right now.
     Absent,
-    /// Everything else: unreachable socket, timeout, malformed reply, or a
-    /// reply that failed the challenge. Never treated as gone.
+    /// Everything else: unreachable socket, timeout, malformed reply, a reply
+    /// that failed the challenge, or an `unknown-runtime` refusal. Never treated
+    /// as gone.
     Unknown,
 }
 

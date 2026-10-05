@@ -1071,6 +1071,15 @@ fn handle_register_with_app_scope_inner(
         // idempotent and keeps the current generation. Any changed key is a
         // rebind: it advances the endpoint generation so every context bound
         // to the old address is fenced.
+        //
+        // A dsh peer's address is its gateway control socket plus the runtime id
+        // the gateway reports, and both live in the transport rather than in the
+        // route key: a dsh binding stores `tmux_endpoint` as `None`, so the key
+        // alone reduces to (session, agent). Without the address, a peer that
+        // came back on a new socket after a gateway restart looked like an
+        // idempotent repeat. The first register command was then replayed
+        // verbatim, and the dead address stayed in place, so the agent could
+        // still send but could never receive again.
         let existing_key = existing_route_scope.as_ref().and_then(|route| {
             st.global
                 .lookup_binding_for(
@@ -1091,13 +1100,22 @@ fn handle_register_with_app_scope_inner(
                     )
                 })
         });
-        let same_runtime_key = existing_key
-            .as_ref()
-            .is_some_and(|(session, thread, endpoint)| {
-                session.as_deref() == selected.session_id.as_deref()
-                    && thread.as_deref() == selected.thread_id.as_deref()
-                    && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
-            });
+        let same_transport_address = match selected.kind {
+            TransportKind::Dsh => selected_transport_for_worker(&existing).is_some_and(|old| {
+                old.kind == TransportKind::Dsh
+                    && old.endpoint == selected.endpoint
+                    && old.namespace == selected.namespace
+            }),
+            _ => true,
+        };
+        let same_runtime_key = same_transport_address
+            && existing_key
+                .as_ref()
+                .is_some_and(|(session, thread, endpoint)| {
+                    session.as_deref() == selected.session_id.as_deref()
+                        && thread.as_deref() == selected.thread_id.as_deref()
+                        && endpoint.as_ref() == selected.tmux_endpoint.as_ref()
+                });
         let same_thread = existing_key
             .as_ref()
             .and_then(|(_, thread, _)| thread.as_deref())
@@ -1130,7 +1148,21 @@ fn handle_register_with_app_scope_inner(
                         },
                     )
                 });
-            if is_master_binding && !same_pane_tmux_recovery {
+            // A dsh peer has no pane to point at, so the tmux arm can never
+            // hold for it. Once a changed gateway address is a rebind, a dsh
+            // master that returns on a new socket would reach this fence and be
+            // refused as a foreign promotion, which would leave it unable to
+            // re-register at all. The token authenticates the principal and the
+            // agent id names it, so a dsh transport carrying the same token and
+            // the same agent is that principal recovering at a new address; the
+            // address itself is what changed and cannot be part of the test.
+            let same_dsh_agent_recovery = existing.token == token
+                && selected.kind == TransportKind::Dsh
+                && selected.thread_id.is_some()
+                && selected_transport_for_worker(&existing).is_some_and(|old| {
+                    old.kind == TransportKind::Dsh && old.thread_id == selected.thread_id
+                });
+            if is_master_binding && !same_pane_tmux_recovery && !same_dsh_agent_recovery {
                 match live_master_id(server, &st) {
                     Ok(None) => {}
                     Ok(Some(live_master)) => {

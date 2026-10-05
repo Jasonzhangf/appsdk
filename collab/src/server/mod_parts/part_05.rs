@@ -782,11 +782,18 @@ fn attempt_tmux_notification_with_retry(
         "notification-batch",
         &batch_notification_text(&batch, remaining),
     ));
+    // The delivery contract carries the real mailbox id. Each transport derives
+    // its own presentation from it: the App Server namespaces its client id,
+    // while dsh submits this id to the gateway, which strips only
+    // `collab:<digest>:` and then looks the remainder up in the mailbox. A
+    // decorated id reached the gateway as `collab:<digest>:collab-notification-…`,
+    // so the peer's ack named a message the mailbox did not have and the
+    // receipt was reported `not_found` while the send still looked successful.
     match deliver(
         transport,
         source_thread_id,
         &text,
-        &format!("collab-notification-{}", first.1),
+        &first.1,
         explicit,
         &delivery_mode,
     ) {

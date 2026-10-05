@@ -145,6 +145,16 @@ fn default_tmux_notification_sink() -> Arc<TmuxNotificationSink> {
     )
 }
 
+/// The App Server client id that a collab notification announces itself with.
+///
+/// The mailbox id is the transport-neutral identity of a notification. The App
+/// Server presents it inside a client-id namespace it shares with the user's
+/// own messages, so the presentation is derived here and named separately
+/// instead of being smuggled through the transport-neutral parameter.
+pub(crate) fn appserver_client_message_id(message_id: &str) -> String {
+    format!("collab-notification-{message_id}")
+}
+
 pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink> {
     let tmux = default_tmux_notification_sink();
     Arc::new(
@@ -154,12 +164,18 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
             // "Collab notifications require tmux".
             match transport.kind {
                 TransportKind::AppServer => {
+                    // `message_id` is the mailbox id. An App Server client id
+                    // shares its namespace with the user's own messages, so a
+                    // collab notification announces itself as one. The
+                    // live-closure reader strips this prefix again to recover
+                    // the mailbox id.
+                    let client_message_id = appserver_client_message_id(message_id);
                     if mode == "queued" {
                         crate::client::adapters::codex_app_server::queued_notify(
                             transport,
                             source_thread_id,
                             body,
-                            message_id,
+                            &client_message_id,
                         )
                         .map_err(|error| error.to_string())
                     } else {
@@ -167,7 +183,7 @@ pub(crate) fn default_appserver_notification_sink() -> Arc<TmuxNotificationSink>
                             transport,
                             source_thread_id,
                             body,
-                            message_id,
+                            &client_message_id,
                         )
                         .map_err(|error| error.to_string())
                     }

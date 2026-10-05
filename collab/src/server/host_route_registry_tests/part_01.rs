@@ -759,7 +759,10 @@
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, None);
         assert!(calls[0].1.contains("challenge-daemon"));
-        assert_eq!(calls[0].2, format!("collab-notification-{message_id}"));
+        // The sink receives the real mailbox id, not a decorated delivery id.
+        // dsh forwards this value to the gateway, which strips only
+        // `collab:<digest>:` before looking it up in the mailbox.
+        assert_eq!(calls[0].2, message_id);
         assert!(!calls[0].3, "daemon live-closure is not explicit");
         drop(calls);
 

@@ -151,6 +151,161 @@ messageId = "collab:" + sha256( collab 状态目录的规范化绝对路径 )[..
 
 ---
 
+## 4.3 【阻塞】S31：notification-batch 把合成 wake id 当 mailbox `msg_id` 传给 dsh sink
+
+**现象（读码 + 一手日志）**：`part_05.rs:789` 在投递 notification-batch 时这样调用：
+
+```rust
+deliver(transport, source_thread_id, &text,
+        &format!("collab-notification-{}", first.1),   // ← 合成 wake id
+        explicit, &delivery_mode)
+```
+
+`deliver` 把第 4 个参数**原样**当作 `message_id` 传给 dsh sink（`part_01.rs:196`），
+sink 再用它构造入站 `messageId`（`dsh.rs:331` → `wake_message_id`，`dsh.rs:293-306`）：
+
+```rust
+Ok(format!("collab:{prefix}:{msg_id}"))
+```
+
+⇒ 本侧实际收到 `messageId = collab:<digest>:collab-notification-m1791124915946-13`，
+**不是** `collab:<digest>:m1791124915946-13`。
+
+但 `wake_message_id` 的文档注释（`dsh.rs:281-292`）声明该 id 必须**派生自 collab 自己的 `msg_id`**，
+且本侧网关"校验形如 `^collab:[0-9a-f]{16}:m[0-9]+-[0-9]+$`"。
+notification-batch 路径**违反了自己的契约**。
+
+### 为什么必须改
+
+本侧收到后回 `Req::Ack` 时只能剥离 `collab:<digest>:`，于是提交
+`collab-notification-m1791124915946-13`。而 `part_11.rs:179-256` 的 Ack 按**真实 mailbox id**
+在 `st.msgs` 与 `.agent-collab/mailbox/<id>.json` 里查找 ⇒ 落入 `not_found`，
+但响应仍是 `Resp::data(json!({acked, already_acked, not_found}))`，**`ok:true`**。
+
+⇒ **通知回执变成"成功响应下的空操作"**：对端永不认为该消息被消费，本侧也无法察觉。
+本侧已按 review 要求显式暴露 `not_found`，但**根因在对端**：mailbox id 在传参时就被丢了。
+
+### 改什么
+
+`part_05.rs:789` 的 notification-batch 路径把**真实 mailbox id**（`first.1`）传给 `deliver` 的
+`message_id` 形参；合成的 `collab-notification-<id>` 只用于**投递/日志**标识，不进入 mailbox 语义。
+
+若确实需要区分"投递 id"与"mailbox id"，请在 typed 契约中把两者**分别显式命名**，
+不要复用同一个形参。
+
+### 验收证据
+
+1. 触发一次 notification-batch 唤醒 ⇒ 本侧收到的 `messageId` 形如
+   `collab:<digest>:m<ms>-<seq>`，**不含** `collab-notification-` 前缀。
+2. 本侧就该 id 发 `Ack` ⇒ 响应中该 id 出现在 `acked`（或 `already_acked`），**不在** `not_found`。
+3. 对端 mailbox 中该消息状态从 `delivered` 变为已消费。
+
+**本侧对应证据**：`packages/daemon/tests/collab.test.ts` 的
+`an ack the peer did not match is reported instead of passing as consumed`
+（用对端真实 Ack 语义建模：`not_found` ⇒ 本侧显式报错）。
+
+---
+
+## 4.2 【阻塞】S30：重注册必须更新该 worker 的 transport
+
+**现象（一手证据，真实对端联调）**：本侧用**同一 worker id、同一 token、同一状态目录**注册两次
+（daemon 在两次之间重启，DSH runtime id 从 `rt-d40dc6d8-…` 变为 `rt-5f25a52c-…`）。
+
+- 第二次 `Register` **返回 `ok:true`**（本侧因此认为恢复成功）；
+- 但对端项目 journal `.agent-collab/server/journal.jsonl` 里，该 worker 的
+  **`Registered` 事件只有 1 条**，且 `transport.namespace` 仍是**第一次**的 `rt-d40dc6d8-…`：
+
+```json
+{"ev": "Registered", "worker": {"id": "dsh-dshgw-tui-e2e4", "token": "a399740f…",
+ "cwd": "/private/tmp/dshgw-probe/tui-project", "registered_ms": 1791126966158,
+ "transport": {"kind": "dsh",
+   "endpoint": "unix:///var/folders/…/dshgw-restart-tui-fqPM/control.sock",
+   "namespace": "rt-d40dc6d8-3245-45db-8471-566e749a1c08",
+   "session_id": "dshgw-tui-e2e4", "thread_id": "dshgw-tui-e2e4",
+   "capabilities": ["enqueue_wake","agent_facts"]}}}
+```
+
+- 对端随后把回信推到**旧的** `rt-d40dc6d8-…`，本侧网关如实拒绝：
+
+```
+collab: DSH_NOTIFICATION_REJECTED: DSH_ENDPOINT_REJECTED:
+gateway refused enqueue with unknown-runtime:
+no connected runtime rt-d40dc6d8-3245-45db-8471-566e749a1c08
+```
+
+### 为什么必须改
+
+⇒ **重启后该 agent 能发、不能收**。`Send` 成功，但任何回信都发往一个已死的 runtime。
+
+**本侧无法自行修复**：`Register` 每次都携带**新的** `candidates.dsh.runtime_id`，但对端对已有 worker
+保留了旧 transport；现有 op 表里**没有任何 op 能更新 transport**。
+
+### 改什么
+
+重注册一个**已存在**的 worker（同 worker id + 同 token）时，用本次 `candidates.dsh` **替换**其
+`transport`（`endpoint` / `namespace`(runtime_id) / `session_id` / `thread_id` / `capabilities`），
+并写一条新的 `Registered` 事件；**不要**静默保留旧值。
+
+若这是有意为之（把重注册设计成幂等空操作），则请提供一个**显式 op**（例如
+`RebindTransport` / `Register{replace_transport:true}`），让本侧能表达"这个 worker 换了 runtime"。
+
+### 验收证据
+
+1. 用 runtime `R1` 注册 worker `W` ⇒ journal 的 `Registered.transport.namespace == R1`。
+2. 停掉本侧 daemon，用 `R2`（`R2 != R1`）以**同一 worker id + 同一 token** 重注册 ⇒ `ok:true`，
+   且 journal **新增**一条 `Registered`，其 `transport.namespace == R2`。
+3. 向 `W` 发一条消息 ⇒ 对端把通知推到 `R2` 的 control socket，本侧收到并唤醒 agent。
+
+**本侧对应证据**：`docs/notes/review-evidence/b-stage-collab-tui/peer-registered-record.jsonl`
+（2 次注册只有 1 条 `Registered`）、`tui-reply-rejected.txt`（对端如实上报投递失败）、
+`restart-tui-run2.txt`（第二次注册 `ok:true` 且出站成功）。
+
+---
+
+## 4.1 【阻塞】S29：`is_definitely_absent()` 只认 `unknown-agent`
+
+**契约已改**：本侧 `COLLAB-CHANNEL-INTERFACE.md` **v10.1.11** §3.1 新增消融项 **N26**。
+
+### 现状（对端）
+
+`dsh.rs:62-67`：
+
+```rust
+fn is_definitely_absent(&self) -> bool {
+    matches!(self, Rejected { code, .. } if code == "unknown-runtime" || code == "unknown-agent")
+}
+```
+
+`probe()` 只在它返回 `true` 时判 `Absent`，而 `identity.rs:1234-1245` 的退休路径会**删除 route**。
+
+### 为什么必须改
+
+`unknown-runtime` 在本侧的真实语义是"**本网关现在观测不到这个 agent**"，不是"该 agent 不存在"。触发它的情形包括：runtime 未连接、`agent/get` 超时、runtime 中途掉线、回复畸形、回复缺 `agent`/`cwd`。
+
+⇒ **一次瞬时故障就会让对端退休一个活着的 peer，并删除 route，不可逆。**
+
+### 改什么（改动量：一个谓词）
+
+```rust
+// 只有肯定的"本网关不认识这个 agent"才退休。
+fn is_definitely_absent(&self) -> bool {
+    matches!(self, Rejected { code, .. } if code == "unknown-agent")
+}
+```
+
+**本侧同步义务（已实现）**：`unknown-agent` **只在**网关 `agent/get` 明确回 `AGENT_NOT_FOUND`（`-32003`）时返回；其余一切失败返回 `unknown-runtime`。
+
+**为何不加新码**：§3.1 词表封闭，新增码需双方同时升级；改判定含义是零新增词汇的最小改法。
+
+### 验收证据
+
+对端补一条用例：构造 `Rejected{code:"unknown-runtime"}` ⇒ `is_definitely_absent()` 为 `false`、`probe()` 为 `Unknown`、**不退休**；构造 `Rejected{code:"unknown-agent"}` ⇒ `true`、`Absent`、退休。
+
+本侧对应回归：`packages/daemon/tests/control.test.ts` 的
+`agent-facts keeps "gone" and "cannot tell" as distinct error codes`（三段：`AGENT_NOT_FOUND` → `unknown-agent`；`CAPABILITY_MISSING` → `persistence-unavailable`；其它失败 → `unknown-runtime` 且 **≠ `unknown-agent`**）。
+
+---
+
 ## 5. 已核对为「无需改动」/「已落地」——请勿回退
 
 以下均在本文件基线上**实测**过，结论是"已经正确"：
@@ -191,13 +346,15 @@ A 段 `AgentView.scope.cwd` —— 因为对端 `AgentFacts.cwd` 是**必需字�
 
 ## 7. 尚未实现、对端现在调不通（**预期，不是 bug**）
 
-- 本侧控制面**目前没有 `agent-facts` op**。今天的 op 表只有：
-  `runtimes` / `queue` / `enqueue` / `agents` / `agent-get` / `interrupt` / `hold-ack` / `release-ack` / `shutdown`。
-  ⇒ 对端 `dsh.rs:232 facts()` 现在调用会收到 **`unknown-op`**。
-- 也还没有 collab 客户端（`Req::Register` / `Ack` / `Send` / `Context` / `MsgStatus`）与 `channel-redrive`。
-- 这些属 **B 段**，**等 S27 落地后再开工**。
+- **本侧 B 段已落地**（2026-10-04）：`agent-facts` op 已实现，collab 客户端
+  （`Register`/`Ack`/`Send`/`Context`/`MsgStatus`）、`channel-redrive`、插件发信工具
+  `collab_send` 与 `collab/send` wire 方法均已实现，并完成真实对端联调（注册、
+  双向收发、重启后重注册恢复）。
+  ⇒ **对端现在可以调通**，上面"预期调不通"的描述已过期。
+- **仍未落地**：无。§4.1 的 **S29** 已于 2026-10-04 落地（见 §10.1）。
+- 其余（S22/S23/S25/S27/S29/S30/S31）状态见 §4、§8 与 §10。
 
-**对端调用 `agent-facts` 的现状形状**（供双方对齐，B 段本侧会照此实现）：
+**对端调用 `agent-facts` 的形状**（本侧已按此实现）：
 
 ```jsonc
 // 请求（NDJSON，一行）
@@ -208,19 +365,22 @@ A 段 `AgentView.scope.cwd` —— 因为对端 `AgentFacts.cwd` 是**必需字�
 ```
 
 - `nonce` **必须原样回显**（对端在 `dsh.rs:244-252` 校验，不回显 ⇒ `challenge-mismatch`）。
-- **缺席必须走错误码**：`unknown-runtime` / `unknown-agent`（对端据此判 `Absent`），**不得**用 `status` 表达缺席。
-- **无法判定**（如持久化能力缺席）走 `persistence-unavailable` ⇒ 对端判 `Unknown`，**绝不退休**。
+- **缺席必须走错误码**，且**只有 `unknown-agent` 算确定缺席**（对端据此判 `Absent`），**不得**用 `status` 表达缺席。**`unknown-runtime` 不再是确定缺席**（见 §4.1 S29）。
+- **无法判定**（持久化能力缺席、超时、runtime 中途掉线、回复畸形）走 `persistence-unavailable` / `unknown-runtime` ⇒ 对端判 `Unknown`，**绝不退休**。
 - `status` 取值域是 **`running` | `inactive`**，由 `AgentView.live` 推导（见 §5 的 N25）。
 
 ---
 
 ## 8. 请对端做的事（checklist）
 
-- [ ] **S27**：`dsh.rs` 的 `notify` 增 `messageId` 形参 + 写进 `enqueue` 请求体；`part_01.rs:196` 把已在作用域的 `message_id` 传下去；派生规则按 §3.2(c)；补 §3.4 的断言。
-- [ ] **S22**：`part_02.rs:109` 的兜底 runtime 标签不要再产出 `runtime-dsh-appserver`。
-- [ ] **S23**：dsh 的 master 恢复路径不要被 `same_pane_tmux_recovery` 恒判为阻塞（注意不要误改 `reissued_master_grant`）。
-- [ ] **S25**：`part_10.rs:768/772/686` 的 rebind 文案不要对 dsh 指向 tmux。
-- [ ] **复核 §5**：确认 S1–S3 / S5 / S18–S21 / S24 / S26 的"已落地"结论，并**保持 N25 的字面量 `"running"` 契约不变**。
+- [x] **S31（阻塞）**：`part_05.rs:789` 把真实 mailbox id 传给 `deliver` 的 `message_id`。**已落地**，见 §10.3
+- [x] **S30（阻塞）**：重注册已存在的 worker 时**更新其 transport**。**已落地**，见 §10.2（真因是 `command_id` 去重，非"保留旧 transport"）
+- [x] **S29（阻塞）**：`dsh.rs` 的 `is_definitely_absent()` 收窄为只认 `unknown-agent`。**已落地**，见 §10.1
+- [x] **S27**：`notify` 增 `messageId` 形参 + 写进 `enqueue` 请求体。**上一轮已落地并合并**
+- [x] **S22**：兜底 runtime 标签不再产出 `runtime-dsh-appserver`。**上一轮已落地并合并**
+- [~] **S23**：**结论已修订**——原论证在改动前不成立（已有反证用例钉住）；S30 落地后该栅栏对 dsh 变为可达，故补了 dsh 同主恢复判定。见 §10.2
+- [x] **S25**：rebind 文案不再对 dsh 指向 tmux。**上一轮已落地并合并**
+- [x] **复核 §5**：已复核；`N25` 的字面量 `"running"` 契约**保持不变**
 
 ---
 
@@ -228,5 +388,95 @@ A 段 `AgentView.scope.cwd` —— 因为对端 `AgentFacts.cwd` 是**必需字�
 
 - 本文件所有 appsdk 行号：**`9a9d674`** 实测（该 SHA 相对审计起点 `7a23f53` 只动了 `rust/`、`contracts/`、`docs/` 与证据，**`collab/` 未变**）。
   > 实施前请按**当时 HEAD** 重核一次行号——本文件的判定依据是**谓词与行为**，行号只是定位手段。
-- 本侧契约：`COLLAB-CHANNEL-INTERFACE.md` **v10.1.9**（含 §9 的 S1–S27 完整审计账；本文件是它的**可执行摘要**）。
-- 本侧实现状态：`docs/notes/a-stage-scope-cwd-run-notes.md`（A 段）；B 段未开工。
+- 本侧契约：`COLLAB-CHANNEL-INTERFACE.md` **v10.1.11**（含 §9 的 S1–S27 完整审计账与 §4.1 的 S29/N26；本文件是它的**可执行摘要**）。
+- 本侧实现状态：A 段已合入 main；**B 段已落地**（`agent-facts`、collab 客户端、`channel-redrive`、`collab_send` 工具 + `collab/send` wire），真实对端联调通过。**S27 / S29 / S30 / S31 已全部落地**（见 §10）。
+
+---
+
+## 10. 实施结果（2026-10-04，对端回应）
+
+三条阻塞项**全部落地**，另有一项由 S30 引出的必要伴生改动。全部改动经黑盒回归与消融验证。
+
+### 10.1 S29 ✅
+
+`collab/src/adapters/dsh.rs` 的 `is_definitely_absent()` 现在**只认 `unknown-agent`**：
+
+```rust
+matches!(self, Self::Rejected { code, .. } if code == "unknown-agent")
+```
+
+`PeerPresence::Absent` 的文档同步订正（`unknown-runtime` 不再算死亡）。**未新增码字**——§3.1 词表是封闭的，
+`unknown-runtime` 的产出方式不变。
+
+用例 `a_dsh_unknown_runtime_stays_uncertain_and_never_retires_the_route`：
+`unknown-runtime` ⇒ `is_definitely_absent()` 假、`probe()` `Unknown`、`dsh_identity_presence()` `Unknown`
+（**不是** `Missing`，故不授权退役）；反向对照 `unknown-agent` ⇒ 真、`Absent`、`Missing`。
+消融：把谓词改回 `|| unknown-runtime` ⇒ 该用例在 presence 断言处变红。
+
+### 10.2 S30 ✅ —— 但**真因与 §4.2 的描述不同**
+
+§4.2 把原因写成"对端对已有 worker 保留了旧 transport"。实测不成立：`Event::Registered` 是**无条件**发射的，
+reducer 也**无条件** `workers.insert` 覆盖，所以 transport 本身能更新。真因是 **`command_id` 去重**：
+
+- 同 runtime key 重注册 ⇒ `reuse_existing` 为真 ⇒ `endpoint_generation` 不变
+- ⇒ `command_id = register-<binding>-<generation>` 与首次注册**完全相同**
+- ⇒ `commit_command_locked` 命中已提交回执，直接 `replayed:true` 返回
+- ⇒ **一条事件都不写**，`worker.transport` 静默保留旧值
+
+而 `same_runtime_key` 只由 binding 的 `(session_id, native_thread_id, tmux_endpoint)` 构成，
+dsh 绑定的 `tmux_endpoint` 恒为 `None` ⇒ dsh 的 key 退化成 `(session, agent)`，
+**网关 control socket 与 runtime id 完全不在判定内**。这是"重启后能发不能收"的唯一真源。
+
+修复（`part_06.rs`）：dsh 的 runtime key 追加**地址**判定——旧 transport 的 `endpoint` 与 `namespace`
+都必须等于本次候选。地址变了 ⇒ key 为假 ⇒ 走既有 rebind 分支 ⇒ `generation + 1` ⇒ 新 `command_id`
+⇒ 新 `Registered` 事件带新 transport。非 dsh 恒真，tmux / appserver 行为不变。
+
+**伴生必改项**：S30 落地后，"dsh 地址变更"第一次成为 rebind，于是 master 栅栏第一次对 dsh **可达**；
+又因 S29 把 `unknown-runtime` 从 `Absent` 改成 `Unknown`，`live_master_id` 对 `Unknown` 返回 `Err`
+⇒ dsh master 的自恢复会被 `MASTER_RECOVERY_BLOCKED_UNKNOWN` 拒绝。故补 `same_dsh_agent_recovery`：
+同 token + 双方均 dsh + 同 agent id。**该判定必须不含地址**——地址正是变化量；与 tmux 的
+`same_pane_tmux_recovery`（同 pane）对称。
+
+> **关于 §4 的 S23**：原始论证（"dsh 重连必被栅栏拒绝"）在**改动前不成立**——`same_runtime_key` 恒真会短路栅栏，
+> 反证用例 `a_dsh_master_reconnect_is_not_fenced_as_a_foreign_promotion` 已钉住该行为。
+> 但 S30 落地后栅栏对 dsh 变为可达，因此**同主恢复判定确实需要**，只是触发条件是"地址变更"而非"任何重连"。
+
+用例 `a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport` 覆盖 §4.2 的三步验收：
+(1) 首次注册后 journal 的 `Registered.transport.namespace == rt-1`；
+(2) 换 socket + runtime 重注册 ⇒ `ok:true`，journal **新增**一条 `Registered`、`namespace == rt-2`、`endpoint` 为新 socket；
+(3) 发消息 ⇒ 新 socket 收到 `enqueue`（`runtimeId == rt-2`），旧 socket **零** `enqueue`。
+消融：去掉地址门 ⇒ 在"`Registered` 事件数 = 2"处变红（实测 `left: 1 / right: 2`）。
+
+### 10.3 S31 ✅ —— 且**保持 AppServer 的对外 wire 值不变**
+
+`part_05.rs:789` 现在把**真实 mailbox id** `first.1` 传给 `deliver` 的 `message_id`。
+
+一个实现细节需要你知道：`deliver` 的第 4 参同时喂给三条 sink。AppServer 把它当 `clientUserMessageId`
+直通进请求，而该命名空间与用户自己的消息**共用**，`collab-notification-` 前缀正是用来区分的
+（本侧 live-closure 读取端也用 `strip_prefix` 还原 mailbox id）。因此前缀没有被删掉，
+而是**移到 AppServer sink 内部**（新增 `appserver_client_message_id`）：
+
+| 传输 | sink 收到的第 4 参 | 对外形态 |
+|---|---|---|
+| **dsh** | 裸 mailbox id | `messageId = collab:<digest>:<mailbox id>` ✅ |
+| **AppServer** | 裸 mailbox id | `clientUserMessageId = collab-notification-<mailbox id>`（**逐字节不变**） |
+| **tmux** | 裸 mailbox id | buffer 名由该值哈希而来（纯内部标签） |
+
+⇒ 你的 `messageId` 形状修正了，而 AppServer 的 wire 值不变，无副作用。
+
+用例 `a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it`：经真实 `send` 入口取 `data.msg_id`，
+断言 `enqueue.params.messageId` **不含** `collab-notification-`、且形如 `collab:<16 位 hex>:<mailbox id>`。
+同一改动也被 AppServer 侧既有用例观测到：`live_closure_daemon_send_uses_daemon_identity_without_explicit_source_thread`
+的 sink 断言由 `collab-notification-{id}` 改为 `{id}`。
+消融：恢复合成 id ⇒ 两条用例同时变红（`left: collab-notification-m1791177548416-4 / right: m1791177548416-4`）。
+
+### 10.4 证据与基线
+
+- 候选：分支 `codex/dsh-channel-s29-31`，base `d86807a`。
+- 全量 `collab` 套件（真实 tmux 会话内串行 `--test-threads=1`）：**931 passed / 0 failed / 1 ignored**，exit 0。
+  基线 928 ⇒ 本次新增 3 个黑盒回归用例。
+- `cargo check --all-targets --offline` 退出码 0（仅剩仓库存量 warning）。
+- 候选 release 构建：`./scripts/build-collab.sh --offline` 退出码 0，`collab_build_version=0.2.0213`。
+- 消融：回退三处修复后 4 条用例全部变红且原因正确；回退后文件 sha256 与基线**逐一 OK**。
+- **行号提醒**：§4 的行号测于 `9a9d674`。本轮按当时 HEAD `d86807a` 复核过：谓词与行为结论不变，
+  个别行号有位移（例如 `dsh.rs` 的 `is_definitely_absent` 现位于 `:73`，`part_05.rs` 的投递点仍在 `:789` 一带）。

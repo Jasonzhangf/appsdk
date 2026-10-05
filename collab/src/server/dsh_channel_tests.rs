@@ -597,6 +597,70 @@ fn a_gateway_timeout_leaves_dsh_presence_unknown_not_missing() {
     );
 }
 
+#[test]
+fn a_dsh_unknown_runtime_stays_uncertain_and_never_retires_the_route() {
+    // S29: `unknown-runtime` is the gateway saying it cannot observe this agent
+    // right now - the runtime is not connected, `agent/get` timed out, the
+    // runtime dropped mid-call, or the reply was malformed. It is not the
+    // gateway denying that the agent exists. Reading it as a denial retired a
+    // live peer, and retirement deletes the route irreversibly. The gateway
+    // contract reserves `unknown-agent` for an explicit AGENT_NOT_FOUND.
+    // The gateway fixture binds a UNIX socket under the temp dir, so the name
+    // must stay short: the path has to fit `sockaddr_un`.
+    let gateway = Gateway::start("s29-rt", |_| {
+        Some(
+            serde_json::json!({
+                "ok": false,
+                "error": {
+                    "code": "unknown-runtime",
+                    "message": "no connected runtime rt-1"
+                }
+            })
+            .to_string(),
+        )
+    });
+    assert!(
+        !crate::client::adapters::dsh::ControlError::Rejected {
+            code: "unknown-runtime".into(),
+            detail: "no connected runtime rt-1".into(),
+        }
+        .is_definitely_absent(),
+        "only an explicit unknown-agent may retire a dsh peer"
+    );
+    // Observable: presence stays uncertain. `Missing` here is what authorizes
+    // both the retirement in `identity_recovery` and the
+    // ROUTE_RESOLVE_NOT_FOUND rejection in route resolution, so `Unknown` is
+    // what keeps the route alive.
+    assert_eq!(
+        dsh_identity_presence(&dsh_transport(&gateway.socket)),
+        IdentityPresence::Unknown
+    );
+    assert_eq!(
+        crate::client::adapters::dsh::probe(&gateway.endpoint(), "rt-1", "ses-1"),
+        crate::client::adapters::dsh::PeerPresence::Unknown
+    );
+
+    // Positive control: the same gateway shape with `unknown-agent` must still
+    // retire, so narrowing the predicate did not disable retirement.
+    let denying = Gateway::start("s29-ag", |_| {
+        Some(
+            serde_json::json!({
+                "ok": false,
+                "error": {"code": "unknown-agent", "message": "no such agent"}
+            })
+            .to_string(),
+        )
+    });
+    assert_eq!(
+        dsh_identity_presence(&dsh_transport(&denying.socket)),
+        IdentityPresence::Missing
+    );
+    assert_eq!(
+        crate::client::adapters::dsh::probe(&denying.endpoint(), "rt-1", "ses-1"),
+        crate::client::adapters::dsh::PeerPresence::Absent
+    );
+}
+
 // ------------------------------------------------------------ wake and delivery
 
 #[test]
@@ -1226,5 +1290,183 @@ fn a_dsh_rebind_is_refused_without_pointing_at_a_tmux_pane() {
         "a dsh rebind must not be blamed on a tmux pane: {refused}"
     );
     assert!(refused.contains("gateway"), "{refused}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_dsh_wake_names_the_real_mailbox_id_so_a_peer_ack_can_match_it() {
+    // S31: the notification batch handed the sink a decorated delivery id,
+    // `collab-notification-<mailbox id>`. dsh forwards that value to the gateway
+    // as `messageId`, and the gateway strips only `collab:<digest>:` before it
+    // looks the remainder up in the mailbox. The peer therefore received a name
+    // the mailbox did not have: it acked `collab-notification-…`, the lookup
+    // answered `not_found`, and the send still reported success - a silent no-op
+    // receipt, so the mailbox stayed `delivered` forever.
+    let root = scratch("wake-mailbox-id");
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let (server, gateway_a, gateway_b) =
+        dsh_peers(&root, || wake_reply("msg-ack"), Arc::clone(&seen));
+
+    let sent = subscribe_and_send(&server);
+    assert!(sent.ok, "send failed: {sent:?}");
+    assert_eq!(sent.data["notification"], "dsh-wake-enqueued");
+    let mailbox_id = sent.data["msg_id"]
+        .as_str()
+        .expect("the send reply names the durable mailbox id")
+        .to_owned();
+
+    let requests = seen.lock().unwrap().clone();
+    let enqueue = requests
+        .iter()
+        .find(|request| request["method"] == "enqueue")
+        .unwrap_or_else(|| panic!("the peer was woken through enqueue: {requests:?}"));
+    let message_id = enqueue["params"]["messageId"]
+        .as_str()
+        .expect("enqueue carries a messageId");
+
+    assert!(
+        !message_id.contains("collab-notification-"),
+        "the gateway messageId must be the mailbox id, not a delivery label: {message_id}"
+    );
+    assert!(
+        message_id.ends_with(&format!(":{mailbox_id}")),
+        "the gateway messageId must end with mailbox id {mailbox_id}: {message_id}"
+    );
+    // The gateway's declared shape: `collab:<16 hex>:<mailbox id>`.
+    let (namespace, rest) = message_id.split_once(':').expect("shape collab:<digest>:<id>");
+    assert_eq!(namespace, "collab", "{message_id}");
+    let (digest, tail) = rest.split_once(':').expect("shape collab:<digest>:<id>");
+    assert_eq!(digest.len(), 16, "the digest is 64 bits wide: {message_id}");
+    assert!(
+        digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "the digest is hex: {message_id}"
+    );
+    assert_eq!(tail, mailbox_id, "{message_id}");
+    drop((gateway_a, gateway_b));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_dsh_peer_returning_on_a_new_gateway_address_replaces_its_transport() {
+    // S30: a dsh peer's route key is (session_id, agent_id) and a dsh binding
+    // stores `tmux_endpoint` as `None`, so neither the gateway control socket
+    // nor the runtime id was visible to the re-register decision. After a
+    // gateway restart the second register looked like an idempotent repeat: the
+    // first register command was replayed verbatim, the journal kept the dead
+    // address, and the peer could still send but never receive again.
+    let root = scratch("address-change");
+    let first_seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let second_seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let gateway_for = |name: &str, observer: Arc<Mutex<Vec<serde_json::Value>>>| {
+        let root = root.clone();
+        Gateway::start(name, move |request| {
+            observer.lock().unwrap().push(request.clone());
+            if request.get("method").and_then(serde_json::Value::as_str) == Some("agent-facts") {
+                Some(facts_reply(&request, &root))
+            } else {
+                wake_reply("msg-address-change")
+            }
+        })
+    };
+    let old_gateway = gateway_for("addr-old", Arc::clone(&first_seen));
+    let new_gateway = gateway_for("addr-new", Arc::clone(&second_seen));
+
+    let mut server = test_server(&root);
+    {
+        let server = Arc::get_mut(&mut server).expect("unique test server");
+        server.appserver_notification_sink = default_appserver_notification_sink();
+        server.config.notifications.enabled = true;
+    }
+    assert!(
+        register_dsh(&server, "dsh-sender", &old_gateway.socket, "rt-s", "ses-sender").ok,
+        "register the sender"
+    );
+    assert!(
+        register_dsh(&server, "dsh-moved", &old_gateway.socket, "rt-1", "ses-moved").ok,
+        "first register of the peer"
+    );
+    let moved = register_dsh(&server, "dsh-moved", &new_gateway.socket, "rt-2", "ses-moved");
+    assert!(
+        moved.ok,
+        "a dsh peer must re-register at its new address: {moved:?}"
+    );
+
+    // The journal is the durable record of what the server believes.
+    let journal = std::fs::read_to_string(server.journal_path.clone()).unwrap();
+    let registered = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["ev"] == "Registered" && event["worker"]["id"] == "dsh-moved")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        registered.len(),
+        2,
+        "each register must be its own event: {journal}"
+    );
+    assert_eq!(registered[0]["worker"]["transport"]["namespace"], "rt-1");
+    assert_eq!(
+        registered[1]["worker"]["transport"]["namespace"], "rt-2",
+        "the re-register must replace the dead runtime id"
+    );
+    assert_eq!(
+        registered[1]["worker"]["transport"]["endpoint"],
+        format!("unix://{}", new_gateway.socket.display()),
+        "the re-register must replace the dead control socket"
+    );
+
+    // The live effect: a wake now reaches the new socket and not the dead one.
+    let subscription = handle_notification_subscribe(
+        &server,
+        "dsh-moved".into(),
+        "token-dsh-moved".into(),
+        "direct-message".into(),
+        None,
+        None,
+        Vec::new(),
+        None,
+        1,
+        3600,
+    );
+    assert!(subscription.ok, "subscription failed: {subscription:?}");
+    let sent = handle_send(
+        &server,
+        "dsh-sender".into(),
+        "dsh-moved".into(),
+        "notify".into(),
+        Some("after the restart".into()),
+        "execute collab recv for this message".into(),
+        None,
+        "immediate".into(),
+    );
+    assert!(sent.ok, "send failed: {sent:?}");
+    assert_eq!(
+        sent.data["notification"], "dsh-wake-enqueued",
+        "{sent:?}"
+    );
+
+    let new_requests = second_seen.lock().unwrap().clone();
+    let enqueues = new_requests
+        .iter()
+        .filter(|request| request["method"] == "enqueue")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        enqueues.len(),
+        1,
+        "the wake must go to the new socket: {new_requests:?}"
+    );
+    assert_eq!(
+        enqueues[0]["params"]["runtimeId"], "rt-2",
+        "the wake must name the live runtime, not the dead one"
+    );
+    assert_eq!(enqueues[0]["params"]["agentId"], "ses-moved");
+    assert!(
+        first_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request["method"] != "enqueue"),
+        "the dead socket must not receive the wake"
+    );
+    drop((old_gateway, new_gateway));
     let _ = std::fs::remove_dir_all(&root);
 }

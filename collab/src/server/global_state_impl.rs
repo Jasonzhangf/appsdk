@@ -23,6 +23,7 @@ impl GlobalState {
             current_thread_routes: BTreeMap::new(),
             legacy_thread_routes: BTreeMap::new(),
             current_thread_route_tombstones: BTreeMap::new(),
+            retired_route_claims: BTreeMap::new(),
             command_receipts: BTreeMap::new(),
             migration_commit_evidence: BTreeMap::new(),
             ledger_scan_receipts: BTreeMap::new(),
@@ -127,6 +128,30 @@ impl GlobalState {
             if self.current_thread_routes.contains_key(&old_address) {
                 return Err(StateError::Invariant(format!(
                     "current thread route tombstone {key} is also live"
+                )));
+            }
+        }
+        for (key, record) in &self.retired_route_claims {
+            record.validate()?;
+            if key != &retired_route_claim_key(&record.binding)? {
+                return Err(StateError::Invariant(format!(
+                    "retired route claim key {key} does not match its route address"
+                )));
+            }
+            let session_id = record.binding.session_id.as_ref().ok_or_else(|| {
+                StateError::Invariant("retired route claim has no session id".to_owned())
+            })?;
+            let native_thread_id = record.binding.native_thread_id.as_ref().ok_or_else(|| {
+                StateError::Invariant("retired route claim has no native thread id".to_owned())
+            })?;
+            let address = current_thread_route_address(
+                session_id,
+                native_thread_id,
+                record.binding.tmux_endpoint.as_ref(),
+            );
+            if self.current_thread_routes.contains_key(&address) {
+                return Err(StateError::Invariant(format!(
+                    "retired route claim {key} is also live"
                 )));
             }
         }

@@ -13,7 +13,7 @@ const NOTIFICATION_SUBSCRIPTION_MISSING_ERROR: &str =
     "no armed direct-message subscription matches this recipient's registered transport";
 const MAILBOX_ONLY_ESCALATION: &str = "the message is durable but this wake has no subscription; have the recipient run collab context to recover or re-register its default direct-message lease, then send a new message if another wake is needed";
 
-pub use global_state::{GlobalState, ProjectRegistration, RuntimeBinding};
+pub use global_state::{GlobalState, ProjectRegistration, RetiredRouteClaim, RuntimeBinding};
 
 use crate::identity::{
     AgentId, AppServerId, BindingId, CommandId, NativeThreadId, OperationId, RuntimeId,

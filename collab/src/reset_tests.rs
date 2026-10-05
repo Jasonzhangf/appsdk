@@ -145,6 +145,7 @@ fn reset_requires_explicit_authorization() {
         ResetRequest {
             approval: "user text".into(),
             discard_legacy: false,
+            ..ResetRequest::default()
         },
     );
     assert!(missing_flag
@@ -158,6 +159,7 @@ fn reset_requires_explicit_authorization() {
         ResetRequest {
             approval: "  ".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     );
     assert!(missing_approval
@@ -187,6 +189,7 @@ fn reset_retires_nonempty_runtime_files_in_current_scaffold() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -228,6 +231,7 @@ fn reset_does_not_mutate_unrelated_project_or_global_configuration() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -272,6 +276,7 @@ fn reset_does_not_treat_nonempty_project_state_as_empty_baseline() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -305,6 +310,7 @@ fn reset_rejects_symlinked_guidance_without_mutating_the_target() {
         ResetRequest {
             approval: "operator authorized current baseline repair".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap_err();
@@ -340,6 +346,7 @@ fn reset_rejects_symlinked_control_root_without_mutating_the_target() {
         ResetRequest {
             approval: "operator authorized current baseline repair".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap_err();
@@ -381,6 +388,7 @@ fn reset_rejects_symlink_inside_control_root_without_archiving() {
         ResetRequest {
             approval: "operator authorized current baseline repair".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap_err();
@@ -420,6 +428,7 @@ fn reset_rolls_back_legacy_roots_when_route_rewrite_fails() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap_err();
@@ -470,6 +479,7 @@ fn reset_rolls_back_legacy_roots_when_reset_record_write_fails() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap_err();
@@ -533,6 +543,7 @@ fn reset_rejects_a_held_legacy_project_writer_lock_before_archive() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap_err();
@@ -564,6 +575,7 @@ fn reset_rebuilds_an_uninitialized_project_root() {
         ResetRequest {
             approval: "operator authorized current baseline repair".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -659,6 +671,7 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -682,6 +695,7 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -703,6 +717,7 @@ fn reset_retires_legacy_control_plane_and_rebuilds_baseline() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -744,6 +759,7 @@ fn reset_retires_stale_project_socket_without_copying_socket_state() {
         ResetRequest {
             approval: "operator authorized legacy retirement".into(),
             discard_legacy: true,
+            ..ResetRequest::default()
         },
     )
     .unwrap();
@@ -768,4 +784,334 @@ fn reset_retires_stale_project_socket_without_copying_socket_state() {
 
     std::fs::remove_dir_all(root).ok();
     std::fs::remove_dir_all(state).ok();
+}
+
+#[test]
+fn reset_level_requires_exactly_one_selector() {
+    let error = ResetLevel::select(false, false, false)
+        .expect_err("no level must fail before any file is read")
+        .to_string();
+    assert!(error.contains("RESET_LEVEL_REQUIRED"), "{error}");
+    assert!(ResetLevel::select(true, true, false).is_err());
+    assert!(ResetLevel::select(true, false, true).is_err());
+    assert!(ResetLevel::select(false, true, true).is_err());
+    assert_eq!(
+        ResetLevel::select(true, false, false).unwrap(),
+        ResetLevel::Routes
+    );
+    assert_eq!(
+        ResetLevel::select(false, true, false).unwrap(),
+        ResetLevel::Project
+    );
+    assert_eq!(
+        ResetLevel::select(false, false, true).unwrap(),
+        ResetLevel::Host
+    );
+}
+
+#[test]
+fn reset_level_flags_are_gated_per_level() {
+    let mut request = ResetRequest {
+        approval: "operator authorized the reset".into(),
+        discard_legacy: true,
+        ..ResetRequest::default()
+    };
+    // The project level needs no storage root and rejects one.
+    assert!(request.validate_level_flags().is_ok());
+    request.storage_root = Some(PathBuf::from("/tmp/not-used"));
+    let error = request
+        .validate_level_flags()
+        .expect_err("--project must reject --storage-root")
+        .to_string();
+    assert!(error.contains("RESET_LEVEL_FLAG_MISMATCH"), "{error}");
+
+    // The routes level requires the storage root and rejects --include-runs.
+    request.storage_root = None;
+    request.level = ResetLevel::Routes;
+    let error = request
+        .validate_level_flags()
+        .expect_err("--routes must require --storage-root")
+        .to_string();
+    assert!(error.contains("RESET_STORAGE_ROOT_REQUIRED"), "{error}");
+    request.storage_root = Some(PathBuf::from("/tmp/not-used"));
+    request.include_runs = true;
+    let error = request
+        .validate_level_flags()
+        .expect_err("--routes must reject --include-runs")
+        .to_string();
+    assert!(error.contains("RESET_LEVEL_FLAG_MISMATCH"), "{error}");
+
+    // The host level requires the storage root and rejects --keep.
+    request.include_runs = false;
+    request.level = ResetLevel::Host;
+    assert!(request.validate_level_flags().is_ok());
+    request.keep = vec!["binding-not-used".into()];
+    let error = request
+        .validate_level_flags()
+        .expect_err("--host must reject --keep")
+        .to_string();
+    assert!(error.contains("RESET_LEVEL_FLAG_MISMATCH"), "{error}");
+}
+
+fn route_binding(
+    scope: &crate::server::global_state::RouteScope,
+    agent: &str,
+    session: &str,
+    thread: &str,
+    pane: &str,
+) -> crate::server::RuntimeBinding {
+    let mut binding = crate::server::RuntimeBinding::new_with_session(
+        scope.project_scope_id.clone(),
+        scope.app_scope_id.clone(),
+        crate::identity::AgentId::new(agent).unwrap(),
+        crate::identity::RuntimeId::new(format!("runtime-{agent}")).unwrap(),
+        crate::identity::BindingId::new(format!("binding-{agent}")).unwrap(),
+        1,
+        Some(crate::identity::SessionId::new(session).unwrap()),
+        Some(crate::identity::NativeThreadId::new(thread).unwrap()),
+    )
+    .unwrap();
+    binding.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
+        socket_path: "/tmp/collab-reset-routes/t".to_owned(),
+        server_pid: 1,
+        tmux_session_id: "$7".to_owned(),
+        pane_id: pane.to_owned(),
+        pane_pid: 1,
+        codex_session_id: Some(session.to_owned()),
+        codex_thread_id: Some(thread.to_owned()),
+    });
+    binding
+}
+
+/// One L1 run must clear every ambiguous pane it is authorized for, and the
+/// retirement must be durable across a fresh replay of the same journal.
+#[test]
+fn reset_routes_retires_each_ambiguous_pane_and_keeps_the_named_survivor() {
+    let root = temp_root("routes-multi");
+    let storage = root.join("storage");
+    let server_dir = storage.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let journal_path = server_dir.join("journal.jsonl");
+    std::fs::File::create(&journal_path).unwrap();
+
+    let scope = crate::server::global_state::RouteScope {
+        app_scope_id: crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .unwrap(),
+        project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
+    };
+    let keep_a = route_binding(&scope, "keep-a", "session-keep-a", "thread-keep-a", "%70");
+    let stale_a = route_binding(&scope, "stale-a", "session-stale-a", "thread-stale-a", "%70");
+    let keep_b = route_binding(&scope, "keep-b", "session-keep-b", "thread-keep-b", "%71");
+    let stale_b = route_binding(&scope, "stale-b", "session-stale-b", "thread-stale-b", "%71");
+    let mut lines = String::new();
+    for binding in [&keep_a, &stale_a, &keep_b, &stale_b] {
+        lines.push_str(
+            &serde_json::to_string(&crate::server::state::Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            })
+            .unwrap(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&journal_path, lines).unwrap();
+
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    std::fs::create_dir_all(host_paths.state_root()).unwrap();
+    run(
+        &Scope { root: root.clone() },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the pane cleanup".into(),
+            discard_legacy: true,
+            level: ResetLevel::Routes,
+            storage_root: Some(storage.clone()),
+            keep: vec!["binding-keep-a".into(), "binding-keep-b".into()],
+            include_runs: false,
+        },
+    )
+    .unwrap();
+
+    let after = crate::server::replay_host_index(&storage).unwrap();
+    for (kept, pane) in [(&keep_a, "%70"), (&keep_b, "%71")] {
+        let endpoint = kept.tmux_endpoint.as_ref().unwrap();
+        let claimants = after
+            .global
+            .tmux_pane_route_claimants_in_scope(&scope, endpoint);
+        assert_eq!(
+            claimants.len(),
+            1,
+            "pane {pane} must keep exactly one claimant: {claimants:?}"
+        );
+        assert_eq!(claimants[0].binding_id, kept.binding_id);
+    }
+    assert!(
+        after.global.lookup_retired_route_claim(&stale_a).is_some(),
+        "the retirement must survive a fresh replay"
+    );
+    assert!(after.global.lookup_retired_route_claim(&stale_b).is_some());
+    assert!(after.global.lookup_retired_route_claim(&keep_a).is_none());
+    assert!(after.global.lookup_retired_route_claim(&keep_b).is_none());
+
+    // The audit record names the authorization, the run, and both survivors.
+    let reset_log = std::fs::read_to_string(host_paths.state_root().join("reset.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(reset_log.lines().last().unwrap()).unwrap();
+    assert_eq!(record["level"], json!("routes"));
+    assert_eq!(
+        record["approval"],
+        json!("operator authorized the pane cleanup")
+    );
+    assert_eq!(
+        record["kept_binding_ids"],
+        json!(["binding-keep-a", "binding-keep-b"])
+    );
+    assert_eq!(
+        record["retired_claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|claim| claim["binding_id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("binding-stale-a"), json!("binding-stale-b")]
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// An ambiguous pane whose survivor is not named changes nothing.
+#[test]
+fn reset_routes_refuses_an_unnamed_pane_without_touching_the_journal() {
+    let root = temp_root("routes-conflict");
+    let storage = root.join("storage");
+    let server_dir = storage.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let journal_path = server_dir.join("journal.jsonl");
+    std::fs::File::create(&journal_path).unwrap();
+
+    let scope = crate::server::global_state::RouteScope {
+        app_scope_id: crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .unwrap(),
+        project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
+    };
+    let keep_a = route_binding(&scope, "conflict-a", "session-conflict-a", "thread-conflict-a", "%72");
+    let stale_a = route_binding(&scope, "conflict-b", "session-conflict-b", "thread-conflict-b", "%72");
+    let keep_b = route_binding(&scope, "conflict-c", "session-conflict-c", "thread-conflict-c", "%73");
+    let stale_b = route_binding(&scope, "conflict-d", "session-conflict-d", "thread-conflict-d", "%73");
+    let mut lines = String::new();
+    for binding in [&keep_a, &stale_a, &keep_b, &stale_b] {
+        lines.push_str(
+            &serde_json::to_string(&crate::server::state::Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            })
+            .unwrap(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&journal_path, lines.clone()).unwrap();
+    let before = std::fs::read(&journal_path).unwrap();
+
+    let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+    std::fs::create_dir_all(host_paths.state_root()).unwrap();
+    // `binding-conflict-a` is the survivor of `%72` only; `%73` stays unnamed.
+    let error = run(
+        &Scope { root: root.clone() },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the pane cleanup".into(),
+            discard_legacy: true,
+            level: ResetLevel::Routes,
+            storage_root: Some(storage.clone()),
+            keep: vec!["binding-conflict-a".into()],
+            include_runs: false,
+        },
+    )
+    .expect_err("an unnamed ambiguous pane must stop the run")
+    .to_string();
+    assert!(error.contains("RESET_KEEP_REQUIRED"), "{error}");
+    assert!(error.contains("%73"), "the error must name the pane: {error}");
+    assert!(
+        error.contains("binding-conflict-c") && error.contains("binding-conflict-d"),
+        "the error must list the claimants: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).unwrap(),
+        before,
+        "a refused run must not write the journal"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The post-commit check must reject a journal that does not carry the
+/// retirement, and must accept one that does.
+#[test]
+fn verify_retirement_requires_the_retirement_and_a_live_survivor() {
+    let root = temp_root("verify");
+    let storage = root.join("storage");
+    let server_dir = storage.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    let journal_path = server_dir.join("journal.jsonl");
+    std::fs::File::create(&journal_path).unwrap();
+
+    let scope = crate::server::global_state::RouteScope {
+        app_scope_id: crate::identity::AppServerId::new(crate::identity::CLI_APP_SERVER_ID)
+            .unwrap(),
+        project_scope_id: crate::server::GlobalState::canonical_project_scope(&storage).unwrap(),
+    };
+    let kept = route_binding(
+        &scope,
+        "verify-kept",
+        "session-verify-kept",
+        "thread-verify-kept",
+        "%74",
+    );
+    let stale = route_binding(
+        &scope,
+        "verify-stale",
+        "session-verify-stale",
+        "thread-verify-stale",
+        "%74",
+    );
+    let mut lines = String::new();
+    for binding in [&kept, &stale] {
+        lines.push_str(
+            &serde_json::to_string(&crate::server::state::Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            })
+            .unwrap(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&journal_path, lines).unwrap();
+
+    // The target is still live, so the postcondition must not hold.
+    let error = verify_retirement(
+        &journal_path,
+        std::slice::from_ref(&stale),
+        &["binding-verify-kept".to_owned()],
+    )
+    .expect_err("an unretired target must fail the postcondition")
+    .to_string();
+    assert!(error.contains("RESET_VERIFY_FAILED"), "{error}");
+
+    // A kept claimant that is not live is also a failed postcondition.
+    let error = verify_retirement(&journal_path, &[], &["binding-absent".to_owned()])
+        .expect_err("a kept claimant that is not live must fail the postcondition")
+        .to_string();
+    assert!(error.contains("RESET_VERIFY_FAILED"), "{error}");
+
+    // With the retirement appended, the same target passes.
+    append_retirement_events(
+        &journal_path,
+        std::slice::from_ref(&stale),
+        "operator authorized the pane cleanup",
+    )
+    .unwrap();
+    verify_retirement(
+        &journal_path,
+        std::slice::from_ref(&stale),
+        &["binding-verify-kept".to_owned()],
+    )
+    .unwrap();
+
+    std::fs::remove_dir_all(root).ok();
 }

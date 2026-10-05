@@ -264,6 +264,28 @@ impl ProjectRuntimeManager {
             if same_scope_pane_owner_supersedes(&self.host, runtime, &binding) {
                 continue;
             }
+            // A retired claim is deliberately absent from the index. It is
+            // resolved, not stuck, so it must not fence the project forever.
+            // This is the request path, so a fence here would reproduce the
+            // original opaque failure on every non-Register request.
+            let retired = self
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_retired_route_claim(&binding)
+                .cloned();
+            if let Some(record) = retired {
+                append_log(
+                    &self.host.log_path(),
+                    &format!(
+                        "RECOVERY_RECONCILE_SKIPPED_RETIRED: {} was retired at {} under approval {:?}; request fencing skipped",
+                        binding.binding_id, record.at_ms, record.approval
+                    ),
+                );
+                continue;
+            }
             let scope = binding.route_scope();
             let (route, claimants) = {
                 let host = self.host.state.lock().unwrap();
@@ -284,29 +306,39 @@ impl ProjectRuntimeManager {
                 (route, claimants)
             };
             if route.as_ref() != Some(&binding) {
+                let pane = binding
+                    .tmux_endpoint
+                    .as_ref()
+                    .map(|endpoint| format!("{}:{}", endpoint.tmux_session_id, endpoint.pane_id))
+                    .unwrap_or_else(|| "<unknown>".to_owned());
+                let describe = |claimant: &RuntimeBinding| {
+                    format!(
+                        "{} binding {} generation {}",
+                        claimant.agent_id, claimant.binding_id, claimant.endpoint_generation
+                    )
+                };
                 if claimants.len() > 1 {
                     return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: pane {} has {} route claimants in project {}; expected exactly one: {}; resolve with `collab reset --routes --keep <binding_id>`",
-                        binding
-                            .tmux_endpoint
-                            .as_ref()
-                            .map(|endpoint| format!(
-                                "{}:{}",
-                                endpoint.tmux_session_id, endpoint.pane_id
-                            ))
-                            .unwrap_or_else(|| "<unknown>".to_owned()),
+                        "RECOVERY_RECONCILE_REQUIRED: pane {pane} has {} route claimants in project {}; expected exactly one: {}; resolve with `collab reset --routes --keep <binding_id>`",
                         claimants.len(),
                         binding.project_scope.as_str(),
                         claimants
                             .iter()
-                            .map(|claimant| format!(
-                                "{} binding {} generation {}",
-                                claimant.agent_id,
-                                claimant.binding_id,
-                                claimant.endpoint_generation
-                            ))
+                            .map(describe)
                             .collect::<Vec<_>>()
                             .join("; ")
+                    ));
+                }
+                if let Some(owner) = claimants.first() {
+                    // One claimant in scope, and it is not this binding. Name
+                    // both sides and the remedy instead of reporting a
+                    // generation mismatch that has no operator action.
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: pane {pane} in project {} is owned by {}; {} binding {} is not the claimant; resolve with `collab reset --routes --keep <binding_id>` naming the claimant to keep",
+                        binding.project_scope.as_str(),
+                        describe(owner),
+                        binding.agent_id,
+                        binding.binding_id
                     ));
                 }
                 return Err(format!(
@@ -328,6 +360,27 @@ impl ProjectRuntimeManager {
                     continue;
                 };
                 if same_scope_pane_owner_supersedes(&self.host, &runtime, &binding) {
+                    continue;
+                }
+                // An operator retirement is durable and outranks this repair.
+                // Publishing here would recreate the claim the operator
+                // removed and reintroduce the duplicate pane route.
+                let retired = self
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .global
+                    .lookup_retired_route_claim(&binding)
+                    .cloned();
+                if let Some(record) = retired {
+                    append_log(
+                        &self.host.log_path(),
+                        &format!(
+                            "RECOVERY_RECONCILE_SKIPPED_RETIRED: {} was retired at {} under approval {:?}",
+                            binding.binding_id, record.at_ms, record.approval
+                        ),
+                    );
                     continue;
                 }
                 let scope = binding.route_scope();
@@ -358,8 +411,15 @@ impl ProjectRuntimeManager {
                     });
                 if !is_same_durable_route {
                     return Err(format!(
-                        "RECOVERY_RECONCILE_REQUIRED: host and project pane routes disagree for {}",
-                        binding.agent_id
+                        "RECOVERY_RECONCILE_REQUIRED: host and project pane routes disagree for {}: pane {}:{} in project {} is held by {} binding {} generation {}, not by binding {}; resolve with `collab reset --routes --keep <binding_id>` naming the claimant to keep",
+                        binding.agent_id,
+                        endpoint.tmux_session_id,
+                        endpoint.pane_id,
+                        binding.project_scope.as_str(),
+                        old.agent_id,
+                        old.binding_id,
+                        old.endpoint_generation,
+                        binding.binding_id
                     ));
                 }
                 if old.endpoint_generation >= binding.endpoint_generation {
@@ -403,6 +463,27 @@ impl ProjectRuntimeManager {
             }
             let session_id = binding.session_id.clone().unwrap();
             let native_thread_id = binding.native_thread_id.clone().unwrap();
+            // An operator retirement is durable and outranks this repair. The
+            // journal still holds the route set event for this address, so
+            // publishing here would undo the retirement at the next start.
+            let retired = self
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .global
+                .lookup_retired_route_claim(&binding)
+                .cloned();
+            if let Some(record) = retired {
+                append_log(
+                    &self.host.log_path(),
+                    &format!(
+                        "RECOVERY_RECONCILE_SKIPPED_RETIRED: {} was retired at {} under approval {:?}",
+                        binding.binding_id, record.at_ms, record.approval
+                    ),
+                );
+                continue;
+            }
             let current = self
                 .host
                 .state
@@ -563,13 +644,33 @@ impl ProjectRuntimeManager {
                 }
             }
         }
-        if anchor_matches.len() > 1 {
+        // Two projects may share one pane, so a match in another project scope is
+        // not an ambiguity: it is the cross-scope anchor the retirement path
+        // handles. Only a second match inside this scope makes the candidate
+        // ambiguous, because only then would two live peers of this project claim
+        // one pane. When nothing matches in scope, the previous fail-closed rule
+        // still applies to several foreign matches.
+        let in_scope = anchor_matches
+            .iter()
+            .find(|binding| {
+                binding.app_scope_id == context.app_scope_id
+                    && binding.project_scope == context.project_scope
+            })
+            .cloned();
+        let in_scope_matches = anchor_matches
+            .iter()
+            .filter(|binding| {
+                binding.app_scope_id == context.app_scope_id
+                    && binding.project_scope == context.project_scope
+            })
+            .count();
+        if in_scope_matches > 1 || (in_scope_matches == 0 && anchor_matches.len() > 1) {
             return Err(
                 "RUNTIME_BINDING_REJECTED: tmux identity anchor matches multiple persisted peers"
                     .to_owned(),
             );
         }
-        if let Some(binding) = anchor_matches.first() {
+        if let Some(binding) = in_scope.or_else(|| anchor_matches.first().cloned()) {
             if binding.agent_id.as_str() != worker_id {
                 if !*retire_cross_project_anchor {
                     return Err(format!(
@@ -577,7 +678,7 @@ impl ProjectRuntimeManager {
                         binding.agent_id
                     ));
                 }
-                self.retire_cross_project_anchor_candidate(context, binding)?;
+                self.retire_cross_project_anchor_candidate(context, &binding)?;
             }
             let remaining_scope_mismatch = binding.app_scope_id != context.app_scope_id
                 || binding.project_scope != context.project_scope;
@@ -588,7 +689,7 @@ impl ProjectRuntimeManager {
                 );
             }
             if remaining_scope_mismatch {
-                self.retire_cross_project_anchor_candidate(context, binding)?;
+                self.retire_cross_project_anchor_candidate(context, &binding)?;
             }
         }
         Ok(())

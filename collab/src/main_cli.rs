@@ -371,15 +371,35 @@ pub(crate) enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Retire the legacy project-local Collab control plane and rebuild the
-    /// current empty baseline. Offline, explicit authorization, transactional.
+    /// Retire accumulated control-plane burden and rebuild the baseline.
+    /// Offline, explicit authorization, transactional. Exactly one level is
+    /// required.
     Reset {
         /// Explicit operator authorization text; required.
         #[arg(long)]
         approval: Option<String>,
-        /// Confirm that the named legacy control plane may be discarded.
+        /// Confirm that the named control plane may be discarded.
         #[arg(long)]
         discard_legacy: bool,
+        /// L1: retire duplicate route claimants in one scope, keeping one.
+        #[arg(long)]
+        routes: bool,
+        /// L2: rebuild this project's runtime baseline.
+        #[arg(long)]
+        project: bool,
+        /// L3: rebuild the host control plane.
+        #[arg(long)]
+        host: bool,
+        /// The live host index root. Required for --routes and --host.
+        #[arg(long)]
+        storage_root: Option<std::path::PathBuf>,
+        /// L1: the binding id to keep. Repeat once per ambiguous pane; each
+        /// ambiguous pane must have exactly one of its claimants kept.
+        #[arg(long)]
+        keep: Vec<String>,
+        /// L3: also remove ~/.collab/runs/.
+        #[arg(long)]
+        include_runs: bool,
     },
     /// Get or create your worker identity and bind the Codex thread
     Whoami {

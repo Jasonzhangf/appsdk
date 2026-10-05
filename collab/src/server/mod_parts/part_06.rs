@@ -949,6 +949,11 @@ pub(crate) fn commit_current_thread_route_for_runtime(
     {
         return Ok(());
     }
+    // A successful registration is live activity. It deliberately re-activates
+    // an address an operator retired, and `set_current_thread_route` clears the
+    // retirement record for exactly that address. The retirement exists to stop
+    // the reconcilers and the replay helper from republishing a claim from the
+    // project side, which is a different signal from a peer registering again.
     route_owner
         .commit_checked(&[Event::GlobalCurrentThreadRouteSet { binding }])
         .map(|_| ())

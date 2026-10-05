@@ -37,6 +37,13 @@ impl State {
                     })?;
                 continue;
             };
+            if recovered.lookup_retired_route_claim(&binding).is_some() {
+                // An operator retired this exact address. Rebuilding it from
+                // the project binding would undo a retirement the journal
+                // already records, and it would clear the record as a side
+                // effect of set_current_thread_route.
+                continue;
+            }
             let existing = match binding.tmux_endpoint.as_ref() {
                 Some(endpoint) => recovered.lookup_tmux_route(endpoint),
                 None => recovered.lookup_current_thread_route(&session, &thread),
@@ -772,6 +779,13 @@ impl State {
                 next.set_counters(self.sequence, self.revision);
                 self.global = next;
             }
+            Event::GlobalRouteClaimRetired { record } => {
+                let mut next = self.global.clone();
+                next.record_retired_route_claim(record.clone())
+                    .map_err(|error| format!("global reducer rejected event: {error}"))?;
+                next.set_counters(self.sequence, self.revision);
+                self.global = next;
+            }
             Event::GlobalMigrationCommitEvidence { evidence } => {
                 self.apply_global_event(&GlobalEvent::MigrationCommitEvidence {
                     evidence: evidence.clone(),
@@ -1076,6 +1090,15 @@ impl State {
                 .values()
                 .cloned()
                 .map(|tombstone| Event::GlobalCurrentThreadRouteTombstoneSet { tombstone }),
+        );
+        // Retired claims are emitted after the route sets so the reducer removes
+        // the claim instead of re-installing it.
+        events.extend(
+            self.global
+                .retired_route_claims
+                .values()
+                .cloned()
+                .map(|record| Event::GlobalRouteClaimRetired { record }),
         );
         let mut migration_commit_evidence: Vec<_> = self
             .global

@@ -10,6 +10,7 @@
 use crate::scope::{self, HostPaths, Scope};
 use anyhow::Context;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,9 +21,136 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// and `protected/` are never listed.
 const LEGACY_CONTROL_ROOTS: [&str; 2] = [".agent-collab", ".agent-collab-v2"];
 
+/// Which accumulated burden this run retires.
+///
+/// The three levels share one pipeline. The level selects the inventory and the
+/// retire set; it never selects a different transaction shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetLevel {
+    /// Retire duplicate route claimants in one scope and keep exactly one.
+    Routes,
+    /// Rebuild this project's runtime baseline.
+    Project,
+    /// Rebuild the host control plane.
+    Host,
+}
+
+impl ResetLevel {
+    /// Resolve the level from the three mutually exclusive selectors.
+    ///
+    /// Exactly one selector is required. A run with none or with two fails
+    /// before any control file is read or written.
+    pub fn select(routes: bool, project: bool, host: bool) -> anyhow::Result<Self> {
+        match (routes, project, host) {
+            (true, false, false) => Ok(Self::Routes),
+            (false, true, false) => Ok(Self::Project),
+            (false, false, true) => Ok(Self::Host),
+            _ => anyhow::bail!(
+                "RESET_LEVEL_REQUIRED: collab reset needs exactly one of --routes, \
+                 --project, or --host"
+            ),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Routes => "routes",
+            Self::Project => "project",
+            Self::Host => "host",
+        }
+    }
+}
+
 pub struct ResetRequest {
     pub approval: String,
     pub discard_legacy: bool,
+    pub level: ResetLevel,
+    /// The live host index root. Required for `Routes` and `Host`.
+    pub storage_root: Option<PathBuf>,
+    /// `Routes`: the binding ids to keep, one per ambiguous pane. Each
+    /// ambiguous pane must have exactly one of its claimants in this set.
+    pub keep: Vec<String>,
+    /// `Host`: also remove `~/.collab/runs/`.
+    pub include_runs: bool,
+}
+
+impl Default for ResetRequest {
+    /// The level-2 shape with no operator authorization.
+    ///
+    /// This exists so a caller that only needs the project baseline states the
+    /// fields it cares about. It is never a valid request on its own: the
+    /// approval text and `--discard-legacy` are still required by `run`.
+    fn default() -> Self {
+        Self {
+            approval: String::new(),
+            discard_legacy: false,
+            level: ResetLevel::Project,
+            storage_root: None,
+            keep: Vec::new(),
+            include_runs: false,
+        }
+    }
+}
+
+impl ResetRequest {
+    /// Reject flags that do not belong to the selected level.
+    ///
+    /// A silently ignored flag is a silent no-op on a destructive operation, so
+    /// a flag that the level does not use is an error rather than a no-op.
+    fn validate_level_flags(&self) -> anyhow::Result<()> {
+        match self.level {
+            ResetLevel::Routes => {
+                if self.include_runs {
+                    anyhow::bail!(
+                        "RESET_LEVEL_FLAG_MISMATCH: --include-runs belongs to --host, not --routes"
+                    );
+                }
+                if self.storage_root.is_none() {
+                    anyhow::bail!(
+                        "RESET_STORAGE_ROOT_REQUIRED: --routes must name the live host index \
+                         with --storage-root <path>; the index is \
+                         <storage-root>/.agent-collab/server/journal.jsonl and routes.jsonl \
+                         does not identify it"
+                    );
+                }
+            }
+            ResetLevel::Project => {
+                if self.storage_root.is_some() {
+                    anyhow::bail!(
+                        "RESET_LEVEL_FLAG_MISMATCH: --storage-root belongs to --routes or \
+                         --host, not --project"
+                    );
+                }
+                if !self.keep.is_empty() {
+                    anyhow::bail!(
+                        "RESET_LEVEL_FLAG_MISMATCH: --keep belongs to --routes, not --project"
+                    );
+                }
+                if self.include_runs {
+                    anyhow::bail!(
+                        "RESET_LEVEL_FLAG_MISMATCH: --include-runs belongs to --host, not \
+                         --project"
+                    );
+                }
+            }
+            ResetLevel::Host => {
+                if !self.keep.is_empty() {
+                    anyhow::bail!(
+                        "RESET_LEVEL_FLAG_MISMATCH: --keep belongs to --routes, not --host"
+                    );
+                }
+                if self.storage_root.is_none() {
+                    anyhow::bail!(
+                        "RESET_STORAGE_ROOT_REQUIRED: --host must name the live host index \
+                         with --storage-root <path>; the index is \
+                         <storage-root>/.agent-collab/server/journal.jsonl and routes.jsonl \
+                         does not identify it"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 struct RetiredRoot {
@@ -63,6 +191,35 @@ fn fnv1a64(bytes: &[u8], seed: u64) -> u64 {
 /// bytes and are returned separately so reset can retire a stale endpoint
 /// without pretending that it copied socket state into the archive.
 fn tree_digest(root: &Path) -> std::io::Result<(usize, Vec<String>, u64, String)> {
+    let root_metadata = std::fs::symlink_metadata(root)?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(control_tree_symlink_error(root));
+    }
+    if !root_metadata.is_dir() {
+        // A single control file is a one-file tree. Its archive is a directory
+        // holding that file, so the digest must describe that same shape: one
+        // file named after the source, hashed as name then content.
+        let name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if is_unix_socket(&root_metadata) {
+            return Ok((
+                0,
+                vec![name],
+                0,
+                format!("fnv1a64:{:016x}", 0xcbf29ce484222325_u64),
+            ));
+        }
+        let content = std::fs::read(root)?;
+        let hash = fnv1a64(&content, fnv1a64(name.as_bytes(), 0xcbf29ce484222325_u64));
+        return Ok((
+            1,
+            Vec::new(),
+            root_metadata.len(),
+            format!("fnv1a64:{hash:016x}"),
+        ));
+    }
     let mut files = Vec::new();
     collect_files(root, root, &mut files)?;
     files.sort();
@@ -127,6 +284,23 @@ fn control_tree_symlink_error(path: &Path) -> std::io::Error {
 
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(destination)?;
+    let source_metadata = std::fs::symlink_metadata(source)?;
+    if source_metadata.file_type().is_symlink() {
+        return Err(control_tree_symlink_error(source));
+    }
+    if !source_metadata.is_dir() {
+        if !is_unix_socket(&source_metadata) {
+            let name = source
+                .file_name()
+                .map(|name| name.to_owned())
+                .unwrap_or_else(|| std::ffi::OsString::from("control-file"));
+            let to = destination.join(name);
+            std::fs::copy(source, &to)?;
+            std::fs::File::open(&to)?.sync_all()?;
+        }
+        sync_dir(destination)?;
+        return Ok(());
+    }
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let from = entry.path();
@@ -310,7 +484,13 @@ fn rollback_retired_roots(retired: &mut [RetiredRoot]) -> anyhow::Result<()> {
 fn discard_staged_roots(retired: &[RetiredRoot]) -> anyhow::Result<()> {
     for entry in retired {
         if let Some(staged) = &entry.staged {
-            std::fs::remove_dir_all(staged)?;
+            // A retire entry may be a single control file (routes.jsonl) or a
+            // directory (identities/), so removal must not assume a directory.
+            if staged.is_dir() {
+                std::fs::remove_dir_all(staged)?;
+            } else {
+                std::fs::remove_file(staged)?;
+            }
         }
     }
     Ok(())
@@ -423,6 +603,82 @@ where
     Ok(removed)
 }
 
+/// Archive the retire set, verify byte equality, and write the archive manifest.
+///
+/// Archive first, verify, and only then remove. A failed archive leaves the
+/// retired control plane untouched. Every level shares this step, so the
+/// manifest shape and the durability rules cannot drift between levels.
+fn archive_retired(
+    archive_root: &Path,
+    state_root: &Path,
+    retired: &[RetiredRoot],
+    run_id: &str,
+    project_root: &Path,
+    approval: &str,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(archive_root)?;
+    for entry in retired {
+        let destination = archive_root.join(&entry.relative);
+        copy_tree(&entry.absolute, &destination)?;
+        let (files, sockets, bytes, digest) = tree_digest(&destination)?;
+        if !archive_matches(entry, files, bytes, &digest) {
+            anyhow::bail!(
+                "RESET_ARCHIVE_MISMATCH: {} -> {} ({files} files, {} sockets, {bytes} bytes, \
+                 {digest}) does not match the source ({} files, {} sockets, {} bytes, {})",
+                entry.absolute.display(),
+                destination.display(),
+                sockets.len(),
+                entry.files,
+                entry.sockets.len(),
+                entry.bytes,
+                entry.digest
+            );
+        }
+        let source_sockets = tree_digest(&entry.absolute)?.1;
+        if !source_matches(entry, &source_sockets) {
+            anyhow::bail!(
+                "RESET_SOURCE_SOCKET_CHANGED: {} socket inventory changed during archive",
+                entry.absolute.display()
+            );
+        }
+    }
+    let manifest = json!({
+        "schema": "collab-reset/v1",
+        "run_id": run_id,
+        "project_root": project_root,
+        "approval": approval,
+        "retired": retired
+            .iter()
+            .map(|entry| json!({
+                "path": entry.relative,
+                "files": entry.files,
+                "sockets": entry.sockets,
+                "bytes": entry.bytes,
+                "digest": entry.digest,
+            }))
+            .collect::<Vec<_>>(),
+        "delivery_verified": false,
+        "created_ms": now_ms(),
+    });
+    let manifest_path = archive_root.join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+    std::fs::File::open(&manifest_path)?.sync_all()?;
+    sync_dir(archive_root)?;
+    if let Some(archives_dir) = archive_root.parent() {
+        sync_dir(archives_dir)?;
+    }
+    sync_dir(state_root)?;
+    Ok(())
+}
+
+/// The single reset entry. It authorizes the run, resolves the level, and
+/// dispatches to the level body.
+///
+/// The three levels share this authorization and the same transaction shape.
+/// Only the inventory and the retire set differ.
 pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyhow::Result<()> {
     if !request.discard_legacy {
         anyhow::bail!(
@@ -436,6 +692,15 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
              naming the operator authorization"
         );
     }
+    request.validate_level_flags()?;
+    match request.level {
+        ResetLevel::Project => run_project(scope, host_paths, &request),
+        ResetLevel::Routes => run_routes(scope, host_paths, &request),
+        ResetLevel::Host => run_host(scope, host_paths, &request),
+    }
+}
+
+fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
     let root = std::fs::canonicalize(&scope.root)?;
 
     // Prove exclusivity before touching any control plane. Keep both the
@@ -496,63 +761,14 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
 
     let already_reset = retired.is_empty();
     if !already_reset {
-        // Archive first, verify byte equality, and only then remove. A failed
-        // archive leaves the legacy control plane untouched.
-        std::fs::create_dir_all(&archive_root)?;
-        for entry in &retired {
-            let destination = archive_root.join(&entry.relative);
-            copy_tree(&entry.absolute, &destination)?;
-            let (files, sockets, bytes, digest) = tree_digest(&destination)?;
-            if !archive_matches(entry, files, bytes, &digest) {
-                anyhow::bail!(
-                    "RESET_ARCHIVE_MISMATCH: {} -> {} ({files} files, {} sockets, {bytes} bytes, \
-                     {digest}) does not match the source ({} files, {} sockets, {} bytes, {})",
-                    entry.absolute.display(),
-                    destination.display(),
-                    sockets.len(),
-                    entry.files,
-                    entry.sockets.len(),
-                    entry.bytes,
-                    entry.digest
-                );
-            }
-            let source_sockets = tree_digest(&entry.absolute)?.1;
-            if !source_matches(entry, &source_sockets) {
-                anyhow::bail!(
-                    "RESET_SOURCE_SOCKET_CHANGED: {} socket inventory changed during archive",
-                    entry.absolute.display()
-                );
-            }
-        }
-        let manifest = json!({
-            "schema": "collab-reset/v1",
-            "run_id": run_id,
-            "project_root": root,
-            "approval": request.approval,
-            "retired": retired
-                .iter()
-                .map(|entry| json!({
-                    "path": entry.relative,
-                    "files": entry.files,
-                    "sockets": entry.sockets,
-                    "bytes": entry.bytes,
-                    "digest": entry.digest,
-                }))
-                .collect::<Vec<_>>(),
-            "delivery_verified": false,
-            "created_ms": now_ms(),
-        });
-        let manifest_path = archive_root.join("manifest.json");
-        std::fs::write(
-            &manifest_path,
-            format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+        archive_retired(
+            &archive_root,
+            host_paths.state_root(),
+            &retired,
+            &run_id,
+            &root,
+            &request.approval,
         )?;
-        std::fs::File::open(&manifest_path)?.sync_all()?;
-        sync_dir(&archive_root)?;
-        if let Some(archives_dir) = archive_root.parent() {
-            sync_dir(archives_dir)?;
-        }
-        sync_dir(host_paths.state_root())?;
     }
 
     let routes_path = host_paths.state_root().join("routes.jsonl");
@@ -673,6 +889,472 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
             anyhow::bail!("RESET_INCOMPLETE: {error}; rollback also failed: {rollback_error}");
         }
         return Err(error.context("reset rolled back; legacy control plane restored"));
+    }
+
+    println!("{}", serde_json::to_string_pretty(&record)?);
+    Ok(())
+}
+
+/// Resolve and verify the root that owns the live host index.
+///
+/// `routes.jsonl` does not identify the index root, so the operator must name
+/// it. The journal inside it must exist, and a non-empty journal must hold a
+/// record for that root, so a typo cannot retarget the operation at another
+/// project's control plane.
+fn resolve_index_root(
+    request: &ResetRequest,
+    level: &str,
+) -> anyhow::Result<(PathBuf, crate::server::state::State)> {
+    let raw = request
+        .storage_root
+        .as_ref()
+        .expect("validated: this level requires --storage-root");
+    let storage_root = std::fs::canonicalize(raw).map_err(|error| {
+        anyhow::anyhow!(
+            "RESET_STORAGE_ROOT_INVALID: {} cannot be resolved: {error}",
+            raw.display()
+        )
+    })?;
+    let index_journal = storage_root.join(".agent-collab/server/journal.jsonl");
+    if !index_journal.is_file() {
+        anyhow::bail!(
+            "RESET_STORAGE_ROOT_INVALID: --{level} storage root {} has no \
+             .agent-collab/server/journal.jsonl, so it does not own the live host index",
+            storage_root.display()
+        );
+    }
+    let state = crate::server::replay_host_index(&storage_root)?;
+    let expected_scope = crate::server::GlobalState::canonical_project_scope(&storage_root)
+        .map_err(|error| anyhow::anyhow!("RESET_STORAGE_ROOT_INVALID: {error}"))?;
+    let has_any_record =
+        !state.global.current_thread_routes.is_empty() || !state.global.projects.is_empty();
+    let owns_root = state.global.projects.contains_key(expected_scope.as_str())
+        || state
+            .global
+            .current_thread_routes
+            .values()
+            .any(|binding| binding.project_scope == expected_scope);
+    if has_any_record && !owns_root {
+        anyhow::bail!(
+            "RESET_STORAGE_ROOT_INVALID: {} does not own the live host index at {}; the journal \
+             holds no route or project for that root",
+            storage_root.display(),
+            index_journal.display()
+        );
+    }
+    Ok((storage_root, state))
+}
+
+/// Group live route claimants by route scope and pane.
+///
+/// The grouping key is the route scope, which is the project plus the app
+/// scope, because the invariant is per project. Grouping by project alone would
+/// retire a claimant that another app scope legitimately owns on the same pane.
+fn pane_claimant_groups(
+    state: &crate::server::state::State,
+) -> BTreeMap<(String, String, String, String), Vec<crate::server::RuntimeBinding>> {
+    let mut groups: BTreeMap<(String, String, String, String), Vec<crate::server::RuntimeBinding>> =
+        BTreeMap::new();
+    for binding in state.global.current_thread_routes.values() {
+        let Some(endpoint) = binding.tmux_endpoint.as_ref() else {
+            continue;
+        };
+        groups
+            .entry((
+                binding.project_scope.as_str().to_owned(),
+                binding.app_scope_id.as_str().to_owned(),
+                endpoint.tmux_session_id.clone(),
+                endpoint.pane_id.clone(),
+            ))
+            .or_default()
+            .push(binding.clone());
+    }
+    groups
+}
+
+fn describe_claimants(claims: &[crate::server::RuntimeBinding]) -> String {
+    claims
+        .iter()
+        .map(|claim| {
+            format!(
+                "{} binding {} generation {}",
+                claim.agent_id, claim.binding_id, claim.endpoint_generation
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Append the durable retirement events, one event per line.
+///
+/// The replay reader treats a line holding several events and no checkpoint as
+/// a root-conversion request, so a journal without a trailing newline is
+/// repaired before the append.
+fn append_retirement_events(
+    journal: &Path,
+    targets: &[crate::server::RuntimeBinding],
+    approval: &str,
+) -> anyhow::Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write;
+    let mut body: Vec<u8> = Vec::new();
+    let existing = std::fs::read(journal)?;
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        body.push(b'\n');
+    }
+    for target in targets {
+        let record = crate::server::RetiredRouteClaim::new(
+            target.clone(),
+            approval.to_owned(),
+            "collab reset --routes".to_owned(),
+            now_ms(),
+        )?;
+        let line = serde_json::to_string(&crate::server::state::Event::GlobalRouteClaimRetired {
+            record,
+        })?;
+        body.extend_from_slice(line.as_bytes());
+        body.push(b'\n');
+    }
+    let mut file = std::fs::OpenOptions::new().append(true).open(journal)?;
+    file.write_all(&body)?;
+    file.sync_data()?;
+    Ok(())
+}
+
+/// Replay the appended journal and assert the postcondition L1 promised.
+///
+/// This runs inside the transaction, before the receipt, so a journal that does
+/// not carry the retirement cannot leave behind a receipt that claims it did.
+fn verify_retirement(
+    index_journal: &Path,
+    targets: &[crate::server::RuntimeBinding],
+    keep: &[String],
+) -> anyhow::Result<()> {
+    let storage_root = index_journal
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "RESET_VERIFY_FAILED: cannot resolve the index root from {}",
+                index_journal.display()
+            )
+        })?;
+    let state = crate::server::replay_host_index(storage_root)?;
+    for target in targets {
+        if state.global.lookup_retired_route_claim(target).is_none() {
+            anyhow::bail!(
+                "RESET_VERIFY_FAILED: {} has no retired record after the append",
+                target.binding_id
+            );
+        }
+        if let (Some(session), Some(thread)) = (&target.session_id, &target.native_thread_id) {
+            if state
+                .global
+                .lookup_current_thread_route(session, thread)
+                .is_some()
+            {
+                anyhow::bail!(
+                    "RESET_VERIFY_FAILED: {} is still a live route after the append",
+                    target.binding_id
+                );
+            }
+        }
+    }
+    for kept in keep {
+        let live = state
+            .global
+            .current_thread_routes
+            .values()
+            .any(|binding| binding.binding_id.as_str() == kept);
+        if !live {
+            anyhow::bail!(
+                "RESET_VERIFY_FAILED: the kept claimant {kept} is not live after the append"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Level 1: retire duplicate route claimants in one route scope.
+///
+/// The invariant is "a pane is addressable by exactly one live peer per
+/// project". This level restores it where a pane accumulated several claimants,
+/// and it records the retirement in the journal so the next start does not
+/// republish the claim.
+///
+/// The `--keep` selection is the authorization and the liveness decision. An
+/// offline reader cannot tell a live claimant from a stale one: both claimants
+/// of a pane share the same pane and the same pane pid, and presence needs a
+/// live tmux probe. A gate that required "not registered" would refuse exactly
+/// the stale claims an operator needs to retire, so the level reports the
+/// candidates and requires the operator to name the survivor.
+fn run_routes(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
+    let (storage_root, state) = resolve_index_root(request, "routes")?;
+    let index_journal = storage_root.join(".agent-collab/server/journal.jsonl");
+
+    let _lock =
+        crate::server::acquire_reset_lock(&host_paths.lock_path(), &host_paths.socket_path())?;
+    if crate::client::alive(&host_paths.socket_path()) {
+        anyhow::bail!(
+            "RESET_DAEMON_LIVE: a Collab daemon is reachable at {}; run `collab down` \
+             before retiring route claimants",
+            host_paths.socket_path().display()
+        );
+    }
+
+    let mut targets: Vec<crate::server::RuntimeBinding> = Vec::new();
+    let mut conflicts: Vec<String> = Vec::new();
+    for ((project_scope, app_scope, session, pane), claims) in pane_claimant_groups(&state) {
+        if claims.len() < 2 {
+            continue;
+        }
+        // `--keep` names the survivor per ambiguous pane, so a run with several
+        // ambiguous panes passes several flags. A pane whose claimants contain
+        // no kept id, or more than one, is a conflict rather than a guess.
+        let kept = claims
+            .iter()
+            .filter(|claim| {
+                request
+                    .keep
+                    .iter()
+                    .any(|keep| keep == claim.binding_id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if kept.len() != 1 {
+            let asked = if request.keep.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "--keep {} does not name exactly one of them; ",
+                    request.keep.join(", ")
+                )
+            };
+            conflicts.push(format!(
+                "{project_scope}/{app_scope} pane {session}:{pane} has {} claimants; {asked}name \
+                 the one to keep with --keep <binding_id>: {}",
+                claims.len(),
+                describe_claimants(&claims)
+            ));
+            continue;
+        }
+        let kept_id = kept[0].binding_id.clone();
+        for claim in &claims {
+            if claim.binding_id != kept_id {
+                targets.push(claim.clone());
+            }
+        }
+    }
+    if !conflicts.is_empty() {
+        anyhow::bail!(
+            "RESET_KEEP_REQUIRED: {} pane(s) have more than one route claimant; nothing was \
+             changed:\n{}",
+            conflicts.len(),
+            conflicts.join("\n")
+        );
+    }
+
+    let run_id = format!("reset-{}-{}", now_ms(), std::process::id());
+    let record = json!({
+        "schema": "collab-reset/v1",
+        "run_id": run_id,
+        "at_ms": now_ms(),
+        "level": "routes",
+        "project_root": scope.root,
+        "storage_root": storage_root,
+        "approval": request.approval,
+        "kept_binding_ids": request.keep,
+        "already_reset": targets.is_empty(),
+        "retired_claims": targets
+            .iter()
+            .map(|target| json!({
+                "binding_id": target.binding_id.as_str(),
+                "agent_id": target.agent_id.as_str(),
+                "project_scope": target.project_scope.as_str(),
+                "app_scope_id": target.app_scope_id.as_str(),
+                "endpoint_generation": target.endpoint_generation,
+                "pane": target.tmux_endpoint.as_ref().map(|endpoint| {
+                    format!("{}:{}", endpoint.tmux_session_id, endpoint.pane_id)
+                }),
+            }))
+            .collect::<Vec<_>>(),
+        "delivery_verified": true,
+        "next": "run collab up; the retirement is durable and the reconcilers skip it",
+    });
+
+    let journal_snapshot = snapshot_file(index_journal.clone())?;
+    let reset_record_snapshot = snapshot_file(host_paths.state_root().join("reset.jsonl"))?;
+    let transaction = (|| -> anyhow::Result<()> {
+        append_retirement_events(&index_journal, &targets, &request.approval)?;
+        verify_retirement(&index_journal, &targets, &request.keep)?;
+        append_reset_record(host_paths, &record)?;
+        Ok(())
+    })();
+    if let Err(error) = transaction {
+        let rollback = restore_file(&journal_snapshot).and(restore_file(&reset_record_snapshot));
+        if let Err(rollback_error) = rollback {
+            anyhow::bail!("RESET_INCOMPLETE: {error}; rollback also failed: {rollback_error}");
+        }
+        return Err(error.context("reset rolled back; the route index is unchanged"));
+    }
+
+    println!("{}", serde_json::to_string_pretty(&record)?);
+    Ok(())
+}
+
+/// The host control-plane entries that level 3 retires.
+///
+/// Each label is a single path segment: it names the archive directory and it
+/// suffixes the staging path. `reset.jsonl` and `archives/` are the audit trail
+/// and are never listed. The project business payload under
+/// `<storage_root>/.agent-collab/` belongs to `--project`, not here.
+fn host_control_plane_entries(
+    state_root: &Path,
+    storage_root: &Path,
+    include_runs: bool,
+) -> Vec<(String, PathBuf)> {
+    let server_dir = storage_root.join(".agent-collab/server");
+    let mut entries = vec![
+        ("host-routes-jsonl".to_owned(), state_root.join("routes.jsonl")),
+        (
+            "host-journal-jsonl".to_owned(),
+            state_root.join("journal.jsonl"),
+        ),
+        (
+            "host-events-jsonl".to_owned(),
+            state_root.join("events.jsonl"),
+        ),
+        ("host-log-txt".to_owned(), state_root.join("log.txt")),
+        ("host-identities".to_owned(), state_root.join("identities")),
+        ("host-projects".to_owned(), state_root.join("projects")),
+        (
+            "resident-index-journal-jsonl".to_owned(),
+            server_dir.join("journal.jsonl"),
+        ),
+        (
+            "resident-index-events-jsonl".to_owned(),
+            server_dir.join("events.jsonl"),
+        ),
+        (
+            "resident-index-log-txt".to_owned(),
+            server_dir.join("log.txt"),
+        ),
+    ];
+    if include_runs {
+        entries.push(("host-runs".to_owned(), state_root.join("runs")));
+    }
+    entries
+}
+
+/// Level 3: rebuild the host control plane.
+///
+/// It retires the host-side control state and the resident project's runtime
+/// journal, which together are the live index. It keeps the audit trail
+/// (`reset.jsonl` and `archives/`), the project business payload under
+/// `<storage_root>/.agent-collab/`, the external service descriptor, and
+/// `~/.collab/runs/` unless `--include-runs` was given.
+fn run_host(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
+    let (storage_root, _state) = resolve_index_root(request, "host")?;
+    let state_root = host_paths.state_root().to_path_buf();
+
+    let _lock =
+        crate::server::acquire_reset_lock(&host_paths.lock_path(), &host_paths.socket_path())?;
+    if crate::client::alive(&host_paths.socket_path()) {
+        anyhow::bail!(
+            "RESET_DAEMON_LIVE: a Collab daemon is reachable at {}; run `collab down` \
+             before rebuilding the host control plane",
+            host_paths.socket_path().display()
+        );
+    }
+
+    let run_id = format!("reset-{}-{}", now_ms(), std::process::id());
+    let archive_root = state_root.join("archives").join(format!("host-{run_id}"));
+    let mut retired = Vec::new();
+    for (label, path) in
+        host_control_plane_entries(&state_root, &storage_root, request.include_runs)
+    {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "RESET_CONTROL_ROOT_INSPECTION_FAILED: cannot inspect {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+        let (files, sockets, bytes, digest) = tree_digest(&path)?;
+        retired.push(RetiredRoot {
+            relative: label,
+            absolute: path,
+            staged: None,
+            files,
+            sockets,
+            bytes,
+            digest,
+        });
+    }
+
+    let already_reset = retired.is_empty();
+    if !already_reset {
+        archive_retired(
+            &archive_root,
+            &state_root,
+            &retired,
+            &run_id,
+            &storage_root,
+            &request.approval,
+        )?;
+    }
+
+    let reset_record_snapshot = snapshot_file(state_root.join("reset.jsonl"))?;
+    let record = json!({
+        "schema": "collab-reset/v1",
+        "run_id": run_id,
+        "at_ms": now_ms(),
+        "level": "host",
+        "project_root": scope.root,
+        "storage_root": storage_root,
+        "state_root": state_root,
+        "approval": request.approval,
+        "already_reset": already_reset,
+        "include_runs": request.include_runs,
+        "archive_root": if already_reset { None } else { Some(archive_root) },
+        "retired": retired
+            .iter()
+            .map(|entry| json!({
+                "path": entry.relative,
+                "files": entry.files,
+                "sockets": entry.sockets,
+                "bytes": entry.bytes,
+                "digest": entry.digest,
+            }))
+            .collect::<Vec<_>>(),
+        "archive_durable": !already_reset,
+        "delivery_verified": false,
+        "next": "run collab up; it recreates the host index, identities, and project registry",
+    });
+
+    let transaction = (|| -> anyhow::Result<()> {
+        if !already_reset {
+            stage_retired_roots(&mut retired, &run_id)?;
+        }
+        append_reset_record(host_paths, &record)?;
+        discard_staged_roots(&retired)?;
+        Ok(())
+    })();
+    if let Err(error) = transaction {
+        let rollback_roots = rollback_retired_roots(&mut retired);
+        let rollback_record = restore_file(&reset_record_snapshot);
+        if let Err(rollback_error) = rollback_roots.and(rollback_record) {
+            anyhow::bail!("RESET_INCOMPLETE: {error}; rollback also failed: {rollback_error}");
+        }
+        return Err(error.context("reset rolled back; the host control plane is restored"));
     }
 
     println!("{}", serde_json::to_string_pretty(&record)?);

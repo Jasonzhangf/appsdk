@@ -6,7 +6,12 @@ designed in `collab-control-plane-reset-20261005.md`, revision 3. This document
 covers the explicit reset/cleanup/initialization operation that clears
 accumulated control-plane burden.
 
-Revision 1, 2026-10-05. Status: design, not implemented.
+Revision 2, 2026-10-05. Status: implemented, pending verification. Revision 2
+folds in the independent design review: the compaction requirement
+(`snapshot_events`), the replay-helper and request-path consumers, the decision
+to drop the offline liveness gate, the register-path reactivation rule,
+repeatable `--keep`, the `archives/` archive root, the L3 retire set, and the
+correction of two factual claims about existing code.
 
 ## 1. Proven problem
 
@@ -23,10 +28,13 @@ live host index measured on 2026-10-05:
 | `reset.jsonl` records | 19 |
 | Journal events | 7869 in the appsdk host journal, 111 route sets, **0 retirements** |
 
-Zero retirements is the core fact. Nothing in the product has ever retired a
-route claim. `retire_current_thread_route` exists
-(`global_state_impl.rs:840-868`) but only the reducer calls it, so a claim
-disappears only when a *newer* route replaces it.
+Zero retirements in this journal is the core fact. The event type already
+exists: `Event::GlobalCurrentThreadRouteRetired` (`state.rs:760`) is emitted by
+the register path when `retire_cross_project_anchor` retires a foreign anchor
+(`runtime_manager_setup.rs:626`), and `retire_current_thread_route`
+(`global_state_impl.rs:840-868`) removes the route from the index. This journal
+holds zero such events, and neither mechanism is reachable from an operator
+command, so a claim disappears only when a *newer* route replaces it.
 
 The existing `collab reset` (`reset.rs:426`) is level 2 only: it retires the
 current project's legacy project-local control plane and rebuilds an empty
@@ -74,18 +82,27 @@ DAG in section 6.
 This is the problem review rounds 3 and 4 raised, and it decides the design.
 
 `retire_current_thread_route` removes the route from the in-memory index and
-writes nothing (`global_state_impl.rs:862-867`). Three separate paths then put
+writes nothing (`global_state_impl.rs:862-867`). Four separate paths then put
 the claim back:
 
 1. **Replay.** The journal still holds the `GlobalCurrentThreadRouteSet` event
    for that address (`state_impl.rs:757-767`), so the next start replays the
-   route into the index.
+   route into the index. This is also why the *existing* retirement event is not
+   enough on its own: `Event::GlobalCurrentThreadRouteRetired` removes the route
+   during replay but leaves no durable statement that the address must stay
+   retired, and it carries no operator authorization.
 2. **`reconcile_started_thread_routes`** republishes any binding of any project
    runtime that carries a session and a native thread whose host route is
    missing (`runtime_manager_setup.rs:400-421`). The project journal owns that
    binding, so the host index is rebuilt from the project side.
 3. **`reconcile_same_pane_master_routes`** does the same for a pending same-pane
    master (`runtime_manager_setup.rs:343-349`).
+4. **`restore_unique_current_thread_routes_from_bindings`** rebuilds the live
+   index from `projects[*].runtime_bindings` when the journal has no
+   `GlobalCurrentThreadRouteSet` at all (`state_impl.rs:3-61`, called at
+   `part_12.rs:492-495`). It calls `set_current_thread_route` for every durable
+   binding whose address is missing, so it re-creates the claim and clears any
+   retirement record as a side effect.
 
 Path 2 also explains the failure mode the user reported: a stale project binding
 keeps a route alive on a pane that a different project's master now owns.
@@ -97,11 +114,29 @@ and binding id (`global_state_models.rs:405-432`). That is a *rebind* record: it
 says "this address moved to that binding". An operator retirement has no
 successor binding, so it has no valid `rebound_to`.
 
-The tombstone lookup has no production consumer either:
-`lookup_current_thread_route_tombstone` (`global_state_impl.rs:686`) and
-`lookup_tmux_route_tombstone` (`:593`) are called only from tests.
+The tombstones do have production consumers —
+`lookup_current_thread_route_tombstone` and `lookup_tmux_route_tombstone` are
+read by the address resolver (`part_04.rs:252-338`, reached from `:114` and
+`:122`) to report `SESSION_THREAD_BINDING_STALE`. A retired address must take the
+opposite branch there: it must not resolve. `resolve_route_by_address` already
+returns `ROUTE_RESOLVE_NOT_FOUND` (`part_04.rs:335-338`) for an address that is
+not in the index, and that is the correct outcome for a claim an operator
+removed, so this delivery adds no branch to the resolver. What the resolver must
+not do is find a route the operator retired, and the four consumers above are
+what guarantee that.
 
-So L1 needs its own durable record and its own consumer.
+The full list of consumers that must consult the retired record is therefore:
+the two reconcilers, the replay helper, and the request-path fence
+(`same_pane_master_route_ready`, `runtime_manager_setup.rs:251-319`, reached from
+`part_04.rs:1193` and `:1236`). A record that only the reconcilers consult would
+leave the request path fencing the project forever.
+
+A successful registration is deliberately *not* on that list. Registering again
+is live activity, and `set_current_thread_route` clears the retirement for
+exactly that address, so the peer comes back only by proving it is running.
+Neither reconciler can produce that proof, which is the whole difference.
+
+So L1 needs its own durable record and its own consumers.
 
 ## 5. Design
 
@@ -116,23 +151,36 @@ collab reset --host    --storage-root <path>                     --approval <tex
 - The three level selectors are mutually exclusive and exactly one is required.
   A run with none or with two fails with `RESET_LEVEL_REQUIRED` before it reads
   or writes any control file.
-- `--storage-root` is required for L1 and L3, and is rejected for L2. The live
-  host index is `<storage-root>/.agent-collab/server/journal.jsonl`
-  (`part_12.rs:348-350`; the daemon opens exactly that path, `part_12.rs:866-871`).
-  `routes.jsonl` cannot stand in for it: all 207 records carry
+- `--storage-root` is required for L1 and L3, and is rejected for L2. For L1 it
+  names the root whose project journal holds the live pane routes:
+  `<storage-root>/.agent-collab/server/journal.jsonl`, read by the same
+  `replay_host_index` the daemon uses (`part_12.rs:359`). L1 canonicalizes the
+  root, requires that journal to exist, and then requires the journal to hold at
+  least one route or project for that canonical root whenever it holds any record
+  at all. A root that owns nothing is `RESET_STORAGE_ROOT_INVALID`. `routes.jsonl`
+  cannot stand in for it: all 207 records carry
   `canonical_root == storage_root`, so the file does not identify which root the
   running daemon uses. A default would silently no-op on the wrong index, which
   is why the flag is required rather than optional.
-- `--keep <binding_id>` is required for L1 when more than one claimant remains
-  after the retired ones are removed. L1 never guesses by generation:
-  `endpoint_generation` is a per-binding counter that starts at 1
-  (`part_04.rs:159,211`), so it is not comparable across bindings. Without
-  `--keep` and with more than one candidate, L1 changes nothing, lists the
-  candidates, and exits non-zero.
+- `--keep <binding_id>` is required for L1 whenever any pane in the named index
+  has more than one claimant in one route scope. It is **repeatable**, and it
+  names the survivor per ambiguous pane: each ambiguous pane must contain
+  exactly one of the ids given. A pane that contains none of them, or more than
+  one, is a conflict. A run with any conflict changes nothing, lists every
+  conflicting pane with its claimants, and exits with `RESET_KEEP_REQUIRED`.
+  L1 never guesses by generation: `endpoint_generation` is a per-binding counter
+  that starts at 1 (`part_04.rs:159,211`), so it is not comparable across
+  bindings.
+- A flag that the selected level does not use is an error
+  (`RESET_LEVEL_FLAG_MISMATCH`), not a silent no-op. `--keep` is L1 only,
+  `--include-runs` is L3 only, and `--storage-root` is rejected for L2. Silently
+  ignoring a flag on a destructive operation is how an operator comes to believe
+  they asked for something they did not.
 - `--discard-legacy` stays required, as today, so the destructive path cannot be
   reached by a bare `collab reset`.
-- `--include-runs` is L3 only and is the single way to remove
-  `~/.collab/runs/`.
+- L2 takes no path argument. It acts on the current project root, resolved the
+  way the existing command resolves it, so B4 runs `collab reset --project` from
+  the storage root rather than passing it a path.
 
 ### 5.2 L1: retire named route claimants
 
@@ -151,33 +199,43 @@ Steps:
    private reader is not allowed: the appended retirement event must satisfy the
    reducer's equality precondition, and only the daemon's own replay defines the
    binding the reducer will compare against.
-3. **Select.** Group the live routes by `(project_scope, pane)` through the same
-   scope-local claimant scan delivery 1 introduced. A group of one is not a
-   target. For each group of two or more, the claimant named by `--keep` is kept;
-   every other claimant is a retirement target.
-4. **Gate liveness.** Refuse to retire a target that the replayed host state
-   still considers the pane owner: the target's agent is registered, and its
-   recorded transport still resolves to that pane. This is the same
-   route-plus-presence invariant `master_anchor_is_superseded`
-   (`part_07.rs:1197`) and `same_scope_pane_owner_supersedes` already use.
-   The refusal is `RESET_TARGET_LIVE` and names the claimant. Retiring a live
-   peer would break it, and the operator's intent is to remove residue.
+3. **Select.** Group the live routes by `(route_scope, pane)` through the same
+   scope-local claimant scan delivery 1 introduced. `RouteScope` is the app scope
+   plus the project scope, so two projects that share one pane are never one
+   group, and a scope-local decision stays scope-local. A group of one is not a
+   target. For each group of two or more, the single claimant named by `--keep`
+   is kept and every other claimant is a retirement target.
+4. **No liveness gate.** L1 does not probe tmux and does not ask whether the
+   target's worker is registered. Both claimants of one pane share the same pane
+   and the same `pane_pid`; they differ only in their Codex address, and deciding
+   which one is still real needs a live tmux probe that an offline command must
+   not perform. A gate of the form "refuse while the target is registered" would
+   refuse exactly the stale claims the operator needs to retire, because a stale
+   claim stays registered until something retires it. `--keep` is the
+   authorization and the liveness decision: the operator names the survivor, and
+   everything else on that pane is residue by that decision.
 5. **Stage.** Copy every file the run will rewrite into
-   `<state_root>/archive/reset-<run_id>/` and record its file count, byte count,
+   `<state_root>/archives/reset-<run_id>/` and record its file count, byte count,
    and tree digest with the existing `tree_digest` (`reset.rs:65`). The journal
    is appended to, not rewritten, so its staged copy is the archive of the
    pre-reset bytes.
 6. **Commit.** Append one `GlobalRouteClaimRetired` event per target (section
-   5.3) to the host journal, `sync_data`, then `sync_all` the directory. One
+   5.3) to the index journal, `sync_data`, then `sync_all` the directory. One
    append per target, in a stable order, so a partial failure is visible as a
-   prefix and can be rolled back by truncating to the recorded offset.
-7. **Verify.** Replay the journal again and assert that the kept claimant is the
-   only claimant of its pane in its scope, and that each retired address is
-   absent. Any mismatch rolls the journal back to the recorded offset and fails
+   prefix. The append first repairs a missing trailing newline, because the
+   append path assumes a whole-line record (`part_02.rs:820-825`) while the
+   compaction rewrite does not always end with one (`part_02.rs:1060-1101`).
+   The rollback is therefore a whole-file restore from the pre-image snapshot
+   taken before the append, not a truncation to a recorded offset.
+7. **Verify.** Replay the journal and assert that each retired address is absent
+   from the live index and carries a retired record, and that every claimant named
+   by `--keep` is still live. This runs inside the same transaction as the append
+   and before the receipt, so a journal that does not carry the retirement cannot
+   leave a receipt that claims it did. A mismatch restores the pre-image and fails
    with `RESET_VERIFY_FAILED`.
 8. **Receipt.** Append one record to `<state_root>/reset.jsonl` with the level,
-   the approval text, the run id, the archive path, the retired binding ids, the
-   kept binding id, the digest, and the timestamp (`append_reset_record`,
+   the approval text, the run id, the archive path, the retired claims, the kept
+   binding ids, the digest, and the timestamp (`append_reset_record`,
    `reset.rs:197`).
 
 L1 is idempotent: a second run finds no group with more than one claimant and
@@ -202,34 +260,55 @@ Event::GlobalRouteClaimRetired { record: RetiredRouteClaim }
 
 Reducer rule (`state_impl.rs`):
 
-1. `retire_current_thread_route(record.binding)`, so the route leaves the index
-   exactly as the existing retirement path removes it.
-2. Insert `record` into `GlobalState.retired_route_claims`, keyed by the same
-   `current_route_address_key` the route index uses
-   (`global_state_impl.rs:807`). A repeat of the same claim is a no-op, so replay
-   of a re-appended event is safe.
-3. Reject a record whose binding does not validate, or whose address is also
-   live, mirroring the tombstone invariant at `global_state_impl.rs:123-130`.
+1. Remove the live route for `record.binding`, exactly as
+   `retire_current_thread_route` already removes it.
+2. Insert `record` into `GlobalState.retired_route_claims`, keyed by
+   `retired_route_claim_key`, which is the same `current_route_address_key`
+   (`session id`, `native thread id`, tmux endpoint) the route index uses. A
+   repeat of the same record is a no-op, so replaying a re-appended event is safe.
+3. Reject a record whose binding does not validate. Because step 1 removes the
+   route in the same event, a live route and a retirement for the same address
+   cannot both come out of the reducer. `GlobalState::validate` still rejects that
+   pair, fail-closed, so a hand-edited or partially written journal stops startup
+   instead of silently resurrecting the claim.
 
-`GlobalState::validate` gains the same cross-check for the new map.
+Reactivation. `set_current_thread_route` clears the retirement for the address it
+is installing. Registering again is live activity, and the register path is the
+only producer that can prove it, so a peer that really is running comes back by
+registering. The reconcilers cannot prove it, which is the whole difference.
 
-Consumers. Both reconcilers consult the map before republishing, and record the
-skip:
+Compaction. `rewrite_journal_locked` builds the compacted journal from
+`State::snapshot_events` alone, and `purge_expired_storage` runs at startup
+before the reconcilers (`part_12.rs:892-893`). The retirement must therefore be
+re-emitted from `snapshot_events`, after the route sets and after the tombstone
+events, so the reducer removes the claim rather than re-installing it. A record
+that is only in the in-memory map is lost on the first compaction.
+
+Consumers. Four places consult the map, and each records the skip:
 
 - `reconcile_started_thread_routes` (`runtime_manager_setup.rs:400`): before the
-  publish at `:418`, skip when the binding's address is retired, and write
-  `ROUTE_CLAIM_RETIRED: binding <id> agent <agent> was retired by an operator;
-  not republished` to the host log.
+  publish, skip a retired address and log
+  `RECOVERY_RECONCILE_SKIPPED_RETIRED: binding <id> agent <agent> was retired by
+  an operator; not republished`.
 - `reconcile_same_pane_master_routes` (`runtime_manager_setup.rs:326`): the same
-  skip before the publish at `:345`.
+  skip before its publish.
+- `restore_unique_current_thread_routes_from_bindings` (`state_impl.rs:3-61`):
+  skip a retired address, otherwise the replay helper re-creates the claim and
+  clears the record in the same step.
+- `same_pane_master_route_ready` (`runtime_manager_setup.rs:251-319`): treat a
+  retired pending claimant as resolved rather than as a same-pane conflict.
+  Without this the request path fences every non-Register request in the project
+  forever, because the claimant it is waiting on can never be published.
 
-This is the only place the design changes startup behavior, and it is
-fail-closed in the right direction: the skip is gated on an explicit,
-operator-authorized, durable record, not on an error. Nothing else changes. A
-retired claim that a worker still tries to use must fail loudly rather than
-silently degrade, so the register path answers
-`ROUTE_CLAIM_RETIRED: binding <id> was retired by an operator; register a new
-binding` instead of publishing.
+The request-path fence also names its remedy now. The single-different-claimant
+branch and the `host and project pane routes disagree` error both report the
+pane, the scope, the owner, the binding, and the generation, and both point at
+`collab reset --routes --keep <binding_id>`. An operator who is told only that
+two routes disagree cannot tell which one to keep.
+
+This is the only place the design changes startup behavior, and it is fail-closed
+in the right direction: the skip is gated on an explicit, operator-authorized,
+durable record, not on an error. Nothing else changes.
 
 ### 5.4 L2: rebuild the project baseline
 
@@ -248,34 +327,51 @@ L2 keeps today's behavior and states its boundary:
 
 ### 5.5 L3: rebuild the host control plane
 
-L3 is the "complete reset" the user asked for. It requires `--storage-root`.
+L3 is the "complete reset" the user asked for. It requires `--storage-root`,
+because the live index it must clear is spread across two roots: the host
+control plane under `<state_root>` and the resident project's runtime journal
+under `<storage_root>/.agent-collab/server/`.
 
 Retired, staged, and archived:
 
 | Target | Path |
 | --- | --- |
-| Route records | `<state_root>/routes.jsonl` |
+| Host route records | `<state_root>/routes.jsonl` |
 | Host journal | `<state_root>/journal.jsonl` |
 | Host events | `<state_root>/events.jsonl` |
 | Host log | `<state_root>/log.txt` |
-| Project runtime journals | `<storage_root>/.agent-collab/server/{journal,events,log}.jsonl` |
-| Identities and archives | `<state_root>/identities/`, `<state_root>/archive/` |
+| Host identities and project directories | `<state_root>/identities/`, `<state_root>/projects/` |
+| Resident index journal | `<storage_root>/.agent-collab/server/journal.jsonl` |
+| Resident index events and log | `<storage_root>/.agent-collab/server/{events.jsonl,log.txt}` |
+| Run notes | `<state_root>/runs/`, only with `--include-runs` |
 
-Kept:
+Kept, and why:
 
-- `~/.collab/runs/`, unless `--include-runs` is given. Run notes are the durable
-  per-run record and must survive a control-plane reset by default.
-- `~/.collab/service.json`, because it belongs to an external supervisor.
-- The socket and lock files are removed only by `collab down`, which L3 requires
-  first. L3 does not delete a live socket.
+- `<state_root>/reset.jsonl` and `<state_root>/archives/`. These are the audit
+  trail of every reset, including this one. Deleting them would make the
+  operation unauditable, and the archive of this run is written under
+  `archives/`, so removing the directory would remove the evidence for the run
+  that is still in progress.
+- `<state_root>/service.json`, `build-version*`, `daemon.lock`, `server.pid`, and
+  `server.sock`. `service.json` describes an external supervisor's desired state;
+  the rest are the daemon's own liveness files, and `collab down` owns them.
+  L3 never deletes a live socket.
+- `<storage_root>/.agent-collab/{mailbox,messages,handoff,merge-queue,runs,mailboxes}`.
+  That is project business payload, not control plane, and clearing it is L2's
+  job, where the operator names the project. L3 clears the control plane of the
+  root it was given, not the business history of every project under it.
+- `<state_root>/runs/` unless `--include-runs` is given. Run notes are the
+  durable per-run record and must survive a control-plane reset by default.
 
-Rebuilt: an empty baseline for the current project, written by the same code
-path L2 uses, so the two levels cannot drift.
+No baseline is rebuilt. L3 leaves both roots without a live index, and the next
+`collab up` recreates the daemon's own state from empty, exactly as a first
+start does. L2 is the level that rebuilds a project baseline.
 
 `--storage-root` must be an existing directory that contains
 `.agent-collab/server/journal.jsonl`, or L3 fails with
 `RESET_STORAGE_ROOT_INVALID` before staging anything. This keeps a typo from
-archiving an unrelated directory.
+archiving an unrelated directory. The same ownership check as L1 applies: a root
+whose journal holds records for a different root is refused.
 
 ### 5.6 Transaction, audit, and failure terminals
 
@@ -288,13 +384,12 @@ authorize -> level select -> lock -> stage -> commit -> verify -> receipt
                                     rollback on any failure
 ```
 
-- Staging copies bytes and records counts and a digest
-  (`stage_retired_roots`, `reset.rs:269`).
-- A failure before the receipt calls `rollback_retired_roots` (`:280`), which
-  restores the staged bytes and, for L1, truncates the journal to the recorded
-  offset.
-- `discard_staged_roots` (`:310`) only runs after the receipt is durable, so the
-  archive is never removed before the audit record exists.
+- Staging copies bytes and records counts and a digest (`stage_retired_roots`).
+- A failure before the receipt calls `rollback_retired_roots`, which restores the
+  staged bytes. For L1 the journal and `reset.jsonl` are each restored from the
+  pre-image snapshot `snapshot_file` took before the transaction.
+- `discard_staged_roots` only runs after the receipt is durable, so the archive is
+  never removed before the audit record exists.
 - `reset.jsonl` is append-only and holds the approval text, so the audit trail
   names who authorized the run.
 
@@ -303,14 +398,18 @@ Failure terminals, each a DAG node with acceptance evidence:
 | Terminal | Condition |
 | --- | --- |
 | `RESET_LEVEL_REQUIRED` | No level, or two levels |
+| `RESET_LEVEL_FLAG_MISMATCH` | A flag the selected level does not use |
 | `RESET_AUTHORIZATION_REQUIRED` | Missing `--discard-legacy` or blank `--approval` |
 | `RESET_STORAGE_ROOT_REQUIRED` | L1 or L3 without `--storage-root` |
-| `RESET_STORAGE_ROOT_INVALID` | `--storage-root` is not a collab storage root |
+| `RESET_STORAGE_ROOT_INVALID` | `--storage-root` is not a collab storage root, or owns no record in the journal it names |
 | `RESET_DAEMON_LIVE` | A daemon answers on the socket |
-| `RESET_KEEP_REQUIRED` | L1 with more than one remaining claimant and no `--keep` |
-| `RESET_TARGET_LIVE` | L1 would retire a live pane owner |
+| `RESET_KEEP_REQUIRED` | An ambiguous pane has no single claimant named by `--keep` |
 | `RESET_PROJECT_HOLDS_HOST_INDEX` | L2 on the root that holds the index |
 | `RESET_VERIFY_FAILED` | Post-commit replay does not match the intent |
+
+There is no liveness terminal. L1 deliberately does not test whether a target is
+still live, for the reason in step 4 above, so `--keep` is the only gate between
+the operator and a retirement.
 
 ## 6. DAG
 
@@ -331,12 +430,12 @@ therefore names its producing node and its acceptance case:
 | Producing node | Terminal | Acceptance |
 | --- | --- | --- |
 | `authorize_reset` | `RESET_LEVEL_REQUIRED` | B0 |
+| `authorize_reset` | `RESET_LEVEL_FLAG_MISMATCH` | B0 |
 | `authorize_reset` | `RESET_AUTHORIZATION_REQUIRED` | existing reset tests |
 | `authorize_reset` | `RESET_STORAGE_ROOT_REQUIRED` | B1 |
 | `authorize_reset` | `RESET_STORAGE_ROOT_INVALID` | B7 |
 | `prove_exclusivity` | `RESET_DAEMON_LIVE` | existing reset tests |
 | `inventory_control_plane` | `RESET_KEEP_REQUIRED` | B3 |
-| `inventory_control_plane` | `RESET_TARGET_LIVE` | B8 |
 | `inventory_control_plane` | `RESET_PROJECT_HOLDS_HOST_INDEX` | B4 |
 | `verify_retirement` | `RESET_VERIFY_FAILED` | B9 |
 
@@ -347,24 +446,42 @@ Success path, in order: `authorize_reset` -> `prove_exclusivity` ->
 The graph is registered in `docs/dagpipe/manifest.json` and validated with
 `dagpipe graph validate` (8 nodes, 7 edges, 8 waves, exit 0).
 
+Every node maps to code that exists, so the graph is not ahead of the
+implementation:
+
+| Node | Code |
+| --- | --- |
+| `authorize_reset` | `ResetLevel::select`, `ResetRequest::validate_level_flags`, and the `--approval`/`--discard-legacy` check in `reset::run` |
+| `prove_exclusivity` | `acquire_reset_lock` plus the `client::alive` gate in each level |
+| `inventory_control_plane` | `resolve_index_root` and `pane_claimant_groups` (L1), `LEGACY_CONTROL_ROOTS` and `reject_unsafe_control_roots` (L2), `host_control_plane_entries` (L3) |
+| `archive_inventory` | `archive_retired` over `tree_digest`, `copy_tree`, and `stage_retired_roots` |
+| `retire_selected_state` | `append_retirement_events` (L1), the legacy-root retire loop and `retire_host_routes` (L2), the removal of `host_control_plane_entries` (L3) |
+| `verify_retirement` | the post-commit `replay_host_index` assertion (L1), `is_current_empty_baseline` (L2), and the `RESET_PROJECT_HOLDS_HOST_INDEX` check |
+| `rebuild_baseline` | the L2 baseline rebuild in `run_project`; a no-op for L1 and L3 |
+| `record_reset_receipt` | `append_reset_record`, then `discard_staged_roots` |
+
+`rollback_retired_roots` is the failure edge out of `retire_selected_state`, not
+a node: it restores the pre-image of the node that failed and returns the error.
+
 ## 7. Acceptance
 
 Black box, from the real CLI entry.
 
 | Id | Case | Expected |
 | --- | --- | --- |
+| B0 | `collab reset` with no level, and with two levels; then `collab reset --project --storage-root <root>` | `RESET_LEVEL_REQUIRED` and `RESET_LEVEL_FLAG_MISMATCH`; nothing changes |
 | B1 | `collab reset --routes` without `--storage-root`, while the live index is not at the state root | `RESET_STORAGE_ROOT_REQUIRED`; nothing changes |
 | B2 | `collab reset --routes --storage-root <root> --keep <binding_id> --approval <t>` on a state copy with a same-scope duplicate | after the daemon replays, the named claimant is retired, the kept one is the only claimant of that pane, business state and identities are unchanged, and a second run is a no-op |
-| B3 | The same command with several remaining claimants and no `--keep` | nothing changes; the candidates are listed; the exit code is non-zero |
-| B4 | `collab reset --project <the storage root>` | refused with `RESET_PROJECT_HOLDS_HOST_INDEX`; the error points to L3 |
-| B5 | `collab reset --project` and `collab reset --host` | the archive holds the retired bytes; `reset.jsonl` holds the receipt with the approval text; the baseline is rebuilt; `~/.collab/runs/` survives unless `--include-runs` was given |
+| B3 | The same command with an ambiguous pane that `--keep` does not resolve | nothing changes; every conflicting pane and its claimants are listed; the exit code is non-zero |
+| B4 | `collab reset --project` run from inside the storage root | refused with `RESET_PROJECT_HOLDS_HOST_INDEX`; the error points to L3 |
+| B5 | `collab reset --project`, then `collab reset --host --storage-root <root>`, then `collab up` | L2 archives the project tree and rebuilds its baseline; L3 archives both control-plane roots and leaves no index; `reset.jsonl` holds both receipts with their approval text; `~/.collab/runs/` survives unless `--include-runs` was given |
 | B6 | Durability: after B2, start the daemon twice | the retired claim does not come back; the index fingerprint is identical across the two starts; the host log records the skip |
-| B0 | `collab reset` with no level, and with two levels | `RESET_LEVEL_REQUIRED`; nothing changes |
 | B7 | `collab reset --host --storage-root <a directory that is not a collab root>` | `RESET_STORAGE_ROOT_INVALID`; nothing is staged |
-| B8 | `collab reset --routes` naming a target whose worker is registered and whose transport is still that pane | `RESET_TARGET_LIVE`; nothing changes |
-| B9 | `collab reset --routes` on a copy whose post-commit replay cannot satisfy the postcondition | `RESET_VERIFY_FAILED`; the journal is truncated to its recorded offset and the staged bytes are restored |
+| B8 | `collab reset --routes` on a copy with two ambiguous panes in one scope and two `--keep` flags | both stale claims are retired in one run and both survivors remain |
+| B9 | `collab reset --routes` on a copy whose post-commit replay cannot satisfy the postcondition | `RESET_VERIFY_FAILED`; the journal is restored from its pre-image snapshot and no receipt is written |
 | B10 | A pane-only candidate registers in project A while project B holds a pane-only anchor on the same pane | the candidate is not rejected as ambiguous; project B is untouched unless `retire_cross_project_anchor` is set, and then the existing retirement path runs unchanged |
 | B11 | Startup with a pending same-pane master whose pane has one in-scope claimant that is not itself, plus a cross-scope claimant | the daemon starts or fails with a named conflict that carries the `collab reset --routes --keep` remedy; it never fails with an unnamed disagreement |
+| B12 | A peer registers at an address that was retired, without a daemon restart | the registration succeeds, the address is live again, and its retired record is gone |
 
 B6 is the acceptance that makes L1 real. Without it, L1 is cosmetic.
 
@@ -374,47 +491,63 @@ The independent architecture review of delivery 1 returned PASS and left three
 open items. They live in the same files and the same invariant family as this
 delivery, so this delivery closes them instead of leaving a known gap.
 
-- **P2-1, the register path still asks a host-wide pane question.**
-  `validate_current_thread_candidate` (`runtime_manager_setup.rs:498-595`)
+- **P2-1, the register path still asks a host-wide pane question.** FIXED.
+  `validate_current_thread_candidate` (`runtime_manager_setup.rs:580-712`)
   collects anchor matches from every runtime's project bindings and rejects with
   `RUNTIME_BINDING_REJECTED: tmux identity anchor matches multiple persisted
-  peers` when more than one matches. Its pane arm (`:549-558`) applies when the
-  candidate carries no Codex ids, so a pane-only candidate counts a claimant in
-  another project on the same pane. Two projects may share a pane, so this
-  breaks the delivery 1 invariant from a different call site. The fix counts
-  ambiguity only among same-scope matches and leaves a single cross-scope match
-  on the existing `retire_cross_project_anchor` path; it does not change what
-  retirement means. Acceptance: B10.
-- **P3-1, a startup input class whose direction changed.**
+  peers` when more than one matches. Its pane arm applies when the candidate
+  carries no Codex ids, so a pane-only candidate counted a claimant in another
+  project on the same pane. Two projects may share a pane, so this breaks the
+  delivery 1 invariant from a different call site. The register path now counts
+  ambiguity only among same-scope matches and prefers the in-scope match as the
+  anchor, so a single cross-scope match stays on the existing
+  `retire_cross_project_anchor` path. When nothing matches in scope, the previous
+  fail-closed rule for several foreign matches is unchanged. Acceptance: B10.
+- **P3-1, a startup input class whose direction changed.** FIXED.
   `reconcile_same_pane_master_routes` publishes a pending same-pane master when
-  the in-scope lookup finds no claimant (`:343-349`). When a scope has exactly
-  one claimant X that is not the pending binding, and another project also
-  claims the pane, the host-wide query used to return `None` and publish, while
-  the in-scope query now returns X and fails. The new direction is fail-closed
-  and it refuses to create a second in-scope claimant, which is the invariant
-  delivery 1 exists to protect, but it can stop the daemon from starting. The
+  the in-scope lookup finds no claimant. When a scope has exactly one claimant X
+  that is not the pending binding, and another project also claims the pane, the
+  host-wide query used to return `None` and publish, while the in-scope query now
+  returns X and fails. The new direction is fail-closed and it refuses to create
+  a second in-scope claimant, which is the invariant delivery 1 exists to
+  protect, but it could stop the daemon from starting with no way forward. The
   durable retirement rule in section 5.3 is the fix: a pending master whose pane
-  is already owned in scope is a named conflict with the `collab reset --routes`
-  remedy, not an opaque startup failure. Acceptance: B11.
-- **P3-4, the reconcile graph is ahead of the code.**
-  `docs/dagpipe/collab-pane-route-reconcile.graph.json` names
+  is already owned in scope now fails with a named conflict that reports the
+  pane, the scope, both owners, both generations, and the
+  `collab reset --routes --keep <binding_id>` remedy, and a pending master whose
+  own address was retired is treated as resolved instead of as a conflict.
+  Acceptance: B11.
+- **P3-4, the reconcile graph is ahead of the code.** FIXED.
+  `docs/dagpipe/collab-pane-route-reconcile.graph.json` named
   `resolve_owner_route` and `emit_reconcile_receipt` as nodes, but the reconciler
-  returns `Result` and there is no `ReconcileReceipt` type. This delivery
-  rewrites the graph to describe the code that exists: classify, resolve,
-  publish, verify, and return the named remainder. Acceptance: the graph
-  validates and every node has a function in the reconciler.
+  returns `Result` and there is no `ReconcileReceipt` type, so the graph promised
+  a persisted artifact that nothing produces. The graph is now `0.3.0` and names
+  the code that exists: `classify_pane_claimants`, `resolve_scope_pane_owner`,
+  `publish_owner_route`, `verify_scope_pane_uniqueness`, and
+  `return_named_outcome`, whose output is the reconciler's own outcome instead of
+  a receipt. Acceptance: `dagpipe graph validate` reports
+  `valid DAG: appsdk-collab-pane-route-reconcile@0.3.0 (5 nodes, 4 edges,
+  5 waves)`.
 
 White-box regression gate, not a substitute: the full collab suite stays green,
 including the existing reset tests and the two delivery-1 pane tests.
 
 ## 8. Risks and rollback
 
-- **A live peer is retired by mistake.** Mitigated by the liveness gate in step 4
-  and by requiring `--keep`. The gate is the same invariant the daemon uses.
+- **A live peer is retired by mistake.** `--keep` is the only gate, by design
+  (section 5.2 step 4). The operator names the survivor, and everything else on
+  that pane is residue by that decision. The record makes the decision auditable,
+  and a peer that really is running comes back by registering at the same
+  address, which clears the record. The mitigation is therefore reversible rather
+  than preventive, and it is bounded: the run retires at most the claimants of
+  panes that already have more than one claimant in one scope.
 - **The retirement record blocks a legitimate future rebind.** The reducer
-  clears a retirement record for an address when a new binding is set for that
-  address, mirroring the tombstone rule at `global_state_impl.rs:815-823`. A
-  worker that comes back with a new binding id is not blocked.
+  clears a retirement record for an address when a new route is set for that
+  address. A worker that comes back, with or without a new binding id, is not
+  blocked.
+- **A stale record outlives its claim.** The record is cleared on reactivation
+  and is re-emitted from `snapshot_events`, so it cannot be lost by compaction
+  and cannot silently accumulate: one address has at most one record.
 - **L3 removes evidence.** Everything retired is staged and archived before it
   is removed, and the receipt is written before the staged copy is discarded.
   `~/.collab/runs/` survives by default.
@@ -426,18 +559,40 @@ including the existing reset tests and the two delivery-1 pane tests.
 
 ## 9. File scope
 
-- `collab/src/reset.rs` — levels, staging, verification, receipts.
+- `collab/src/reset.rs` — the three levels, the retired-claim inventory, staging,
+  verification, and receipts.
 - `collab/src/main.rs` — the `Reset` command flags and dispatch.
-- `collab/src/server/state.rs`, `state_impl.rs`, `global_state_impl.rs`,
-  `global_state_models.rs` — the retirement record, its reducer rule, its map,
-  and its validation.
+- `collab/src/server/global_state_models.rs` — `RetiredRouteClaim` and the
+  `GlobalState.retired_route_claims` map.
+- `collab/src/server/global_state_impl.rs` — the map's lifecycle: record,
+  lookup, clear-on-reactivation, and validation.
+- `collab/src/server/state.rs` — `Event::GlobalRouteClaimRetired`.
+- `collab/src/server/state_impl.rs` — the reducer branch, the `snapshot_events`
+  emission, and the replay helper's skip.
+- `collab/src/server/mod_parts/part_12.rs` — `replay_host_index`, the replay
+  entry L1 uses to read the index.
+- `collab/src/server/mod_parts/part_06.rs` — the comment recording why a
+  successful registration deliberately re-activates a retired address.
 - `collab/src/server/mod_parts/runtime_manager_setup.rs` — the two reconciler
-  skips.
-- `collab/src/reset_tests.rs` — unit and regression tests.
-- `docs/dagpipe/collab-reset-operation.graph.json`, `docs/dagpipe/manifest.json`.
-- `skills/collab/references/state-paths.md` and `SKILL.md` — the operator-facing
-  description of the three levels.
+  skips, the replay-path skip, the request-path skip, the scope-local
+  `validate_current_thread_candidate` (P2-1), and the named conflict errors with
+  their `collab reset --routes --keep` remedy.
+- `collab/src/server/mod.rs` — the `RetiredRouteClaim` re-export.
+- `collab/src/reset_tests.rs` — level gating, multi-pane L1, and the refused-run
+  cases.
+- `collab/src/server/host_route_registry_tests/part_02_tail.rs` — the reducer,
+  compaction, replay-helper, and request-path regression tests.
+- `docs/dagpipe/collab-control-plane-reset.graph.json` — the extended reset
+  graph, `0.2.0`.
+- `docs/dagpipe/collab-pane-route-reconcile.graph.json` — the reconcile graph
+  rewritten to match the reconciler, `0.3.0` (P3-4).
+- `docs/dagpipe/manifest.json` — graph registration.
+
+The operator-facing description of the three levels lives in the installed
+`collab` skill (`~/.agents/skills/collab`), which is outside this repository. It
+is updated after the merge, from the merged source, so the skill never describes
+a flag the installed binary does not have.
 
 Delivery 1 owns `global_state_impl.rs` and `runtime_manager_setup.rs` too. This
-delivery must rebase onto the merged delivery 1 before its own review, and the
-two deliveries must not be reviewed as one candidate.
+delivery rebased onto the merged delivery 1 (`72810b0`) before its own review,
+and the two deliveries are not reviewed as one candidate.

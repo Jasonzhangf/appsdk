@@ -1454,3 +1454,378 @@
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    fn retire_test_scope(project: &Path, app: &str) -> crate::server::global_state::RouteScope {
+        crate::server::global_state::RouteScope {
+            app_scope_id: AppServerId::new(app).unwrap(),
+            project_scope_id: GlobalState::canonical_project_scope(project).unwrap(),
+        }
+    }
+
+    fn retire_test_binding(
+        scope: &crate::server::global_state::RouteScope,
+        agent: &str,
+        binding_id: &str,
+        session: &str,
+        thread: &str,
+        pane: &str,
+    ) -> RuntimeBinding {
+        let mut binding = RuntimeBinding::new_with_session(
+            scope.project_scope_id.clone(),
+            scope.app_scope_id.clone(),
+            crate::identity::AgentId::new(agent).unwrap(),
+            crate::identity::RuntimeId::new(format!("runtime-{agent}")).unwrap(),
+            BindingId::new(binding_id).unwrap(),
+            1,
+            Some(crate::identity::SessionId::new(session).unwrap()),
+            Some(crate::identity::NativeThreadId::new(thread).unwrap()),
+        )
+        .unwrap();
+        binding.tmux_endpoint = Some(crate::proto::TmuxEndpoint {
+            socket_path: "/tmp/collab-retire-tests/t".to_owned(),
+            server_pid: 1,
+            tmux_session_id: "$41".to_owned(),
+            pane_id: pane.to_owned(),
+            pane_pid: 1,
+            codex_session_id: Some(session.to_owned()),
+            codex_thread_id: Some(thread.to_owned()),
+        });
+        binding
+    }
+
+    /// One retirement event must both clear the index and record the decision.
+    ///
+    /// This is the durability core: an index-only retirement is undone by the
+    /// next replay, and both reconcilers republish from the project side.
+    #[test]
+    fn a_retired_route_claim_leaves_the_index_and_survives_replay() {
+        let root =
+            std::env::temp_dir().join(format!("collab-retire-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let scope = retire_test_scope(&root, "app-retire");
+        let kept = retire_test_binding(
+            &scope,
+            "retire-kept",
+            "binding-retire-kept",
+            "session-retire-kept",
+            "thread-retire-kept",
+            "%41",
+        );
+        let stale = retire_test_binding(
+            &scope,
+            "retire-stale",
+            "binding-retire-stale",
+            "session-retire-stale",
+            "thread-retire-stale",
+            "%41",
+        );
+        let endpoint = stale.tmux_endpoint.clone().unwrap();
+
+        let mut state = State::default();
+        state
+            .apply_checked(&Event::GlobalCurrentThreadRouteSet {
+                binding: kept.clone(),
+            })
+            .unwrap();
+        state
+            .apply_checked(&Event::GlobalCurrentThreadRouteSet {
+                binding: stale.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .global
+                .tmux_pane_route_claimants_in_scope(&scope, &endpoint)
+                .len(),
+            2,
+            "the fixture must start with two claimants on one pane"
+        );
+
+        let record = RetiredRouteClaim::new(
+            stale.clone(),
+            "operator retired the stale claimant",
+            "collab reset --routes",
+            42,
+        )
+        .unwrap();
+        state
+            .apply_checked(&Event::GlobalRouteClaimRetired {
+                record: record.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            state
+                .global
+                .tmux_pane_route_claimants_in_scope(&scope, &endpoint)
+                .len(),
+            1,
+            "the retired claim must leave the index"
+        );
+        assert_eq!(state.global.lookup_retired_route_claim(&stale), Some(&record));
+        state.global.validate().unwrap();
+
+        // Replay reconstructs both halves of the operation from the one event.
+        let mut replayed = State::default();
+        replayed
+            .apply_checked(&Event::GlobalRouteClaimRetired {
+                record: record.clone(),
+            })
+            .unwrap();
+        assert!(replayed
+            .global
+            .lookup_current_thread_route(
+                stale.session_id.as_ref().unwrap(),
+                stale.native_thread_id.as_ref().unwrap(),
+            )
+            .is_none());
+        assert_eq!(
+            replayed.global.lookup_retired_route_claim(&stale),
+            Some(&record)
+        );
+        replayed.global.validate().unwrap();
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A later live route at the retired address is real activity, not a
+    /// resurrection, so the record must not outlive it.
+    #[test]
+    fn a_new_route_at_the_retired_address_clears_the_retirement() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-retire-reactivate-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let scope = retire_test_scope(&root, "app-retire-reactivate");
+        let stale = retire_test_binding(
+            &scope,
+            "retire-reactivate",
+            "binding-retire-reactivate",
+            "session-retire-reactivate",
+            "thread-retire-reactivate",
+            "%42",
+        );
+
+        let mut state = State::default();
+        state
+            .apply_checked(&Event::GlobalCurrentThreadRouteSet {
+                binding: stale.clone(),
+            })
+            .unwrap();
+        let record = RetiredRouteClaim::new(stale.clone(), "approval", "reason", 7).unwrap();
+        state
+            .apply_checked(&Event::GlobalRouteClaimRetired {
+                record: record.clone(),
+            })
+            .unwrap();
+        assert!(state.global.lookup_retired_route_claim(&stale).is_some());
+
+        state
+            .apply_checked(&Event::GlobalCurrentThreadRouteSet {
+                binding: stale.clone(),
+            })
+            .unwrap();
+        assert!(
+            state.global.lookup_retired_route_claim(&stale).is_none(),
+            "a live route at the address must clear the retirement"
+        );
+        state.global.validate().unwrap();
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The journal is compacted from `snapshot_events`, so a retirement that is
+    /// not re-emitted there is lost on the first compaction.
+    #[test]
+    fn snapshot_events_reemits_the_retired_route_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "collab-retire-compaction-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let scope = retire_test_scope(&root, "app-retire-compaction");
+        let stale = retire_test_binding(
+            &scope,
+            "retire-compaction",
+            "binding-retire-compaction",
+            "session-retire-compaction",
+            "thread-retire-compaction",
+            "%43",
+        );
+
+        let mut state = State::default();
+        state
+            .apply_checked(&Event::GlobalCurrentThreadRouteSet {
+                binding: stale.clone(),
+            })
+            .unwrap();
+        let record = RetiredRouteClaim::new(stale.clone(), "approval", "reason", 11).unwrap();
+        state
+            .apply_checked(&Event::GlobalRouteClaimRetired {
+                record: record.clone(),
+            })
+            .unwrap();
+
+        let events = state.snapshot_events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::GlobalRouteClaimRetired { record: emitted } if emitted == &record
+            )),
+            "the compaction snapshot must carry the retirement"
+        );
+
+        let mut compacted = State::default();
+        for event in &events {
+            compacted.apply(event);
+        }
+        assert_eq!(
+            compacted.global.lookup_retired_route_claim(&stale),
+            Some(&record),
+            "a compacted journal must still reconstruct the retirement"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The replay helper rebuilds missing live routes from project bindings.
+    /// Without a retired check it recreates the claim and clears the record.
+    #[tokio::test]
+    async fn replay_restore_skips_a_retired_route_address() {
+        let (server, root, _) = test_server();
+        let worker = "retire-restore-worker";
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+        let registered = handle_register_with_app_scope_unfinalized(
+            &server,
+            worker.into(),
+            format!("token-{worker}"),
+            root.display().to_string(),
+            Some(app),
+            Some(test_candidates(worker).unwrap()),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let binding = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == worker)
+            .cloned()
+            .expect("a successful registration creates a project binding");
+
+        let mut state = server.state.lock().unwrap();
+        state
+            .apply_checked(&Event::GlobalCurrentThreadRouteSet {
+                binding: binding.clone(),
+            })
+            .unwrap();
+        let record =
+            RetiredRouteClaim::new(binding.clone(), "operator retired this claim", "reason", 7)
+                .unwrap();
+        state
+            .apply_checked(&Event::GlobalRouteClaimRetired {
+                record: record.clone(),
+            })
+            .unwrap();
+
+        state
+            .restore_unique_current_thread_routes_from_bindings()
+            .unwrap();
+
+        assert_eq!(
+            state.global.lookup_retired_route_claim(&binding),
+            Some(&record)
+        );
+        assert!(
+            state
+                .global
+                .lookup_current_thread_route(
+                    binding.session_id.as_ref().unwrap(),
+                    binding.native_thread_id.as_ref().unwrap(),
+                )
+                .is_none(),
+            "the replay helper must not rebuild a retired address"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The request path fences on a pending same-pane master. A retired claim is
+    /// resolved rather than stuck, so it must not fence every non-Register
+    /// request in the project.
+    #[tokio::test]
+    async fn same_pane_master_route_ready_does_not_fence_a_retired_pending_master() {
+        let (host, host_root, _) = test_server();
+        let (runtime, project_root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(host_root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(host.clone(), &host_paths).unwrap();
+        let app = AppServerId::new(crate::identity::CLI_APP_SERVER_ID).unwrap();
+
+        let master_worker = "retired-pane-master";
+        let master_token = "token-retired-pane-master";
+        let registered = handle_register_with_app_scope_unfinalized(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            project_root.display().to_string(),
+            Some(app.clone()),
+            Some(test_candidates(master_worker).unwrap()),
+        );
+        assert!(registered.ok, "{registered:?}");
+        let promoted = handle_master_promote(
+            &runtime,
+            master_worker.into(),
+            master_token.into(),
+            "user approved the pane master".into(),
+        );
+        assert!(promoted.ok, "{promoted:?}");
+        let scope = crate::server::global_state::RouteScope {
+            app_scope_id: app.clone(),
+            project_scope_id: GlobalState::canonical_project_scope(&project_root).unwrap(),
+        };
+        let master_binding = runtime
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_binding_for(
+                &scope,
+                &BindingId::new(format!("binding-{master_worker}")).unwrap(),
+            )
+            .unwrap()
+            .clone();
+        host.commit_checked(&[Event::GlobalCurrentThreadRouteSet {
+            binding: master_binding.clone(),
+        }])
+        .unwrap();
+        manager.install_runtime(
+            &(
+                app.as_str().to_owned(),
+                master_binding.project_scope.as_str().to_owned(),
+            ),
+            runtime.clone(),
+            None,
+        );
+
+        // The operator retires the pending master anchor. Without the retired
+        // check this fences every non-Register request in the project.
+        let record = RetiredRouteClaim::new(
+            master_binding.clone(),
+            "operator retired the pane master anchor",
+            "collab reset --routes",
+            9,
+        )
+        .unwrap();
+        host.commit_checked(&[Event::GlobalRouteClaimRetired { record }])
+            .unwrap();
+
+        let ready = manager.same_pane_master_route_ready(&runtime);
+        assert!(ready.is_ok(), "{ready:?}");
+
+        std::fs::remove_dir_all(host_root).unwrap();
+        std::fs::remove_dir_all(project_root).unwrap();
+    }

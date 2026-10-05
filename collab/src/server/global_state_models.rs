@@ -551,6 +551,66 @@ impl RuntimeBindingTombstone {
 
 
 
+/// A durable record that an operator retired one route claim.
+///
+/// This is deliberately not a `RuntimeBindingTombstone`. A tombstone says "this
+/// address moved to that binding" and requires a `rebound_to` binding that
+/// shares the project, app scope, agent, and binding id. An operator retirement
+/// has no successor, so it has no valid `rebound_to`.
+///
+/// The record must survive replay, because the journal still holds the route
+/// set event for the address and both reconcilers republish from the project
+/// side when the host route is missing. Without a durable record the retirement
+/// is undone at the next daemon start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetiredRouteClaim {
+    pub binding: RuntimeBinding,
+    pub approval: String,
+    pub reason: String,
+    pub at_ms: i64,
+}
+
+impl RetiredRouteClaim {
+    pub fn new(
+        binding: RuntimeBinding,
+        approval: impl Into<String>,
+        reason: impl Into<String>,
+        at_ms: i64,
+    ) -> Result<Self, StateError> {
+        let claim = Self {
+            binding,
+            approval: approval.into(),
+            reason: reason.into(),
+            at_ms,
+        };
+        claim.validate()?;
+        Ok(claim)
+    }
+
+    pub fn validate(&self) -> Result<(), StateError> {
+        self.binding.validate()?;
+        if self.binding.session_id.is_none() || self.binding.native_thread_id.is_none() {
+            return Err(StateError::invalid(
+                "retired route claim",
+                "requires both a session id and a native thread id",
+            ));
+        }
+        if self.approval.trim().is_empty() {
+            return Err(StateError::invalid(
+                "retired route claim",
+                "requires a non-empty operator approval",
+            ));
+        }
+        if self.approval.chars().any(char::is_control) {
+            return Err(StateError::invalid(
+                "retired route claim approval",
+                "must not contain control characters",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A master capability is an explicit grant bound to one live runtime
 /// generation.  A registration has no role field: absence of this record is
 /// the durable default `Peer` role.
@@ -1387,6 +1447,13 @@ pub struct GlobalState {
     pub legacy_thread_routes: BTreeMap<(String, String, String), RuntimeBinding>,
     #[serde(default)]
     pub current_thread_route_tombstones: BTreeMap<String, RuntimeBindingTombstone>,
+    /// Route claims an operator retired, keyed by the route address key.
+    ///
+    /// Both reconcilers consult this before they republish a binding whose host
+    /// route is missing, so an offline retirement is not undone by the next
+    /// daemon start. A new binding for the same address clears the entry.
+    #[serde(default)]
+    pub retired_route_claims: BTreeMap<String, RetiredRouteClaim>,
     #[serde(default)]
     pub command_receipts: BTreeMap<String, CommandReceipt>,
     #[serde(default)]

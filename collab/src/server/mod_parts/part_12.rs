@@ -350,6 +350,20 @@ fn replay(root: &Path) -> anyhow::Result<State> {
     replay_from_journal(root, &root.join(".agent-collab/server/journal.jsonl"))
 }
 
+/// Replay the host index exactly as the daemon does.
+///
+/// The offline reset owner must use this reader and not a private one. The
+/// claim it retires has to be the same binding the reducer compares against on
+/// the next start, and only this reader performs the same current-thread
+/// restore and legacy indexing steps.
+pub fn replay_host_index(storage_root: &Path) -> anyhow::Result<State> {
+    let storage_root = std::fs::canonicalize(storage_root)?;
+    replay_from_journal(
+        &storage_root,
+        &storage_root.join(".agent-collab/server/journal.jsonl"),
+    )
+}
+
 /// Replay a project reducer from the journal selected by its runtime owner.
 /// The project root remains the semantic scope used by worktree and identity
 /// validation; the journal path may be an appserver-specific runtime store.

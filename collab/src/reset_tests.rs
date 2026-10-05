@@ -1115,3 +1115,64 @@ fn verify_retirement_requires_the_retirement_and_a_live_survivor() {
 
     std::fs::remove_dir_all(root).ok();
 }
+
+/// The project level must not retire the root whose `.agent-collab/` is the
+/// live route index; that is the host level's job.
+#[test]
+fn reset_project_refuses_the_root_that_holds_the_live_index() {
+    let root = temp_root("project-guard");
+    let project = root.join("project");
+    let state = root.join("state");
+    std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("service.json"),
+        serde_json::to_vec(&json!({
+            "desired_state": "down",
+            "generation": 1,
+            "service_scope_root": project.display().to_string(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let host_paths = HostPaths::for_state_root(&state).unwrap();
+    let error = run(
+        &Scope {
+            root: project.clone(),
+        },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the project reset".into(),
+            discard_legacy: true,
+            ..ResetRequest::default()
+        },
+    )
+    .expect_err("the resident index root must be refused")
+    .to_string();
+    assert!(error.contains("RESET_PROJECT_HOLDS_HOST_INDEX"), "{error}");
+    assert!(
+        project.join(".agent-collab/server").exists(),
+        "a refused run must not retire the project control plane"
+    );
+
+    // A project that is not the resident root is still allowed to run.
+    let other = root.join("other");
+    std::fs::create_dir_all(other.join(".agent-collab/server")).unwrap();
+    run(
+        &Scope { root: other.clone() },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the project reset".into(),
+            discard_legacy: true,
+            ..ResetRequest::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        is_current_empty_baseline(&other.join(".agent-collab")),
+        "the project level rebuilds an empty baseline"
+    );
+
+    std::fs::remove_dir_all(root).ok();
+}

@@ -700,6 +700,20 @@ pub fn run(scope: &Scope, host_paths: &HostPaths, request: ResetRequest) -> anyh
     }
 }
 
+/// The canonical project root whose `.agent-collab/` is the live route index.
+///
+/// The host daemon records the root it was started from in `service.json`. That
+/// root's project journal is the index the daemon replays, so the project level
+/// must not retire it: the host level is the operation that owns it. When no
+/// daemon descriptor exists, no project root holds the live index and the
+/// project level is free to run.
+fn resident_index_root(host_paths: &HostPaths) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(host_paths.state_root().join("service.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let recorded = value.get("service_scope_root")?.as_str()?;
+    std::fs::canonicalize(recorded).ok()
+}
+
 fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) -> anyhow::Result<()> {
     let root = std::fs::canonicalize(&scope.root)?;
 
@@ -715,6 +729,15 @@ fn run_project(scope: &Scope, host_paths: &HostPaths, request: &ResetRequest) ->
             "RESET_DAEMON_LIVE: a Collab daemon is reachable at {}; run `collab down` \
              before retiring the project control plane",
             host_paths.socket_path().display()
+        );
+    }
+    if resident_index_root(host_paths).is_some_and(|owner| owner == root) {
+        anyhow::bail!(
+            "RESET_PROJECT_HOLDS_HOST_INDEX: {} is the storage root of the running daemon, so its \
+             .agent-collab/ is the live route index; retire that index with `collab reset --host \
+             --storage-root {}` instead",
+            root.display(),
+            root.display()
         );
     }
 

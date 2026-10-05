@@ -214,19 +214,23 @@ Steps:
    claim stays registered until something retires it. `--keep` is the
    authorization and the liveness decision: the operator names the survivor, and
    everything else on that pane is residue by that decision.
-5. **Stage.** Copy every file the run will rewrite into
-   `<state_root>/archives/reset-<run_id>/` and record its file count, byte count,
-   and tree digest with the existing `tree_digest` (`reset.rs:65`). The journal
-   is appended to, not rewritten, so its staged copy is the archive of the
-   pre-reset bytes.
+5. **No archive, and why.** L1 removes nothing. It appends one event per target
+   to a journal that keeps every earlier event, so the pre-image is the file
+   itself and there are no retired bytes to preserve. The audit trail is the
+   receipt in `<state_root>/reset.jsonl` plus the events in the journal, and the
+   decision is reversible: a later route set at the same address reactivates it.
+   Levels 2 and 3 do remove bytes, and both stage them into
+   `<state_root>/archives/<label>-<run_id>/` first (`archive_retired`,
+   `reset.rs:611`), with the file count, byte count, and tree digest.
 6. **Commit.** Append one `GlobalRouteClaimRetired` event per target (section
    5.3) to the index journal, `sync_data`, then `sync_all` the directory. One
    append per target, in a stable order, so a partial failure is visible as a
    prefix. The append first repairs a missing trailing newline, because the
    append path assumes a whole-line record (`part_02.rs:820-825`) while the
    compaction rewrite does not always end with one (`part_02.rs:1060-1101`).
-   The rollback is therefore a whole-file restore from the pre-image snapshot
-   taken before the append, not a truncation to a recorded offset.
+   A failure restores the journal from the whole-file pre-image snapshot
+   `snapshot_file` took before the append, rather than truncating to a recorded
+   offset, because the append may also have repaired the final newline.
 7. **Verify.** Replay the journal and assert that each retired address is absent
    from the live index and carries a retired record, and that every claimant named
    by `--keep` is still live. This runs inside the same transaction as the append
@@ -379,12 +383,17 @@ Every level uses the same transaction shape, which already exists in
 `reset.rs`:
 
 ```
-authorize -> level select -> lock -> stage -> commit -> verify -> receipt
-                                             |
-                                    rollback on any failure
+authorize -> level select -> lock -> commit -> verify -> receipt
+                                     |
+                            rollback on any failure
+
+L2 and L3 insert `stage` before `commit` and `discard_staged_roots` after the
+receipt, because they remove bytes. L1 removes nothing, so it has no stage step
+and no discard step.
 ```
 
-- Staging copies bytes and records counts and a digest (`stage_retired_roots`).
+- Staging copies bytes and records counts and a digest (`stage_retired_roots`),
+  and only L2 and L3 stage.
 - A failure before the receipt calls `rollback_retired_roots`, which restores the
   staged bytes. For L1 the journal and `reset.jsonl` are each restored from the
   pre-image snapshot `snapshot_file` took before the transaction.

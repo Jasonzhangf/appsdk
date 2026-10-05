@@ -427,6 +427,42 @@ daemon, and never consumes messages:
 collab dashboard [--port <loopback-port>]
 ```
 
+It prints one JSON line and then serves until stopped:
+
+```json
+{"url":"http://127.0.0.1:<port>/#<capability>","read_only":true,"refresh_seconds":2}
+```
+
+Open that printed URL in a browser on the same host. The capability is a fresh
+per-run read credential carried only in the URL fragment: the page keeps it in
+memory, sends it as a bearer header, and never puts it in a query string or a
+log. It grants no actor identity and no write authority. The page re-reads the
+board projection every 2 seconds; it is a polling view, not an event stream.
+
+Any registered identity on that host may start one, so a master or an ordinary
+peer can expose the project board for the human controller. It is an observer,
+not a control surface: it cannot publish, invite, respond, update, withdraw or
+close anything.
+
+The observer rejects a request whose `Host` is not its own bound authority with
+`DASHBOARD_HOST_REJECTED` (403) and a request without the exact capability with
+`DASHBOARD_CAPABILITY_REQUIRED` (401). While the daemon is unreachable the
+board endpoint answers 503 with the exact daemon error instead of an empty
+board. Static assets carry no state and no token.
+
+The public board is for the master and ordinary peers only. A managed subagent
+actor is refused with `BOARD_PRIVATE_ACTOR`, managed children never appear in
+the board projection, and `collab subagent dispatch` stays on the private
+managed path.
+
+An owner edits the descriptive part of its own independent task without
+changing lifecycle. Every flag is required and the revision is checked:
+
+```sh
+collab board describe <task-id> --expected-revision <observed> --title <t> \
+  --description <d> --delivery-condition <d> --test-condition <t>
+```
+
 `collab-mcp` exposes the same operations as `collab_board_show`,
 `collab_board_publish`, `collab_board_invite`, `collab_board_respond`,
 `collab_board_withdraw`, `collab_board_update`, `collab_board_describe`, and

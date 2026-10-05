@@ -2,6 +2,8 @@
 mod global_state_helpers;
 #[path = "global_state_impl.rs"]
 mod global_state_impl;
+#[path = "global_state_impl_part2.rs"]
+mod global_state_impl_part2;
 #[path = "global_state_models.rs"]
 mod global_state_models;
 

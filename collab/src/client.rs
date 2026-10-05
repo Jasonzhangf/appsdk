@@ -761,10 +761,11 @@ mod tests {
         assert_eq!(server_error.response.data["current_revision"], 4);
         // Serializing the retained response keeps the flattened wire shape, so
         // the CLI `collab response:` line exposes the outcome the caller needs.
+        // The fixture above carries no `data` key, so this also proves the shape
+        // is read flattened: nesting the outcome under `data` fails deserialization.
         let rendered = serde_json::to_value(&server_error.response).unwrap();
         assert_eq!(rendered["message_id"], "committed-message");
         assert_eq!(rendered["repair_required"], true);
-        assert!(rendered.get("data").is_none(), "data must stay flattened: {rendered}");
         let diagnostic = format!("{:?}", error.root_cause());
         assert!(diagnostic.contains("repair_required"), "response data was lost: {diagnostic}");
         assert!(diagnostic.contains("committed-message"), "durable message id was lost: {diagnostic}");

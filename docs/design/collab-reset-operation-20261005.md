@@ -425,7 +425,7 @@ the operator and a retirement.
 Single source `collab reset`, single sink the receipt plus its verification.
 
 The graph is the one already registered as `appsdk-collab-control-plane-reset`,
-extended to `0.2.0`. It gains one node, `verify_retirement`, between the
+extended to `0.2.1`. It gains one node, `verify_retirement`, between the
 retirement commit and the baseline rebuild, so a postcondition that does not
 hold cannot reach the receipt.
 
@@ -448,7 +448,15 @@ therefore names its producing node and its acceptance case:
 | `inventory_control_plane` | `RESET_PROJECT_HOLDS_HOST_INDEX` | B4 |
 | `verify_retirement` | `RESET_VERIFY_FAILED` | B9 |
 
-Success path, in order: `authorize_reset` -> `prove_exclusivity` ->
+`verify_retirement` is the L1 postcondition, and it is the only level that has
+one. `run_project` and `run_host` do not call it: neither retires a live route
+set that a later start could republish, so neither has a retirement to verify.
+`run_project` carries `is_current_empty_baseline` instead, and that is an
+idempotence **pre-check** before archiving (`reset.rs:751-757`), not a
+post-retirement assertion. The graph's single linear chain therefore describes
+the L1 path; treat the chain, not the per-level call graph.
+
+Success path for L1, in order: `authorize_reset` -> `prove_exclusivity` ->
 `inventory_control_plane` -> `archive_inventory` -> `retire_selected_state` ->
 `verify_retirement` -> `rebuild_baseline` -> `record_reset_receipt`.
 
@@ -465,7 +473,7 @@ implementation:
 | `inventory_control_plane` | `resolve_index_root` and `pane_claimant_groups` (L1), `LEGACY_CONTROL_ROOTS` and `reject_unsafe_control_roots` (L2), `host_control_plane_entries` (L3) |
 | `archive_inventory` | `archive_retired` over `tree_digest`, `copy_tree`, and `stage_retired_roots` |
 | `retire_selected_state` | `append_retirement_events` (L1), the legacy-root retire loop and `retire_host_routes` (L2), the removal of `host_control_plane_entries` (L3) |
-| `verify_retirement` | the post-commit `replay_host_index` assertion (L1), `is_current_empty_baseline` (L2), and the `RESET_PROJECT_HOLDS_HOST_INDEX` check |
+| `verify_retirement` | `verify_retirement` in `run_routes`: replay the index with `replay_host_index` and assert the postcondition (L1 only; no other level calls it) |
 | `rebuild_baseline` | the L2 baseline rebuild in `run_project`; a no-op for L1 and L3 |
 | `record_reset_receipt` | `append_reset_record`, then `discard_staged_roots` |
 

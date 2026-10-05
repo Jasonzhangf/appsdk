@@ -65,6 +65,28 @@ pub(super) fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
     format!("{}\0{}", address.0, address.1)
 }
 
+/// The durable retirement key for one claim: its route address.
+///
+/// The key is the address and not the binding id, so a retirement covers the
+/// exact address the operator named and never a later generation at that
+/// address. It lives here because both `global_state_impl` and
+/// `global_state_impl_part2` read and write the retirement map.
+pub(super) fn retired_route_claim_key(
+    binding: &RuntimeBinding,
+) -> Result<String, StateError> {
+    let session_id = binding.session_id.as_ref().ok_or_else(|| {
+        StateError::invalid("retired route claim", "requires a session id")
+    })?;
+    let native_thread_id = binding.native_thread_id.as_ref().ok_or_else(|| {
+        StateError::invalid("retired route claim", "requires a native thread id")
+    })?;
+    Ok(current_route_address_key(
+        session_id,
+        native_thread_id,
+        binding.tmux_endpoint.as_ref(),
+    ))
+}
+
 pub(super) fn tmux_route_address_key_for_lookup(endpoint: &TmuxEndpoint) -> String {
     let address = tmux_route_address_for_lookup(endpoint);
     format!("{}\0{}", address.0, address.1)

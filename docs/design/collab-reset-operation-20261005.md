@@ -315,45 +315,37 @@ Failure terminals, each a DAG node with acceptance evidence:
 ## 6. DAG
 
 Single source `collab reset`, single sink the receipt plus its verification.
-Failure terminals are nodes, not prose.
 
-```mermaid
-graph TD
-  A[collab reset] --> B{level select}
-  B -->|none or two| F1[RESET_LEVEL_REQUIRED]
-  B --> C[authorize approval and discard-legacy]
-  C -->|missing| F2[RESET_AUTHORIZATION_REQUIRED]
-  C --> D[acquire reset lock and legacy writer fence]
-  D -->|daemon answers| F3[RESET_DAEMON_LIVE]
-  D --> L1[L1 routes]
-  D --> L2[L2 project]
-  D --> L3[L3 host]
-  L1 -->|no storage-root| F4[RESET_STORAGE_ROOT_REQUIRED]
-  L1 --> E[replay index with daemon replay]
-  E --> G[group claimants per scope and pane]
-  G -->|more than one and no keep| F5[RESET_KEEP_REQUIRED]
-  G --> H[gate liveness of each target]
-  H -->|target is live owner| F6[RESET_TARGET_LIVE]
-  H --> I[stage bytes and digest]
-  L2 --> J[reject root that holds the index]
-  J -->|holds index| F7[RESET_PROJECT_HOLDS_HOST_INDEX]
-  J --> I
-  L3 -->|no storage-root| F4
-  L3 --> K[enumerate host roots, keep runs by default]
-  K -->|root invalid| F8[RESET_STORAGE_ROOT_INVALID]
-  K --> I
-  I --> M[commit: journal append or tree retire]
-  M --> N[verify by replay]
-  N -->|mismatch| O[rollback to staged bytes and journal offset]
-  O --> F9[RESET_VERIFY_FAILED]
-  N --> P[append reset.jsonl receipt]
-  P --> Q[discard staged roots]
-  Q --> R[rebuild empty baseline]
-  R --> S[done: receipt, archive, verified index]
-```
+The graph is the one already registered as `appsdk-collab-control-plane-reset`,
+extended to `0.2.0`. It gains one node, `verify_retirement`, between the
+retirement commit and the baseline rebuild, so a postcondition that does not
+hold cannot reach the receipt.
+
+Failure terminals are **bound to the node that produces them**, not modelled as
+extra sink nodes. `dagpipe graph validate` enforces that an audited SESE graph
+declares exactly one output arc, so a terminal cannot also be a node; the first
+draft of this graph was rejected with
+`an audited SESE Graph must declare exactly one output ARC`. Each terminal
+therefore names its producing node and its acceptance case:
+
+| Producing node | Terminal | Acceptance |
+| --- | --- | --- |
+| `authorize_reset` | `RESET_LEVEL_REQUIRED` | B0 |
+| `authorize_reset` | `RESET_AUTHORIZATION_REQUIRED` | existing reset tests |
+| `authorize_reset` | `RESET_STORAGE_ROOT_REQUIRED` | B1 |
+| `authorize_reset` | `RESET_STORAGE_ROOT_INVALID` | B7 |
+| `prove_exclusivity` | `RESET_DAEMON_LIVE` | existing reset tests |
+| `inventory_control_plane` | `RESET_KEEP_REQUIRED` | B3 |
+| `inventory_control_plane` | `RESET_TARGET_LIVE` | B8 |
+| `inventory_control_plane` | `RESET_PROJECT_HOLDS_HOST_INDEX` | B4 |
+| `verify_retirement` | `RESET_VERIFY_FAILED` | B9 |
+
+Success path, in order: `authorize_reset` -> `prove_exclusivity` ->
+`inventory_control_plane` -> `archive_inventory` -> `retire_selected_state` ->
+`verify_retirement` -> `rebuild_baseline` -> `record_reset_receipt`.
 
 The graph is registered in `docs/dagpipe/manifest.json` and validated with
-`dagpipe graph validate`.
+`dagpipe graph validate` (8 nodes, 7 edges, 8 waves, exit 0).
 
 ## 7. Acceptance
 
@@ -367,8 +359,50 @@ Black box, from the real CLI entry.
 | B4 | `collab reset --project <the storage root>` | refused with `RESET_PROJECT_HOLDS_HOST_INDEX`; the error points to L3 |
 | B5 | `collab reset --project` and `collab reset --host` | the archive holds the retired bytes; `reset.jsonl` holds the receipt with the approval text; the baseline is rebuilt; `~/.collab/runs/` survives unless `--include-runs` was given |
 | B6 | Durability: after B2, start the daemon twice | the retired claim does not come back; the index fingerprint is identical across the two starts; the host log records the skip |
+| B0 | `collab reset` with no level, and with two levels | `RESET_LEVEL_REQUIRED`; nothing changes |
+| B7 | `collab reset --host --storage-root <a directory that is not a collab root>` | `RESET_STORAGE_ROOT_INVALID`; nothing is staged |
+| B8 | `collab reset --routes` naming a target whose worker is registered and whose transport is still that pane | `RESET_TARGET_LIVE`; nothing changes |
+| B9 | `collab reset --routes` on a copy whose post-commit replay cannot satisfy the postcondition | `RESET_VERIFY_FAILED`; the journal is truncated to its recorded offset and the staged bytes are restored |
+| B10 | A pane-only candidate registers in project A while project B holds a pane-only anchor on the same pane | the candidate is not rejected as ambiguous; project B is untouched unless `retire_cross_project_anchor` is set, and then the existing retirement path runs unchanged |
+| B11 | Startup with a pending same-pane master whose pane has one in-scope claimant that is not itself, plus a cross-scope claimant | the daemon starts or fails with a named conflict that carries the `collab reset --routes --keep` remedy; it never fails with an unnamed disagreement |
 
 B6 is the acceptance that makes L1 real. Without it, L1 is cosmetic.
+
+## 7.1 Residuals this delivery absorbs
+
+The independent architecture review of delivery 1 returned PASS and left three
+open items. They live in the same files and the same invariant family as this
+delivery, so this delivery closes them instead of leaving a known gap.
+
+- **P2-1, the register path still asks a host-wide pane question.**
+  `validate_current_thread_candidate` (`runtime_manager_setup.rs:498-595`)
+  collects anchor matches from every runtime's project bindings and rejects with
+  `RUNTIME_BINDING_REJECTED: tmux identity anchor matches multiple persisted
+  peers` when more than one matches. Its pane arm (`:549-558`) applies when the
+  candidate carries no Codex ids, so a pane-only candidate counts a claimant in
+  another project on the same pane. Two projects may share a pane, so this
+  breaks the delivery 1 invariant from a different call site. The fix counts
+  ambiguity only among same-scope matches and leaves a single cross-scope match
+  on the existing `retire_cross_project_anchor` path; it does not change what
+  retirement means. Acceptance: B10.
+- **P3-1, a startup input class whose direction changed.**
+  `reconcile_same_pane_master_routes` publishes a pending same-pane master when
+  the in-scope lookup finds no claimant (`:343-349`). When a scope has exactly
+  one claimant X that is not the pending binding, and another project also
+  claims the pane, the host-wide query used to return `None` and publish, while
+  the in-scope query now returns X and fails. The new direction is fail-closed
+  and it refuses to create a second in-scope claimant, which is the invariant
+  delivery 1 exists to protect, but it can stop the daemon from starting. The
+  durable retirement rule in section 5.3 is the fix: a pending master whose pane
+  is already owned in scope is a named conflict with the `collab reset --routes`
+  remedy, not an opaque startup failure. Acceptance: B11.
+- **P3-4, the reconcile graph is ahead of the code.**
+  `docs/dagpipe/collab-pane-route-reconcile.graph.json` names
+  `resolve_owner_route` and `emit_reconcile_receipt` as nodes, but the reconciler
+  returns `Result` and there is no `ReconcileReceipt` type. This delivery
+  rewrites the graph to describe the code that exists: classify, resolve,
+  publish, verify, and return the named remainder. Acceptance: the graph
+  validates and every node has a function in the reconciler.
 
 White-box regression gate, not a substitute: the full collab suite stays green,
 including the existing reset tests and the two delivery-1 pane tests.

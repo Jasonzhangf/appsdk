@@ -173,6 +173,12 @@ Two projects may share a pane, and neither may block or retire the other.
   worker can register in more than one project. It keeps the host-wide lookup in
   this delivery. It is not part of either proven failure mode, and it fails
   closed with `RECOVERY_RECONCILE_REQUIRED: no unique host pane route`.
+- `master_anchor_is_superseded` (`part_07.rs:1197-1249`) also asks who owns a
+  pane, but it reads the project's own `runtime_bindings`, not the host route
+  index, and it is already scope-local. Its doc comment states why the two
+  sources differ: the host index owns current-thread routes, so a project runtime
+  is not authoritative for them. It is a deliberate second source, not a second
+  copy of this scan, and this delivery leaves it alone.
 - The host-wide lookup keeps its `Option` contract for callers that genuinely ask
   a host-wide question, and is expressed through the same claimant scan. It is
   not a second mechanism.

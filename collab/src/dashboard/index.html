@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Collab · 项目任务板</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header>
+  <div><span class="eyebrow">APPSDK / COLLAB</span><h1>项目任务板 <span id="project"></span></h1></div>
+  <div class="connection"><span id="connection" role="status" aria-live="polite">正在连接</span><small id="updated">尚未取得项目快照</small></div>
+</header>
+<main>
+  <section aria-labelledby="members-heading" class="members-section">
+    <h2 id="members-heading">协作成员 <span class="muted">Master / Peer</span></h2>
+    <div id="members" class="members"><p class="muted">读取公共成员…</p></div>
+  </section>
+  <section aria-labelledby="tasks-heading">
+    <div class="toolbar">
+      <div><h2 id="tasks-heading">执行任务 <span id="task-count" class="muted"></span></h2><p class="hint">各 owner 通过 CLI / MCP 更新。此页面只读，不代替接单或消息消费。</p></div>
+      <div class="filters"><label>Owner<select id="owner"><option value="">全部成员</option></select></label><label>搜索<input id="search" type="search" placeholder="任务、标题或下一步" autocomplete="off"></label></div>
+    </div>
+    <p id="error" class="error" role="alert" hidden></p>
+    <p id="empty" class="empty" hidden>当前项目还没有公共任务。Master 可发布任务，Peer 可登记自己的任务。</p>
+    <div id="board" class="board" aria-label="任务状态分组"></div>
+  </section>
+</main>
+<footer>共享同一份项目状态 · 每 2 秒读取 · 不显示 parent 私有的 subworker</footer>
+<dialog id="detail" aria-labelledby="detail-title"><div class="dialog-heading"><h2 id="detail-title"></h2><button id="close-detail" type="button" aria-label="关闭任务详情">关闭</button></div><div id="detail-content"></div></dialog>
+</body>
+</html>

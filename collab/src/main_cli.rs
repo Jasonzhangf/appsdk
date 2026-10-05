@@ -73,8 +73,23 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         next: Option<String>,
     },
-    /// Accept an assigned task and atomically begin owner execution
-    Accept { id: String },
+    /// Accept a board invitation (with revision), or a legacy assigned task
+    Accept {
+        id: String,
+        #[arg(long)]
+        expected_revision: Option<u64>,
+    },
+    /// Decline an invitation or an unstarted legacy assignment
+    Decline {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        /// Explicitly reject a legacy assigned task rather than a board invite
+        #[arg(long)]
+        legacy_assignment: bool,
+    },
     /// Deprecated: peers self-register tasks; no central available queue
     Claim { id: String },
     /// Put an owned task into resource-waiting state until another task releases

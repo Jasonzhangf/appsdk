@@ -375,6 +375,8 @@ fn worker_status_summary_with_maps(
 
 fn mutation_blocked_during_migration(req: &Req) -> bool {
     match req {
+        Req::BoardShow => false,
+        Req::Board { command, .. } => !matches!(command, crate::board::BoardCommand::Show),
         Req::SubagentObserve { .. } => false,
         Req::Subagent { command, .. } => !matches!(
             command,
@@ -453,7 +455,8 @@ fn wire_mutation_principal(req: &Req) -> Option<(&str, &str)> {
             command,
             ..
         } if subagent_action_mutates(command) => Some((worker_id, token)),
-        Req::Register {
+        Req::Board { worker_id, token, .. }
+        | Req::Register {
             worker_id, token, ..
         }
         | Req::Send {

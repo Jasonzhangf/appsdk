@@ -2,7 +2,7 @@
     fn scheduler_dispatch_concurrent_same_request_reserves_once() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
         let server = Arc::new(server);
@@ -36,7 +36,7 @@
         let first = first.join().unwrap();
         let second = second.join().unwrap();
         let completed = [&first, &second].into_iter()
-            .filter(|resp| resp.ok && resp.data["decision"] == "use-registered-peer")
+            .filter(|resp| resp.ok && resp.data["decision"] == "reuse-idle-managed-subagent")
             .count();
         assert_eq!(
             completed, 1,
@@ -53,9 +53,9 @@
         }
         assert_eq!(first.data["task_id"], second.data["task_id"]);
         assert_eq!(first.data["message_id"], second.data["message_id"]);
-        assert!(["use-registered-peer", "deduplicated"]
+        assert!(["reuse-idle-managed-subagent", "deduplicated"]
             .contains(&first.data["decision"].as_str().unwrap()));
-        assert!(["use-registered-peer", "deduplicated"]
+        assert!(["reuse-idle-managed-subagent", "deduplicated"]
             .contains(&second.data["decision"].as_str().unwrap()));
         let state = server.state.lock().unwrap();
         assert_eq!(state.tasks.len(), 1);
@@ -76,7 +76,7 @@
     fn scheduler_dispatch_concurrent_retry_notifies_once() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
         let sink_calls = Arc::new(AtomicUsize::new(0));
@@ -214,7 +214,7 @@
     fn scheduler_dispatch_without_subscription_reports_repair_terminal() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
         let server = Arc::new(server);
@@ -275,7 +275,7 @@
     fn stale_notifying_claim_recovers_after_cooldown() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
         let server = Arc::new(server);
@@ -345,7 +345,7 @@
     fn stale_unknown_notification_claim_is_not_resent_after_cooldown() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
         let sink_calls = Arc::new(AtomicU64::new(0));

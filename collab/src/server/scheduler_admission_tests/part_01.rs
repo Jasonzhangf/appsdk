@@ -9,6 +9,18 @@
     use std::thread;
     use std::time::{Duration, Instant};
 
+    // Notification/recovery tests use the retained private-child dispatcher.
+    // Public ordinary-peer dispatch is tested as an explicit board-only gate.
+    fn register_private_dispatch_peer(server: &Server) {
+        register(server, "peer", "%peer");
+        server.commit(&[Event::SubagentUpdated { subagent: crate::subagent::Record {
+            id: "managed-peer".into(), parent: "master".into(), peer: "peer".into(),
+            status: "idle".into(), thread_id: None, profile: None,
+            created_ms: now_ms(), ready_deadline_ms: now_ms() + 60_000,
+            last_message: None, error: None, probe_failures: vec![], runtime: Some("codex".into()),
+        } }]);
+    }
+
     fn promote_master(server: &Server) {
         let response = handle_master_promote(
             server,
@@ -610,7 +622,7 @@
     }
 
     #[test]
-    fn scheduler_dispatch_assigns_ordinary_peer_and_deduplicates_request() {
+    fn scheduler_dispatch_requires_board_invitation_for_ordinary_peer() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "peer", "%peer");
@@ -644,91 +656,26 @@
             Some("peer")
         );
         let first = dispatch_request("Implement feature", "Do the work");
-        assert!(first.ok, "{first:?}");
-        assert_eq!(first.data["decision"], "use-registered-peer");
-        assert_eq!(first.data["target"], "peer");
-        assert_eq!(first.data["status"], "assigned");
-        let second = dispatch_request("different retry text", "ignored by request key");
-        assert!(second.ok, "{second:?}");
-        assert_eq!(second.data["decision"], "deduplicated");
-        assert_eq!(second.data["task_id"], first.data["task_id"]);
-        assert_eq!(second.data["message_id"], first.data["message_id"]);
+        assert!(!first.ok, "{first:?}");
+        assert!(first.error.as_deref().unwrap().contains("BOARD_INVITATION_REQUIRED"));
+        assert_eq!(first.data["peer_id"], "peer");
+        assert_eq!(first.data["assigned"], false);
+        let retry = dispatch_request("different retry text", "no implicit dispatch");
+        assert!(!retry.ok, "{retry:?}");
+        assert!(retry.error.as_deref().unwrap().contains("BOARD_INVITATION_REQUIRED"));
         let state = server.state.lock().unwrap();
-        assert_eq!(state.tasks.len(), 1);
-        assert_eq!(state.msgs.len(), 1);
-        assert_eq!(state.tasks["task-scheduler-req-ordinary-1"].owner, "peer");
-        let message_id = first.data["message_id"].as_str().unwrap();
-        let subscription_id = state.wake_bindings.get(message_id).unwrap();
-        assert_eq!(state.delivery_modes[message_id], "explicit-notification");
-        assert_eq!(
-            state.notification_subscriptions[subscription_id].worker_id,
-            "peer"
-        );
-        assert_eq!(
-            state.notification_subscriptions[subscription_id].event,
-            "direct-message"
-        );
+        assert!(state.tasks.is_empty());
+        assert!(state.msgs.is_empty());
+        assert!(state.scheduler_admissions.is_empty());
         drop(state);
-        let rejected_update = dispatch(
-            &server,
-            Req::TaskUpdate {
-                worker_id: "peer".into(),
-                token: "token-peer".into(),
-                task_id: "task-scheduler-req-ordinary-1".into(),
-                status: Some("working".into()),
-                next_step: None,
-            },
-        );
-        assert!(!rejected_update.ok, "{rejected_update:?}");
-        assert!(rejected_update.error.unwrap().contains("task accept"));
-        let accepted = dispatch(
-            &server,
-            Req::TaskAccept {
-                worker_id: "peer".into(),
-                token: "token-peer".into(),
-                task_id: "task-scheduler-req-ordinary-1".into(),
-            },
-        );
-        assert!(accepted.ok, "{accepted:?}");
-        assert_eq!(accepted.data["status"], "working");
-        let retry = dispatch(
-            &server,
-            Req::TaskAccept {
-                worker_id: "peer".into(),
-                token: "token-peer".into(),
-                task_id: "task-scheduler-req-ordinary-1".into(),
-            },
-        );
-        assert!(retry.ok, "{retry:?}");
-        assert_eq!(retry.data["idempotent"], true);
         let replayed = replay(&root).unwrap();
-        assert_eq!(
-            replayed.tasks["task-scheduler-req-ordinary-1"].status,
-            "working"
-        );
-        assert_eq!(
-            replayed.scheduler_admissions["req-ordinary-1"].status,
-            "succeeded"
-        );
-        let replayed_subscription_id = replayed
-            .wake_bindings
-            .get(first.data["message_id"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(
-            replayed.notification_subscriptions[replayed_subscription_id].worker_id,
-            "peer"
-        );
-        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-            .unwrap()
-            .lines()
-            .filter(|line| line.contains("scheduler_admission") && line.contains("req-ordinary-1"))
-            .count();
-        assert_eq!(audit_count, 1);
+        assert!(replayed.tasks.is_empty());
+        assert!(replayed.scheduler_admissions.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn scheduler_dispatch_prefers_idle_registered_peer_over_idle_managed_child() {
+    fn scheduler_dispatch_public_peer_refusal_does_not_fall_back_to_private_child() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
         register(&server, "idle-peer", "%idle-peer");
@@ -774,40 +721,22 @@
         };
 
         let first = request();
-        assert!(first.ok, "{first:?}");
-        assert_eq!(first.data["decision"], "use-registered-peer");
-        assert_eq!(first.data["target"], "idle-peer");
-        assert!(first.data["managed_subagent_id"].is_null());
-
+        assert!(!first.ok, "{first:?}");
+        assert!(first.error.as_deref().unwrap().contains("BOARD_INVITATION_REQUIRED"));
+        assert_eq!(first.data["peer_id"], "idle-peer");
+        assert_eq!(first.data["assigned"], false);
         let retry = request();
-        assert!(retry.ok, "{retry:?}");
-        assert_eq!(retry.data["decision"], "deduplicated");
-        assert_eq!(retry.data["task_id"], first.data["task_id"]);
-        assert_eq!(retry.data["message_id"], first.data["message_id"]);
-        assert!(retry.data["managed_subagent_id"].is_null());
-
+        assert!(!retry.ok, "{retry:?}");
+        assert_eq!(retry.data["peer_id"], "idle-peer");
         let state = server.state.lock().unwrap();
-        assert_eq!(state.tasks.len(), 1);
-        assert_eq!(state.msgs.len(), 1);
-        assert_eq!(
-            state.tasks["task-scheduler-req-peer-before-managed"].owner,
-            "idle-peer"
-        );
+        assert!(state.tasks.is_empty());
+        assert!(state.msgs.is_empty());
+        assert!(state.scheduler_admissions.is_empty());
         assert_eq!(state.subagents["managed-child"].status, "idle");
         assert_eq!(state.subagents["managed-child"].last_message, None);
-        assert_eq!(
-            state.scheduler_admissions["req-peer-before-managed"].decision,
-            "use-registered-peer"
-        );
         drop(state);
-        let audit_count = std::fs::read_to_string(root.join(".agent-collab/server/events.jsonl"))
-            .unwrap()
-            .lines()
-            .filter(|line| {
-                line.contains("scheduler_admission") && line.contains("req-peer-before-managed")
-            })
-            .count();
-        assert_eq!(audit_count, 1);
+        assert!(!root.join(".agent-collab/server/events.jsonl").exists(),
+            "rejected ordinary dispatch must not create an admission audit");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -815,7 +744,7 @@
     fn scheduler_dispatch_notification_rejection_keeps_retryable_reservation() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         promote_master(&server);
         let reject_once = Arc::new(AtomicBool::new(true));
         let reject_once_for_sink = reject_once.clone();
@@ -904,15 +833,13 @@
         );
         drop(state);
 
-        let accepted = dispatch(
-            &server,
-            Req::TaskAccept {
-                worker_id: "peer".into(),
-                token: "token-peer".into(),
-                task_id: first.data["task_id"].as_str().unwrap().into(),
-            },
-        );
-        assert!(accepted.ok, "{accepted:?}");
+        // Notification admission is not task acceptance or message consumption.
+        // The private child keeps its existing private readiness protocol.
+        let replayed = replay(&root).unwrap();
+        assert_eq!(replayed.scheduler_admissions["req-notify-rejected-1"].status, "succeeded");
+        let task = &replayed.tasks["task-scheduler-req-notify-rejected-1"];
+        assert_eq!(task.status, "assigned");
+        assert!(board_task_view(&replayed, task).is_none(), "private assignment must stay off the public board");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -920,7 +847,7 @@
     fn scheduler_dispatch_unknown_notification_outcome_is_not_resent() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         promote_master(&server);
         let calls = Arc::new(AtomicU64::new(0));
         let calls_for_sink = calls.clone();
@@ -1033,7 +960,7 @@
     fn scheduler_dispatch_audit_failure_is_stable_on_request_retry() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         promote_master(&server);
         let activity_path = root.join(".agent-collab/server/events.jsonl");
         std::fs::create_dir_all(activity_path.parent().unwrap()).unwrap();
@@ -1169,7 +1096,7 @@
     fn scheduler_dispatch_audit_failure_does_not_wake_long_poll_or_recv() {
         let (server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         promote_master(&server);
         std::fs::create_dir(root.join(".agent-collab/server/events.jsonl")).unwrap();
         let server = Arc::new(server);
@@ -1227,7 +1154,7 @@
     fn scheduler_dispatch_success_wakes_long_poll() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         assert!(server
             .state

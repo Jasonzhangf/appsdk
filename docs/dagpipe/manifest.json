@@ -40,6 +40,10 @@
     {
       "id": "appsdk-sdk-pin-history",
       "path": "docs/dagpipe/sdk-pin-history.graph.json"
+    },
+    {
+      "id": "appsdk-collab-dashboard-operation",
+      "path": "docs/dagpipe/collab-dashboard.graph.json"
     }
   ]
 }

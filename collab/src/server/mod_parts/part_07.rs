@@ -284,12 +284,7 @@ pub(crate) fn registered_available_peer_for_admission(
             .values()
             .filter(|worker| worker.id != requester)
             .filter(|worker| !is_managed_subagent(&state, &worker.id))
-            .filter(|worker| {
-                !state
-                    .tasks
-                    .values()
-                    .any(|task| task.owner == worker.id && task_resource_active(&task.status))
-            })
+            .filter(|worker| !board_peer_has_responsibility(&state, &worker.id, None))
             .cloned()
             .collect();
         workers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -312,10 +307,7 @@ pub(crate) fn registered_available_peer_for_admission(
             && current.registered_ms == worker.registered_ms;
         if unchanged
             && !is_managed_subagent(&state, &worker.id)
-            && !state
-                .tasks
-                .values()
-                .any(|task| task.owner == worker.id && task_resource_active(&task.status))
+            && !board_peer_has_responsibility(&state, &worker.id, None)
         {
             return Some((worker.id, "live registered peer has no active task".into()));
         }
@@ -960,6 +952,12 @@ pub(crate) fn handle_scheduler_dispatch(
             );
         };
 
+        if managed_id.is_none() {
+            return Resp::err_data(
+                "BOARD_INVITATION_REQUIRED: ordinary peers must receive a board invitation with delivery/test conditions and an observed revision; use collab board publish/invite",
+                json!({"peer_id": peer_id, "assigned": false, "next_action": "collab board publish then collab board invite"}),
+            );
+        }
         let mut state = server.state.lock().unwrap();
         let Some(worker) = state.workers.get(&peer_id).cloned() else {
             continue;

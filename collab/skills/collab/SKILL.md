@@ -1,9 +1,17 @@
 ---
 name: collab
-description: "Collab: 只跑 collab context 一条命令, 自动查身份/恢复/注册/补齐上下文+角色操作, 并在同一快照返回 peers/master/scheduling/env; 身份需修复时返回 requires_identity_update (reason/action/exact_error)。高频: sendmessage, recv, task accept/update/deliver/review/close, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, master 或满足收口条件的 peer merge 后 task integrated 才能 close (TASK_MERGE_PENDING); peer merge 失败上报 master。见 context/status/longhorizon/idle wake。master 职责: 派单、解 blocker、驱动 verify/merge/cleanup/close; Codex root != master; 不手改 routes/journal/mailbox/token; ACK/read != consumption。"
+description: "已启用并注册 Collab 的 peer/master 通信、任务、claim、共享任务板与资源协作；明确要求注册时也用本 Skill。未注册独立完成，不寻找 Master；普通开发、worktree 与 goal 不自动启用 Collab。只跑 collab context 一条命令即自动查身份/恢复/注册/返回 peers/master/scheduling/env 快照，身份需修复时返回 requires_identity_update (reason/action/exact_error)。高频: sendmessage, recv, task accept/update/deliver/review/close, collab board publish/invite/respond/update, collab dashboard, master 派单 collab subagent dispatch。review --accept 会登记 daemon pending merge, task integrated 才能 close (TASK_MERGE_PENDING)。"
 ---
 
 # Collab
+
+## 适用身份
+
+只有本任务明确启用 Collab、当前执行者已注册且具有有效通信 route，才适用后文 master/peer/subworker 协议。未注册 Collab 就独立完成任务，不寻找、等待或服从 Master，不为普通任务自动注册、晋升或接管他人身份。用户明确要求注册时才执行初始化。
+
+独立开发使用全局规定的外置独占 worktree。注意共享资源冲突，不改动、回收或覆盖他人的 worktree、文件、进程与 claim；能隔离就继续，不能隔离只报告受影响操作。没有 Collab 不阻断独立任务，也不要求建立一套协作生命周期。
+
+共享任务板与 dashboard 同样只在已注册时可用：`collab board show` 需要已注册身份但不需要 daemon 生命周期动作；`collab dashboard` 只读，不注册 peer、不启动 daemon、不消费消息。
 
 Durable identity, role, mailbox, task, and subscription truth lives in the
 Collab daemon. Codex AppServer RPC is the preferred communication and thread
@@ -24,14 +32,16 @@ release builds fail with an instruction to use the official entry. An upgrade
 targets the current reviewed source and does not migrate, replay, or interpret
 older local versions.
 
-The canonical reviewed-source delivery sequence is a single source, single
+The canonical candidate delivery sequence is a single source, single
 sink DAG. Every applicable node must finish before claiming delivery:
 
 ```text
-reviewed_source
+latest_main_candidate
   -> targeted_tests + build/install
   -> if runtime/daemon is affected: collab down -> collab up (one maintenance window)
   -> installed binary + collab context + collab-mcp initialize live checks
+  -> black-box live behavior replay + author debug complete
+  -> applicable independent architecture review PASS
   -> commit/merge/push and cleanup
 ```
 
@@ -42,7 +52,7 @@ behavior must cross the runtime lifecycle boundary in the same delivery unit
 after installation, unless the owner explicitly records why no daemon change is
 applicable.
 
-The canonical install sequence from the reviewed source is:
+The canonical install sequence from the candidate source is:
 
 ```sh
 scripts/install-global-collab.sh
@@ -352,6 +362,81 @@ window; they are not repeated as heartbeat storms.
 Do not retry a failed send automatically. Return its exact error and durable
 status. Never call a transport command directly; the server owns transport
 selection and sends only through the selected adapter.
+
+## Public task board and read-only dashboard
+
+The public task board is the shared master/peer surface. It carries only public
+task identity, lifecycle status, owner, and the typed delivery/test conditions.
+It never exposes worker tokens, runtime endpoints, role briefs, managed-child
+identity, private assignments, or raw journal events. A published task does not
+start execution; an invitation does not transfer ownership.
+
+Read the board without consuming messages or changing lifecycle:
+
+```sh
+collab board show
+```
+
+The live project master publishes a pending task with its contract, then invites
+one live idle ordinary peer:
+
+```sh
+collab board publish <task-id> --title <t> --description <d> \
+  --delivery-condition <d> --test-condition <t> [--priority p0|p1|p2|p3|p4]
+collab board invite <task-id> --to <peer> --expected-revision <observed>
+```
+
+Invite and respond are revision-checked. `invite` fails with
+`BOARD_STALE_REVISION` when the observed revision is old, and with
+`BOARD_PEER_BUSY` when the target already owns an unfinished task or another
+invitation. Take the revision from `collab board show`, never from a message
+body.
+
+The invited peer accepts or declines in its own identity. Accept rechecks the
+peer's other responsibilities and its live binding before ownership moves:
+
+```sh
+collab board respond <task-id> --accept --expected-revision <observed>
+collab board respond <task-id> --decline --expected-revision <observed> --reason "<text>"
+```
+
+Decline requires a nonempty reason and leaves publisher ownership unchanged. The
+owner updates progress on its own task with a current revision:
+
+```sh
+collab board update <task-id> --expected-revision <observed> --status <s> [--next <step>]
+```
+
+The master withdraws an unaccepted invitation with its observed revision and a
+reason; withdrawal never reclaims peer-owned execution:
+
+```sh
+collab board withdraw <task-id> --expected-revision <observed> --reason "<text>"
+```
+
+Ordinary peers do not receive scheduler dispatch. `collab subagent dispatch`
+targets the private managed path only; a public assignment uses the board
+invitation above. If a peer or its peer node refuses an invitation, that refusal
+is explicit and there is no silent fallback to a private child.
+
+`collab dashboard` opens a read-only loopback Web observer for the same public
+board. It requires a registered identity, does not bootstrap or restart the
+daemon, and never consumes messages:
+
+```sh
+collab dashboard [--port <loopback-port>]
+```
+
+`collab-mcp` exposes the same operations as `collab_board_show`,
+`collab_board_publish`, `collab_board_invite`, `collab_board_respond`,
+`collab_board_withdraw`, `collab_board_update`, `collab_board_describe`, and
+`collab_task_decline`. Each takes `expected_revision` as an integer of at least
+1; `collab_task_decline` takes `legacy_assignment: true` only for an unstarted
+legacy assignment.
+
+When any board command fails, the CLI preserves the server's full typed
+response, including durable IDs and `repair_required`. Read the `collab
+response:` line before retrying: a durable outcome is not a retryable failure.
 
 ## Common command card
 
@@ -762,7 +847,7 @@ mailbox、task lifecycle 或安装包的修复/发布。源码测试和 `git pus
 runtime 节点未完成时必须报 `INCOMPLETE`。
 
 ```text
-入口: reviewed_origin_main_candidate
+入口: latest_origin_main_candidate
   -> applicable_targeted_tests_pass
   -> scripts/install-global-collab.sh
   -> installed_binary_version_digest_verified
@@ -771,6 +856,7 @@ runtime 节点未完成时必须报 `INCOMPLETE`。
   -> collab_context_registered_live
   -> collab_mcp_initialize_matches_version
   -> live_replay_or_explicit_non_applicable_reason
+  -> applicable_architecture_review_pass_after_behavior_verified
   -> commit_merge_push_verified
 终点: cleanup_verified
 ```
@@ -808,8 +894,9 @@ lease. After an explicit unsubscribe, re-arm with `collab notify subscribe
 --event direct-message`.
 
 AGY review is not used for Collab v1 lifecycle gates. Ordinary review uses an
-independent review path when review is required; a milestone may use Astra when
-required. Missing AGY is not a blocker because it is excluded; missing a
+independent review path when review is required; milestone review uses Codex
+Review with the `oauth` profile and `gpt-6.1-sol`. Astra is not a reviewer.
+Missing AGY is not a blocker because it is excluded; missing a
 declared review gate is a failure.
 
 Without an available, verified selected transport, initialization fails
@@ -1029,7 +1116,7 @@ register it.
   task close keeps that owner's auto-notify armed; use
   `collab notify unsubscribe <subscription-id>` for a specific leftover
   lease. Only an explicit unsubscribe stops it. AGY review is not a Collab v1 gate; ordinary review is independent,
-  and a milestone may use Astra when required. Explicit managed subagent tasks
+  and milestone review uses Codex Review (`oauth`, `gpt-6.1-sol`). Explicit managed subagent tasks
   use the task-bound inspect obligation above; it is not a free-form task queue
   and does not create worker transport input.
 - Each peer owns its complete task/worktree/integration/resource/cleanup

@@ -1018,6 +1018,9 @@ fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id
     let Some(mut task) = st.tasks.get(&task_id).cloned() else {
         return Resp::err(format!("task {} not found", task_id));
     };
+    if task.status == "invited" {
+        return Resp::err("BOARD_INVITATION_REVISION_REQUIRED: use collab task accept --expected-revision N or collab board respond --accept --expected-revision N");
+    }
     if task.owner != worker_id {
         return Resp::err("only the task owner may accept its assignment");
     }
@@ -1050,10 +1053,15 @@ fn handle_task_accept(server: &Server, worker_id: String, token: String, task_id
             task.id, task.status
         ));
     }
+    if let Err(error) = board_execution_gate(server, &st, &worker_id, &task_id) {
+        return error;
+    }
     task.status = "working".into();
     task.wait = None;
     task.updated_ms = now_ms();
-    server.commit_locked(&mut st, &[Event::TaskUpdated { task: task.clone() }]);
+    if let Err(error) = server.commit_locked_checked(&mut st, &[Event::TaskUpdated { task: task.clone() }]) {
+        return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "task": task.id,
         "status": task.status,
@@ -1073,6 +1081,18 @@ fn handle_task_update(
     next_step: Option<String>,
 ) -> Resp {
     let mut st = server.state.lock().unwrap();
+    task_update_locked(server, &mut st, worker_id, token, task_id, status, next_step)
+}
+
+fn task_update_locked(
+    server: &Server,
+    mut st: &mut State,
+    worker_id: String,
+    token: String,
+    task_id: String,
+    status: Option<String>,
+    next_step: Option<String>,
+) -> Resp {
     let Some(worker) = st.workers.get(&worker_id).cloned() else {
         return Resp::err(format!("worker {} not registered", worker_id));
     };
@@ -1153,7 +1173,9 @@ fn handle_task_update(
             events.push(Event::Superseded { ids: stale_notices });
         }
     }
-    server.commit_locked(&mut st, &events);
+    if let Err(error) = server.commit_locked_checked(&mut st, &events) {
+        return Resp::err(format!("TASK_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "task": task.id,
         "status": task.status,

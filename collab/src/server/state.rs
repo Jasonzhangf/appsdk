@@ -508,7 +508,7 @@ impl CleanupVerification {
 }
 
 pub fn task_resource_active(status: &str) -> bool {
-    !matches!(status, "waiting" | "merged" | "closed" | "cancelled")
+    !matches!(status, "pending" | "invited" | "waiting" | "merged" | "closed" | "cancelled")
 }
 
 pub fn wait_cycle(tasks: &HashMap<String, TaskRec>, task_id: &str, waiting_for: &str) -> bool {
@@ -666,6 +666,10 @@ pub enum Event {
     Superseded {
         ids: Vec<String>,
     },
+    BoardDetailsChanged {
+        task_id: String,
+        details: crate::board::BoardTaskDetails,
+    },
     TaskCreated {
         task: TaskRec,
     },
@@ -793,6 +797,7 @@ pub struct State {
     pub notification_delivery_evidence: HashMap<String, serde_json::Value>,
     pub receive_receipts: HashMap<String, ReceiveReceipt>,
     pub tasks: HashMap<String, TaskRec>,
+    pub board_details: HashMap<String, crate::board::BoardTaskDetails>,
     pub scheduler_admissions: HashMap<String, SchedulerAdmissionRecord>,
     pub task_lifecycle: HashMap<String, TaskLifecycleRecord>,
     /// Accepted tasks awaiting a main merge, keyed by task id. Daemon-owned so

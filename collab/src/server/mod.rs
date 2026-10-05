@@ -83,3 +83,8 @@ include!("mod_parts/part_09.rs");
 include!("mod_parts/part_10.rs");
 include!("mod_parts/part_11.rs");
 include!("mod_parts/part_12.rs");
+include!("board_handlers.rs");
+include!("board_invites.rs");
+include!("board_execution.rs");
+#[cfg(test)]
+mod board_state_tests;

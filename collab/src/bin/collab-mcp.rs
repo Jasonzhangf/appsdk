@@ -2,6 +2,9 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::process::Command;
 
+#[path = "collab-mcp/board_tools.rs"]
+mod board_tools;
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
@@ -11,7 +14,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 
 fn tools() -> Value {
-    json!([
+    let mut tools = json!([
         tool("collab_msg", "Read a durable notification by ID.", json!({"id":{"type":"string"}}), &["id"]),
         tool(
             "collab_recv",
@@ -22,7 +25,7 @@ fn tools() -> Value {
             }),
             &["receive_id"]
         ),
-        tool("collab_subagent", "Parent manages children; child uses ready/working and sends results via collab_sendmessage. status includes mailbox, keepalive and notification history. snapshot is explicit screen-tail read only, not a health probe. Observers without an App Server push channel must check status/mailbox themselves. rearm requires an explicit operator request after exhaustion. start accepts optional runtime=codex to override ~/.appsdk/config.toml. dispatch assigns a real task through the live master scheduler and is idempotent by request_id.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close"]},"id":{"type":"string"},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
+        tool("collab_subagent", "Parent manages children; child uses ready/working and sends results via collab_sendmessage. status includes mailbox, keepalive and notification history. snapshot is explicit screen-tail read only, not a health probe. Observers without an App Server push channel must check status/mailbox themselves. rearm requires an explicit operator request after exhaustion. start accepts optional runtime=codex to override ~/.appsdk/config.toml. dispatch retains the legacy private managed-child path and is idempotent by request_id; ordinary peers must instead use collab_board_publish/invite with delivery/test conditions and an observed revision.", json!({"action":{"type":"string","enum":["start","dispatch","list","status","snapshot","rearm","send","ready","working","close"]},"id":{"type":"string"},"request_id":{"type":"string"},"runtime":{"type":"string","enum":["codex"]},"lines":{"type":"integer","minimum":1,"maximum":200},"subject":{"type":"string"},"body":{"type":"string"},"feature_id":{"type":"string"},"worktree_path":{"type":"string"},"branch":{"type":"string"},"base_commit":{"type":"string"},"priority":{"type":"string","enum":["p0","p1","p2","p3","p4"]},"next_step":{"type":"string"}}), &["action"]),
         tool(
             "collab_init",
             "Operator-only. Prefer `collab_context`, which performs initialization, recovery, and registration automatically. Use this only for explicit operator-driven project initialization or an intentional peer selection via worker_id.",
@@ -79,8 +82,8 @@ fn tools() -> Value {
         ),
         tool(
             "collab_task_accept",
-            "Owner-authenticated acceptance of an assigned scheduler task; atomically records assigned to working.",
-            json!({"id":{"type":"string"}}),
+            "Accept a board invitation with expected_revision through the shared accept transaction, or a legal legacy scheduler assignment without it. Rechecks other owned responsibilities before starting work.",
+            json!({"id":{"type":"string"},"expected_revision":{"type":"integer","minimum":1}}),
             &["id"]
         ),
         tool(
@@ -163,11 +166,13 @@ fn tools() -> Value {
         ),
         tool(
             "collab_master",
-            "Inspect the live Collab master, self-promote after explicit user approval when no live master exists, or delegate as the current live master. Codex root is unrelated. Init and register never create master. Independent peers may decline a master collaboration invite; managed subagents must obey the master.",
+            "Inspect the live Collab master, self-promote after explicit user approval when no live master exists, or delegate as the current live master. Codex root is unrelated. Init and register never create master. Independent peers may decline a master board invitation; private subworkers are not exposed on the public board.",
             json!({"action":{"type":"string","enum":["status","promote","delegate"]},"approval":{"type":"string"},"target":{"type":"string"}}),
             &["action"]
         )
-    ])
+    ]);
+    tools.as_array_mut().expect("tool list").extend(board_tools::tools());
+    tools
 }
 
 fn collab_bin() -> std::path::PathBuf {
@@ -194,6 +199,7 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
 }
 
 fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
+    if let Some(argv) = board_tools::argv(name, args)? { return Ok(argv); }
     let mut argv = Vec::<String>::new();
     match name {
         "collab_msg" => argv.extend(["msg".into(), required(args, "id")?]),
@@ -317,6 +323,7 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         }
         "collab_task_accept" => {
             argv.extend(["task".into(), "accept".into(), required(args, "id")?]);
+            optional_integer_flag(&mut argv, args, "expected_revision", "--expected-revision")?;
         }
         "collab_task_register" => {
             argv.extend(["task".into(), "register".into(), required(args, "id")?]);

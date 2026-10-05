@@ -8,10 +8,25 @@ fn dispatch_with_route_context(
             "MIGRATION_ADMISSION_FROZEN: only identity rebind, read queries, daemon restart, and migration verify are allowed",
         );
     }
+    let unaccepted_resource_task = match &req {
+        Req::TaskRelocate { task_id, .. } | Req::TaskWait { task_id, .. }
+        | Req::TaskDeliver { task_id, .. } | Req::TaskReview { task_id, .. }
+        | Req::TaskIntegrated { task_id, .. } | Req::TaskClose { task_id, .. }
+        | Req::TaskFinalizeCleanup { task_id, .. } => Some(task_id),
+        _ => None,
+    };
+    if let Some(task_id) = unaccepted_resource_task {
+        let state = server.state.lock().unwrap();
+        if state.tasks.get(task_id).is_some_and(|task| matches!(task.status.as_str(), "pending" | "invited")) {
+            return Resp::err("BOARD_ACCEPT_REQUIRED: unaccepted tasks cannot bind execution resources or lifecycle evidence");
+        }
+    }
     let app_scope = project_context
         .as_ref()
         .map(|context| context.app_scope_id.clone());
     match req {
+        Req::BoardShow => handle_board_show(server),
+        Req::Board { worker_id, token, command } => handle_board_command(server, worker_id, token, command),
         Req::SubagentObserve { id, snapshot_lines } => {
             match crate::subagent::observe(server, id.as_deref(), snapshot_lines) {
                 Ok(mut value) => {
@@ -758,7 +773,8 @@ enum WireRoutePrincipal<'a> {
 
 fn wire_route_principals(req: &Req) -> Result<Vec<WireRoutePrincipal<'_>>, String> {
     match req {
-        Req::Subagent { worker_id, .. }
+        Req::Board { worker_id, .. }
+        | Req::Subagent { worker_id, .. }
         | Req::Register { worker_id, .. }
         | Req::LiveClosureDaemonSend { worker_id, .. }
         | Req::NotificationSubscribe { worker_id, .. }

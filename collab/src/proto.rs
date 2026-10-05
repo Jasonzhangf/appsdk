@@ -332,6 +332,12 @@ impl ProjectContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Req {
+    BoardShow,
+    Board {
+        worker_id: String,
+        token: String,
+        command: crate::board::BoardCommand,
+    },
     SubagentObserve {
         id: Option<String>,
         snapshot_lines: Option<usize>,

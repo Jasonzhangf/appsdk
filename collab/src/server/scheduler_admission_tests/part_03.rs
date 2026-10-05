@@ -2,7 +2,7 @@
     fn stale_attempt_cannot_clear_newer_notification_claim() {
         let (mut server, root) = test_server();
         register(&server, "master", "%master");
-        register(&server, "peer", "%peer");
+        register_private_dispatch_peer(&server);
         server.config.notifications.enabled = true;
         promote_master(&server);
         let server = Arc::new(server);

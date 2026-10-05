@@ -365,7 +365,40 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
     let other_scope = test_scope(other.clone());
     let host_paths = HostPaths::for_state_root(&state_root).unwrap();
 
-    let candidate = tmux_candidate(Some("session-cross"), Some("thread-cross"), "%5");
+    // Exercise discovery with an owned real endpoint, not ambient TMUX state.
+    struct OwnedTmux(std::path::PathBuf);
+    impl Drop for OwnedTmux {
+        fn drop(&mut self) {
+            let status = std::process::Command::new("tmux")
+                .arg("-S").arg(&self.0).arg("kill-server").status().unwrap();
+            assert!(status.success(), "owned identity fixture tmux cleanup failed");
+        }
+    }
+    // macOS sockaddr_un has a short path limit; keep the owned socket basename short.
+    let tmux_socket = root.join("s");
+    let status = std::process::Command::new("tmux").arg("-S").arg(&tmux_socket)
+        .args(["new-session", "-d", "-s", "identity", "-c"]).arg(&root).arg("cat")
+        .status().unwrap();
+    assert!(status.success());
+    let owned_tmux = OwnedTmux(tmux_socket.clone());
+    let output = std::process::Command::new("tmux").arg("-S").arg(&tmux_socket)
+        .args(["display-message", "-p", "-t", "identity:0.0", "#{pid}\t#{pane_id}"])
+        .output().unwrap();
+    assert!(output.status.success());
+    let metadata = String::from_utf8(output.stdout).unwrap();
+    let (server_pid, pane_id) = metadata.trim().split_once('\t').unwrap();
+    let tmux_env = format!("{},{server_pid},0", tmux_socket.display());
+    let previous_tmux = std::env::var_os("TMUX");
+    let previous_pane = std::env::var_os("TMUX_PANE");
+    let previous_thread = std::env::var_os("CODEX_THREAD_ID");
+    let previous_session = std::env::var_os("CODEX_SESSION_ID");
+    let previous_worker = std::env::var_os("COLLAB_WORKER");
+    std::env::set_var("TMUX", &tmux_env);
+    std::env::set_var("TMUX_PANE", pane_id);
+    std::env::set_var("CODEX_THREAD_ID", "thread-cross");
+    std::env::set_var("CODEX_SESSION_ID", "session-cross");
+    std::env::remove_var("COLLAB_WORKER");
+    let candidate = crate::client::adapters::tmux::candidate_from_env().unwrap();
     saved_identity(
         &host_paths,
         &other_scope,
@@ -377,14 +410,6 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
 
     // Non-rebind paths (scope resolution / init) still fail closed on a
     // cross-project unique anchor instead of displacing another project.
-    let previous_thread = std::env::var_os("CODEX_THREAD_ID");
-    let previous_session = std::env::var_os("CODEX_SESSION_ID");
-    let previous_worker = std::env::var_os("COLLAB_WORKER");
-    let previous_pane = std::env::var_os("TMUX_PANE");
-    std::env::set_var("TMUX_PANE", "%5");
-    std::env::set_var("CODEX_THREAD_ID", "thread-cross");
-    std::env::set_var("CODEX_SESSION_ID", "session-cross");
-    std::env::remove_var("COLLAB_WORKER");
     let hard_fail = load_or_create_resolved_at(&host_paths, &scope, None, false);
     let hard_fail_error = hard_fail.as_ref().unwrap_err().to_string();
     assert!(
@@ -454,7 +479,12 @@ fn scope_rebind_command_retires_a_unique_cross_project_tmux_anchor() {
         Some(value) => std::env::set_var("TMUX_PANE", value),
         None => std::env::remove_var("TMUX_PANE"),
     }
-    std::fs::remove_dir_all(root).ok();
+    match previous_tmux {
+        Some(value) => std::env::set_var("TMUX", value),
+        None => std::env::remove_var("TMUX"),
+    }
+    drop(owned_tmux);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// A caller without any anchor stays unauthenticated: a persisted non-live

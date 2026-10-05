@@ -13,6 +13,25 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Preserve the daemon's complete error response, including committed outcomes.
+/// Display remains message-only so legacy error classification cannot read data
+/// or user-provided text as a transport error code.
+#[derive(Debug)]
+pub struct ServerResponseError {
+    pub response: Resp,
+}
+
+impl std::fmt::Display for ServerResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.response.error.as_deref() {
+            Some(message) => formatter.write_str(message),
+            None => formatter.write_str("DAEMON_UNKNOWN: unknown server error"),
+        }
+    }
+}
+
+impl std::error::Error for ServerResponseError {}
+
 const READINESS_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, serde::Deserialize)]
@@ -213,15 +232,7 @@ pub fn call_with_stream<T: DeserializeOwned>(
     let resp: Resp = serde_json::from_str(buf.trim())
         .context("DAEMON_UNKNOWN: malformed response from server")?;
     if !resp.ok {
-        anyhow::bail!(format!(
-            "{}{}",
-            if resp.error.is_none() {
-                "DAEMON_UNKNOWN: "
-            } else {
-                ""
-            },
-            resp.error.unwrap_or_else(|| "unknown server error".into())
-        ));
+        return Err(ServerResponseError { response: resp }.into());
     }
     serde_json::from_value(resp.data).with_context(|| {
         format!(
@@ -653,6 +664,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs::{self, File};
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -711,6 +723,30 @@ mod tests {
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         assert_eq!(rc, 0, "hold fixture lock");
         file
+    }
+
+    #[test]
+    fn server_error_retains_committed_outcome_in_the_error_chain() {
+        let dir = TempServerDir::new("response-data");
+        let socket = dir.socket();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut request).unwrap();
+            let response = serde_json::json!({
+                "ok": false,
+                "error": "notification unavailable",
+                "data": {"repair_required": true, "durable": true, "message_id": "committed-message"}
+            });
+            writeln!(stream, "{response}").unwrap();
+        });
+        let error = call::<serde_json::Value>(&socket, &Req::Ping).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.to_string(), "notification unavailable");
+        let diagnostic = format!("{:?}", error.root_cause());
+        assert!(diagnostic.contains("repair_required"), "response data was lost: {diagnostic}");
+        assert!(diagnostic.contains("committed-message"), "durable message id was lost: {diagnostic}");
     }
 
     #[test]

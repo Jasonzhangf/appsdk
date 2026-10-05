@@ -60,7 +60,7 @@ pub(crate) fn actionable(status: &str) -> bool {
 /// already-delivered task raises no keepalive nudge, but it is still unfinished
 /// responsibility that must be resolved before worker close.
 pub(crate) fn unfinished(status: &str) -> bool {
-    !matches!(status, "closed" | "cancelled")
+    !matches!(status, "pending" | "invited" | "closed" | "cancelled")
 }
 
 fn observed_label(agent: AgentState) -> &'static str {

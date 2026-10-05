@@ -213,6 +213,11 @@ impl State {
                 self.master_wake = accumulator.clone();
             }
             Event::SubagentUpdated { subagent } => {
+                for task in self.tasks.values().filter(|task| task.owner == subagent.peer || task.created_by == subagent.peer) {
+                    if let Some(details) = self.board_details.get_mut(&task.id) {
+                        details.public_visibility = false;
+                    }
+                }
                 self.subagents.insert(subagent.id.clone(), subagent.clone());
                 if subagent.status == "closed" {
                     let id = format!("subagent:{}", subagent.id);
@@ -568,7 +573,18 @@ impl State {
                     m.last_wake_attempt_ms = 0;
                 }
             }
+            Event::BoardDetailsChanged { task_id, details } => {
+                self.board_details.insert(task_id.clone(), details.clone());
+            }
             Event::TaskCreated { task } | Event::TaskUpdated { task } => {
+                let known_public = self.workers.contains_key(&task.owner)
+                    && !self.subagents.values().any(|child| child.peer == task.owner);
+                match self.board_details.get_mut(&task.id) {
+                    Some(details) => details.revision += 1,
+                    None => {
+                        self.board_details.insert(task.id.clone(), crate::board::BoardTaskDetails::legacy(&task.id, known_public));
+                    }
+                }
                 self.tasks.insert(task.id.clone(), task.clone());
             }
             Event::SchedulerAdmission { admission } => {
@@ -588,6 +604,9 @@ impl State {
                 }
             }
             Event::TaskLifecycleUpdated { task_id, record } => {
+                if let Some(details) = self.board_details.get_mut(task_id) {
+                    details.revision += 1;
+                }
                 self.task_lifecycle.insert(task_id.clone(), record.clone());
             }
             Event::MergeRequested { request } => {
@@ -598,6 +617,9 @@ impl State {
                 self.pending_merges.remove(task_id);
             }
             Event::CleanupVerified { receipt } => {
+                if let Some(details) = self.board_details.get_mut(&receipt.task_id) {
+                    details.revision += 1;
+                }
                 self.cleanup_receipts
                     .insert(receipt.task_id.clone(), receipt.clone());
             }
@@ -1068,6 +1090,14 @@ impl State {
                 .into_iter()
                 .map(|evidence| Event::GlobalMigrationCommitEvidence { evidence }),
         );
+        // Restore exact final descriptive records after replaying the resource
+        // snapshots above. Snapshot TaskCreated is not an additional update.
+        let mut details: Vec<_> = self.board_details.iter().collect();
+        details.sort_by(|left, right| left.0.cmp(right.0));
+        events.extend(details.into_iter().map(|(task_id, details)| Event::BoardDetailsChanged {
+            task_id: task_id.clone(),
+            details: details.clone(),
+        }));
         events.push(Event::ReducerCheckpoint {
             sequence: self.sequence,
             revision: self.revision,

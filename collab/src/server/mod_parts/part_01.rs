@@ -86,7 +86,9 @@ impl HostRouteRegistry {
 }
 
 const MAX_POLL_MS: u64 = 3_600_000;
-const TASK_STATUSES: [&str; 12] = [
+const TASK_STATUSES: [&str; 14] = [
+    "pending",
+    "invited",
     "assigned",
     "working",
     "blocked",

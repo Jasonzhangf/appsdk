@@ -1,3 +1,5 @@
+mod board;
+mod dashboard;
 mod client;
 mod config;
 mod identity;
@@ -64,6 +66,17 @@ enum Cmd {
     Status {
         #[arg(long)]
         all: bool,
+    },
+    /// Open a read-only loopback Web observer for this project's task board
+    Dashboard {
+        /// Loopback port; 0 lets the operating system select an available port
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
+    /// Shared public task board for the project master and independent peers
+    Board {
+        #[command(subcommand)]
+        cmd: board::BoardCommand,
     },
     /// Inspect or read messages from durable mailbox
     Mailbox {
@@ -326,6 +339,17 @@ fn me(scope: &Scope, worker: Option<String>) -> anyhow::Result<Identity> {
     }
     runtime_for_request(&ident)?;
     Ok(ident)
+}
+
+/// Board operations never bootstrap an identity or launch the daemon.
+fn registered_board_identity(scope: &Scope) -> anyhow::Result<Identity> {
+    let identity = identity::load_existing_at(&scope::HostPaths::resolve()?, scope, None)?
+        .ok_or_else(|| anyhow::anyhow!("BOARD_IDENTITY_REQUIRED: run collab context from the owning TUI before opening the board"))?;
+    if !persisted_runtime_matches_scope(scope, &identity)? {
+        anyhow::bail!("BOARD_STALE_IDENTITY: run collab context to repair the project binding");
+    }
+    runtime_for_request(&identity)?;
+    Ok(identity)
 }
 
 /// How `collab context` changed an identity during automatic bootstrap.
@@ -652,6 +676,9 @@ fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
         eprintln!("collab: {}", format_cli_error(&e.to_string()));
+        if let Some(server_error) = e.downcast_ref::<client::ServerResponseError>() {
+            eprintln!("collab response: {}", serde_json::json!(&server_error.response));
+        }
         std::process::exit(1);
     }
 }
@@ -1288,6 +1315,24 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
             out(&v);
             Ok(())
         }
+        Cmd::Dashboard { port } => {
+            let scope = Scope::resolve()?;
+            let identity = registered_board_identity(&scope)?;
+            let runtime = runtime_for_request(&identity)?;
+            let context = proto::ProjectContext::for_registered_root_with_app(&scope.root, runtime.appserver_id.clone())?;
+            dashboard::run(scope.sock_path(), context, port)
+        }
+        Cmd::Board { cmd } => {
+            let scope = Scope::resolve()?;
+            let ident = registered_board_identity(&scope)?;
+            let request = match cmd {
+                board::BoardCommand::Show => Req::BoardShow,
+                command => Req::Board { worker_id: ident.worker_id.clone(), token: ident.token.clone(), command },
+            };
+            let value: serde_json::Value = call_project(&scope, &ident, &request)?;
+            out(&value);
+            Ok(())
+        }
         Cmd::Task { cmd } => {
             let scope = Scope::resolve()?;
             let ident = me(&scope, None)?;
@@ -1324,10 +1369,20 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
                     status,
                     next_step: next,
                 },
-                TaskCmd::Accept { id } => Req::TaskAccept {
-                    worker_id: worker_id.clone(),
-                    token: token.clone(),
-                    task_id: id,
+                TaskCmd::Accept { id, expected_revision } => match expected_revision {
+                    Some(expected_revision) => Req::Board {
+                        worker_id: worker_id.clone(), token: token.clone(),
+                        command: board::BoardCommand::Respond { id, accept: true, decline: false, expected_revision, reason: None },
+                    },
+                    None => Req::TaskAccept { worker_id: worker_id.clone(), token: token.clone(), task_id: id },
+                },
+                TaskCmd::Decline { id, expected_revision, reason, legacy_assignment } => Req::Board {
+                    worker_id: worker_id.clone(), token: token.clone(),
+                    command: if legacy_assignment {
+                        board::BoardCommand::DeclineAssigned { id, expected_revision, reason }
+                    } else {
+                        board::BoardCommand::Respond { id, accept: false, decline: true, expected_revision, reason: Some(reason) }
+                    },
                 },
                 TaskCmd::Relocate {
                     id,

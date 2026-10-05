@@ -643,6 +643,7 @@ mod tests {
 
     #[test]
     fn notify_pastes_text_then_sends_enter_and_never_claims_consumption() {
+        let _guard = crate::scope::TEST_ENV_LOCK.lock().unwrap();
         let tmux = IsolatedTmux::start_with_command(Some("cat"));
         let endpoint = tmux.endpoint();
         let receipt = notify(&endpoint, "message-1", "collab durable wake").unwrap();

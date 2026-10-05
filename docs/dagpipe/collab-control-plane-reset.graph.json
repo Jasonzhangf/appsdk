@@ -1,0 +1,209 @@
+{
+  "id": "appsdk-collab-control-plane-reset",
+  "version": "0.1.0",
+  "description": "SESE control-plane reset graph. It authorizes one explicit reset level, proves exclusivity for that level, inventories the exact retire set including duplicate pane claimants, archives with byte-equality verification, retires the selected state transactionally, rebuilds an empty baseline, and emits one audit receipt. The three levels (routes, project, host) share this pipeline; the level selects the inventory and retire set, not the topology. Declared failure terminals, each leaving the source untouched: RESET_AUTHORIZATION_REQUIRED, RESET_DAEMON_LIVE, RESET_AMBIGUOUS_PANE_CLAIMANTS (carries the candidate list), RESET_ARCHIVE_MISMATCH.",
+  "inputs": [
+    {
+      "id": "reset_request",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "authorize_reset",
+      "operator": "appsdk.collab_control_plane.authorize_reset",
+      "operator_version": "1",
+      "inputs": [
+        "reset_request"
+      ],
+      "output": {
+        "id": "authorized_reset_request",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "prove_exclusivity",
+      "operator": "appsdk.collab_control_plane.prove_exclusivity",
+      "operator_version": "1",
+      "inputs": [
+        "authorized_reset_request"
+      ],
+      "output": {
+        "id": "exclusive_reset_context",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "inventory_control_plane",
+      "operator": "appsdk.collab_control_plane.inventory_control_plane",
+      "operator_version": "1",
+      "inputs": [
+        "exclusive_reset_context"
+      ],
+      "output": {
+        "id": "control_plane_inventory",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "archive_inventory",
+      "operator": "appsdk.collab_control_plane.archive_inventory",
+      "operator_version": "1",
+      "inputs": [
+        "control_plane_inventory"
+      ],
+      "output": {
+        "id": "verified_archive",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "retire_selected_state",
+      "operator": "appsdk.collab_control_plane.retire_selected_state",
+      "operator_version": "1",
+      "inputs": [
+        "verified_archive"
+      ],
+      "output": {
+        "id": "retired_state",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "rebuild_baseline",
+      "operator": "appsdk.collab_control_plane.rebuild_baseline",
+      "operator_version": "1",
+      "inputs": [
+        "retired_state"
+      ],
+      "output": {
+        "id": "rebuilt_baseline",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "record_reset_receipt",
+      "operator": "appsdk.collab_control_plane.record_reset_receipt",
+      "operator_version": "1",
+      "inputs": [
+        "rebuilt_baseline"
+      ],
+      "output": {
+        "id": "reset_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "authorize_reset",
+      "to": "prove_exclusivity",
+      "arc_id": "authorized_reset_request"
+    },
+    {
+      "from": "prove_exclusivity",
+      "to": "inventory_control_plane",
+      "arc_id": "exclusive_reset_context"
+    },
+    {
+      "from": "inventory_control_plane",
+      "to": "archive_inventory",
+      "arc_id": "control_plane_inventory"
+    },
+    {
+      "from": "archive_inventory",
+      "to": "retire_selected_state",
+      "arc_id": "verified_archive"
+    },
+    {
+      "from": "retire_selected_state",
+      "to": "rebuild_baseline",
+      "arc_id": "retired_state"
+    },
+    {
+      "from": "rebuild_baseline",
+      "to": "record_reset_receipt",
+      "arc_id": "rebuilt_baseline"
+    }
+  ],
+  "outputs": [
+    "reset_receipt"
+  ]
+}

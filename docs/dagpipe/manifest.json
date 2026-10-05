@@ -44,6 +44,14 @@
     {
       "id": "appsdk-collab-dashboard-operation",
       "path": "docs/dagpipe/collab-dashboard.graph.json"
+    },
+    {
+      "id": "appsdk-collab-control-plane-reset",
+      "path": "docs/dagpipe/collab-control-plane-reset.graph.json"
+    },
+    {
+      "id": "appsdk-collab-pane-route-reconcile",
+      "path": "docs/dagpipe/collab-pane-route-reconcile.graph.json"
     }
   ]
 }

@@ -1,0 +1,153 @@
+{
+  "id": "appsdk-collab-pane-route-reconcile",
+  "version": "0.2.0",
+  "description": "SESE pane-route reconciliation graph entered only when the host route index disagrees with the project route owner. It classifies the scope-local pane claimants, resolves the highest-generation scope-local owner binding, publishes that owner route when the host index lagged, verifies the scope-local uniqueness postcondition, and emits one receipt that either converges or names the remaining scope-local conflict. A claimant from another project scope is never a conflict. A retired lower-generation claimant is not republished, so the index converges instead of flipping.",
+  "inputs": [
+    {
+      "id": "route_index_disagreement",
+      "schema": "Object"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "classify_pane_claimants",
+      "operator": "appsdk.collab_pane_route.classify_claimants",
+      "operator_version": "1",
+      "inputs": [
+        "route_index_disagreement"
+      ],
+      "output": {
+        "id": "pane_claimant_classification",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "resolve_owner_route",
+      "operator": "appsdk.collab_pane_route.resolve_owner_route",
+      "operator_version": "1",
+      "inputs": [
+        "pane_claimant_classification"
+      ],
+      "output": {
+        "id": "owner_route_resolution",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "publish_owner_route",
+      "operator": "appsdk.collab_pane_route.publish_owner_route",
+      "operator_version": "1",
+      "inputs": [
+        "owner_route_resolution"
+      ],
+      "output": {
+        "id": "owner_route_publication",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "verify_scope_pane_uniqueness",
+      "operator": "appsdk.collab_pane_route.verify_scope_uniqueness",
+      "operator_version": "1",
+      "inputs": [
+        "owner_route_publication"
+      ],
+      "output": {
+        "id": "scope_pane_uniqueness_postcondition",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "emit_reconcile_receipt",
+      "operator": "appsdk.collab_pane_route.emit_reconcile_receipt",
+      "operator_version": "1",
+      "inputs": [
+        "scope_pane_uniqueness_postcondition"
+      ],
+      "output": {
+        "id": "reconcile_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    }
+  ],
+  "edges": [
+    {
+      "from": "classify_pane_claimants",
+      "to": "resolve_owner_route",
+      "arc_id": "pane_claimant_classification"
+    },
+    {
+      "from": "resolve_owner_route",
+      "to": "publish_owner_route",
+      "arc_id": "owner_route_resolution"
+    },
+    {
+      "from": "publish_owner_route",
+      "to": "verify_scope_pane_uniqueness",
+      "arc_id": "owner_route_publication"
+    },
+    {
+      "from": "verify_scope_pane_uniqueness",
+      "to": "emit_reconcile_receipt",
+      "arc_id": "scope_pane_uniqueness_postcondition"
+    }
+  ],
+  "outputs": [
+    "reconcile_receipt"
+  ]
+}

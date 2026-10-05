@@ -29,16 +29,12 @@ fn same_scope_pane_owner_supersedes(
     let candidates = {
         let host = host_server.state.lock().unwrap();
         host.global
-            .current_thread_routes
-            .values()
+            .tmux_pane_route_claimants_in_scope(&binding.route_scope(), endpoint)
+            .into_iter()
             .filter(|other| {
-                other.route_scope() == binding.route_scope()
-                    && other.binding_id != binding.binding_id
+                other.binding_id != binding.binding_id
                     && other.session_id.is_some()
                     && other.native_thread_id.is_some()
-                    && other.tmux_endpoint.as_ref().is_some_and(|other_endpoint| {
-                        crate::client::adapters::tmux::same_pane_route(other_endpoint, endpoint)
-                    })
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -215,8 +211,18 @@ impl ProjectRuntimeManager {
         if verify(&runtime.state.lock().unwrap(), worker_id, token).is_err() {
             return Err("TOKEN_MISMATCH: pane register retry credential does not own worker".into());
         }
-        let host_route = self.host.state.lock().unwrap().global
-            .lookup_unique_tmux_pane_route(&candidate.endpoint).cloned();
+        let retry_scope = RouteScope {
+            project_scope_id: context.project_scope.clone(),
+            app_scope_id: previous.appserver_id.clone(),
+        };
+        let host_route = self
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .lookup_unique_tmux_pane_route_in_scope(&retry_scope, &candidate.endpoint)
+            .cloned();
         let host_matches = host_route.as_ref().is_some_and(|host|
             host == &binding ||
             (host.same_principal(&binding)

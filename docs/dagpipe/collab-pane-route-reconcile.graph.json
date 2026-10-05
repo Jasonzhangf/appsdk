@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-pane-route-reconcile",
   "version": "0.2.0",
-  "description": "SESE pane-route reconciliation graph entered only when the host route index disagrees with the project route owner. It classifies the scope-local pane claimants, resolves the highest-generation scope-local owner binding, publishes that owner route when the host index lagged, verifies the scope-local uniqueness postcondition, and emits one receipt that either converges or names the remaining scope-local conflict. A claimant from another project scope is never a conflict. A retired lower-generation claimant is not republished, so the index converges instead of flipping.",
+  "description": "SESE pane-route reconciliation graph entered only when the host route index disagrees with the project route owner. It classifies the scope-local pane claimants, resolves the scope-local owner binding, publishes that owner route when the host index lagged, verifies the scope-local uniqueness postcondition, and emits one receipt that either converges or names the remaining scope-local conflict. A claimant from another project scope is never a conflict. Two claimants inside one scope stay ambiguous: the receipt names them and the fence fails closed, because an offline reset is the only path that may retire a live conflict.",
   "inputs": [
     {
       "id": "route_index_disagreement",

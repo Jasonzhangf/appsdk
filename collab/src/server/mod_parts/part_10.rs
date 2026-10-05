@@ -786,7 +786,7 @@ fn validate_cli_register_rebind(
     let candidate_binding = state.global.lookup_tmux_route(&candidate.endpoint).or_else(|| {
         state
             .global
-            .lookup_unique_tmux_pane_route(&candidate.endpoint)
+            .lookup_unique_tmux_pane_route_in_scope(&route_scope, &candidate.endpoint)
             .filter(|binding| {
                 binding.agent_id.as_str() == worker_id
                     && state.workers.get(worker_id).is_some_and(|worker| {

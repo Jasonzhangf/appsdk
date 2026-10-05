@@ -185,7 +185,19 @@ impl ProjectRuntimeManager {
             .map(|(key, route)| (key.clone(), route.root.clone(), route.storage_root.clone()))
             .collect::<Vec<_>>();
         for (key, root, storage_root) in pending {
-            let _ = manager.ensure_runtime(&key, &root, &storage_root);
+            // A route whose runtime cannot be opened must stay visibly not
+            // ready.  Dropping this error would hide the only trace of the
+            // failure until a client happens to ask for that project.
+            if let Err(error) = manager.ensure_runtime(&key, &root, &storage_root) {
+                append_log(
+                    &host_paths.log_path(),
+                    &format!(
+                        "RUNTIME_ENSURE_FAILED: route {key:?} at {} (storage {}) is not ready: {error}",
+                        root.display(),
+                        storage_root.display()
+                    ),
+                );
+            }
         }
         manager.reconcile_started_thread_routes()?;
         manager.reconcile_same_pane_master_routes()?;
@@ -252,15 +264,51 @@ impl ProjectRuntimeManager {
             if same_scope_pane_owner_supersedes(&self.host, runtime, &binding) {
                 continue;
             }
-            let route = {
+            let scope = binding.route_scope();
+            let (route, claimants) = {
                 let host = self.host.state.lock().unwrap();
-                binding
-                    .tmux_endpoint
-                    .as_ref()
-                    .and_then(|endpoint| host.global.lookup_unique_tmux_pane_route(endpoint))
-                    .cloned()
+                let claimants = match binding.tmux_endpoint.as_ref() {
+                    Some(endpoint) => host
+                        .global
+                        .tmux_pane_route_claimants_in_scope(&scope, endpoint)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    None => Vec::new(),
+                };
+                let route = if claimants.len() == 1 {
+                    claimants.first().cloned()
+                } else {
+                    None
+                };
+                (route, claimants)
             };
             if route.as_ref() != Some(&binding) {
+                if claimants.len() > 1 {
+                    return Err(format!(
+                        "RECOVERY_RECONCILE_REQUIRED: pane {} has {} route claimants in project {}; expected exactly one: {}; resolve with `collab reset --routes --keep <binding_id>`",
+                        binding
+                            .tmux_endpoint
+                            .as_ref()
+                            .map(|endpoint| format!(
+                                "{}:{}",
+                                endpoint.tmux_session_id, endpoint.pane_id
+                            ))
+                            .unwrap_or_else(|| "<unknown>".to_owned()),
+                        claimants.len(),
+                        binding.project_scope.as_str(),
+                        claimants
+                            .iter()
+                            .map(|claimant| format!(
+                                "{} binding {} generation {}",
+                                claimant.agent_id,
+                                claimant.binding_id,
+                                claimant.endpoint_generation
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 return Err(format!(
                     "RECOVERY_RECONCILE_REQUIRED: host route for {} is not at project generation {}",
                     binding.agent_id, binding.endpoint_generation
@@ -282,9 +330,12 @@ impl ProjectRuntimeManager {
                 if same_scope_pane_owner_supersedes(&self.host, &runtime, &binding) {
                     continue;
                 }
+                let scope = binding.route_scope();
                 let host_route = {
                     let host = self.host.state.lock().unwrap();
-                    host.global.lookup_unique_tmux_pane_route(endpoint).cloned()
+                    host.global
+                        .lookup_unique_tmux_pane_route_in_scope(&scope, endpoint)
+                        .cloned()
                 };
                 if host_route.as_ref() == Some(&binding) {
                     continue;

@@ -523,15 +523,42 @@ impl GlobalState {
         // native-key lookup misses it.  Only scan when the caller is pane-only
         // and there is exactly one matching pane, otherwise fail closed.
         if endpoint.codex_session_id.is_none() && endpoint.codex_thread_id.is_none() {
-            let mut matches = self.current_thread_routes.values().filter(|binding| {
-                binding.tmux_endpoint.as_ref().is_some_and(|persisted| {
-                    crate::client::adapters::tmux::same_pane_route(persisted, endpoint)
-                })
-            });
+            let mut matches = self.tmux_pane_route_claimants(endpoint).into_iter();
             let binding = matches.next()?;
             return matches.next().is_none().then_some(binding);
         }
         None
+    }
+
+    /// Every live route that claims this pane, host-wide.
+    ///
+    /// Pane uniqueness is a per-project contract, so this host-wide view is
+    /// only for callers that genuinely ask a host-wide question.  Scope-aware
+    /// callers use [`Self::tmux_pane_route_claimants_in_scope`].
+    pub fn tmux_pane_route_claimants(&self, endpoint: &TmuxEndpoint) -> Vec<&RuntimeBinding> {
+        self.current_thread_routes
+            .values()
+            .filter(|binding| {
+                binding.tmux_endpoint.as_ref().is_some_and(|persisted| {
+                    crate::client::adapters::tmux::same_pane_route(persisted, endpoint)
+                })
+            })
+            .collect()
+    }
+
+    /// Every live route in `scope` that claims this pane.
+    ///
+    /// A claimant from another project scope is not a conflict: it neither
+    /// blocks this scope nor may be retired by it.
+    pub fn tmux_pane_route_claimants_in_scope(
+        &self,
+        scope: &RouteScope,
+        endpoint: &TmuxEndpoint,
+    ) -> Vec<&RuntimeBinding> {
+        self.tmux_pane_route_claimants(endpoint)
+            .into_iter()
+            .filter(|binding| binding.route_scope() == *scope)
+            .collect()
     }
 
     /// Recovery-only lookup of the complete pane address. The caller still
@@ -540,11 +567,25 @@ impl GlobalState {
         &self,
         endpoint: &TmuxEndpoint,
     ) -> Option<&RuntimeBinding> {
-        let mut matches = self.current_thread_routes.values().filter(|binding| {
-            binding.tmux_endpoint.as_ref().is_some_and(|persisted| {
-                crate::client::adapters::tmux::same_pane_route(persisted, endpoint)
-            })
-        });
+        let mut matches = self.tmux_pane_route_claimants(endpoint).into_iter();
+        let binding = matches.next()?;
+        matches.next().is_none().then_some(binding)
+    }
+
+    /// Recovery-only lookup of the complete pane address inside one project
+    /// scope.  Returns a route only when this scope has exactly one claimant.
+    ///
+    /// This is the scope-aware form used by the recovery fence, the reconciler,
+    /// register recovery and the CLI rebind.  Two claimants inside one scope
+    /// stay ambiguous and fail closed.
+    pub fn lookup_unique_tmux_pane_route_in_scope(
+        &self,
+        scope: &RouteScope,
+        endpoint: &TmuxEndpoint,
+    ) -> Option<&RuntimeBinding> {
+        let mut matches = self
+            .tmux_pane_route_claimants_in_scope(scope, endpoint)
+            .into_iter();
         let binding = matches.next()?;
         matches.next().is_none().then_some(binding)
     }

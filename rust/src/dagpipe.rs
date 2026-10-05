@@ -370,7 +370,7 @@ fn design_graph_ids() -> [&'static str; 11] {
     ]
 }
 
-fn design_graph_operator_names() -> [&'static str; 63] {
+fn design_graph_operator_names() -> [&'static str; 64] {
     [
         "appsdk.collab_context.resolve_root",
         "appsdk.collab_context.ensure_baseline",
@@ -428,13 +428,14 @@ fn design_graph_operator_names() -> [&'static str; 63] {
         "appsdk.collab_control_plane.inventory_control_plane",
         "appsdk.collab_control_plane.archive_inventory",
         "appsdk.collab_control_plane.retire_selected_state",
+        "appsdk.collab_control_plane.verify_retirement",
         "appsdk.collab_control_plane.rebuild_baseline",
         "appsdk.collab_control_plane.record_reset_receipt",
         "appsdk.collab_pane_route.classify_claimants",
-        "appsdk.collab_pane_route.resolve_owner_route",
+        "appsdk.collab_pane_route.resolve_scope_pane_owner",
         "appsdk.collab_pane_route.publish_owner_route",
         "appsdk.collab_pane_route.verify_scope_uniqueness",
-        "appsdk.collab_pane_route.emit_reconcile_receipt",
+        "appsdk.collab_pane_route.return_named_outcome",
     ]
 }
 

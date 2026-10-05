@@ -474,7 +474,12 @@ Success path for L1, in order: `authorize_reset` -> `prove_exclusivity` ->
 `verify_retirement` -> `rebuild_baseline` -> `record_reset_receipt`.
 
 The graph is registered in `docs/dagpipe/manifest.json` and validated with
-`dagpipe graph validate` (8 nodes, 7 edges, 8 waves, exit 0).
+`dagpipe graph validate` (8 nodes, 7 edges, 8 waves, exit 0). The design-graph
+operator allow-list in `rust/src/dagpipe.rs` must name every operator the graph
+uses, in node order: `verify_retirement` sits between `retire_selected_state`
+and `rebuild_baseline` in both. A node's `operator_version` is the operator's
+version, not the graph's, and the registry serves every design operator at
+version `"1"`, so raising the graph's own `version` does not change it.
 
 Every node maps to code that exists, so the graph is not ahead of the
 implementation:

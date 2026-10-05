@@ -12,7 +12,7 @@
     {
       "id": "authorize_reset",
       "operator": "appsdk.collab_control_plane.authorize_reset",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "reset_request"
       ],
@@ -35,7 +35,7 @@
     {
       "id": "prove_exclusivity",
       "operator": "appsdk.collab_control_plane.prove_exclusivity",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "authorized_reset_request"
       ],
@@ -58,7 +58,7 @@
     {
       "id": "inventory_control_plane",
       "operator": "appsdk.collab_control_plane.inventory_control_plane",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "exclusive_reset_context"
       ],
@@ -81,7 +81,7 @@
     {
       "id": "archive_inventory",
       "operator": "appsdk.collab_control_plane.archive_inventory",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "control_plane_inventory"
       ],
@@ -104,7 +104,7 @@
     {
       "id": "retire_selected_state",
       "operator": "appsdk.collab_control_plane.retire_selected_state",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "verified_archive"
       ],
@@ -150,7 +150,7 @@
     {
       "id": "rebuild_baseline",
       "operator": "appsdk.collab_control_plane.rebuild_baseline",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "verified_retirement"
       ],
@@ -173,7 +173,7 @@
     {
       "id": "record_reset_receipt",
       "operator": "appsdk.collab_control_plane.record_reset_receipt",
-      "operator_version": "2",
+      "operator_version": "1",
       "inputs": [
         "rebuilt_baseline"
       ],

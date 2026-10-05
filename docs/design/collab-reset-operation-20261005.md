@@ -484,7 +484,7 @@ Black box, from the real CLI entry.
 | B3 | The same command with an ambiguous pane that `--keep` does not resolve | nothing changes; every conflicting pane and its claimants are listed; the exit code is non-zero |
 | B4 | `collab reset --project` run from inside the storage root | refused with `RESET_PROJECT_HOLDS_HOST_INDEX`; the error points to L3 |
 | B5 | `collab reset --project`, then `collab reset --host --storage-root <root>`, then `collab up` | L2 archives the project tree and rebuilds its baseline; L3 archives both control-plane roots and leaves no index; `reset.jsonl` holds both receipts with their approval text; `~/.collab/runs/` survives unless `--include-runs` was given |
-| B6 | Durability: after B2, start the daemon twice | the retired claim does not come back; the index fingerprint is identical across the two starts; the host log records the skip |
+| B6 | Durability: after B2, start the daemon twice | the retired claim does not come back; the index fingerprint is identical across the two starts. The reconciler skip that prevents the republish is asserted by unit test, because an isolated fixture cannot register a peer on a live pane, so the reconciler has no binding to walk and the skip is not observable in the host log |
 | B7 | `collab reset --host --storage-root <a directory that is not a collab root>` | `RESET_STORAGE_ROOT_INVALID`; nothing is staged |
 | B8 | `collab reset --routes` on a copy with two ambiguous panes in one scope and two `--keep` flags | both stale claims are retired in one run and both survivors remain |
 | B9 | `collab reset --routes` on a copy whose post-commit replay cannot satisfy the postcondition | `RESET_VERIFY_FAILED`; the journal is restored from its pre-image snapshot and no receipt is written |

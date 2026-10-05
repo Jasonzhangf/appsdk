@@ -69,8 +69,8 @@ pub(super) fn tmux_route_address_key(endpoint: &TmuxEndpoint) -> String {
 ///
 /// The key is the address and not the binding id, so a retirement covers the
 /// exact address the operator named and never a later generation at that
-/// address. It lives here because both `global_state_impl` and
-/// `global_state_impl_part2` read and write the retirement map.
+/// address. It lives here because the retirement map spans both modules:
+/// `global_state_impl` validates it and `global_state_impl_part2` writes it.
 pub(super) fn retired_route_claim_key(
     binding: &RuntimeBinding,
 ) -> Result<String, StateError> {

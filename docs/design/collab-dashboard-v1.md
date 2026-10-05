@@ -1,6 +1,6 @@
 # Collab 执行任务板 v1
 
-状态：设计准入待审；尚未实现。目标基线 d86807a18448780a1b74da31a6e7dc441c8fe83e。
+状态：已实现；候选提交 caf598d2218aedc9f17d9d776e0e07ad6f70db73（parent origin/main 68ef9c0fd42101797b9979de47c618efdcf57ba8），独立架构 review 无 P0/P1。阶段证据见 docs/design/collab-dashboard-run-notes.md。
 
 ## 用户已确认的契约
 

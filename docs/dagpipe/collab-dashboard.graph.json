@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-dashboard-operation",
   "version": "0.1.0",
-  "description": "执行任务板一次请求：接收已认证的查看/发布/邀请/回应/进度意图，校验当前项目与权限，读取或原子提交daemon真源，投影无凭据无subworker的结果，返回明确成功/失败。设计和状态机见 docs/design/collab-dashboard-v1.md，当前待实现。每次重试是新请求，不构造跨节点回边。",
+  "description": "执行任务板一次请求：接收已认证的查看/发布/邀请/回应/进度意图，校验当前项目与权限，读取或原子提交daemon真源，投影无凭据无subworker的结果，返回明确成功/失败。设计和状态机见 docs/design/collab-dashboard-v1.md；实现位于 collab/src/server/board_handlers.rs（候选 caf598d）。每次重试是新请求，不构造跨节点回边。",
   "inputs": [{"id": "board_intent", "schema": "Object"}],
   "nodes": [
     {"id": "接收任务板意图", "operator": "appsdk.collab.board.admit_request", "operator_version": "1", "inputs": ["board_intent"], "output": {"id": "scoped_intent", "schema": "Object"}, "input_selector": {"include": [], "exclude": [], "predicate": null}, "output_selector": {"include": [], "exclude": [], "predicate": null}, "iterator": "Whole"},

@@ -734,16 +734,37 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = String::new();
             BufReader::new(stream.try_clone().unwrap()).read_line(&mut request).unwrap();
+            // The daemon flattens `Resp::data` into the response object, so the
+            // outcome fields sit at the top level with no `data` key. This is the
+            // real shape observed from the running daemon: a stale board invite
+            // answered `{"ok":false,"error":"BOARD_STALE_REVISION: ...",
+            // "current_revision":4,"expected_revision":99,"task_id":"dash-live-2"}`.
             let response = serde_json::json!({
                 "ok": false,
                 "error": "notification unavailable",
-                "data": {"repair_required": true, "durable": true, "message_id": "committed-message"}
+                "durable": true,
+                "message_id": "committed-message",
+                "repair_required": true,
+                "task_id": "dash-live-2",
+                "current_revision": 4
             });
             writeln!(stream, "{response}").unwrap();
         });
         let error = call::<serde_json::Value>(&socket, &Req::Ping).unwrap_err();
         server.join().unwrap();
         assert_eq!(error.to_string(), "notification unavailable");
+        let server_error = error
+            .downcast_ref::<ServerResponseError>()
+            .expect("the typed response error must stay in the chain");
+        assert_eq!(server_error.response.data["message_id"], "committed-message");
+        assert_eq!(server_error.response.data["repair_required"], true);
+        assert_eq!(server_error.response.data["current_revision"], 4);
+        // Serializing the retained response keeps the flattened wire shape, so
+        // the CLI `collab response:` line exposes the outcome the caller needs.
+        let rendered = serde_json::to_value(&server_error.response).unwrap();
+        assert_eq!(rendered["message_id"], "committed-message");
+        assert_eq!(rendered["repair_required"], true);
+        assert!(rendered.get("data").is_none(), "data must stay flattened: {rendered}");
         let diagnostic = format!("{:?}", error.root_cause());
         assert!(diagnostic.contains("repair_required"), "response data was lost: {diagnostic}");
         assert!(diagnostic.contains("committed-message"), "durable message id was lost: {diagnostic}");

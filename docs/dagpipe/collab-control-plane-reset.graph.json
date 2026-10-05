@@ -1,7 +1,7 @@
 {
   "id": "appsdk-collab-control-plane-reset",
-  "version": "0.1.0",
-  "description": "SESE control-plane reset graph. It authorizes one explicit reset level, proves exclusivity for that level, inventories the exact retire set including duplicate pane claimants, archives with byte-equality verification, retires the selected state transactionally, rebuilds an empty baseline, and emits one audit receipt. The three levels (routes, project, host) share this pipeline; the level selects the inventory and retire set, not the topology. Declared failure terminals, each leaving the source untouched: RESET_AUTHORIZATION_REQUIRED, RESET_DAEMON_LIVE, RESET_AMBIGUOUS_PANE_CLAIMANTS (carries the candidate list), RESET_ARCHIVE_MISMATCH.",
+  "version": "0.2.0",
+  "description": "SESE control-plane reset graph. It authorizes one explicit reset level, proves exclusivity for that level, inventories the exact retire set including duplicate pane claimants, archives with byte-equality verification, retires the selected state transactionally, verifies the postcondition by replaying the daemon's own reader, rebuilds an empty baseline, and emits one audit receipt. The three levels (routes, project, host) share this pipeline; the level selects the inventory and retire set, not the topology. Failure terminals are nodes, each leaving the source untouched: fail_level_required (RESET_LEVEL_REQUIRED), fail_authorization_required (RESET_AUTHORIZATION_REQUIRED), fail_storage_root (RESET_STORAGE_ROOT_REQUIRED, RESET_STORAGE_ROOT_INVALID), fail_daemon_live (RESET_DAEMON_LIVE), fail_keep_required (RESET_KEEP_REQUIRED, carries the candidate list), fail_target_live (RESET_TARGET_LIVE), fail_project_holds_index (RESET_PROJECT_HOLDS_HOST_INDEX), fail_verify_rollback (RESET_VERIFY_FAILED after restoring the staged pre-image and truncating the journal to its recorded offset).",
   "inputs": [
     {
       "id": "reset_request",
@@ -12,7 +12,7 @@
     {
       "id": "authorize_reset",
       "operator": "appsdk.collab_control_plane.authorize_reset",
-      "operator_version": "1",
+      "operator_version": "2",
       "inputs": [
         "reset_request"
       ],
@@ -35,7 +35,7 @@
     {
       "id": "prove_exclusivity",
       "operator": "appsdk.collab_control_plane.prove_exclusivity",
-      "operator_version": "1",
+      "operator_version": "2",
       "inputs": [
         "authorized_reset_request"
       ],
@@ -58,7 +58,7 @@
     {
       "id": "inventory_control_plane",
       "operator": "appsdk.collab_control_plane.inventory_control_plane",
-      "operator_version": "1",
+      "operator_version": "2",
       "inputs": [
         "exclusive_reset_context"
       ],
@@ -81,7 +81,7 @@
     {
       "id": "archive_inventory",
       "operator": "appsdk.collab_control_plane.archive_inventory",
-      "operator_version": "1",
+      "operator_version": "2",
       "inputs": [
         "control_plane_inventory"
       ],
@@ -104,7 +104,7 @@
     {
       "id": "retire_selected_state",
       "operator": "appsdk.collab_control_plane.retire_selected_state",
-      "operator_version": "1",
+      "operator_version": "2",
       "inputs": [
         "verified_archive"
       ],
@@ -125,11 +125,34 @@
       "iterator": "Whole"
     },
     {
-      "id": "rebuild_baseline",
-      "operator": "appsdk.collab_control_plane.rebuild_baseline",
+      "id": "verify_retirement",
+      "operator": "appsdk.collab_control_plane.verify_retirement",
       "operator_version": "1",
       "inputs": [
         "retired_state"
+      ],
+      "output": {
+        "id": "verified_retirement",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "rebuild_baseline",
+      "operator": "appsdk.collab_control_plane.rebuild_baseline",
+      "operator_version": "2",
+      "inputs": [
+        "verified_retirement"
       ],
       "output": {
         "id": "rebuilt_baseline",
@@ -150,12 +173,196 @@
     {
       "id": "record_reset_receipt",
       "operator": "appsdk.collab_control_plane.record_reset_receipt",
-      "operator_version": "1",
+      "operator_version": "2",
       "inputs": [
         "rebuilt_baseline"
       ],
       "output": {
         "id": "reset_receipt",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_level_required",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "reset_request"
+      ],
+      "output": {
+        "id": "rejected_level_required",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_authorization_required",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "reset_request"
+      ],
+      "output": {
+        "id": "rejected_authorization_required",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_storage_root",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "reset_request"
+      ],
+      "output": {
+        "id": "rejected_storage_root",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_daemon_live",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "authorized_reset_request"
+      ],
+      "output": {
+        "id": "rejected_daemon_live",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_keep_required",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "exclusive_reset_context"
+      ],
+      "output": {
+        "id": "rejected_keep_required",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_target_live",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "exclusive_reset_context"
+      ],
+      "output": {
+        "id": "rejected_target_live",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_project_holds_index",
+      "operator": "appsdk.collab_control_plane.reject_reset",
+      "operator_version": "1",
+      "inputs": [
+        "exclusive_reset_context"
+      ],
+      "output": {
+        "id": "rejected_project_holds_index",
+        "schema": "Object"
+      },
+      "input_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "output_selector": {
+        "include": [],
+        "exclude": [],
+        "predicate": null
+      },
+      "iterator": "Whole"
+    },
+    {
+      "id": "fail_verify_rollback",
+      "operator": "appsdk.collab_control_plane.rollback_reset",
+      "operator_version": "1",
+      "inputs": [
+        "retired_state"
+      ],
+      "output": {
+        "id": "rolled_back_reset",
         "schema": "Object"
       },
       "input_selector": {
@@ -178,14 +385,49 @@
       "arc_id": "authorized_reset_request"
     },
     {
+      "from": "authorize_reset",
+      "to": "fail_level_required",
+      "arc_id": "rejected_level_required"
+    },
+    {
+      "from": "authorize_reset",
+      "to": "fail_authorization_required",
+      "arc_id": "rejected_authorization_required"
+    },
+    {
+      "from": "authorize_reset",
+      "to": "fail_storage_root",
+      "arc_id": "rejected_storage_root"
+    },
+    {
       "from": "prove_exclusivity",
       "to": "inventory_control_plane",
       "arc_id": "exclusive_reset_context"
     },
     {
+      "from": "prove_exclusivity",
+      "to": "fail_daemon_live",
+      "arc_id": "rejected_daemon_live"
+    },
+    {
       "from": "inventory_control_plane",
       "to": "archive_inventory",
       "arc_id": "control_plane_inventory"
+    },
+    {
+      "from": "inventory_control_plane",
+      "to": "fail_keep_required",
+      "arc_id": "rejected_keep_required"
+    },
+    {
+      "from": "inventory_control_plane",
+      "to": "fail_target_live",
+      "arc_id": "rejected_target_live"
+    },
+    {
+      "from": "inventory_control_plane",
+      "to": "fail_project_holds_index",
+      "arc_id": "rejected_project_holds_index"
     },
     {
       "from": "archive_inventory",
@@ -194,8 +436,18 @@
     },
     {
       "from": "retire_selected_state",
-      "to": "rebuild_baseline",
+      "to": "verify_retirement",
       "arc_id": "retired_state"
+    },
+    {
+      "from": "verify_retirement",
+      "to": "rebuild_baseline",
+      "arc_id": "verified_retirement"
+    },
+    {
+      "from": "verify_retirement",
+      "to": "fail_verify_rollback",
+      "arc_id": "rolled_back_reset"
     },
     {
       "from": "rebuild_baseline",
@@ -204,6 +456,14 @@
     }
   ],
   "outputs": [
-    "reset_receipt"
+    "reset_receipt",
+    "rejected_level_required",
+    "rejected_authorization_required",
+    "rejected_storage_root",
+    "rejected_daemon_live",
+    "rejected_keep_required",
+    "rejected_target_live",
+    "rejected_project_holds_index",
+    "rolled_back_reset"
   ]
 }

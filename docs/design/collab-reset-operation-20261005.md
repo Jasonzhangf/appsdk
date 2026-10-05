@@ -597,10 +597,8 @@ including the existing reset tests and the two delivery-1 pane tests.
   rewritten to match the reconciler, `0.3.0` (P3-4).
 - `docs/dagpipe/manifest.json` — graph registration.
 
-The operator-facing description of the three levels lives in the installed
-`collab` skill (`~/.agents/skills/collab`), which is outside this repository. It
-is updated after the merge, from the merged source, so the skill never describes
-a flag the installed binary does not have.
+- `collab/skills/collab/SKILL.md` — the operator description of the three levels.
+- `collab/skills/collab/references/state-paths.md` — the per-level sequences.
 
 Delivery 1 owns `global_state_impl.rs` and `runtime_manager_setup.rs` too. This
 delivery rebased onto the merged delivery 1 (`72810b0`) before its own review,

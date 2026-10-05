@@ -92,10 +92,22 @@ cross-scope `codex-%2` stays untouched.
 
 ## 2. Goal
 
-- G-A: one explicit, offline, archived, audited reset / cleanup /
+- G-B (delivery 1): close the normal-path logic gaps, so this class of deadlock
+  stops happening and the operator always gets a named, actionable conflict.
+- G-A (delivery 2): one explicit, offline, archived, audited reset / cleanup /
   re-initialization operation that clears accumulated control-plane burden.
-- G-B: close the normal-path logic gaps, so this class of deadlock stops
-  happening and the operator always gets a named, actionable conflict.
+
+### Delivery plan
+
+Independent review round 2 concluded that the pane-uniqueness fix (D1) is
+consistent with the existing contract and sufficient to fix **both** failure
+modes, and advised keeping that fix separate from the larger reset feature. The
+review also raised P0 findings against the reset operation only. So:
+
+- **Delivery 1 (this worktree, this delivery)**: D1, D2, D3. Reviewed and
+  sufficient; verified against the live routecodex master.
+- **Delivery 2 (next)**: D5, with the review P0s answered in section 5.5, and D4.
+  Each gets its own design review and acceptance run.
 
 ## 3. Non-goals
 
@@ -139,9 +151,18 @@ Two projects may share a pane, and neither may block or retire the other.
   the scope-local claimant count is exactly one.
 - Every scope-specific caller passes its own scope: the fence
   (`runtime_manager_setup.rs:260`), the reconciler (`:287`), register recovery
-  (`part_06.rs:1144`, scope already available at `:1129`), staged pane recovery
-  (`part_04.rs:137`), committed-register retry (`part_04.rs:219`), and CLI rebind
-  (`part_10.rs:789`).
+  (`part_06.rs:1144`, scope already available at `:1129`), committed-register
+  retry (`part_04.rs:219`, scope from `context.project_scope` and
+  `previous.appserver_id`), and CLI rebind (`part_10.rs:789`, scope in scope at
+  `:815`).
+- One call site stays host-wide and is documented as such:
+  `resolve_staged_pane_recovery` (`part_04.rs:136-137`). Its request
+  `Req::RouteResolvePaneRecovery` carries only `tmux_endpoint`, `worker_id`, and
+  `token` (`proto.rs:457-462`), and the scope is derived *from* the lookup, so
+  there is no scope to pass. A worker id is not a scope either, because one
+  worker can register in more than one project. It keeps the host-wide lookup in
+  this delivery. It is not part of either proven failure mode, and it fails
+  closed with `RECOVERY_RECONCILE_REQUIRED: no unique host pane route`.
 - The host-wide lookup keeps its `Option` contract for callers that genuinely ask
   a host-wide question, and is expressed through the same claimant scan. It is
   not a second mechanism.
@@ -153,30 +174,50 @@ This alone clears both failure modes: the fence resolves the master, and
 
 ### D2 Ambiguity is diagnosable
 
-- One claimant scan owns the question: `pane_route_claimants(scope?, endpoint)`.
-  The scope-local lookup, the host-wide lookup, and the pane-only branch of
+- One claimant scan owns the question: `pane_route_claimants(scope, endpoint)`
+  takes the route scope. The scope-local lookup and the pane-only branch of
   `lookup_tmux_route` (`global_state_impl.rs:525-533`, currently a duplicate of
-  the same scan) are all expressed through it.
+  the same scan) are expressed through it. The host-wide lookup is the same scan
+  without the scope filter and keeps its own caller.
+- Conflict messages are always scope-local. A cross-scope claimant is never
+  listed as a conflict, because it is not one.
 - When the scope-local claimant count is greater than one, the fence error names
   the pane and each claimant (agent id, binding id, generation) and names the
   remedy (`collab reset --routes ... --keep <binding_id>`). Today it reports a
   generation mismatch that hides the real cause.
 
-### D3 Reconcile is reachable, non-aborting, and durable
+### D3 Reconcile is logged, pane-consistent, and durable
 
 - A startup `ensure_runtime` failure is logged (host log plus event) instead of
-  being discarded by `let _ =` (`runtime_manager_setup.rs:188`).
-- `reconcile_same_pane_master_routes` and `reconcile_started_thread_routes` no
-  longer abort the whole startup round on the first binding that cannot be
-  resolved. They collect the unresolved bindings and report them as one named
-  remainder. Daemon start no longer depends on one stale binding.
-- The reconciler publishes only the highest-generation binding for a
-  `(route_scope, pane)` group, so a retired lower-generation claimant is not
-  resurrected at the next start. This is what makes D5 L1 durable; without it the
-  owner journal would republish the claimant that L1 just retired.
+  being discarded by `let _ =` (`runtime_manager_setup.rs:188`). This is safe:
+  a route with no runtime is handled as NOT_READY and never falls back to the
+  resident reducer.
+- `reconcile_started_thread_routes` publishes only the pane-consistent owner.
+  The rule is stated for that function, because that is where a retired binding
+  would otherwise be republished:
+  1. collect the bindings as today (all runtimes, `runtime_manager_setup.rs:336-348`);
+  2. group the bindings that carry a tmux endpoint by `(route_scope, pane)`;
+  3. inside a group, a binding whose `endpoint_generation` is not the group
+     maximum is skipped entirely. It is not published, and it is not an error;
+  4. a group whose maximum generation is shared by two different bindings is
+     skipped as a whole and reported as a named remainder;
+  5. every remaining binding keeps the existing logic: skip when the host route
+     is already this binding, publish when there is none, and fail closed when
+     the host route belongs to another principal or carries a generation that is
+     not older (`:371-390`);
+  6. a binding without a tmux endpoint keeps the existing logic unchanged.
+
+  Without this rule the owner journal republishes a claimant that L1 retired,
+  because the loop keys on `(session_id, native_thread_id)` and treats a missing
+  host route as "publish" (`:366-368`). This rule is also what makes a same-scope
+  duplicate converge at startup instead of flip-flopping.
+- Startup failures stay fatal. `ProjectRuntimeManager::new(...)?`
+  (`part_12.rs:891-892`) still stops the daemon when a reconcile cannot be
+  resolved. Review round 3 showed that making the round non-aborting would remove
+  the only fail-closed gate for thread-route conflicts, which the request path
+  does not fence. So this delivery does not change abort semantics.
 - The request path stays read-only. No reconcile, commit, or probe is added to
-  the fence. Revision 1 proposed that; review P1-5 rejected it as write-on-read
-  with an undefined bound.
+  the fence.
 
 ### D4 Control-plane storage isolation (designed, separate delivery)
 
@@ -216,26 +257,42 @@ the evidence that the user asked to preserve.
 
 L1 rule, deterministic and offline:
 
-- replay the host control-plane journal and group live routes by
+- replay the resolved host control-plane journal and group live routes by
   `(route_scope, pane)`;
 - a group with one claimant needs nothing;
-- a group with several claimants keeps the highest `endpoint_generation` and
-  appends `Event::GlobalCurrentThreadRouteRetired { binding }`
-  (`collab/src/server/state.rs:760`, reducer `state_impl.rs:761-767`) for each
-  other claimant. The reducer removes a route only when the stored binding equals
-  the event binding, so L1 replays first and appends the exact stored binding;
-- a group whose top generation is tied is a real ambiguity (this is the current
-  `$16:%16`). L1 changes nothing, lists the candidates with agent id, binding id,
-  and generation, and asks for `--keep <binding_id>`;
+- inside a group, a claimant whose owning project root no longer exists is
+  provably stale and is retired without a decision;
+- if two or more claimants remain, L1 does not guess. `endpoint_generation` is a
+  per-binding counter (`part_06.rs:984-988`, `global_state_impl.rs:727-733`), so
+  it is not comparable across different bindings and cannot order them. L1
+  changes nothing, lists the candidates with agent id, binding id, and
+  generation, and requires `--keep <binding_id>` to name the winner;
+- the retirement is appended as
+  `Event::GlobalCurrentThreadRouteRetired { binding }`
+  (`collab/src/server/state.rs:760`, reducer `state_impl.rs:761-767`). The
+  reducer removes a route only when the stored binding equals the event binding,
+  so L1 replays first and appends the exact stored binding;
 - a cross-scope claimant is never a target: it is not a conflict;
-- durability: because of D3, the owner journal does not republish a
-  lower-generation claimant of the same scope and pane;
+- durability: because of D3, the owner journal does not republish a same-scope
+  claimant that lost its pane group;
+- L1 does not retire tombstones. No event removes a tombstone; it disappears only
+  when the same address is reactivated (`global_state_impl.rs:779-783`). Stale
+  host route records stay owned by the existing `prune_stale_host_routes`;
 - L1 never removes business state and adds no daemon request. The appended event
   is applied when the daemon next replays the journal.
 
+L2 additionally refuses when the target project holds the resolved host index
+journal. That journal is the host control plane, and L2 promises to keep host
+state, so the operator is sent to L3 instead.
+
 `--storage-root` exists only because of D4: today the live host index sits in the
-storage root's project journal. It defaults to the state root, and the receipt
-prints the journal path that was used.
+storage root's project journal, not at the state root. Resolution is explicit and
+never silent: L1 and L3 use `<state_root>` only when its `journal.jsonl` holds a
+host index (at least one `GlobalCurrentThreadRouteSet` event). Otherwise they fail
+with `RESET_STORAGE_ROOT_REQUIRED` and change nothing, because a reset that
+silently targeted the wrong journal would report success while the burden stayed.
+The receipt always prints the journal path that was used. D4 removes the need for
+this parameter.
 
 `--discard-legacy` keeps its current meaning and is the L2 authorization flag;
 when no level flag is given, `collab reset` behaves as today (L2 on the current
@@ -296,20 +353,31 @@ remainder. A cross-scope claimant is not a conflict and never appears as one.
 
 ## 7. Acceptance
 
-Black-box acceptance (real entry, external observable result):
+### 7.1 Delivery 1 (D1, D2, D3), black box
 
 | Id | Case | Expected |
 | --- | --- | --- |
-| A1 | Real routecodex master, candidate installed, daemon restarted | `collab context` in routecodex returns an identity with `registered: true`; `collab master status` reports the master; and a recorded window of >= 10 non-`Register` operations from routecodex adds **zero** `RECOVERY_RECONCILE_REQUIRED` lines to `<state_root>/log.txt` (before/after line counts recorded) |
+| A1 | Real routecodex master. Precondition recorded first: replaying the live host journal still shows 2 claimants on pane `$2:%2` and `collab context` still fails with `RECOVERY_RECONCILE_REQUIRED`. Then install the candidate, restart the daemon, and repeat | `collab context` in routecodex returns an identity with `registered: true`; `collab master status` reports the master; a window of >= 10 non-`Register` operations from routecodex adds **zero** `RECOVERY_RECONCILE_REQUIRED` lines to `<state_root>/log.txt` (before/after counts recorded) |
 | A2 | Cross-scope pane sharing (`$2:%2`, `$138:%138`) | neither peer is fenced or retired; `collab context` succeeds in both scopes; the host index still shows both claimants |
-| A3 | `collab reset --routes --approval <t>` on a state copy with a same-scope duplicate | after the daemon replays, only the highest-generation claimant remains; business state and identities are unchanged; a second run is a no-op; a generation-tied group is refused with its candidates listed |
-| A4 | `collab reset --project` and `collab reset --host` | the archive holds the retired bytes, `reset.jsonl` holds the receipt with the approval text, the baseline is rebuilt, and `~/.collab/runs/` survives unless `--include-runs` was given |
+| A3 | Ambiguous same-scope pane (`$6:%6`, `$8:%8`, `$16:%16`) | the failure names the pane and each claimant with agent id, binding id, and generation, and names the remedy. It is not reported as a generation mismatch |
+| A4 | A project runtime that cannot be ensured at startup | the failure appears in `<state_root>/log.txt` and as an event. It is no longer discarded |
+| A5 | A daemon restart after a claimant lost its pane group | the reconciler does not republish that claimant, and a second restart produces the same index (no flip-flop) |
 
-White-box regression gate (not a substitute for A1-A4): the full collab test
+White-box regression gate (not a substitute for A1-A5): the full collab test
 suite stays green, including
 `superseded_same_pane_master_does_not_fence_project_route`,
 `same_pane_master_still_fences_when_host_route_is_missing`, and the existing
 reset tests.
+
+### 7.2 Delivery 2 (D5), black box
+
+| Id | Case | Expected |
+| --- | --- | --- |
+| B1 | `collab reset --routes` without `--storage-root`, while the live index is not at the state root | fails with `RESET_STORAGE_ROOT_REQUIRED` and changes nothing |
+| B2 | `collab reset --routes --storage-root <root> --approval <t>` on a state copy with a same-scope duplicate | after the daemon replays, the named claimant is retired; business state and identities are unchanged; a second run is a no-op |
+| B3 | The same command with several remaining claimants and no `--keep` | nothing changes; the candidates are listed; the exit code is non-zero |
+| B4 | `collab reset --project <the storage root>` | refused, because that project holds the host index; the error points to L3 |
+| B5 | `collab reset --project` and `collab reset --host` | the archive holds the retired bytes, `reset.jsonl` holds the receipt with the approval text, the baseline is rebuilt, and `~/.collab/runs/` survives unless `--include-runs` was given |
 
 ## 8. Risks and rollback
 
@@ -318,25 +386,28 @@ reset tests.
   its intent.
 - D3 stops aborting a startup round on one bad binding. The fence still fails
   closed per request, so an unresolved binding still blocks its own project.
-- L1 retires only a strictly lower generation within one scope, and only with an
-  explicit approval. Every level archives before it removes.
+- L1 retires only a claimant that the operator named, or one whose project root is
+  gone, and only with an explicit approval. Every level archives before it
+  removes.
 - Rollback is the reverse commit. No project journal is rewritten; L1 only
   appends.
 
 ## 9. File scope
 
-Changed in this delivery:
+Delivery 1 (D1, D2, D3):
 
 - `collab/src/server/global_state_impl.rs` (claimant query, scope-local lookup)
 - `collab/src/server/mod_parts/runtime_manager_setup.rs` (fence, reconciler)
 - `collab/src/server/mod_parts/part_06.rs` (register recovery scope)
-- `collab/src/server/mod_parts/part_04.rs` (staged recovery, retry admission)
+- `collab/src/server/mod_parts/part_04.rs` (committed-register retry admission)
 - `collab/src/server/mod_parts/part_10.rs` (CLI rebind)
-- `collab/src/reset.rs`, `collab/src/main.rs` (reset levels)
 - tests under `collab/src/server/*_tests*`
 - `docs/design/`, `docs/dagpipe/`
 
+Delivery 2 (D5, D4): `collab/src/reset.rs`, `collab/src/main.rs`, and the D4
+startup path in `collab/src/server/mod_parts/part_12.rs`.
+
 `codex/collab-master-liveness-fence` (2 commits, unmerged) changes `part_06.rs`,
-`part_07.rs`, `part_08.rs`, `part_09.rs`, `state.rs`. The only shared file is
-`part_06.rs`; the merge must re-check the `same_pane_tmux_recovery` predicate
-there.
+`part_07.rs`, `part_08.rs`, `part_09.rs`, `state.rs`. Delivery 1 shares
+`part_06.rs` with it; the merge must re-check the `same_pane_tmux_recovery`
+predicate there.

@@ -230,26 +230,22 @@ live communication.
 
 1. Read project AGENTS and affected code/contracts. Resolve owner, scope,
    acceptance and relevant gates. Read historical notes only when they help.
-2. Use a clean owner worktree from latest origin/main. Preserve others' work.
-   For multi-worker work, automatically register the peer, communications and
-   task/file scope through official Collab; enforce overlap/resource ownership.
-3. Implement the smallest adequate change. Use existing design for local work;
-   clarify only material unknowns. Do not require a new plan or approval when
-   scope is already authorized and clear.
-4. Run applicable tests, necessary build and actual entrypoint checks. Install
-   and restart only when required by the delivery object. Fix failures at their
-   owner, never forge evidence or hide errors.
-5. Review exact validated changes under the shared review standard. Block
-   concrete correctness, safety, contract or material structural regressions;
-   optional simplifications are advisory.
-6. Treat each stage as a re-entrant gate. Persist candidate/tree, scope,
-   dependency, artifact, producer and environment identity with its PASS
-   evidence. Reuse only when that identity is unchanged and fresh; otherwise
-   rerun from the first invalidated stage and its downstream dependants. A
-   stage-name or session change alone never forces a full rerun. Report reused
-   and rerun stages separately.
-7. Deliver within authorization. Report test, review, merge, install, publish
-   and resource cleanup as separate achieved states.
+2. Implement the smallest adequate change. Use existing design for local work;
+   clarify only material unknowns.
+3. Run only the applicable checks. Fix failures at their owner; never forge
+   evidence or hide errors.
+4. Stay within authorization. Report each achieved state separately: test,
+   review, merge, install, publish and resource cleanup are distinct, and a
+   result in one is not evidence for another.
+5. Single-file documentation and Skill edits are out of this loop: make the
+   change, run one targeted check, and do not acquire a plan, task, worktree
+   switch, extra review or lifecycle ceremony.
+
+The heavier parts of delivery are conditional, not a default. Take a clean owner
+worktree from latest `origin/main`, register peer and task/file scope through
+Collab, review under the shared standard, and reuse stage evidence under
+[Stage gates: re-entry and reuse](#stage-gates-re-entry-and-reuse) only when the
+changed module or the requested delivery actually needs them.
 
 ## Quick start: new governed project with Collab
 
@@ -497,10 +493,10 @@ records before doing work.
   guessed cache. `verify` may reread the full graph for integrity without
   rerunning external commands.
 
-This staged reuse is part of AppSDK quality governance and has no dependency on
-Collab, Codex TUI, Desktop, or a particular agent runtime.
-
 ## Long-Horizon Goal Subscription & Master Saturation
+
+Selected for a long-running, master-scheduled task only. Ordinary development
+never registers a goal or saturation loop and never gates on them.
 
 `collab context` returns identity, liveness, tasks, inbox, `next_actions`,
 master/authority state, `role_brief`, and truth. Registration returns the brief
@@ -592,11 +588,6 @@ evidence location.
   Normal memory writes use one `project-memory entry` invocation, which writes
   the raw event and regenerates detail/index/projection together; do not hand
   write one of those derived files as a separate step.
-  `memory/index.md` contains fixed-size Skill description candidates. Their L2/L3
-  lines already include the kind, tags, and relative `L2/` or `L3/` detail path.
-  During initialization or an intentional refresh, manually carry deduplicated
-  L1 lines into the project Skill description, then fill unused slots with L2
-  and L3 lines. Memory writes never rewrite Skill descriptions automatically.
   `project-memory reentry [project] --run <run-id>` to resume the same run after
   interruption. A missing or rebuilding memory index is not a governance
   failure, and memory state must not be reconstructed from Guide, debug,

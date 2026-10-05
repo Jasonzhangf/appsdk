@@ -216,10 +216,7 @@ if [[ "${#remaining[@]}" -ne 1 || "${remaining[0]}" != "$canonical_bin" ]]; then
   exit 1
 fi
 
-digest_line="$(shasum -a 256 "$canonical_bin")"
-digest="${digest_line%% *}"
-printf 'Installed: %s\nVersion: %s\nSHA-256 (diagnostic): %s\n' \
-  "$canonical_bin" "$release_version" "$digest"
+printf 'Installed: %s\nVersion: %s\n' "$canonical_bin" "$release_version"
 printf '%s\n' 'Refresh the current shell command cache with: rehash (zsh) or hash -r (bash)'
 
 for skill in "${skills[@]}"; do

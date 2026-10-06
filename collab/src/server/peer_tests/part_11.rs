@@ -609,14 +609,12 @@ fn approve_promotion(server: &Arc<Server>, worker_id: &str) -> Resp {
     )
 }
 
-/// `live_master_id` decides liveness from a pane probe, and a pane's shell
-/// survives a Codex restart inside that pane. When another registration takes
-/// the recorded master's pane, the master is still reported live but can no
-/// longer act on its anchor. The owner's explicit approval must still be able
-/// to replace it, otherwise the project is left with an authority that can
-/// neither act, nor be recovered, nor be replaced.
+/// A pane has one owner, so the later registrant on the recorded master's pane
+/// closes the master and retires its binding. The owner's explicit approval
+/// must still be able to name the new authority, otherwise the project is left
+/// with no authority at all.
 #[test]
-fn user_approved_promotion_replaces_a_master_whose_anchor_was_taken() {
+fn user_approved_promotion_replaces_a_master_after_its_pane_is_taken() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start_single(&root);
     let server = Arc::new(server);
@@ -650,12 +648,18 @@ fn user_approved_promotion_replaces_a_master_whose_anchor_was_taken() {
         }])
         .unwrap();
 
-    // The recorded master is still reported live. That is exactly why the
-    // repair has to consult the anchor, not the presence probe.
-    assert_eq!(
+    // The later registrant owns the pane, so the recorded master is closed and
+    // its authority is gone. The pane never makes a retired claimant live.
+    assert_ne!(
         dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
         "old-master"
     );
+    assert!(!server
+        .state
+        .lock()
+        .unwrap()
+        .workers
+        .contains_key("old-master"));
 
     let promoted = approve_promotion(&server, "taker");
     assert!(promoted.ok, "{promoted:?}");
@@ -667,10 +671,10 @@ fn user_approved_promotion_replaces_a_master_whose_anchor_was_taken() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// The repair must not become a coup: while the recorded master still owns its
-/// anchor, an approved promotion is still refused.
+/// An explicit user approval strips the recorded grant. A different pane is
+/// still only an address, so the incumbent cannot veto the replacement.
 #[test]
-fn user_approved_promotion_still_refuses_a_master_that_owns_its_anchor() {
+fn user_approved_promotion_replaces_a_master_that_owns_its_anchor() {
     let (server, root) = test_server();
     let tmux = IsolatedTmux::start_single(&root);
     let server = Arc::new(server);
@@ -692,11 +696,11 @@ fn user_approved_promotion_still_refuses_a_master_that_owns_its_anchor() {
     other.codex_thread_id = Some("thread-other".into());
     assert!(register_tmux(&server, "other", other).ok);
 
-    let refused = approve_promotion(&server, "other");
-    assert!(!refused.ok, "{refused:?}");
+    let promoted = approve_promotion(&server, "other");
+    assert!(promoted.ok, "{promoted:?}");
     assert_eq!(
         dispatch(&server, Req::MasterStatus).data["master"]["worker_id"],
-        "master"
+        "other"
     );
     drop(tmux);
     std::fs::remove_dir_all(root).ok();

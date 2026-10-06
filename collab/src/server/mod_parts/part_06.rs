@@ -1284,6 +1284,76 @@ fn master_authority_transfer_events(
     events
 }
 
+/// Finds the bindings that an incoming registration reclaims.
+///
+/// A tmux pane has one owner, and the pane id is the whole anchor a tmux
+/// registration fixes at registration time. The later registrant therefore
+/// replaces every other binding that holds the same pane on the same tmux
+/// server, in any project or app scope. Nothing is probed: a pane can never
+/// answer a liveness question.
+fn pane_claimants(
+    state: &State,
+    taker: &str,
+    route_scope: &RouteScope,
+    endpoint: &crate::proto::TmuxEndpoint,
+) -> Vec<RuntimeBinding> {
+    state
+        .global
+        .projects
+        .values()
+        .flat_map(|project| project.runtime_bindings.values())
+        .filter(|binding| {
+            binding.tmux_endpoint.as_ref().is_some_and(|previous| {
+                previous.socket_path == endpoint.socket_path
+                    && previous.tmux_session_id == endpoint.tmux_session_id
+                    && previous.pane_id == endpoint.pane_id
+            })
+        })
+        // The binding this registration is about to own is not a takeover:
+        // a same-scope re-registration stays idempotent.
+        .filter(|binding| {
+            !(binding.agent_id.as_str() == taker && binding.route_scope() == *route_scope)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Events that hand one pane to a later registrant.
+///
+/// The previous claimant loses the pane, its current-thread route and its worker
+/// record in the same commit as the new binding, so the ledger cannot fence the
+/// new owner on the next attempt.
+fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Event>, String> {
+    if previous.native_thread_id.is_none() && previous.session_id.is_none() {
+        return Err(
+            "RUNTIME_BINDING_REJECTED: reclaimed anchor has no identity to retire".to_owned(),
+        );
+    }
+    let next_generation = previous.endpoint_generation.checked_add(1).ok_or_else(|| {
+        "RUNTIME_BINDING_REJECTED: reclaimed anchor generation overflow".to_owned()
+    })?;
+    let mut retired = previous.clone();
+    retired.endpoint_generation = next_generation;
+    retired.native_thread_id = None;
+    retired.tmux_endpoint = None;
+    let mut events = vec![
+        Event::GlobalCurrentThreadRouteRetired {
+            binding: previous.clone(),
+        },
+        Event::GlobalRuntimeBound { binding: retired },
+    ];
+    if previous.agent_id.as_str() != taker {
+        events.push(Event::WorkerClosed {
+            worker_id: previous.agent_id.as_str().to_owned(),
+            closed_by: taker.to_owned(),
+            reason: "tmux pane reclaimed by a later registration".to_owned(),
+            snapshot_captured_ms: None,
+            at_ms: now_ms(),
+        });
+    }
+    Ok(events)
+}
+
 fn current_master_grant(
     state: &State,
     route_scope: Option<&RouteScope>,

@@ -87,12 +87,12 @@
         )
     }
 
-    /// The fence has to hold until a distinct same-scope worker actually owns
-    /// the pane and is present. Reading the runtime's own (empty) route index as
-    /// "the recorded master lost its anchor" would let an approved promotion
-    /// replace a live master.
+    /// An explicit, user-approved promotion replaces the recorded incumbent.
+    /// The incumbent's pane is only an address, so no probe can veto the
+    /// replacement: the approval itself is the authority. A promotion without
+    /// approval stays refused.
     #[tokio::test]
-    async fn approved_promotion_keeps_the_fence_without_a_live_pane_taker() {
+    async fn approved_promotion_replaces_the_incumbent_without_a_pane_taker() {
         let (_host, host_root, runtime, project_root, _manager, app, _candidates, _master) =
             fenced_master_fixture("fenced-pane-master");
 
@@ -108,17 +108,23 @@
             test_candidates("fenced-other-pane-peer-thread"),
         );
         assert!(peer.ok, "{peer:?}");
-        let refused = handle_master_promote(
+
+        let unapproved = handle_master_promote(
+            &runtime,
+            peer_worker.into(),
+            peer_token.into(),
+            "   ".into(),
+        );
+        assert!(!unapproved.ok, "{unapproved:?}");
+
+        let promoted = handle_master_promote(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
             "user approved the peer".into(),
         );
-        assert!(!refused.ok, "{refused:?}");
-        assert_eq!(
-            refused.error.as_deref(),
-            Some("master already exists; only the registered master may delegate")
-        );
+        assert!(promoted.ok, "{promoted:?}");
+        assert_eq!(promoted.data["master"], peer_worker);
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }
@@ -157,11 +163,11 @@
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
-    /// A durable route left behind by a peer that moved to another pane is not
-    /// takeover evidence: only the peer's *current* transport owning the pane
-    /// counts, which is the route-plus-presence invariant the close path uses.
+    /// A peer that moved off the master pane is still replaced by an approved
+    /// promotion: pane position is an address, and the approval is the whole
+    /// authority for the transition.
     #[tokio::test]
-    async fn approved_promotion_refuses_a_peer_that_moved_off_the_master_pane() {
+    async fn approved_promotion_replaces_the_incumbent_even_after_the_peer_moved_on() {
         let (_host, host_root, runtime, project_root, _manager, app, mut candidates, _master) =
             fenced_master_fixture("moved-pane-master");
 
@@ -197,17 +203,14 @@
             .unwrap()
             .tmux_endpoint = Some(moved);
 
-        let refused = handle_master_promote(
+        let promoted = handle_master_promote(
             &runtime,
             peer_worker.into(),
             peer_token.into(),
             "user approved the peer".into(),
         );
-        assert!(!refused.ok, "{refused:?}");
-        assert_eq!(
-            refused.error.as_deref(),
-            Some("master already exists; only the registered master may delegate")
-        );
+        assert!(promoted.ok, "{promoted:?}");
+        assert_eq!(promoted.data["master"], peer_worker);
         std::fs::remove_dir_all(host_root).unwrap();
         std::fs::remove_dir_all(project_root).unwrap();
     }
@@ -1281,8 +1284,9 @@
     /// tmux reuses pane ids after a server restart, so a shared `pane_id` with a
     /// different `pane_pid` is a different pane. The cross-project anchor match
     /// in `validate_current_thread_candidate` must compare the whole endpoint
-    /// (`same_pane_route`): a hand-written subset that omits `pane_pid` rejects
-    /// a fresh peer as "already bound" to a dead pane.
+    /// (`same_pane_route`): a hand-written subset that omits `pane_pid` would
+    /// hand a fresh peer the dead pane's claim. The same pane, by contrast, is
+    /// reclaimed by the later registrant.
     #[tokio::test]
     async fn pane_anchor_match_requires_the_same_pane_pid() {
         let (server, root, _) = test_server();
@@ -1319,8 +1323,8 @@
             candidates
         };
 
-        // Same pane id and pane pid: the anchor really is taken, so the second
-        // peer must still be rejected.
+        // Same pane id and pane pid: the anchor really is the same pane, so the
+        // later registrant reclaims it instead of being fenced out.
         let duplicate = manager.validate_current_thread_candidate(
             &context,
             &Req::register(
@@ -1331,11 +1335,8 @@
             ),
         );
         assert!(
-            duplicate
-                .as_ref()
-                .err()
-                .is_some_and(|error| error.contains("already bound")),
-            "{duplicate:?}"
+            duplicate.is_ok(),
+            "the same pane is reclaimed by the later registrant: {duplicate:?}"
         );
 
         // Reused pane id with a new pane pid: a different pane, so the fresh
@@ -1357,12 +1358,11 @@
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// `collab context --worker <id>` is the adjudication channel: it may retire
-    /// the foreign route that holds the anchor and register the peer in the
-    /// current scope. The implicit path must not, so the identical request with
-    /// the retire flag cleared stays rejected.
+    /// A pane anchor is a resource, not a scope lock: a later registration in
+    /// another scope takes the pane, retires the foreign route and owns the
+    /// anchor. No extra flag is needed, because the later registrant wins.
     #[tokio::test]
-    async fn named_override_retires_a_stale_cross_scope_anchor() {
+    async fn a_later_registration_takes_a_foreign_scope_anchor() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -1371,13 +1371,12 @@
         let anchor = candidates.tmux.as_ref().unwrap().endpoint.clone();
         let (_, first) = manager.dispatch_sync(
             Some(context_with_app(&root, "appserver-cli")),
-            Req::Register {
-                worker_id: "cross-scope-worker".into(),
-                token: "token-cross-scope-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: Some(candidates),
-                retire_cross_project_anchor: false,
-            },
+            Req::register(
+                "cross-scope-worker".into(),
+                "token-cross-scope-worker".into(),
+                root.display().to_string(),
+                Some(candidates),
+            ),
         );
         assert!(first.ok, "{first:?}");
 
@@ -1395,36 +1394,16 @@
             candidates
         };
 
-        let (_, implicit) = manager.dispatch_sync(
+        let (_, taken) = manager.dispatch_sync(
             Some(context_with_app(&root, "tui-other")),
-            Req::Register {
-                worker_id: "cross-scope-worker".into(),
-                token: "token-cross-scope-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: Some(pane_only()),
-                retire_cross_project_anchor: false,
-            },
+            Req::register(
+                "cross-scope-worker".into(),
+                "token-cross-scope-worker".into(),
+                root.display().to_string(),
+                Some(pane_only()),
+            ),
         );
-        assert!(!implicit.ok, "{implicit:?}");
-        assert!(
-            implicit
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("another project route")),
-            "{implicit:?}"
-        );
-
-        let (_, named) = manager.dispatch_sync(
-            Some(context_with_app(&root, "tui-other")),
-            Req::Register {
-                worker_id: "cross-scope-worker".into(),
-                token: "token-cross-scope-worker".into(),
-                cwd: root.display().to_string(),
-                candidates: Some(pane_only()),
-                retire_cross_project_anchor: true,
-            },
-        );
-        assert!(named.ok, "{named:?}");
+        assert!(taken.ok, "{taken:?}");
 
         let pane_owners = |server: &Arc<Server>| {
             server

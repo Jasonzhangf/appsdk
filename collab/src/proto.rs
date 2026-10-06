@@ -355,10 +355,6 @@ pub enum Req {
         cwd: String,
         #[serde(default)]
         candidates: Option<TransportCandidates>,
-        /// `collab context` may retire a stale cross-project anchor before
-        /// registering the current project peer.
-        #[serde(default)]
-        retire_cross_project_anchor: bool,
     },
     Send {
         from: String,
@@ -647,9 +643,8 @@ pub enum Req {
 }
 
 impl Req {
-    /// Ordinary (non-`context`) registration.  The daemon keeps the default
-    /// fail-closed behavior unless `retire_cross_project_anchor` is explicitly
-    /// requested by the one-shot `collab context` bootstrap path.
+    /// Registration of one worker on its current transport. A pane already
+    /// claimed by another worker is reclaimed by the later registrant.
     pub fn register(
         worker_id: String,
         token: String,
@@ -661,7 +656,6 @@ impl Req {
             token,
             cwd,
             candidates,
-            retire_cross_project_anchor: false,
         }
     }
 }

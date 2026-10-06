@@ -17,7 +17,6 @@ use proto::{Req, Resp, TransportKind};
 use scope::Scope;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::cell::Cell;
 
 mod main_live_closure;
 use main_live_closure::*;
@@ -54,24 +53,6 @@ fn register(scope: &Scope, ident: &mut Identity) -> anyhow::Result<serde_json::V
         None => RuntimeIdentity::cli_adapter(&ident.worker_id)?,
     };
     register_with_runtime(scope, ident, context_runtime)
-}
-
-thread_local! {
-    /// Set for the duration of one `collab context` registration so the client
-    /// asks the daemon to retire a provably dead cross-project anchor instead of
-    /// failing closed. The getter and the setter below must share this single
-    /// cell: a second `thread_local!` in either one would be a different cell,
-    /// and `Req::Register` would then always carry
-    /// `retire_cross_project_anchor: false`.
-    static CONTEXT_RETIRE_CROSS_PROJECT: Cell<bool> = const { Cell::new(false) };
-}
-
-fn context_registration_requested() -> bool {
-    CONTEXT_RETIRE_CROSS_PROJECT.with(Cell::get)
-}
-
-pub(crate) fn set_context_registration_requested(value: bool) {
-    CONTEXT_RETIRE_CROSS_PROJECT.with(|flag| flag.set(value));
 }
 
 /// Bootstrap recovery with the only runtime identity accepted before the
@@ -126,7 +107,6 @@ fn register_with_runtime(
                 tmux: tmux_candidate,
                 dsh: None,
             }),
-            retire_cross_project_anchor: context_registration_requested(),
         },
         &scope.root,
         &context_runtime,

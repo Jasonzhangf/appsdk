@@ -98,8 +98,11 @@ fn absent_tmux_master_allows_approved_peer_promotion() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The recorded grant is the only authority, and an explicit user-approved
+/// promotion replaces the incumbent even while the incumbent's pane answers.
+/// A pane is an address, so it cannot veto the owner's decision.
 #[test]
-fn live_tmux_master_cannot_be_superseded_by_approved_peer_promotion() {
+fn approved_promotion_supersedes_a_live_tmux_master() {
     let (server, root) = test_server();
     register(&server, "peer-a", "thread-a");
     register(&server, "peer-b", "thread-b");
@@ -127,10 +130,11 @@ fn live_tmux_master_cannot_be_superseded_by_approved_peer_promotion() {
         "token-peer-b".into(),
         "user approved peer-b after the previous master thread became unusable".into(),
     );
-    assert!(!promoted.ok, "a live tmux master must retain ownership");
+    assert!(promoted.ok, "{promoted:?}");
+    assert_eq!(promoted.data["master"], "peer-b");
     assert_eq!(
         super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
-        Some("peer-a".into())
+        Some("peer-b".into())
     );
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1185,17 +1185,19 @@ fn master_promotion_requires_user_approval_and_existing_master_delegates() {
         "user approved peer-a as collab master"
     );
 
-    let rejected = super::handle_master_promote(
+    // A peer cannot take the seat by itself. Only explicit user approval strips
+    // the recorded grant, so without approval the incumbent keeps it.
+    let unapproved = super::handle_master_promote(
         &server,
         "peer-b".into(),
         "token-peer-b".into(),
-        "user approved peer-b as collab master".into(),
+        "  ".into(),
     );
-    assert!(!rejected.ok);
-    assert!(rejected
-        .error
-        .unwrap()
-        .contains("only the registered master"));
+    assert!(!unapproved.ok, "{unapproved:?}");
+    assert_eq!(
+        super::live_master_id(&server, &server.state.lock().unwrap()).unwrap(),
+        Some("peer-a".into())
+    );
 
     let outsider = super::handle_master_delegate(
         &server,

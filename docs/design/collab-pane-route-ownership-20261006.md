@@ -564,3 +564,89 @@ of section 6.2 are replaced by a skip, and no terminal names the deleted
   window, and the host log gains no new `RECOVERY_RECONCILE_REQUIRED` or
   `MASTER_RECOVERY_BLOCKED_LIVE` line.
 - Independent architecture review, then merge and push.
+
+## 11. Revision: a pane is a resource, not a liveness credential
+
+Section 5 and the stale-claim acceptance in section 10 describe the state after
+the first delivery. This section supersedes them. The owner set the contract in
+three sentences:
+
+1. The identity is fixed at registration. A tmux registration anchors on its
+   pane, and a dsh registration anchors on its session and thread. Every
+   identity has one anchor that can always decide it.
+2. For tmux, only the pane id decides. The same pane id anchors the new
+   registrant directly. A registration on another pane does not transfer a
+   grant; only the owner's authorization strips the old grant.
+3. Any authorized promotion replaces the incumbent. The old grant is no veto.
+
+### 11.1 The delivered rule
+
+A tmux pane is a resource with one owner. When a worker registers on a pane that
+another binding already holds, the daemon accepts the later registrant and
+replaces the old binding. The replacement covers another project and another
+route scope. It needs no retire flag, and no old master and no old claimant can
+refuse it. The previous claimant loses the pane, its current-thread route and
+its worker record.
+
+The Codex session and thread a tmux endpoint carries stay a conflict fence, not
+an anchor. Another worker that holds that thread on a *different* pane is still
+refused, because the pane is the only thing that changed owner. The refusal
+happens before any commit, so the journal does not move.
+
+A tmux-only binding has no queryable AppServer session or thread. Its liveness
+is therefore `Missing` unless a later registration re-anchors it. The pane
+probe answers addressability, and it is the anchor for the tmux identity. It
+never makes a binding live on its own.
+
+### 11.2 Code changes
+
+- `Req::Register.retire_cross_project_anchor` is deleted, with its
+  `main_context.rs` producer and its thread-local flag in `main.rs`. The flag
+  existed only to authorize the replacement this revision makes unconditional.
+- `validate_cli_register_rebind` no longer fences pane ownership. The typed
+  registration path owns that decision.
+- `validate_current_thread_candidate` matches the anchor on the pane only
+  (socket, tmux session, pane id). The Codex ids are used only for the conflict
+  fence above. A claimant that lives in the runtime this registration commits
+  into is left to that commit, so the replacement is one transaction. A claimant
+  in another runtime is retired there, because only that runtime's global state
+  knows the claimant's project scope.
+- `pane_claimants` and `pane_reclaim_events` (`part_06.rs`) are the single
+  builder for a replacement. `typed_dispatch` calls it inside the registration
+  commit; `validate_current_thread_candidate` calls it for a foreign runtime.
+- `handle_master_promote` no longer vetoes an incumbent. An explicit approval is
+  the whole authority for the transition, so the grant moves to the named
+  worker.
+
+### 11.3 Delivery gates, unchanged
+
+The revision does not weaken delivery. An ordinary send still blocks on
+`Missing` only. `daemon_to_peer` and `restart_replay` still require `Present`.
+A cross-project send still requires `Present` on both sides, and `collab master
+send` still requires `master.endpoint_live == true`. The stale-master symptom is
+fixed at the root: the pane re-anchors to the later registrant, and an
+authorized promotion always replaces the incumbent.
+
+### 11.4 Tests
+
+- `a_second_claim_on_the_same_pane_replaces_the_first_claimant` (new): a second
+  registration on one pane wins it, and the previous claimant is closed.
+- `a_codex_thread_on_another_pane_stays_a_conflict` (new): the same thread on
+  another pane is refused, and the journal does not move.
+- `a_later_registration_takes_a_foreign_scope_anchor` (renamed from
+  `named_override_retires_a_stale_cross_scope_anchor`): a plain registration
+  takes a foreign-scope anchor, with no operator override.
+- `approved_promotion_replaces_the_incumbent_without_a_pane_taker` and
+  `approved_promotion_replaces_the_incumbent_even_after_the_peer_moved_on`
+  (renamed): an authorized promotion replaces the incumbent.
+- `approved_promotion_supersedes_a_live_tmux_master`,
+  `user_approved_promotion_replaces_a_master_that_owns_its_anchor`,
+  `user_approved_promotion_replaces_a_master_after_its_pane_is_taken`
+  (renamed): the incumbent grant is not a veto.
+- `wire_cli_recover_rejects_a_forged_token_and_a_forged_route` (renamed): a
+  forged token is still refused; a claim on another worker's pane is accepted
+  and closes that worker.
+- `closed_same_pane_peer_keeps_the_pane_ownership` (rewritten): the later
+  registrant closes the recorded master, and the closed peer keeps its durable
+  host route, so the pane stays owned.
+

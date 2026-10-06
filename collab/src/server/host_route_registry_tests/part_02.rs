@@ -628,47 +628,122 @@
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A pane has exactly one owner, so a second registration on the same pane
+    /// id re-anchors to the later registrant and the previous claimant is closed
+    /// in the same commit. The pane is a resource, never a liveness credential,
+    /// so no probe in this path can veto the replacement.
     #[tokio::test]
-    async fn duplicate_codex_thread_anchor_cannot_bind_two_tmux_peers() {
+    async fn a_second_claim_on_the_same_pane_replaces_the_first_claimant() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
         let app = crate::identity::CLI_APP_SERVER_ID;
         let context = context_with_app(&root, app);
-        let shared_thread = "thread-session-pair-worker";
-        let candidates = |session_id: &str| {
-            let mut candidates = test_candidates(shared_thread).unwrap();
-            candidates.tmux.as_mut().unwrap().endpoint.codex_session_id =
-                Some(session_id.to_owned());
+        let pane = test_candidates("thread-pane-owner-a")
+            .unwrap()
+            .tmux
+            .unwrap()
+            .endpoint;
+        let on_pane = |thread_id: &str| {
+            let mut candidates = test_candidates(thread_id).unwrap();
+            let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
+            endpoint.socket_path = pane.socket_path.clone();
+            endpoint.server_pid = pane.server_pid;
+            endpoint.tmux_session_id = pane.tmux_session_id.clone();
+            endpoint.pane_id = pane.pane_id.clone();
+            endpoint.pane_pid = pane.pane_pid;
             Some(candidates)
         };
 
         let (_, first_registration) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::register("session-pair-worker-a".into(),
-                 "token-session-pair-worker-a".into(),
+            Req::register("pane-owner-a".into(),
+                 "token-pane-owner-a".into(),
                  root.display().to_string(),
-                 candidates("session-pair-a")),
+                 on_pane("thread-pane-owner-a")),
         );
         assert!(first_registration.ok, "{first_registration:?}");
 
         let (_, second_registration) = manager.dispatch_sync(
             Some(context.clone()),
-            Req::register("session-pair-worker-b".into(),
-                 "token-session-pair-worker-b".into(),
+            Req::register("pane-owner-b".into(),
+                 "token-pane-owner-b".into(),
                  root.display().to_string(),
-                 candidates("session-pair-b")),
+                 on_pane("thread-pane-owner-b")),
+        );
+        assert!(second_registration.ok, "{second_registration:?}");
+
+        let owner = manager
+            .resolve_route_by_native_thread("session-thread-pane-owner-b", "thread-pane-owner-b")
+            .unwrap();
+        assert_eq!(owner.agent_id.as_str(), "pane-owner-b");
+
+        let (first_claimant_registered, retired) = {
+            let state = server.state.lock().unwrap();
+            let retired = state
+                .global
+                .projects
+                .values()
+                .flat_map(|project| project.runtime_bindings.values())
+                .find(|binding| binding.agent_id.as_str() == "pane-owner-a")
+                .cloned();
+            (state.workers.contains_key("pane-owner-a"), retired)
+        };
+        assert!(
+            !first_claimant_registered,
+            "the replaced claimant must be closed, not left registered"
+        );
+        let retired = retired.expect("the retired binding stays in the ledger");
+        assert!(retired.tmux_endpoint.is_none(), "{retired:?}");
+        assert!(retired.native_thread_id.is_none(), "{retired:?}");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Codex thread is not an anchor, so it cannot transfer a pane. Two peers
+    /// claiming one thread on different panes stay a conflict, and the refused
+    /// registration must leave the ledger untouched.
+    #[tokio::test]
+    async fn a_codex_thread_on_another_pane_stays_a_conflict() {
+        let (server, root, journal_path) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+        let app = crate::identity::CLI_APP_SERVER_ID;
+        let context = context_with_app(&root, app);
+        let shared_thread = "thread-shared-across-panes";
+
+        let (_, first_registration) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register("thread-owner-a".into(),
+                 "token-thread-owner-a".into(),
+                 root.display().to_string(),
+                 test_candidates(shared_thread)),
+        );
+        assert!(first_registration.ok, "{first_registration:?}");
+        let before = std::fs::read(&journal_path).unwrap();
+
+        let (_, second_registration) = manager.dispatch_sync(
+            Some(context.clone()),
+            Req::register("thread-owner-b".into(),
+                 "token-thread-owner-b".into(),
+                 root.display().to_string(),
+                 test_candidates(shared_thread)),
         );
         assert!(!second_registration.ok, "{second_registration:?}");
-        assert!(second_registration.error.as_deref().is_some_and(|error| {
-            error.starts_with("RUNTIME_BINDING_REJECTED:")
-                && error.contains("identity anchor is already bound")
-        }));
+        assert!(
+            second_registration
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")
+                    && error.contains("another pane")),
+            "{second_registration:?}"
+        );
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before);
 
-        let first = manager
-            .resolve_route_by_native_thread("session-pair-a", shared_thread)
+        let owner = manager
+            .resolve_route_by_native_thread(&format!("session-{shared_thread}"), shared_thread)
             .unwrap();
-        assert_eq!(first.agent_id.as_str(), "session-pair-worker-a");
+        assert_eq!(owner.agent_id.as_str(), "thread-owner-a");
 
         std::fs::remove_dir_all(root).unwrap();
     }

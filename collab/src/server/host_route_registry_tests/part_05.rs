@@ -1029,7 +1029,7 @@
     }
 
     #[tokio::test]
-    async fn wire_cli_recover_rejects_forged_token_thread_and_route() {
+    async fn wire_cli_recover_rejects_a_forged_token_and_a_forged_route() {
         let (server, root, journal_path) = test_server();
         let app = crate::identity::CLI_APP_SERVER_ID;
         let worker_id = "recover-negative-worker";
@@ -1098,10 +1098,11 @@
         )
         .unwrap();
 
-        let before = mutation_snapshot(&server);
-        let before_journal = std::fs::read(&journal_path).unwrap();
-        let before_mailbox = directory_snapshot(&root.join(".agent-collab/mailbox"));
-        let wrong_thread = dispatch_wire(
+        // The same pane, claimed by another worker. A pane has one owner, so the
+        // later registrant takes it and the previous claimant is closed. The
+        // Codex thread the request carries is not the anchor and cannot fence
+        // that replacement.
+        let taken = dispatch_wire(
             server.clone(),
             Some(context_with_runtime(&root, app, &provisional)),
             Req::register(worker_id.into(),
@@ -1110,17 +1111,29 @@
                  test_candidates_for_registered(&server, &root, "other-worker", app)),
         )
         .await;
-        assert!(!wrong_thread.ok, "{wrong_thread:?}");
-        assert!(wrong_thread
-            .error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("RUNTIME_BINDING_REJECTED:")));
-        assert_eq!(mutation_snapshot(&server), before);
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before_journal);
-        assert_eq!(
-            directory_snapshot(&root.join(".agent-collab/mailbox")),
-            before_mailbox
-        );
+        assert!(taken.ok, "{taken:?}");
+        {
+            let state = server.state.lock().unwrap();
+            assert!(
+                !state.workers.contains_key("other-worker"),
+                "the replaced claimant must be closed; workers={:?} bindings={:?}",
+                state.workers.keys().collect::<Vec<_>>(),
+                state
+                    .global
+                    .projects
+                    .values()
+                    .flat_map(|project| project.runtime_bindings.values())
+                    .map(|binding| (
+                        binding.agent_id.as_str().to_owned(),
+                        binding.tmux_endpoint.is_some(),
+                        binding
+                            .native_thread_id
+                            .as_ref()
+                            .map(|thread| thread.as_str().to_owned()),
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
 
         let wrong_root = root.with_file_name(format!(
             "{}-wrong-route",

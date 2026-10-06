@@ -91,15 +91,6 @@ pub(crate) fn context_bootstrap(
     })
 }
 
-/// Only the explicit `--worker` override is the adjudication channel, and it is
-/// the one path the cross-project restore error points the user at. The implicit
-/// `collab context` path must never ask the daemon to retire another peer's
-/// anchor: the ledger contract keeps the implicit path inside the current scope
-/// and fails closed on a foreign record.
-pub(crate) fn context_may_retire_foreign_anchor(worker: Option<&str>) -> bool {
-    worker.is_some()
-}
-
 /// Environment keys that describe the agent's own Collab/Codex runtime. The
 /// daemon cannot see the caller's environment, so this projection is built
 /// client-side and replaces the manual `env | rg` probe with one snapshot
@@ -327,16 +318,11 @@ pub(crate) fn context_snapshot(worker: Option<String>) -> anyhow::Result<serde_j
     let scope = bootstrap.scope.clone();
     let requested_worker = worker.clone();
     let requested_worker = requested_worker.as_deref();
-    let retire_foreign_anchor = context_may_retire_foreign_anchor(requested_worker);
     let mut ident = match identity::load_or_create_for_context(&scope, worker) {
         Ok(ident) => ident,
         Err(error) => return identity_terminal(&bootstrap, error, requested_worker),
     };
-    if retire_foreign_anchor {
-        crate::set_context_registration_requested(true);
-    }
     let registration = ensure_registration_with_outcome(&scope, &mut ident);
-    crate::set_context_registration_requested(false);
     let (_, identity_state) = match registration {
         Ok(outcome) => outcome,
         // The durable identity is loaded here, so the terminal can name the

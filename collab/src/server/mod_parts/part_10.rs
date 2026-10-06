@@ -826,20 +826,10 @@ fn validate_cli_register_rebind(
             );
         }
     } else if let Some(candidate_binding) = candidate_binding {
-        if candidate_binding.agent_id.as_str() != worker_id {
-            return Err(format!(
-                "RUNTIME_BINDING_REJECTED: candidate tmux pane {candidate_thread} is already bound to worker {}",
-                candidate_binding.agent_id
-            ));
-        }
-        if candidate_binding.app_scope_id != route_scope.app_scope_id
-            || candidate_binding.project_scope != route_scope.project_scope_id
-        {
-            return Err(
-                "RUNTIME_BINDING_REJECTED: candidate transport belongs to another project route"
-                    .to_owned(),
-            );
-        }
+        // A pane has one owner and the later registrant wins it. The typed
+        // registration path retires the previous claimant in the same
+        // transaction, so this validator must not fence the pane a second time.
+        let _ = candidate_binding;
     }
     Ok(())
 }

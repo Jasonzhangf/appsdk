@@ -503,7 +503,6 @@ impl ProjectRuntimeManager {
         let Req::Register {
             worker_id,
             candidates: Some(candidates),
-            retire_cross_project_anchor,
             ..
         } = req
         else {
@@ -522,7 +521,8 @@ impl ProjectRuntimeManager {
                 runtimes.push(runtime);
             }
         }
-        let mut anchor_matches = Vec::new();
+        let mut pane_claims: Vec<(Arc<Server>, RuntimeBinding)> = Vec::new();
+        let mut foreign_thread_matches = Vec::new();
         for runtime in runtimes {
             let state = runtime.state.lock().unwrap();
             for binding in state
@@ -531,140 +531,111 @@ impl ProjectRuntimeManager {
                 .values()
                 .flat_map(|project| project.runtime_bindings.values())
             {
-                let same_codex_session =
-                    endpoint.codex_session_id.as_deref().is_some_and(|session| {
-                        binding
-                            .session_id
-                            .as_ref()
-                            .map(crate::identity::SessionId::as_str)
-                            == Some(session)
-                    });
-                let same_codex_thread = endpoint.codex_thread_id.as_deref().is_some_and(|thread| {
-                    binding
-                        .native_thread_id
-                        .as_ref()
-                        .map(NativeThreadId::as_str)
-                        == Some(thread)
-                });
+                // A tmux registration anchors on its pane id and nothing else.
+                // The Codex ids a tmux endpoint carries are not queryable, and
+                // the pane's shell pid is not an identity, so neither may decide
+                // which binding a second claim replaces. Socket, session and
+                // pane id name one pane on one tmux server.
                 let same_tmux_pane = binding.tmux_endpoint.as_ref().is_some_and(|previous| {
-                    // A live native thread is authoritative. The tmux pane is
-                    // only a recovery anchor when both Codex IDs are absent.
-                    // Pane identity has one owner (`same_pane_route`): socket,
-                    // server pid, session, pane id and pane pid.
-                    endpoint.codex_session_id.is_none()
-                        && endpoint.codex_thread_id.is_none()
-                        && crate::client::adapters::tmux::same_pane_route(previous, endpoint)
+                    previous.socket_path == endpoint.socket_path
+                        && previous.tmux_session_id == endpoint.tmux_session_id
+                        && previous.pane_id == endpoint.pane_id
                 });
-                if (same_codex_session || same_codex_thread || same_tmux_pane)
-                    && !anchor_matches.iter().any(|existing| existing == binding)
-                {
-                    anchor_matches.push(binding.clone());
+                if same_tmux_pane {
+                    if !pane_claims
+                        .iter()
+                        .any(|(_, existing)| existing == binding)
+                    {
+                        pane_claims.push((runtime.clone(), binding.clone()));
+                    }
+                    continue;
+                }
+                // The Codex ids are not an anchor, but they still name one live
+                // thread. Another worker holding this thread on a *different*
+                // pane is a conflict, not a takeover: only a pane changes owner
+                // here, so this stays refused and nothing is committed.
+                if binding.agent_id.as_str() != worker_id {
+                    let same_codex_session =
+                        endpoint.codex_session_id.as_deref().is_some_and(|session| {
+                            binding
+                                .session_id
+                                .as_ref()
+                                .map(crate::identity::SessionId::as_str)
+                                == Some(session)
+                        });
+                    let same_codex_thread =
+                        endpoint.codex_thread_id.as_deref().is_some_and(|thread| {
+                            binding
+                                .native_thread_id
+                                .as_ref()
+                                .map(NativeThreadId::as_str)
+                                == Some(thread)
+                        });
+                    if (same_codex_session || same_codex_thread)
+                        && !foreign_thread_matches
+                            .iter()
+                            .any(|existing| existing == binding)
+                    {
+                        foreign_thread_matches.push(binding.clone());
+                    }
                 }
             }
         }
-        // This is an identity question, not a pane-ownership question. Pane
-        // ownership is global and the route reducer enforces it, so at most one
-        // route claims this pane. The binding ledger can still hold more than one
-        // record for the pane, and only a second record inside this scope makes
-        // the candidate ambiguous, because two live peers of one project cannot
-        // share a pane. A match in another project scope is not an ambiguity
-        // here: it is the cross-project anchor that the retirement path below
-        // handles. When nothing matches in scope, the previous fail-closed rule
-        // still applies to several foreign matches.
-        let in_scope = anchor_matches
-            .iter()
-            .find(|binding| {
-                binding.app_scope_id == context.app_scope_id
-                    && binding.project_scope == context.project_scope
-            })
-            .cloned();
-        let in_scope_matches = anchor_matches
-            .iter()
-            .filter(|binding| {
-                binding.app_scope_id == context.app_scope_id
-                    && binding.project_scope == context.project_scope
-            })
-            .count();
-        if in_scope_matches > 1 || (in_scope_matches == 0 && anchor_matches.len() > 1) {
-            return Err(
-                "RUNTIME_BINDING_REJECTED: tmux identity anchor matches multiple persisted peers"
-                    .to_owned(),
-            );
+        if let Some(conflict) = foreign_thread_matches.first() {
+            let identity = conflict
+                .native_thread_id
+                .as_ref()
+                .map(NativeThreadId::as_str)
+                .or_else(|| {
+                    conflict
+                        .session_id
+                        .as_ref()
+                        .map(crate::identity::SessionId::as_str)
+                })
+                .unwrap_or("<unknown>");
+            return Err(format!(
+                "RUNTIME_BINDING_REJECTED: Codex thread {identity} is already bound to worker {} on another pane",
+                conflict.agent_id
+            ));
         }
-        if let Some(binding) = in_scope.or_else(|| anchor_matches.first().cloned()) {
-            if binding.agent_id.as_str() != worker_id {
-                if !*retire_cross_project_anchor {
-                    return Err(format!(
-                        "RUNTIME_BINDING_REJECTED: tmux identity anchor is already bound to worker {}",
-                        binding.agent_id
-                    ));
-                }
-                self.retire_cross_project_anchor_candidate(context, &binding)?;
+        // The pane scan above only answers the conflict question. Ownership of
+        // the pane itself is settled at the registration commit, by
+        // `retire_reclaimed_panes`, because both registration entry points share
+        // that commit and neither may keep a second owner of one pane.
+        let route_scope = RouteScope {
+            app_scope_id: context.app_scope_id.clone(),
+            project_scope_id: context.project_scope.clone(),
+        };
+        // A claimant that lives in the runtime this registration commits into is
+        // retired by that commit itself, so the replacement is one transaction.
+        // Only a claimant in another runtime needs this earlier retirement,
+        // because that runtime's global state is the only one that knows the
+        // claimant's project scope.
+        let registering_runtime = self
+            .routes
+            .lock()
+            .unwrap()
+            .get(&Self::route_key(context))
+            .and_then(|route| route.runtime.clone());
+        for (runtime, binding) in pane_claims {
+            if registering_runtime
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &runtime))
+            {
+                continue;
             }
-            let remaining_scope_mismatch = binding.app_scope_id != context.app_scope_id
-                || binding.project_scope != context.project_scope;
-            if remaining_scope_mismatch && !*retire_cross_project_anchor {
-                return Err(
-                    "RUNTIME_BINDING_REJECTED: tmux identity anchor belongs to another project route"
-                        .to_owned(),
-                );
+            // The binding this registration is about to own is not a takeover:
+            // a same-scope re-registration stays idempotent.
+            if binding.agent_id.as_str() == worker_id && binding.route_scope() == route_scope {
+                continue;
             }
-            if remaining_scope_mismatch {
-                self.retire_cross_project_anchor_candidate(context, &binding)?;
-            }
+            // The claimant is retired on the runtime that holds it, because only
+            // that runtime's global state knows the claimant's project scope.
+            let events = pane_reclaim_events(worker_id, &binding)?;
+            runtime
+                .commit_checked(&events)
+                .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
         }
         Ok(())
-    }
-
-    fn retire_cross_project_anchor_candidate(
-        &self,
-        context: &ProjectContext,
-        binding: &RuntimeBinding,
-    ) -> Result<(), String> {
-        let candidate_scope_mismatch = binding.app_scope_id != context.app_scope_id
-            || binding.project_scope != context.project_scope;
-        if !candidate_scope_mismatch {
-            return Ok(());
-        }
-        // The reducer refuses to retire a route without both ids; report the
-        // same precondition with a message that names the stale anchor.
-        if binding.native_thread_id.is_none() {
-            return Err(
-                "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no native thread id"
-                    .to_owned(),
-            );
-        }
-        if binding.session_id.is_none() {
-            return Err(
-                "RUNTIME_BINDING_REJECTED: stale cross-project anchor has no session id".to_owned(),
-            );
-        }
-        // The anchor match that selected this binding already applied the single
-        // pane-identity implementation (`same_pane_route`). Re-deriving pane
-        // identity here a second time could only disagree with the match that got
-        // us here, so the postcondition asks the exact question the reducer
-        // answers: is this binding still a live current-thread route?
-        self.host
-            .commit_checked(&[Event::GlobalCurrentThreadRouteRetired {
-                binding: binding.clone(),
-            }])
-            .map(|_| ())
-            .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
-        let retired = {
-            let state = self.host.state.lock().unwrap();
-            !state
-                .global
-                .current_thread_routes
-                .values()
-                .any(|route| route == binding)
-        };
-        if retired {
-            Ok(())
-        } else {
-            Err(
-                "RUNTIME_BINDING_REJECTED: stale cross-project anchor retirement was not applied"
-                    .to_owned(),
-            )
-        }
     }
 }

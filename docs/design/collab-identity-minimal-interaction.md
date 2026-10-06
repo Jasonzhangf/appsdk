@@ -10,6 +10,11 @@ those real facts once with `collab context --provide '<JSON>'`. The remaining
 work completes in that daemon invocation. No worker-id hunt or status/init/route
 sequence. Genuine conflicts and runtime failures stay explicit.
 
+Project root resolution stays automatic: a linked Git worktree resolves to
+its exact registered canonical main root, including worktrees outside that
+root's directory. Root resolution reads Git and registered project routes; it
+does not load or select a worker identity.
+
 This implements the original user contract. The concurrent draft is retained
 in the task run directory as evidence; its extra init recovery entry and five
 questions are superseded. No project decision is delegated to those questions.

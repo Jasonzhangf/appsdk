@@ -237,7 +237,6 @@
         let resolved = Scope::resolve_from_cwd_with_host_paths(
             &worktree,
             &host_paths,
-            Some("worker-a".into()),
         )
         .unwrap();
 
@@ -266,87 +265,6 @@
             uninitialized
         );
 
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn recovery_scope_uses_canonical_route_without_a_native_thread_route() {
-        let _env_guard = TEST_ENV_LOCK.lock().unwrap();
-        let _tmux_env_guard = EnvVarGuard::without("TMUX_PANE");
-        let previous_cwd = std::env::current_dir().unwrap();
-        let previous_thread = std::env::var_os("CODEX_THREAD_ID");
-        let previous_state = std::env::var_os(COLLAB_STATE_DIR_ENV);
-        let root = test_root("recovery-worktree-without-route");
-        let canonical = root.join("project");
-        let worktree = canonical.join("playground/task-a");
-        let state_root = root.join("host-state");
-        std::fs::create_dir_all(canonical.join(".agent-collab")).unwrap();
-        std::fs::create_dir_all(&state_root).unwrap();
-        let status = Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&canonical)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let status = Command::new("git")
-            .args([
-                "-c",
-                "user.name=Collab Test",
-                "-c",
-                "user.email=collab-test@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-q",
-                "-m",
-                "initial",
-            ])
-            .current_dir(&canonical)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let status = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "task-a",
-                worktree.to_str().unwrap(),
-                "main",
-            ])
-            .current_dir(&canonical)
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let canonical = canonical.canonicalize().unwrap();
-        let worktree = worktree.canonicalize().unwrap();
-        let route = json!({
-            "version": 1,
-            "op": "register",
-            "app_scope_id": "appserver-cli",
-            "project_scope": canonical,
-            "canonical_root": canonical,
-            "storage_root": canonical,
-            "registered_ms": 1
-        });
-        std::fs::write(state_root.join("routes.jsonl"), format!("{route}\n")).unwrap();
-        std::env::set_var(COLLAB_STATE_DIR_ENV, &state_root);
-        std::env::set_current_dir(&worktree).unwrap();
-        std::env::set_var("CODEX_THREAD_ID", "missing-native-route");
-
-        let resolved = resolve_for_recovery().unwrap();
-
-        assert_eq!(resolved.root, canonical);
-        std::env::set_current_dir(previous_cwd).unwrap();
-        match previous_thread {
-            Some(value) => std::env::set_var("CODEX_THREAD_ID", value),
-            None => std::env::remove_var("CODEX_THREAD_ID"),
-        }
-        match previous_state {
-            Some(value) => std::env::set_var(COLLAB_STATE_DIR_ENV, value),
-            None => std::env::remove_var(COLLAB_STATE_DIR_ENV),
-        }
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -392,7 +310,7 @@
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
         let resolved =
-            Scope::resolve_from_cwd_with_host_paths(&project, &host_paths, Some("worker-a".into()))
+            Scope::resolve_from_cwd_with_host_paths(&project, &host_paths)
                 .unwrap();
 
         assert_eq!(resolved.root, project);
@@ -457,7 +375,7 @@
         let nested = nested.canonicalize().unwrap();
 
         let host_paths = HostPaths::for_state_root(&state_root).unwrap();
-        let resolved = Scope::resolve_from_cwd_with_host_paths(&nested, &host_paths, None).unwrap();
+        let resolved = Scope::resolve_from_cwd_with_host_paths(&nested, &host_paths).unwrap();
 
         assert_eq!(resolved.root, nested);
         match previous_thread {

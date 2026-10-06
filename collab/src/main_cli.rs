@@ -339,7 +339,7 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         command: MasterCmd,
     },
-    /// Refresh this worker's App Server registration
+    /// Operator inspection and explicit retirement of registered workers
     Worker {
         #[command(subcommand)]
         cmd: WorkerCmd,

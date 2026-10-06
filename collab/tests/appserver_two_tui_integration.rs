@@ -967,6 +967,39 @@ fn one_thread_supplement_survives_continuously_missing_environment() {
 }
 
 #[test]
+fn external_linked_worktree_reuses_the_canonical_identity_without_recovery_calls() {
+    let mut fixture = AppFixture::new();
+    let canonical = fixture.project.clone();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["-c", "user.name=Collab Test", "-c", "user.email=collab-test@example.invalid", "commit", "--allow-empty", "-q", "-m", "initial"],
+    ] {
+        assert!(Command::new("git").args(args).current_dir(&canonical).status().unwrap().success());
+    }
+    let context = fixture.run_public(&["context"], THREAD_A);
+    fixture.initialized = true;
+    let linked = fixture.root.join("external-linked");
+    assert!(Command::new("git").args(["worktree", "add", "-q", "-b", "linked", linked.to_str().unwrap()]).current_dir(&canonical).status().unwrap().success());
+    fixture.project = linked;
+    let replay = fixture.command_public(&["context"], THREAD_A);
+    let tasks = fixture.command_without_thread(&["task", "status"], THREAD_A);
+    let worktree_baseline = fixture.project.join(".agent-collab").exists();
+    // Restore the daemon's lifecycle cwd before assertions so a failing
+    // regression still stops its own isolated daemon in Fixture::drop.
+    fixture.project = canonical;
+    assert!(replay.status.success(), "{}{}", String::from_utf8_lossy(&replay.stdout), String::from_utf8_lossy(&replay.stderr));
+    let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(replay["project_root"], context["project_root"]);
+    assert_eq!(replay["identity"], context["identity"]);
+    assert_eq!(replay["binding"], context["binding"]);
+    assert!(tasks.status.success(), "{}{}", String::from_utf8_lossy(&tasks.stdout), String::from_utf8_lossy(&tasks.stderr));
+    let tasks: Value = serde_json::from_slice(&tasks.stdout).unwrap();
+    assert_eq!(tasks["tasks"], json!([]));
+    assert!(!worktree_baseline, "a worktree must not create a second identity baseline");
+    drop(fixture);
+}
+
+#[test]
 fn forged_appserver_endpoint_and_missing_project_context_fail_closed() {
     let root = unique_root();
     let project = root.join("project");

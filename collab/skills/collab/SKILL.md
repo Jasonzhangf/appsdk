@@ -1087,7 +1087,9 @@ A Git worktree is a task execution directory, not a second identity or a
 substitute for the canonical project root. `collab context` resolves the
 canonical root automatically and the daemon owns identity selection, creation,
 recovery, update, route publication, and binding persistence. Do not create a
-worktree-local peer. The `collab context` snapshot is the agent's complete
+worktree-local peer. External linked worktrees use the registered Git main root
+automatically for context and ordinary commands; do not switch cwd to recover
+an identity. The `collab context` snapshot is the agent's complete
 live-master and peer read. A failed context is not evidence that no master
 exists; preserve the exact error. Master promotion still requires explicit user
 approval and a live registered transport. `collab master status` remains a

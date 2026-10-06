@@ -1101,6 +1101,37 @@ bootstrap.
 `collab init` remains the explicit AppSDK-side command for operator-driven
 project initialization; agents do not need to run it before `collab context`.
 
+## AppServer runtime registration
+
+Registration derives the host namespace from the active runtime. The exact
+`CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop` marker selects `codex_app`;
+`Codex CLI` or `Codex TUI` selects `codex_tui`, and `TMUX_PANE` selects
+`codex_tui` when no originator marker is present. An explicit
+`COLLAB_APPSERVER_NAMESPACE` is reserved for nonstandard hosts and must be one
+of those two values. Unknown host markers never select an AppServer namespace.
+With an explicit AppServer socket they fail registration; without one, the
+adapter returns no AppServer candidate and may continue through another
+existing transport only after that transport's normal verification. Never
+default an unidentified session to `codex_tui`.
+
+Endpoint discovery is host-specific and performed by the Collab client adapter
+before registration. `COLLAB_APPSERVER_SOCKET` and
+`CODEX_APP_SERVER_SOCKET` are explicit endpoints. For Desktop only, the client
+adapter may discover the managed endpoint at
+`$CODEX_HOME/app-server-control/app-server-control.sock`, or
+`$HOME/.codex/app-server-control/app-server-control.sock` when `CODEX_HOME` is
+unset. A TUI must supply its own reachable AppServer endpoint; never borrow the
+Desktop managed socket for a private embedded TUI. `CODEX_APP_TOOLS_PIPE_PATH`
+is a tool pipe, not an AppServer endpoint. The daemon still verifies the exact
+thread/session/project tuple before committing the route.
+
+The selected namespace is persisted with the recipient route. `turn/start`
+notifications use that stored recipient namespace (`codex_app` or
+`codex_tui`); they never infer it from the sender or hardcode the TUI namespace.
+If an AppServer endpoint is unavailable before registration, the existing
+transport selection rules apply. Once an AppServer binding is selected, do not
+switch transports after an RPC error.
+
 ## Worktree identity
 
 A Git worktree is a task execution directory, not a second identity or a

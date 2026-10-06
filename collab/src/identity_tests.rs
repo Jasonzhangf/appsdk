@@ -971,12 +971,18 @@ fn first_appserver_peer_uses_thread_identity_without_a_tmux_pane() {
     let previous_pane = std::env::var_os("TMUX_PANE");
     let previous_worker = std::env::var_os("COLLAB_WORKER");
     let previous_socket = std::env::var_os("COLLAB_APPSERVER_SOCKET");
+    let previous_originator = std::env::var_os("CODEX_INTERNAL_ORIGINATOR_OVERRIDE");
+    let previous_namespace = std::env::var_os("COLLAB_APPSERVER_NAMESPACE");
+    let previous_codex_socket = std::env::var_os("CODEX_APP_SERVER_SOCKET");
     std::env::set_var("CODEX_THREAD_ID", "desktop-first-thread");
     std::env::set_var("CODEX_SESSION_ID", "desktop-first-session");
     std::env::set_var(
         "COLLAB_APPSERVER_SOCKET",
         "/tmp/desktop-first-appserver.sock",
     );
+    std::env::set_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop");
+    std::env::remove_var("COLLAB_APPSERVER_NAMESPACE");
+    std::env::remove_var("CODEX_APP_SERVER_SOCKET");
     std::env::remove_var("TMUX_PANE");
     std::env::remove_var("COLLAB_WORKER");
 
@@ -1001,6 +1007,18 @@ fn first_appserver_peer_uses_thread_identity_without_a_tmux_pane() {
     match previous_socket {
         Some(value) => std::env::set_var("COLLAB_APPSERVER_SOCKET", value),
         None => std::env::remove_var("COLLAB_APPSERVER_SOCKET"),
+    }
+    match previous_originator {
+        Some(value) => std::env::set_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", value),
+        None => std::env::remove_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE"),
+    }
+    match previous_namespace {
+        Some(value) => std::env::set_var("COLLAB_APPSERVER_NAMESPACE", value),
+        None => std::env::remove_var("COLLAB_APPSERVER_NAMESPACE"),
+    }
+    match previous_codex_socket {
+        Some(value) => std::env::set_var("CODEX_APP_SERVER_SOCKET", value),
+        None => std::env::remove_var("CODEX_APP_SERVER_SOCKET"),
     }
 
     let identity = result.unwrap();

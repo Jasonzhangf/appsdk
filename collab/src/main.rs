@@ -804,7 +804,8 @@ fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Root { command } | Cmd::Master { command } => {
             if matches!(command, MasterCmd::Status) {
                 let host_paths = scope::HostPaths::resolve()?;
-                let route = scope::route_for_tmux_pane(&host_paths)?;
+                let cwd = std::env::current_dir()?;
+                let route = scope::canonical_route_for_cwd(&host_paths, &cwd)?;
                 let scope = Scope { root: route.root };
                 let v: serde_json::Value = client::call_with_context(
                     &scope.sock_path(),

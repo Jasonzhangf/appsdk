@@ -262,6 +262,58 @@
     }
 
     #[test]
+    fn immediate_notify_uses_registered_codex_app_namespace() {
+        let socket = temp_socket("notify-start-desktop");
+        let Some(listener) = bind_test_socket(&socket) else {
+            return;
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream);
+            initialize(&mut stream);
+            prepare_recipient_thread(&mut stream, "ok");
+            let read_id = next_request_id(&mut stream);
+            respond(
+                &mut stream,
+                json!({
+                    "id": read_id,
+                    "result": {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "idle"}
+                        }
+                    }
+                }),
+            );
+            let request = next_request(&mut stream);
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["params"]["toolOutput"]["namespace"], "codex_app");
+            respond(
+                &mut stream,
+                json!({
+                    "id": request["id"],
+                    "result": {
+                        "turn": {"id": "turn-started", "status": "inProgress", "items": []}
+                    }
+                }),
+            );
+            stream.shutdown(Shutdown::Both).ok();
+        });
+
+        let mut transport = selected_transport(&socket);
+        transport.namespace = Some("codex_app".into());
+        immediate_notify(
+            &transport,
+            Some("sender-thread"),
+            "notify body",
+            "message-desktop-start",
+        )
+        .unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
     fn immediate_notify_attributes_turn_start_to_sender_not_recipient() {
         let socket = temp_socket("notify-source-thread");
         let Some(listener) = bind_test_socket(&socket) else {
@@ -843,6 +895,7 @@
             let start = next_request(&mut stream);
             assert_eq!(start["method"], "turn/start");
             assert_eq!(start["params"]["threadId"], "thread-1");
+            assert_eq!(start["params"]["toolOutput"]["namespace"], "codex_app");
             assert_eq!(
                 start["params"]["clientUserMessageId"],
                 "message-queued-idle"
@@ -859,8 +912,10 @@
             stream.shutdown(Shutdown::Both).ok();
         });
 
+        let mut transport = selected_transport(&socket);
+        transport.namespace = Some("codex_app".into());
         let receipt = queued_notify(
-            &selected_transport(&socket),
+            &transport,
             None,
             "notify body",
             "message-queued-idle",

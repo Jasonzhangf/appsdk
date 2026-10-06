@@ -1,4 +1,3 @@
-
 use super::{AdapterCapabilities, AdapterError, EndpointKind, WakeMode};
 use crate::identity::NativeThreadId;
 use crate::proto::{AppServerCandidate, SelectedTransport, TransportKind};
@@ -11,9 +10,67 @@ use std::time::Duration;
 pub const APPSERVER_SOCKET_ENV: &str = "COLLAB_APPSERVER_SOCKET";
 pub const APPSERVER_NAMESPACE_ENV: &str = "COLLAB_APPSERVER_NAMESPACE";
 pub const APPSERVER_TIMEOUT_MS_ENV: &str = "COLLAB_APPSERVER_TIMEOUT_MS";
+const CODEX_ORIGINATOR_ENV: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_OUTGOING_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INCOMING_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+fn appserver_namespace(
+    explicit: Option<&str>,
+    originator: Option<&str>,
+    tmux_pane: Option<&str>,
+) -> Result<&'static str, AdapterError> {
+    if let Some(explicit) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return match explicit {
+            "codex_tui" => Ok("codex_tui"),
+            "codex_app" => Ok("codex_app"),
+            namespace => Err(AdapterError::Unknown {
+                operation: "detect",
+                detail: format!("unsupported App Server namespace {namespace}"),
+            }),
+        };
+    }
+
+    match originator.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("Codex Desktop") => Ok("codex_app"),
+        Some("Codex CLI" | "Codex TUI") => Ok("codex_tui"),
+        Some(originator) => Err(AdapterError::Unknown {
+            operation: "detect",
+            detail: format!("unsupported Codex host originator {originator}"),
+        }),
+        None if tmux_pane.map(str::trim).is_some_and(|value| !value.is_empty()) => {
+            Ok("codex_tui")
+        }
+        None => Err(AdapterError::Unknown {
+            operation: "detect",
+            detail: format!(
+                "cannot identify Codex host; set {APPSERVER_NAMESPACE_ENV} only for a nonstandard runtime"
+            ),
+        }),
+    }
+}
+
+fn appserver_namespace_from_env() -> Result<&'static str, AdapterError> {
+    let explicit = std::env::var(APPSERVER_NAMESPACE_ENV).ok();
+    let originator = std::env::var(CODEX_ORIGINATOR_ENV).ok();
+    let tmux_pane = std::env::var("TMUX_PANE").ok();
+    appserver_namespace(
+        explicit.as_deref(),
+        originator.as_deref(),
+        tmux_pane.as_deref(),
+    )
+}
+
+fn selected_namespace(transport: &SelectedTransport) -> Result<&str, AdapterError> {
+    let namespace = transport
+        .namespace
+        .as_deref()
+        .filter(|value| matches!(*value, "codex_tui" | "codex_app"))
+        .ok_or_else(|| AdapterError::InvalidBinding {
+            detail: "selected App Server transport has no supported namespace".into(),
+        })?;
+    Ok(namespace)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerCapabilities {
@@ -91,21 +148,12 @@ impl LiveAppServer {
             NativeThreadId::new(thread_id).map_err(|error| AdapterError::InvalidBinding {
                 detail: format!("CODEX_THREAD_ID is invalid: {error}"),
             })?;
-        let Some(socket_path) = socket_candidate() else {
+        let namespace = appserver_namespace_from_env()?;
+        let Some(socket_path) = socket_candidate(namespace) else {
             return Ok(None);
         };
         if !socket_path.is_absolute() || !socket_path.exists() {
             return Ok(None);
-        }
-        let namespace = std::env::var(APPSERVER_NAMESPACE_ENV)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "codex_tui".into());
-        if !matches!(namespace.as_str(), "codex_tui" | "codex_app") {
-            return Err(AdapterError::Unknown {
-                operation: "detect",
-                detail: format!("unsupported App Server namespace {namespace}"),
-            });
         }
         let timeout = match std::env::var(APPSERVER_TIMEOUT_MS_ENV) {
             Ok(value) => Duration::from_millis(value.trim().parse::<u64>().map_err(|error| {
@@ -151,7 +199,7 @@ impl LiveAppServer {
         }
         Ok(Some(Self {
             socket_path,
-            namespace,
+            namespace: namespace.to_owned(),
             thread_id,
             timeout,
             capabilities: AppServerCapabilities::native(),
@@ -255,13 +303,18 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
     NativeThreadId::new(thread_id.clone()).map_err(|error| AdapterError::InvalidBinding {
         detail: format!("CODEX_THREAD_ID is invalid: {error}"),
     })?;
-    let Some(socket_path) = socket_candidate() else {
+    let explicit_endpoint = [APPSERVER_SOCKET_ENV, "CODEX_APP_SERVER_SOCKET"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .any(|value| !value.is_empty());
+    let namespace = match appserver_namespace_from_env() {
+        Ok(namespace) => namespace,
+        Err(error) if explicit_endpoint => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let Some(socket_path) = socket_candidate(namespace) else {
         return Ok(None);
     };
-    let namespace = std::env::var(APPSERVER_NAMESPACE_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "codex_tui".into());
     let cwd = std::env::current_dir()
         .and_then(|path| path.canonicalize())
         .map_err(|error| AdapterError::InvalidBinding {
@@ -275,7 +328,7 @@ pub fn candidate_from_env() -> Result<Option<AppServerCandidate>, AdapterError> 
         .to_owned();
     Ok(Some(AppServerCandidate {
         endpoint: format!("unix://{}", socket_path.display()),
-        namespace,
+        namespace: namespace.to_owned(),
         session_id,
         thread_id,
         cwd,
@@ -507,6 +560,7 @@ pub fn immediate_notify(
         .ok_or_else(|| AdapterError::InvalidBinding {
             detail: "selected App Server transport has no thread_id".into(),
         })?;
+    let namespace = selected_namespace(transport)?;
     let socket_path = endpoint_path(endpoint)?;
     let thread_id = NativeThreadId::new(thread_id.to_owned()).map_err(|error| {
         AdapterError::InvalidBinding {
@@ -583,7 +637,7 @@ pub fn immediate_notify(
                     "input": [],
                     "toolOutput": {
                         "name": "send_message_to_thread",
-                        "namespace": "codex_tui",
+                        "namespace": namespace,
                         "output": delegated_prompt(
                             source_thread_id,
                             client_user_message_id,
@@ -643,6 +697,7 @@ pub fn queued_notify(
         .ok_or_else(|| AdapterError::InvalidBinding {
             detail: "selected App Server transport has no thread_id".into(),
         })?;
+    let namespace = selected_namespace(transport)?;
     let socket_path = endpoint_path(endpoint)?;
     let thread_id = NativeThreadId::new(thread_id.to_owned()).map_err(|error| {
         AdapterError::InvalidBinding {
@@ -707,7 +762,7 @@ pub fn queued_notify(
                     "input": [],
                     "toolOutput": {
                         "name": "send_message_to_thread",
-                        "namespace": "codex_tui",
+                        "namespace": namespace,
                         "output": delegated_prompt(
                             source_thread_id,
                             client_user_message_id,

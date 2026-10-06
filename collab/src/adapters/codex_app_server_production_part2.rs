@@ -286,7 +286,7 @@ fn method_exists(client: &mut Client, method: &str, params: Value) -> Result<boo
     }
 }
 
-fn socket_candidate() -> Option<PathBuf> {
+fn socket_candidate(namespace: &str) -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(APPSERVER_SOCKET_ENV).filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(value));
     }
@@ -295,7 +295,19 @@ fn socket_candidate() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(value));
     }
-    None
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
+    managed_appserver_socket(namespace, codex_home.as_deref())
+}
+
+fn managed_appserver_socket(namespace: &str, codex_home: Option<&Path>) -> Option<PathBuf> {
+    if namespace != "codex_app" {
+        return None;
+    }
+    let socket = codex_home?.join("app-server-control/app-server-control.sock");
+    (socket.is_absolute() && socket.exists()).then_some(socket)
 }
 
 struct Client {

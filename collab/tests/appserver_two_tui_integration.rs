@@ -35,18 +35,34 @@ struct AppFixture {
     project: PathBuf,
     host_state: PathBuf,
     app_socket: PathBuf,
+    state: Arc<Mutex<HashMap<String, ThreadState>>>,
+    appserver_connections: Arc<AtomicU64>,
     initialized: bool,
     _server_thread: thread::JoinHandle<()>,
 }
 
 impl AppFixture {
     fn new() -> Self {
+        Self::with_managed_socket(false)
+    }
+
+    fn new_desktop_managed() -> Self {
+        Self::with_managed_socket(true)
+    }
+
+    fn with_managed_socket(managed_socket: bool) -> Self {
         let root = unique_root();
         let project = root.join("project");
         let host_state = root.join("h");
-        let app_socket = root.join("app.sock");
+        let app_socket = if managed_socket {
+            root.join("home/app-server-control/app-server-control.sock")
+        } else {
+            root.join("app.sock")
+        };
         std::fs::create_dir_all(&project).expect("create project root");
         std::fs::create_dir_all(&host_state).expect("create host state root");
+        std::fs::create_dir_all(app_socket.parent().unwrap())
+            .expect("create AppServer socket root");
         let project_str = std::fs::canonicalize(&project)
             .unwrap()
             .to_string_lossy()
@@ -54,11 +70,14 @@ impl AppFixture {
         let listener = UnixListener::bind(&app_socket).expect("bind app server fixture");
         let shared = Arc::new(Mutex::new(HashMap::<String, ThreadState>::new()));
         let server_shared = Arc::clone(&shared);
+        let connections = Arc::new(AtomicU64::new(0));
+        let server_connections = Arc::clone(&connections);
         let server_scope = project_str.clone();
         let server_thread = thread::spawn(move || {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
+                        server_connections.fetch_add(1, Ordering::Relaxed);
                         let shared = Arc::clone(&server_shared);
                         let scope = server_scope.clone();
                         thread::spawn(move || serve_connection(stream, shared, &scope));
@@ -72,6 +91,8 @@ impl AppFixture {
             project,
             host_state,
             app_socket,
+            state: shared,
+            appserver_connections: connections,
             initialized: false,
             _server_thread: server_thread,
         }
@@ -83,6 +104,9 @@ impl AppFixture {
             .current_dir(&self.project)
             .env("COLLAB_STATE_DIR", &self.host_state)
             .env("COLLAB_APPSERVER_SOCKET", &self.app_socket)
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
             .env("CODEX_SESSION_ID", thread)
             .env("CODEX_THREAD_ID", thread)
             .env("COLLAB_WORKER", worker)
@@ -91,11 +115,62 @@ impl AppFixture {
             .expect("run collab CLI")
     }
 
+    fn command_desktop(&self, args: &[&str], thread: &str, worker: &str) -> Output {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+            .env("CODEX_SESSION_ID", thread)
+            .env("CODEX_THREAD_ID", thread)
+            .env("COLLAB_WORKER", worker)
+            .env("CODEX_HOME", self.root.join("home"))
+            .output()
+            .expect("run Desktop collab CLI")
+    }
+
+    fn command_tui_without_explicit_endpoint(
+        &self,
+        args: &[&str],
+        thread: &str,
+        worker: &str,
+    ) -> Output {
+        Command::new(binary())
+            .args(args)
+            .current_dir(&self.project)
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
+            .env("CODEX_SESSION_ID", thread)
+            .env("CODEX_THREAD_ID", thread)
+            .env("COLLAB_WORKER", worker)
+            .env("CODEX_HOME", self.root.join("home"))
+            .output()
+            .expect("run TUI collab CLI without an explicit endpoint")
+    }
+
     fn run_ok(&self, args: &[&str], thread: &str, worker: &str) -> Value {
         let output = self.command(args, thread, worker);
         assert!(
             output.status.success(),
             "collab {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("collab CLI emits JSON")
+    }
+
+    fn run_ok_desktop(&self, args: &[&str], thread: &str, worker: &str) -> Value {
+        let output = self.command_desktop(args, thread, worker);
+        assert!(
+            output.status.success(),
+            "Desktop collab {:?} failed: stdout={} stderr={}",
             args,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -133,6 +208,7 @@ struct ThreadState {
     status: String,
     active_turn: Option<String>,
     turns: Vec<Value>,
+    tool_namespaces: Vec<Option<String>>,
     seq: u64,
     queued: u64,
 }
@@ -143,6 +219,7 @@ impl ThreadState {
             status: "idle".into(),
             active_turn: None,
             turns: Vec::new(),
+            tool_namespaces: Vec::new(),
             seq: 0,
             queued: 0,
         }
@@ -253,6 +330,11 @@ fn turn_start(params: Value, id: Value, state: &Mutex<HashMap<String, ThreadStat
     let entry = locked
         .entry(thread_id.clone())
         .or_insert_with(ThreadState::new);
+    entry.tool_namespaces.push(
+        params["toolOutput"]["namespace"]
+            .as_str()
+            .map(str::to_owned),
+    );
     let turn_id = entry.next_turn();
     entry.status = "active".into();
     entry.active_turn = Some(turn_id.clone());
@@ -469,6 +551,101 @@ fn two_tui_appserver_receipt_flow() {
 }
 
 #[test]
+fn desktop_managed_socket_registration_persists_and_uses_codex_app_namespace() {
+    let mut fixture = AppFixture::new_desktop_managed();
+
+    let init_a = fixture.run_ok_desktop(&["init"], THREAD_A, "desktop-a");
+    assert_eq!(init_a["transport_selected"]["namespace"], "codex_app");
+    assert_eq!(
+        init_a["transport_selected"]["endpoint"],
+        format!("unix://{}", fixture.app_socket.display())
+    );
+    let init_b = fixture.run_ok_desktop(&["init"], THREAD_B, "desktop-b");
+    assert_eq!(init_b["transport_selected"]["namespace"], "codex_app");
+    fixture.initialized = true;
+
+    let context_b =
+        fixture.run_ok_desktop(&["context", "--worker", "desktop-b"], THREAD_B, "desktop-b");
+    assert_eq!(context_b["identity"]["transport"]["namespace"], "codex_app");
+    assert_eq!(
+        context_b["identity"]["transport"]["endpoint"],
+        format!("unix://{}", fixture.app_socket.display())
+    );
+
+    let sent = fixture.run_ok_desktop(
+        &[
+            "send",
+            "--from",
+            "desktop-a",
+            "--to",
+            "desktop-b",
+            "--subject",
+            "desktop namespace",
+            "desktop body",
+        ],
+        THREAD_A,
+        "desktop-a",
+    );
+    assert_eq!(sent["notification"], "appserver-input-submitted");
+    assert_eq!(sent["consumed"], false);
+    assert_eq!(
+        fixture.state.lock().unwrap()[THREAD_B]
+            .tool_namespaces
+            .last()
+            .and_then(Option::as_deref),
+        Some("codex_app")
+    );
+
+    let received = fixture.run_ok_desktop(
+        &[
+            "recv",
+            "--worker",
+            "desktop-b",
+            "--receive-id",
+            "desktop-receive-1",
+            "--timeout",
+            "0",
+        ],
+        THREAD_B,
+        "desktop-b",
+    );
+    assert_eq!(received["count"], 1);
+
+    let down = fixture.command_desktop(&["down"], THREAD_B, "desktop-b");
+    assert!(down.status.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && fixture.host_state.join("server.sock").exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let up = fixture.command_desktop(&["up"], THREAD_B, "desktop-b");
+    assert!(up.status.success());
+    let replay_context =
+        fixture.run_ok_desktop(&["context", "--worker", "desktop-b"], THREAD_B, "desktop-b");
+    assert_eq!(
+        replay_context["identity"]["transport"]["namespace"],
+        "codex_app"
+    );
+}
+
+#[test]
+fn tui_does_not_borrow_the_desktop_managed_socket() {
+    let mut fixture = AppFixture::new_desktop_managed();
+    fixture.initialized = true;
+
+    let output = fixture.command_tui_without_explicit_endpoint(
+        &["init", "--worker-id", "tui-without-endpoint"],
+        THREAD_A,
+        "tui-without-endpoint",
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        fixture.appserver_connections.load(Ordering::Relaxed),
+        0,
+        "TUI must not connect to the Desktop managed AppServer socket"
+    );
+}
+
+#[test]
 fn wrong_appserver_endpoint_fails_closed() {
     let root = unique_root();
     let project = root.join("project");
@@ -481,6 +658,9 @@ fn wrong_appserver_endpoint_fails_closed() {
         .current_dir(&project)
         .env("COLLAB_STATE_DIR", &host_state)
         .env("COLLAB_APPSERVER_SOCKET", &missing)
+        .env_remove("CODEX_APP_SERVER_SOCKET")
+        .env_remove("COLLAB_APPSERVER_NAMESPACE")
+        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex TUI")
         .env("CODEX_SESSION_ID", THREAD_A)
         .env("CODEX_THREAD_ID", THREAD_A)
         .env("CODEX_HOME", root.join("home"))

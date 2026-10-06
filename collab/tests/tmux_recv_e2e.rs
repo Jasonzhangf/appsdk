@@ -15,11 +15,25 @@ struct Fixture {
 
 impl Fixture {
     fn command(&self, args: &[&str], pane: Option<&Pane>) -> Output {
+        self.command_with_originator(args, pane, "Codex TUI")
+    }
+
+    fn command_with_originator(
+        &self,
+        args: &[&str],
+        pane: Option<&Pane>,
+        originator: &str,
+    ) -> Output {
         let mut command = Command::new(&self.binary);
         command
             .args(args)
             .current_dir(&self.root)
-            .env("COLLAB_STATE_DIR", &self.host_state);
+            .env("COLLAB_STATE_DIR", &self.host_state)
+            .env("CODEX_HOME", self.root.join("home"))
+            .env_remove("COLLAB_APPSERVER_SOCKET")
+            .env_remove("CODEX_APP_SERVER_SOCKET")
+            .env_remove("COLLAB_APPSERVER_NAMESPACE")
+            .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", originator);
         if let Some(pane) = pane {
             command
                 .env(
@@ -162,7 +176,20 @@ fn collab_recv_cli_subprocess_commits_queryable_receipt_over_isolated_daemon() {
     let receiver = pane(pane_ids[1], "tmux-e2e-b");
 
     fixture.initialized = true;
-    fixture.run_ok(&["init"], Some(&sender));
+    let unknown_host =
+        fixture.command_with_originator(&["init"], Some(&sender), "Codex future host");
+    assert!(
+        unknown_host.status.success(),
+        "verified tmux registration should remain available without an App Server endpoint: stdout={} stderr={}",
+        String::from_utf8_lossy(&unknown_host.stdout),
+        String::from_utf8_lossy(&unknown_host.stderr)
+    );
+    let unknown_host_registration: Value =
+        serde_json::from_slice(&unknown_host.stdout).expect("collab CLI emits JSON");
+    assert_eq!(
+        unknown_host_registration["transport_selected"]["kind"],
+        "tmux"
+    );
     fixture.run_ok(&["init"], Some(&receiver));
 
     let route = fixture.run_ok(

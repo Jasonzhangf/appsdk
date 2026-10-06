@@ -293,8 +293,12 @@ fn with_current_address<T>(thread: &str, session: &str, body: impl FnOnce() -> T
     let previous_thread = std::env::var_os("CODEX_THREAD_ID");
     let previous_session = std::env::var_os("CODEX_SESSION_ID");
     let previous_worker = std::env::var_os("COLLAB_WORKER");
+    let previous_originator = std::env::var_os("CODEX_INTERNAL_ORIGINATOR_OVERRIDE");
+    let previous_namespace = std::env::var_os("COLLAB_APPSERVER_NAMESPACE");
     std::env::set_var("CODEX_THREAD_ID", thread);
     std::env::set_var("CODEX_SESSION_ID", session);
+    std::env::set_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop");
+    std::env::remove_var("COLLAB_APPSERVER_NAMESPACE");
     std::env::remove_var("COLLAB_WORKER");
     let result = body();
     match previous_thread {
@@ -308,6 +312,14 @@ fn with_current_address<T>(thread: &str, session: &str, body: impl FnOnce() -> T
     match previous_worker {
         Some(value) => std::env::set_var("COLLAB_WORKER", value),
         None => std::env::remove_var("COLLAB_WORKER"),
+    }
+    match previous_originator {
+        Some(value) => std::env::set_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", value),
+        None => std::env::remove_var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE"),
+    }
+    match previous_namespace {
+        Some(value) => std::env::set_var("COLLAB_APPSERVER_NAMESPACE", value),
+        None => std::env::remove_var("COLLAB_APPSERVER_NAMESPACE"),
     }
     result
 }

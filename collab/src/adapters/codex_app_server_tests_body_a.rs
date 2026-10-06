@@ -2,6 +2,46 @@
     use std::os::unix::net::UnixListener;
     use std::thread;
 
+    #[test]
+    fn appserver_namespace_is_detected_from_the_host_runtime() {
+        assert_eq!(
+            appserver_namespace(None, Some("Codex Desktop"), None).unwrap(),
+            "codex_app"
+        );
+        assert_eq!(
+            appserver_namespace(None, Some("Codex CLI"), None).unwrap(),
+            "codex_tui"
+        );
+        assert_eq!(
+            appserver_namespace(None, None, Some("%7")).unwrap(),
+            "codex_tui"
+        );
+        assert_eq!(
+            appserver_namespace(Some("codex_app"), Some("Codex CLI"), None).unwrap(),
+            "codex_app"
+        );
+        assert!(appserver_namespace(None, None, None).is_err());
+        assert!(appserver_namespace(None, Some("unknown host"), None).is_err());
+    }
+
+    #[test]
+    fn managed_appserver_socket_is_only_inferred_for_desktop_runtime() {
+        let home = std::path::PathBuf::from("/tmp").join(format!("cas-{}", std::process::id()));
+        let socket = home.join("app-server-control/app-server-control.sock");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        assert_eq!(
+            managed_appserver_socket("codex_app", Some(&home)),
+            Some(socket.clone())
+        );
+        assert_eq!(managed_appserver_socket("codex_tui", Some(&home)), None);
+
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     fn assert_malformed_active_turn(page: Value, expected_detail: &str) {
         match active_turn_id_from_page(&page).unwrap_err() {
             AdapterError::Unknown { operation, detail } => {

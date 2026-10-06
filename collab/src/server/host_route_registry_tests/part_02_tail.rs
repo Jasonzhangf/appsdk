@@ -1281,14 +1281,14 @@
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
-    /// tmux reuses pane ids after a server restart, so a shared `pane_id` with a
-    /// different `pane_pid` is a different pane. The cross-project anchor match
-    /// in `validate_current_thread_candidate` must compare the whole endpoint
-    /// (`same_pane_route`): a hand-written subset that omits `pane_pid` would
-    /// hand a fresh peer the dead pane's claim. The same pane, by contrast, is
-    /// reclaimed by the later registrant.
+    /// A tmux pane is one owned resource. The takeover match is the pane
+    /// identity itself — socket, session and pane id, the fields that name one
+    /// pane on one tmux server — so a later registration in another app scope is
+    /// planned as the pane's new owner even when tmux reused the pane id with a
+    /// new pane pid. Planning is not committing: a registration that never
+    /// completes must leave the incumbent bound to the pane.
     #[tokio::test]
-    async fn pane_anchor_match_requires_the_same_pane_pid() {
+    async fn pane_takeover_plans_a_foreign_claimant_without_evicting_it() {
         let (server, root, _) = test_server();
         let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
         let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
@@ -1308,51 +1308,137 @@
         );
         assert!(first.ok, "{first:?}");
 
-        // A pane anchor only applies when both Codex IDs are absent, so the
-        // probe candidate carries no native thread and differs only in pane pid.
-        let pane_candidate = |pane_pid: u32| {
+        // The probe candidate carries no Codex anchor, so only the pane identity
+        // can decide whether it is the same pane.
+        let pane_candidate = |pane_id: &str, pane_pid: u32| {
             let mut candidates = test_candidates("thread-pane-pid-b").unwrap();
             let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
             endpoint.socket_path = anchor.socket_path.clone();
             endpoint.server_pid = anchor.server_pid;
             endpoint.tmux_session_id = anchor.tmux_session_id.clone();
-            endpoint.pane_id = anchor.pane_id.clone();
+            endpoint.pane_id = pane_id.to_string();
             endpoint.pane_pid = pane_pid;
             endpoint.codex_session_id = None;
             endpoint.codex_thread_id = None;
             candidates
         };
+        let other_context = context_with_app(&root, "tui-other");
 
-        // Same pane id and pane pid: the anchor really is the same pane, so the
-        // later registrant reclaims it instead of being fenced out.
-        let duplicate = manager.validate_current_thread_candidate(
-            &context,
-            &Req::register(
-                "pane-pid-b".into(),
-                "token-pane-pid-b".into(),
+        // Another app scope has its own runtime, so the incumbent is foreign to
+        // this registration and the takeover can only be planned here.
+        let planned = manager
+            .validate_current_thread_candidate(
+                &other_context,
+                &Req::register(
+                    "pane-pid-b".into(),
+                    "token-pane-pid-b".into(),
+                    root.display().to_string(),
+                    Some(pane_candidate(&anchor.pane_id, anchor.pane_pid + 1)),
+                ),
+            )
+            .expect("a foreign claimant on the same pane is planned for takeover");
+        assert_eq!(planned.len(), 1, "one pane has one incumbent");
+        assert_eq!(planned[0].2.agent_id.as_str(), "pane-pid-a");
+
+        // Planning is not committing. Nothing has retired the incumbent yet.
+        let still_bound = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .any(|binding| binding.agent_id.as_str() == "pane-pid-a");
+        assert!(
+            still_bound,
+            "a planned takeover must not evict the incumbent before the registration commits"
+        );
+
+        // A different pane is not a takeover at all.
+        let unrelated = manager
+            .validate_current_thread_candidate(
+                &other_context,
+                &Req::register(
+                    "pane-pid-c".into(),
+                    "token-pane-pid-c".into(),
+                    root.display().to_string(),
+                    Some(pane_candidate("%unrelated-pane", anchor.pane_pid)),
+                ),
+            )
+            .expect("an unrelated pane is not a conflict");
+        assert!(unrelated.is_empty(), "an unrelated pane plans no retirement");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A registration that is rejected after the pane scan must not evict the
+    /// foreign claimant. The retirement is committed only after the registering
+    /// runtime has committed the takeover, so a request that never reaches that
+    /// commit leaves the pane owned by its incumbent.
+    #[tokio::test]
+    async fn a_rejected_registration_leaves_the_foreign_pane_claimant_bound() {
+        let (server, root, _) = test_server();
+        let host_paths = HostPaths::for_state_root(root.join("host-state")).unwrap();
+        let manager = ProjectRuntimeManager::new(server.clone(), &host_paths).unwrap();
+
+        let candidates = test_candidates("thread-rejected-a").unwrap();
+        let anchor = candidates.tmux.as_ref().unwrap().endpoint.clone();
+        let (_, first) = manager.dispatch_sync(
+            Some(context_with_app(&root, "appserver-cli")),
+            Req::register(
+                "rejected-incumbent".into(),
+                "token-rejected-incumbent".into(),
                 root.display().to_string(),
-                Some(pane_candidate(anchor.pane_pid)),
+                Some(candidates),
             ),
         );
-        assert!(
-            duplicate.is_ok(),
-            "the same pane is reclaimed by the later registrant: {duplicate:?}"
-        );
+        assert!(first.ok, "{first:?}");
 
-        // Reused pane id with a new pane pid: a different pane, so the fresh
-        // peer must not inherit the dead pane's owner.
-        let reused = manager.validate_current_thread_candidate(
-            &context,
-            &Req::register(
-                "pane-pid-c".into(),
-                "token-pane-pid-c".into(),
-                root.display().to_string(),
-                Some(pane_candidate(anchor.pane_pid + 1)),
+        let pane_only = || {
+            let mut candidates = test_candidates("thread-rejected-b").unwrap();
+            let endpoint = &mut candidates.tmux.as_mut().unwrap().endpoint;
+            endpoint.socket_path = anchor.socket_path.clone();
+            endpoint.server_pid = anchor.server_pid;
+            endpoint.tmux_session_id = anchor.tmux_session_id.clone();
+            endpoint.pane_id = anchor.pane_id.clone();
+            endpoint.pane_pid = anchor.pane_pid;
+            endpoint.codex_session_id = None;
+            endpoint.codex_thread_id = None;
+            candidates
+        };
+
+        // The worktree is outside the project root, so this registration is
+        // rejected after the pane scan and before the takeover can commit.
+        let (_, rejected) = manager.dispatch_sync(
+            Some(context_with_app(&root, "tui-other")),
+            Req::register(
+                "rejected-taker".into(),
+                "token-rejected-taker".into(),
+                "/nonexistent/collab-rejected-registration".into(),
+                Some(pane_only()),
             ),
         );
+        assert!(!rejected.ok, "the foreign worktree must be rejected: {rejected:?}");
+
+        let incumbent = server
+            .state
+            .lock()
+            .unwrap()
+            .global
+            .projects
+            .values()
+            .flat_map(|project| project.runtime_bindings.values())
+            .find(|binding| binding.agent_id.as_str() == "rejected-incumbent")
+            .cloned()
+            .expect("a rejected registration must not evict the incumbent");
         assert!(
-            reused.is_ok(),
-            "a new pane pid must not inherit the old pane's anchor: {reused:?}"
+            incumbent.tmux_endpoint.is_some(),
+            "the incumbent must keep the pane: {incumbent:?}"
+        );
+        assert!(
+            incumbent.native_thread_id.is_some(),
+            "the incumbent must keep its thread anchor: {incumbent:?}"
         );
 
         std::fs::remove_dir_all(root).unwrap();

@@ -1,5 +1,10 @@
 # Collab control-plane reset operation
 
+*(Historical. The pane-route mechanism named below,
+`Req::Register.retire_cross_project_anchor`, was deleted by
+`collab-pane-route-ownership-20261006.md` revision 8: a later registration on the
+same pane takes it with no operator flag.)*
+
 Delivery 2 of the collab control-plane work. Delivery 1 is the normal-path fix
 (scope-local pane uniqueness, named ambiguity, ensure-runtime logging) and is
 designed in `collab-control-plane-reset-20261005.md`, revision 3. This document

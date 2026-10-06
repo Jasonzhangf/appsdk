@@ -253,7 +253,7 @@ impl Server {
                         && previous.is_some_and(|current| {
                             current.tmux_endpoint.as_ref().is_some_and(|old| {
                                 binding.tmux_endpoint.as_ref().is_some_and(|new| {
-                                    crate::client::adapters::tmux::same_pane_route(old, new)
+                                    crate::client::adapters::tmux::same_owned_pane(old, new)
                                 })
                             })
                         })

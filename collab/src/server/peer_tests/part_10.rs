@@ -179,20 +179,23 @@ fn context_does_not_project_retired_appserver_thread_or_turn_state() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("context must not call retired AppServer status"));
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("APP_SERVER_RETIRED: the registered AppServer endpoint is gone".into())
+    });
     let server = Arc::new(server);
     let context = handle_context(&server, "state-peer".into(), "token-state-peer".into());
     assert_eq!(context.data["agent"]["thread_state"], "unknown");
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
     assert_eq!(status.data["workers"][0]["agent_state"], "unknown");
-    assert_eq!(status.data["workers"][0]["presence"], "present");
+    // The pane answers, but the registered AppServer anchor does not, so the
+    // peer is not live and its retired thread state is not projected.
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn retired_appserver_status_callback_does_not_override_live_tmux_presence() {
+fn retired_appserver_status_callback_leaves_a_tmux_binding_unknown() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "timeout-peer", "thread-timeout-peer");
     assert!(
@@ -200,23 +203,30 @@ fn retired_appserver_status_callback_does_not_override_live_tmux_presence() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("status must come from the registered tmux pane"));
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("APP_SERVER_RETIRED: the registered AppServer endpoint is gone".into())
+    });
     let server = Arc::new(server);
 
     let context = handle_context(&server, "timeout-peer".into(), "token-timeout-peer".into());
     assert_eq!(context.data["agent"]["thread_state"], "unknown");
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["presence"], "present");
-    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(status.data["workers"][0]["identity_valid"], true);
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        status.data["workers"][0]["identity_valid"],
+        serde_json::Value::Null
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn retired_appserver_route_error_does_not_mark_live_tmux_pane_missing() {
+fn retired_appserver_route_error_leaves_a_tmux_binding_unknown_not_missing() {
     let (mut server, root) = test_server();
     let registration = register_appserver(&mut server, "missing-peer", "thread-missing-peer");
     assert!(
@@ -224,14 +234,23 @@ fn retired_appserver_route_error_does_not_mark_live_tmux_pane_missing() {
         "{}",
         registration.error.unwrap_or_default()
     );
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("status must come from the registered tmux pane"));
+    server.appserver_thread_status = Arc::new(|_, _| {
+        Err("APP_SERVER_ROUTE_RETIRED: the registered route is gone".into())
+    });
     let server = Arc::new(server);
 
     let status = dispatch(&server, Req::WorkerStatus { worker_id: None });
-    assert_eq!(status.data["workers"][0]["presence"], "present");
-    assert_eq!(status.data["workers"][0]["endpoint_live"], true);
-    assert_eq!(status.data["workers"][0]["identity_valid"], true);
+    // A retired AppServer route is not evidence that the pane vanished, so the
+    // peer stays Unknown instead of Missing.
+    assert_eq!(status.data["workers"][0]["presence"], "unknown");
+    assert_eq!(
+        status.data["workers"][0]["endpoint_live"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        status.data["workers"][0]["identity_valid"],
+        serde_json::Value::Null
+    );
 
     std::fs::remove_dir_all(root).ok();
 }

@@ -499,17 +499,17 @@ impl ProjectRuntimeManager {
         &self,
         context: &ProjectContext,
         req: &Req,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<(String, Arc<Server>, RuntimeBinding)>, String> {
         let Req::Register {
             worker_id,
             candidates: Some(candidates),
             ..
         } = req
         else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let Some(candidate) = candidates.tmux.as_ref() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let endpoint = &candidate.endpoint;
         let mut runtimes = vec![self.host.clone()];
@@ -537,9 +537,7 @@ impl ProjectRuntimeManager {
                 // which binding a second claim replaces. Socket, session and
                 // pane id name one pane on one tmux server.
                 let same_tmux_pane = binding.tmux_endpoint.as_ref().is_some_and(|previous| {
-                    previous.socket_path == endpoint.socket_path
-                        && previous.tmux_session_id == endpoint.tmux_session_id
-                        && previous.pane_id == endpoint.pane_id
+                    crate::client::adapters::tmux::same_owned_pane(previous, endpoint)
                 });
                 if same_tmux_pane {
                     if !pane_claims
@@ -599,24 +597,27 @@ impl ProjectRuntimeManager {
             ));
         }
         // The pane scan above only answers the conflict question. Ownership of
-        // the pane itself is settled at the registration commit, by
-        // `retire_reclaimed_panes`, because both registration entry points share
-        // that commit and neither may keep a second owner of one pane.
+        // the pane itself is settled by the registration commit, because both
+        // registration entry points share that commit and neither may keep a
+        // second owner of one pane.
         let route_scope = RouteScope {
             app_scope_id: context.app_scope_id.clone(),
             project_scope_id: context.project_scope.clone(),
         };
         // A claimant that lives in the runtime this registration commits into is
         // retired by that commit itself, so the replacement is one transaction.
-        // Only a claimant in another runtime needs this earlier retirement,
-        // because that runtime's global state is the only one that knows the
-        // claimant's project scope.
+        // A claimant in another runtime cannot join that transaction, because
+        // each runtime owns its own journal. Such a claimant is therefore only
+        // *planned* here and retired after the registration is durable: retiring
+        // it first would close it for a registration that may still fail, and
+        // that would strand the pane.
         let registering_runtime = self
             .routes
             .lock()
             .unwrap()
             .get(&Self::route_key(context))
             .and_then(|route| route.runtime.clone());
+        let mut superseded = Vec::new();
         for (runtime, binding) in pane_claims {
             if registering_runtime
                 .as_ref()
@@ -629,13 +630,61 @@ impl ProjectRuntimeManager {
             if binding.agent_id.as_str() == worker_id && binding.route_scope() == route_scope {
                 continue;
             }
+            superseded.push((worker_id.clone(), runtime, binding));
+        }
+        Ok(superseded)
+    }
+
+    /// Retires the claimants that `validate_current_thread_candidate` planned,
+    /// but only after the registering runtime committed the takeover. The order
+    /// is the point: a registration that fails leaves the incumbent owning the
+    /// pane instead of stranding it, and a retirement that fails leaves the pane
+    /// owned by the new registrant instead of unowned.
+    fn retire_superseded_claimants(
+        &self,
+        superseded: Vec<(String, Arc<Server>, RuntimeBinding)>,
+        response: Resp,
+    ) -> Resp {
+        if !response.ok || superseded.is_empty() {
+            return response;
+        }
+        for (taker, runtime, binding) in superseded {
+            // The registration commit of the registering runtime already retires
+            // a claimant that lives in that same runtime. Re-read the claimant
+            // before retiring it, so a binding that is already retired is left
+            // alone and one takeover never retires the same anchor twice.
+            let still_owns_the_pane = {
+                let state = runtime.state.lock().unwrap();
+                state
+                    .global
+                    .projects
+                    .values()
+                    .flat_map(|project| project.runtime_bindings.values())
+                    .any(|current| {
+                        current.binding_id == binding.binding_id
+                            && current.endpoint_generation == binding.endpoint_generation
+                            && current.tmux_endpoint.is_some()
+                    })
+            };
+            if !still_owns_the_pane {
+                continue;
+            }
             // The claimant is retired on the runtime that holds it, because only
             // that runtime's global state knows the claimant's project scope.
-            let events = pane_reclaim_events(worker_id, &binding)?;
-            runtime
-                .commit_checked(&events)
-                .map_err(|error| format!("RUNTIME_BINDING_REJECTED: {error}"))?;
+            let events = match pane_reclaim_events(&taker, &binding) {
+                Ok(events) => events,
+                Err(error) => {
+                    return Resp::err(format!(
+                        "SUPERSEDED_CLAIMANT_RETIREMENT_FAILED: {error}; the pane now belongs to the later registration; restart the affected daemon so the lagged claimant is reconciled"
+                    ))
+                }
+            };
+            if let Err(error) = runtime.commit_checked(&events) {
+                return Resp::err(format!(
+                    "SUPERSEDED_CLAIMANT_RETIREMENT_FAILED: {error}; the pane now belongs to the later registration; restart the affected daemon so the lagged claimant is reconciled"
+                ));
+            }
         }
-        Ok(())
+        response
     }
 }

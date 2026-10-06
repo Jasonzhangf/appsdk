@@ -1,6 +1,6 @@
 # Pane route ownership: one pane, one binding
 
-Status: design revision 7. Supersedes the L1 half of
+Status: design revision 8. Supersedes the L1 half of
 `collab-reset-operation-20261005.md` and the scope-local decision recorded in
 `collab-control-plane-reset-run-notes.md` (2026-10-05 17:15).
 
@@ -29,6 +29,16 @@ stranded pane is releasable in band. It also found that the deleted in-scope
 pane query used to provide a scope check that the host-wide
 `MASTER_RECOVERY_BLOCKED_LIVE` gate no longer made, which is restored. Sections
 changed here are marked `(Revision 7, review 6 Pn)`.
+
+Revision 8 is the pane-ownership contract itself: a pane is an owned resource,
+a later registration on the same pane address wins it across projects and scopes
+with no flag, and liveness comes only from an explicitly registered and queryable
+AppServer session and thread. It removes `Req::Register.retire_cross_project_anchor`,
+`master_anchor_is_superseded` and `Event::GlobalRouteClaimRetired`, and it
+answers review 7, which found that a tmux transport carrying explicit Codex ids
+still reached `Present` from the pane probe and that the cross-runtime takeover
+was two durable commits. Sections changed here are marked
+`(Revision 8, review 7 Pn)`.
 
 ## 1. The defect
 
@@ -613,17 +623,35 @@ presence edge, so it is neither announced online nor declared offline.
   answered `promotion candidate identity is unknown; defer promotion until
   transport probes succeed`, which is exactly the refusal that stranded a project
   whose only candidate is a tmux-only peer.
-- `worker_identity_presence` (`part_07.rs`) stops reporting `Present` for a
-  tmux-only binding. A tmux transport whose endpoint carries no
-  `codex_session_id` and no `codex_thread_id` has no registered AppServer anchor,
-  so the pane probe can only report a vanished anchor as `Missing`; a reachable
-  pane is `Unknown`. The pane stays an address, never a liveness credential.
+- `worker_identity_presence` (`part_07.rs`) answers a tmux transport from its
+  registered AppServer anchor, never from the pane. The pane probe decides one
+  thing only: a vanished pane is a vanished address, so it is `Missing`. A
+  reachable pane is not liveness. A tmux endpoint with no `codex_session_id` or
+  no `codex_thread_id` has no registered anchor, so it is `Unknown`; one that
+  carries both asks the AppServer status seam for that exact thread and is
+  `Present` only when that query answers. A tmux transport has no AppServer
+  endpoint, so the default probe refuses the foreign thread and the answer stays
+  `Unknown`. The pane stays an address, never a liveness credential.
 - `load_or_create_resolved_full_at` (`identity.rs`) mints a named worker on a
   pane another peer owns. A tmux registration anchors on the pane alone, so the
   identity gate must not refuse the later registrant that the daemon is required
   to accept. The gate still fails closed when the anchor is a Codex
   session/thread: `appserver_worker.is_some()` or no tmux candidate keeps
   `IDENTITY_RESTORE_CONFLICT` and `IDENTITY_RESTORE_CROSS_PROJECT`.
+- Pane ownership has one predicate, `tmux::same_owned_pane` (socket, session,
+  pane id). `tmux::same_pane_route` keeps the server and shell pids and stays the
+  exact-endpoint proof used by route resolution, recovery and identity
+  re-anchoring. Ownership ignores those pids because tmux reissues them while the
+  pane id stays the address; identity re-anchoring keeps them because a reissued
+  pane id must not hand a new process a dead worker's identity.
+- The cross-runtime takeover is ordered so the pane is never stranded.
+  `validate_current_thread_candidate` only *plans* the foreign claimants; the
+  registering runtime commits the takeover first, and
+  `retire_superseded_claimants` retires each planned claimant afterwards, skipping
+  one that the same commit already retired. A registration that fails leaves the
+  incumbent owning the pane; a retirement that fails leaves the pane owned by the
+  new registrant, because the host route index evicts the same pane inside the
+  route-publish commit itself.
 
 ### 11.3 Delivery gates, unchanged
 
@@ -637,9 +665,16 @@ authorized promotion always replaces the incumbent.
 The liveness rule has one consequence that is deliberate: a tmux-only peer is
 `Unknown`, so it holds no live master authority, `endpoint_live` is `null` rather
 than `false`, and `master send` refuses it. A peer that registers an explicit
-AppServer session and thread keeps its reachability probe. Removing the tmux arm
-from liveness altogether is a larger change: it fails 138 of the 946 unit tests
-across the delivery, wake and authority paths, so it belongs to its own round.
+AppServer session and thread keeps its reachability probe, and the tmux arm now
+routes that probe through the same AppServer status seam.
+
+Making the pane itself the liveness answer for *any* tmux transport is the
+variant this revision rejects. It fails 94 of the 949 unit tests across the
+delivery, wake and authority paths, and it would let a dead Codex inside a live
+pane hold live master authority. The query-based rule keeps every one of those
+tests meaningful: the test server's status seam is the AppServer answer, so a
+peer whose registered thread answers is live and a peer whose registered thread
+does not answer is not.
 
 ### 11.4 Tests
 
@@ -663,6 +698,22 @@ across the delivery, wake and authority paths, so it belongs to its own round.
 - `closed_same_pane_peer_keeps_the_pane_ownership` (rewritten): the later
   registrant closes the recorded master, and the closed peer keeps its durable
   host route, so the pane stays owned.
+- `pane_takeover_plans_a_foreign_claimant_without_evicting_it` (rewritten from
+  `pane_anchor_match_requires_the_same_pane_pid`): a foreign claimant on the same
+  pane is planned for takeover even when the pane id was reused with a new pane
+  pid, and planning alone retires nothing.
+- `a_rejected_registration_leaves_the_foreign_pane_claimant_bound` (new): a
+  registration that is rejected after the pane scan leaves the foreign claimant
+  bound to the pane, because the retirement follows the takeover commit.
+- `retired_appserver_status_callback_leaves_a_tmux_binding_unknown` and
+  `retired_appserver_route_error_leaves_a_tmux_binding_unknown_not_missing`
+  (renamed from `retired_appserver_*_does_not_override_live_tmux_presence` and
+  `retired_appserver_route_error_does_not_mark_live_tmux_pane_missing`): a tmux
+  binding whose registered AppServer thread does not answer is `Unknown`, and a
+  retired route is not evidence that the pane vanished.
+- `admission_uses_the_appserver_answer_for_a_registered_tmux_peer` (renamed from
+  `admission_uses_live_tmux_presence_without_appserver_status`): admission reads
+  the registered AppServer answer, not the pane.
 - `a_named_worker_mints_on_an_owned_pane_because_the_pane_is_the_anchor` (new):
   the identity gate mints the later registrant on an owned pane and leaves the
   previous claimant untouched, because the daemon commits the replacement.

@@ -1,5 +1,9 @@
 # SDK source line-limit repair v1
 
+*(Historical extraction plan. It names the method group as it stood at base
+`61e8c53`; the `retire_cross_project_anchor` path it lists was later deleted by
+`collab-pane-route-ownership-20261006.md` revision 8.)*
+
 ## Goal
 
 Make the strict `verify-sdk-source-registry` gate pass on `base 61e8c534b5295fb0f60a6634ad3cf99d99f12a4c` without changing the 1500-line default, without changing the DAGpipe module's declared 3500-line exception, and without relaxing the gate's treatment of tracked or untracked SDK source paths.

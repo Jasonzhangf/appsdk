@@ -825,12 +825,10 @@ fn validate_cli_register_rebind(
                     .to_owned(),
             );
         }
-    } else if let Some(candidate_binding) = candidate_binding {
-        // A pane has one owner and the later registrant wins it. The typed
-        // registration path retires the previous claimant in the same
-        // transaction, so this validator must not fence the pane a second time.
-        let _ = candidate_binding;
     }
+    // A pane has one owner and the later registrant wins it. The typed
+    // registration path retires the previous claimant in the same transaction,
+    // so this validator must not fence the pane a second time.
     Ok(())
 }
 

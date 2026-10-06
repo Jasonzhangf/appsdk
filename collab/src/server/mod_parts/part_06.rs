@@ -1067,7 +1067,7 @@ fn handle_register_with_app_scope_inner(
                     selected_transport_for_worker(&existing).is_some_and(|old| {
                         old.kind == TransportKind::Tmux
                             && old.tmux_endpoint.as_ref().is_some_and(|endpoint| {
-                                crate::client::adapters::tmux::same_pane_route(endpoint, candidate)
+                                crate::client::adapters::tmux::same_owned_pane(endpoint, candidate)
                             })
                     }) && existing_route_scope.as_ref().is_some_and(|route_scope| {
                         // The pane query is host-wide, so the scope check that
@@ -1304,9 +1304,7 @@ fn pane_claimants(
         .flat_map(|project| project.runtime_bindings.values())
         .filter(|binding| {
             binding.tmux_endpoint.as_ref().is_some_and(|previous| {
-                previous.socket_path == endpoint.socket_path
-                    && previous.tmux_session_id == endpoint.tmux_session_id
-                    && previous.pane_id == endpoint.pane_id
+                crate::client::adapters::tmux::same_owned_pane(previous, endpoint)
             })
         })
         // The binding this registration is about to own is not a takeover:
@@ -1324,11 +1322,6 @@ fn pane_claimants(
 /// record in the same commit as the new binding, so the ledger cannot fence the
 /// new owner on the next attempt.
 fn pane_reclaim_events(taker: &str, previous: &RuntimeBinding) -> Result<Vec<Event>, String> {
-    if previous.native_thread_id.is_none() && previous.session_id.is_none() {
-        return Err(
-            "RUNTIME_BINDING_REJECTED: reclaimed anchor has no identity to retire".to_owned(),
-        );
-    }
     let next_generation = previous.endpoint_generation.checked_add(1).ok_or_else(|| {
         "RUNTIME_BINDING_REJECTED: reclaimed anchor generation overflow".to_owned()
     })?;

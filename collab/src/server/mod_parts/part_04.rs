@@ -473,8 +473,23 @@ impl ProjectRuntimeManager {
             return Ok(());
         }
         if let Some(existing) = current {
-            if existing.agent_id != binding.agent_id
-                || existing.route_scope() != binding.route_scope()
+            // A pane has one owner and the later registrant wins it. The host
+            // index evicts every other claimant of the same pane inside this
+            // same commit, so a same-pane incumbent is replaced here instead of
+            // fencing the registration. Only a claim on a *different* pane stays
+            // a conflict, because two workers must never share one App Server
+            // thread.
+            let same_pane = binding.tmux_endpoint.as_ref().is_some_and(|candidate| {
+                existing
+                    .tmux_endpoint
+                    .as_ref()
+                    .is_some_and(|previous| {
+                        crate::client::adapters::tmux::same_owned_pane(previous, candidate)
+                    })
+            });
+            if !same_pane
+                && (existing.agent_id != binding.agent_id
+                    || existing.route_scope() != binding.route_scope())
             {
                 return Err(format!(
                     "RUNTIME_BINDING_REJECTED: App Server thread {} is already bound to worker {}",
@@ -1093,9 +1108,10 @@ impl ProjectRuntimeManager {
         if let Err(error) = self.admit_committed_pane_register_retry(&mut context, &req) {
             return (self.host.clone(), Resp::err(error));
         }
-        if let Err(error) = self.validate_current_thread_candidate(&context, &req) {
-            return (self.host.clone(), Resp::err(error));
-        }
+        let superseded = match self.validate_current_thread_candidate(&context, &req) {
+            Ok(superseded) => superseded,
+            Err(error) => return (self.host.clone(), Resp::err(error)),
+        };
         if matches!(req, Req::CrossProjectSend { .. }) {
             return self.dispatch_cross_project_send(&context, req);
         }
@@ -1126,7 +1142,7 @@ impl ProjectRuntimeManager {
                 } else {
                     dispatch_with_route_context(&runtime, req, Some(context.clone()))
                 };
-            return self.finalize_registration(
+            let (runtime, response) = self.finalize_registration(
                 runtime,
                 &context,
                 register_worker_id.as_deref(),
@@ -1136,6 +1152,7 @@ impl ProjectRuntimeManager {
                 rollback_state.3,
                 response,
             );
+            return (runtime, self.retire_superseded_claimants(superseded, response));
         }
 
         let pending_route = self
@@ -1169,7 +1186,7 @@ impl ProjectRuntimeManager {
                 } else {
                     dispatch_with_route_context(&runtime, req, Some(context.clone()))
                 };
-            return self.finalize_registration(
+            let (runtime, response) = self.finalize_registration(
                 runtime,
                 &context,
                 register_worker_id.as_deref(),
@@ -1179,6 +1196,7 @@ impl ProjectRuntimeManager {
                 rollback_state.3,
                 response,
             );
+            return (runtime, self.retire_superseded_claimants(superseded, response));
         }
 
         // The first route for the daemon's resident project keeps the
@@ -1214,7 +1232,7 @@ impl ProjectRuntimeManager {
             if is_register {
                 self.install_runtime(&key, self.host.clone(), None);
             }
-            return self.finalize_registration(
+            let (runtime, response) = self.finalize_registration(
                 self.host.clone(),
                 &context,
                 register_worker_id.as_deref(),
@@ -1224,6 +1242,7 @@ impl ProjectRuntimeManager {
                 rollback_state.3,
                 response,
             );
+            return (runtime, self.retire_superseded_claimants(superseded, response));
         }
 
         let Req::Register { cwd, .. } = &req else {
@@ -1270,7 +1289,7 @@ impl ProjectRuntimeManager {
         } else {
             dispatch_with_route_context(&runtime, req, Some(context.clone()))
         };
-        self.finalize_registration(
+        let (runtime, response) = self.finalize_registration(
             runtime,
             &context,
             register_worker_id.as_deref(),
@@ -1279,6 +1298,7 @@ impl ProjectRuntimeManager {
             rollback_state.2,
             rollback_state.3,
             response,
-        )
+        );
+        (runtime, self.retire_superseded_claimants(superseded, response))
     }
 }

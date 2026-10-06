@@ -7,31 +7,38 @@ fn worker_identity_presence(server: &Server, worker: &WorkerRec) -> IdentityPres
             let Some(endpoint) = transport.tmux_endpoint.as_ref() else {
                 return IdentityPresence::Missing;
             };
-            // A tmux pane is an identity anchor and an address, not a liveness
-            // credential. Only a binding that registered an explicit AppServer
-            // session and thread may be judged live; a tmux-only binding stays
-            // Unknown, because the pane probe proves reachability and nothing
-            // else. The pane probe still reports a vanished anchor as Missing.
-            if endpoint.codex_session_id.is_none() || endpoint.codex_thread_id.is_none() {
-                return match crate::client::adapters::tmux::probe(endpoint) {
-                    Ok(crate::client::adapters::tmux::PanePresence::Missing) => {
-                        IdentityPresence::Missing
-                    }
-                    Ok(crate::client::adapters::tmux::PanePresence::Present)
-                    | Ok(crate::client::adapters::tmux::PanePresence::Unknown)
-                    | Err(_) => IdentityPresence::Unknown,
-                };
-            }
+            // A tmux pane is an address, never a liveness credential. The pane
+            // probe decides one thing only: a vanished pane is a vanished
+            // address, so it is Missing. It can never make the binding live.
             match crate::client::adapters::tmux::probe(endpoint) {
-                Ok(crate::client::adapters::tmux::PanePresence::Present) => {
-                    IdentityPresence::Present
-                }
                 Ok(crate::client::adapters::tmux::PanePresence::Missing) => {
+                    return IdentityPresence::Missing
+                }
+                Ok(crate::client::adapters::tmux::PanePresence::Present)
+                | Ok(crate::client::adapters::tmux::PanePresence::Unknown)
+                | Err(_) => {}
+            }
+            // Liveness needs an explicitly registered and queryable AppServer
+            // session and thread. A tmux registration carries them only when it
+            // recorded both ids, and the answer must come from the AppServer
+            // probe. A tmux-only binding has no such anchor, so it stays
+            // Unknown.
+            let Some(thread_id) = endpoint.codex_thread_id.as_deref() else {
+                return IdentityPresence::Unknown;
+            };
+            if endpoint.codex_session_id.is_none() || thread_id.trim().is_empty() {
+                return IdentityPresence::Unknown;
+            }
+            match (server.appserver_thread_status)(&transport, thread_id) {
+                Ok(_) => IdentityPresence::Present,
+                Err(error)
+                    if error.contains("not found")
+                        || error.contains("MISSING")
+                        || error.contains("GONE") =>
+                {
                     IdentityPresence::Missing
                 }
-                Ok(crate::client::adapters::tmux::PanePresence::Unknown) | Err(_) => {
-                    IdentityPresence::Unknown
-                }
+                Err(_) => IdentityPresence::Unknown,
             }
         }
         TransportKind::AppServer => {

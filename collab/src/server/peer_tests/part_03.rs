@@ -530,13 +530,23 @@ fn live_tmux_subagent_still_requires_a_snapshot_before_close() {
     server.commit(&[Event::SubagentUpdated {
         subagent: subagent_record("cold-retire", "idle", "child"),
     }]);
-    server.appserver_thread_status =
-        Arc::new(|_, _| panic!("tmux close must not inspect AppServer thread status"));
+    server.appserver_thread_status = Arc::new(|_, thread_id| {
+        Ok(serde_json::json!({
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "idle"},
+                "canAcceptDirectInput": true,
+                "turns": [{"status": "completed"}]
+            },
+            "thread_state": "idle",
+            "transport": "tmux"
+        }))
+    });
     let child = server.state.lock().unwrap().workers["child"].clone();
     assert_eq!(
         worker_presence(&server, &child),
         IdentityPresence::Present,
-        "live tmux pane presence is independent of retired AppServer thread state"
+        "a tmux binding is live only when its registered AppServer thread answers"
     );
     let server = Arc::new(server);
     let response = dispatch(

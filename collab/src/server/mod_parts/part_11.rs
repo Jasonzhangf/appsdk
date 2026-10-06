@@ -262,7 +262,10 @@ fn dispatch_with_route_context(
             }
 
             if !events.is_empty() {
-                server.commit_locked(&mut st, &events);
+                if let Err(error) = server.commit_locked(&mut st, &events) {
+                    drop(st);
+                    return Resp::err(format!("ACK_DURABILITY_FAILED: {error}"));
+                }
             }
             drop(st);
             Resp::data(json!({

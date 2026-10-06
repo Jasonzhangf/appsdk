@@ -782,4 +782,64 @@
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn ledger_maintenance_skips_routes_this_daemon_does_not_own() {
+        // The ledger is resident control state. A host-wide route whose project
+        // scope this daemon never registered cannot be classified here: the
+        // global reducer rejects the record, so the tick would commit an event
+        // that replay can never reduce.
+        use crate::identity::{AgentId, AppServerId, BindingId, NativeThreadId, RuntimeId, SessionId};
+        use crate::scope::ProjectScopeId;
+        use crate::server::global_state::RuntimeBinding;
+
+        let (server, root) = test_server();
+        register(&server, "codex-owner");
+        let foreign_scope =
+            ProjectScopeId::new("/tmp/collab-unregistered-project".to_owned()).unwrap();
+        let foreign_app = AppServerId::new("appserver-cli".to_owned()).unwrap();
+        {
+            let mut state = server.state.lock().unwrap();
+            let foreign = RuntimeBinding::new_with_session(
+                foreign_scope.clone(),
+                foreign_app.clone(),
+                AgentId::new("codex-owner".to_owned()).unwrap(),
+                RuntimeId::new("runtime-foreign".to_owned()).unwrap(),
+                BindingId::new("binding-foreign".to_owned()).unwrap(),
+                1,
+                Some(SessionId::new("session-foreign".to_owned()).unwrap()),
+                Some(NativeThreadId::new("thread-foreign".to_owned()).unwrap()),
+            )
+            .expect("foreign binding");
+            state
+                .global
+                .set_current_thread_route(foreign)
+                .expect("host-wide route");
+        }
+
+        super::tick_ledger_maintenance_at(&server, 1_000);
+
+        let state = server.state.lock().unwrap();
+        assert!(
+            state.journal_poison.is_none(),
+            "ledger maintenance must not commit a record the reducer rejects: {:?}",
+            state.journal_poison
+        );
+        assert!(
+            state.global.lookup_project(&foreign_scope).is_none(),
+            "fixture: the foreign project scope must stay unregistered"
+        );
+        let classified: usize = state
+            .global
+            .projects
+            .values()
+            .map(|project| project.runtime_binding_ledger.len())
+            .sum();
+        assert!(
+            classified > 0,
+            "a route this daemon owns must still be classified"
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 include!("timers_tests_part2.rs");

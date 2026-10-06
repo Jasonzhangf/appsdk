@@ -196,12 +196,14 @@ fn handle_notification_subscribe(
                 existing.method = transport.kind.as_str().into();
                 existing.target = target.clone();
                 existing.updated_ms = now;
-                server.commit_locked(
+                if let Err(error) = server.commit_locked(
                     &mut state,
                     &[Event::NotificationSubscribed {
                         subscription: existing.clone(),
                     }],
-                );
+                ) {
+                    return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+                }
             }
             return Resp::data(json!({
                 "subscription": existing,
@@ -290,12 +292,14 @@ fn handle_notification_subscribe(
         updated_ms: now,
         status_reason: None,
     };
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut state,
         &[Event::NotificationSubscribed {
             subscription: subscription.clone(),
         }],
-    );
+    ) {
+        return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(
         json!({"subscription": subscription, "one_shot": goal_deadline, "max_repeat_count": crate::server::state::MAX_NOTIFICATION_REPEATS}),
     )
@@ -355,7 +359,9 @@ fn handle_notification_unsubscribe(
     if !pending.is_empty() {
         events.push(Event::Superseded { ids: pending });
     }
-    server.commit_locked(&mut state, &events);
+    if let Err(error) = server.commit_locked(&mut state, &events) {
+        return Resp::err(format!("NOTIFICATION_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({"subscription_id": subscription_id, "status": "cancelled"}))
 }
 
@@ -620,12 +626,14 @@ fn handle_migration_plan(server: &Server, worker_id: String, token: String) -> R
         created_ms: now,
         updated_ms: now,
     };
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut state,
         &[Event::MigrationUpdated {
             migration: migration.clone(),
         }],
-    );
+    ) {
+        return Resp::err(format!("MIGRATION_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "migration": migration,
         "admissible": issues.is_empty(),
@@ -666,12 +674,14 @@ fn handle_migration_apply(server: &Server, worker_id: String, token: String) -> 
     migration.task_count = state.tasks.len();
     migration.message_count = state.msgs.len();
     migration.updated_ms = now_ms();
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut state,
         &[Event::MigrationUpdated {
             migration: migration.clone(),
         }],
-    );
+    ) {
+        return Resp::err(format!("MIGRATION_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "migration": migration,
         "admission_frozen": true,
@@ -729,12 +739,14 @@ fn handle_migration_verify(server: &Server, worker_id: String, token: String) ->
     } else {
         migration.phase = "migration_needs_operator".into();
     }
-    server.commit_locked(
+    if let Err(error) = server.commit_locked(
         &mut state,
         &[Event::MigrationUpdated {
             migration: migration.clone(),
         }],
-    );
+    ) {
+        return Resp::err(format!("MIGRATION_DURABILITY_FAILED: {error}"));
+    }
     Resp::data(json!({
         "migration": migration,
         "verified": issues.is_empty(),

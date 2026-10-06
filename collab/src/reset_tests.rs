@@ -837,15 +837,177 @@ fn reset_level_flags_are_gated_per_level() {
     assert!(request.validate_level_flags().is_ok());
 }
 
-/// The project level must not retire the root whose `.agent-collab/` is the
-/// live route index; that is the host level's job.
+/// C2: a project that IS the daemon's storage root must be recoverable with
+/// `collab reset --project`. The project level retires that project's business
+/// payload and its resident `.agent-collab/server/` index, leaves every other
+/// project alone, and keeps the host-level audit trail.
 #[test]
-fn reset_project_refuses_the_root_that_holds_the_live_index() {
+fn reset_project_retires_the_root_that_holds_the_live_index() {
     let root = temp_root("project-guard");
     let project = root.join("project");
+    let other = root.join("other");
     let state = root.join("state");
     std::fs::create_dir_all(project.join(".agent-collab/server")).unwrap();
+    for payload in ["mailbox", "review", "agy", "runs", "merge-queue", "handoff"] {
+        std::fs::create_dir_all(project.join(".agent-collab").join(payload)).unwrap();
+    }
+    let resident_journal = b"{\"ev\":\"Sent\",\"msg\":{}}\n";
+    std::fs::write(
+        project.join(".agent-collab/server/journal.jsonl"),
+        resident_journal,
+    )
+    .unwrap();
+    std::fs::write(project.join(".agent-collab/server/events.jsonl"), b"{}\n").unwrap();
+    std::fs::write(project.join(".agent-collab/server/log.txt"), b"resident log\n").unwrap();
+    std::fs::write(project.join(".agent-collab/mailbox/old.jsonl"), b"{}\n").unwrap();
+    std::fs::write(project.join(".agent-collab/runs/old.jsonl"), b"{}\n").unwrap();
+
+    // Another project's state and route must survive this run.
+    std::fs::create_dir_all(other.join(".agent-collab/server")).unwrap();
+    std::fs::create_dir_all(other.join(".agent-collab/mailbox")).unwrap();
+    std::fs::write(other.join(".agent-collab/server/journal.jsonl"), b"{}\n").unwrap();
+    std::fs::write(other.join(".agent-collab/mailbox/keep.jsonl"), b"{}\n").unwrap();
+
     std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("service.json"),
+        serde_json::to_vec(&json!({
+            "desired_state": "down",
+            "generation": 1,
+            "service_scope_root": project.display().to_string(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let route = |path: &Path, registered_ms: i64| {
+        let canonical = path.canonicalize().unwrap().to_string_lossy().to_string();
+        json!({
+            "version": 1,
+            "op": "register",
+            "app_scope_id": "appserver-cli",
+            "project_scope": canonical,
+            "canonical_root": canonical,
+            "storage_root": canonical,
+            "registered_ms": registered_ms,
+        })
+    };
+    std::fs::write(
+        state.join("routes.jsonl"),
+        format!("{}\n{}\n", route(&project, 1), route(&other, 2)),
+    )
+    .unwrap();
+    // Host-level audit artifacts are not the project level's target.
+    std::fs::write(
+        state.join("reset.jsonl"),
+        b"{\"schema\":\"collab-reset/v1\",\"prior\":true}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(state.join("archives/prior")).unwrap();
+    std::fs::write(state.join("archives/prior/manifest.json"), b"{}\n").unwrap();
+
+    let host_paths = HostPaths::for_state_root(&state).unwrap();
+    run(
+        &Scope {
+            root: project.clone(),
+        },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the project reset".into(),
+            discard_legacy: true,
+            ..ResetRequest::default()
+        },
+    )
+    .expect("the storage root must be recoverable with a project reset");
+
+    let record = read_last_reset_record(&state);
+    assert_eq!(record["held_resident_index"], json!(true));
+
+    // The project's business payload and resident index are retired.
+    assert!(!project.join(".agent-collab/server/journal.jsonl").exists());
+    assert!(!project.join(".agent-collab/server/events.jsonl").exists());
+    assert!(!project.join(".agent-collab/server/log.txt").exists());
+    assert!(!project.join(".agent-collab/mailbox/old.jsonl").exists());
+    assert!(!project.join(".agent-collab/runs/old.jsonl").exists());
+    assert!(is_current_empty_baseline(&project.join(".agent-collab")));
+    let archive_root = PathBuf::from(record["archive_root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read(archive_root.join(".agent-collab/server/journal.jsonl")).unwrap(),
+        resident_journal
+    );
+
+    // Another project is untouched, including its route record.
+    assert_eq!(
+        std::fs::read(other.join(".agent-collab/server/journal.jsonl")).unwrap(),
+        b"{}\n"
+    );
+    assert_eq!(
+        std::fs::read(other.join(".agent-collab/mailbox/keep.jsonl")).unwrap(),
+        b"{}\n"
+    );
+    let routes = std::fs::read_to_string(state.join("routes.jsonl")).unwrap();
+    assert!(routes.contains(&other.canonicalize().unwrap().to_string_lossy().to_string()));
+    assert!(!routes.contains(
+        &project
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    ));
+
+    // The host-level audit trail survives and grows by this run.
+    assert!(state.join("archives/prior/manifest.json").exists());
+    let reset_log = std::fs::read_to_string(state.join("reset.jsonl")).unwrap();
+    assert!(reset_log.contains("\"prior\":true"));
+    assert!(reset_log.lines().count() >= 2);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// C1: a journal that cannot be replayed is exactly the state reset exists to
+/// repair. The host level must still run, archive the unreadable journal as
+/// evidence, and report the degraded reset instead of refusing with the replay
+/// error.
+#[test]
+fn reset_host_recovers_an_unreplayable_index_and_reports_degraded() {
+    let root = temp_root("host-unreplayable");
+    let project = root.join("project");
+    let state = root.join("state");
+    let server_dir = project.join(".agent-collab/server");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let canonical = project.canonicalize().unwrap().to_string_lossy().to_string();
+
+    let mut journal = String::new();
+    journal.push_str(&format!(
+        "{}\n",
+        json!({
+            "ev": "GlobalProjectRegistered",
+            "registration": {
+                "project_scope": canonical,
+                "app_scope_id": "appserver-cli",
+                "registered_at_ms": 1,
+            }
+        })
+    ));
+    // The live defect shape: a reducer rejection for a project scope this
+    // index never registered. Replay stops here.
+    journal.push_str(&format!(
+        "{}\n",
+        json!({
+            "ev": "GlobalRuntimeBound",
+            "binding": {
+                "project_scope": root.join("foreign").display().to_string(),
+                "app_scope_id": "appserver-cli",
+                "agent_id": "agent-x",
+                "runtime_id": "runtime-x",
+                "binding_id": "binding-x",
+                "endpoint_generation": 1,
+            }
+        })
+    ));
+    std::fs::write(server_dir.join("journal.jsonl"), &journal).unwrap();
+    std::fs::write(server_dir.join("events.jsonl"), b"{}\n").unwrap();
+    std::fs::write(server_dir.join("log.txt"), b"resident log\n").unwrap();
     std::fs::write(
         state.join("service.json"),
         serde_json::to_vec(&json!({
@@ -858,44 +1020,178 @@ fn reset_project_refuses_the_root_that_holds_the_live_index() {
     .unwrap();
 
     let host_paths = HostPaths::for_state_root(&state).unwrap();
-    let error = run(
+    run(
         &Scope {
             root: project.clone(),
         },
         &host_paths,
         ResetRequest {
-            approval: "operator authorized the project reset".into(),
+            approval: "operator authorized the host reset".into(),
             discard_legacy: true,
-            ..ResetRequest::default()
+            level: ResetLevel::Host,
+            storage_root: Some(project.clone()),
+            include_runs: false,
         },
     )
-    .expect_err("the resident index root must be refused")
-    .to_string();
-    assert!(error.contains("RESET_PROJECT_HOLDS_HOST_INDEX"), "{error}");
+    .expect("an unreplayable index must be recoverable with a reset");
+
+    let record = read_last_reset_record(&state);
+    assert_eq!(record["degraded"], json!(true));
+    assert_eq!(record["index_replay"], json!("unreadable"));
     assert!(
-        project.join(".agent-collab/server").exists(),
-        "a refused run must not retire the project control plane"
+        record["index_replay_error"]
+            .as_str()
+            .unwrap()
+            .contains("journal replay failed"),
+        "{record}"
+    );
+    assert!(
+        record["warning"]
+            .as_str()
+            .unwrap()
+            .contains("could not be replayed"),
+        "{record}"
     );
 
-    // A project that is not the resident root is still allowed to run.
+    // The unreadable journal is archived byte-for-byte as evidence.
+    let archive_root = PathBuf::from(record["archive_root"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read(archive_root.join("resident-index-journal-jsonl/journal.jsonl")).unwrap(),
+        journal.as_bytes()
+    );
+    assert!(!server_dir.join("journal.jsonl").exists());
+    assert!(!server_dir.join("events.jsonl").exists());
+    assert!(!server_dir.join("log.txt").exists());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The ownership guarantee survives the C1 weakening. When the journal cannot
+/// be replayed, only the daemon's own `service_scope_root` descriptor can prove
+/// that `--storage-root` is the live index root. A root the descriptor does not
+/// name is still refused, and a replayable journal that names a different root
+/// is still refused.
+#[test]
+fn reset_host_still_refuses_a_storage_root_that_does_not_own_the_index() {
+    let root = temp_root("host-foreign");
+    let recorded = root.join("recorded");
+    let foreign = root.join("foreign");
     let other = root.join("other");
-    std::fs::create_dir_all(other.join(".agent-collab/server")).unwrap();
-    run(
+    let state = root.join("state");
+    for path in [
+        recorded.join(".agent-collab/server"),
+        foreign.join(".agent-collab/server"),
+        state.clone(),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::create_dir_all(&other).unwrap();
+
+    // `recorded` is the daemon's declared storage root; `foreign` is not.
+    std::fs::write(
+        state.join("service.json"),
+        serde_json::to_vec(&json!({
+            "desired_state": "down",
+            "generation": 1,
+            "service_scope_root": recorded.display().to_string(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let host_paths = HostPaths::for_state_root(&state).unwrap();
+
+    // (1) An unreplayable journal that the descriptor does not name is refused.
+    let unreplayable = format!(
+        "{}\n",
+        json!({
+            "ev": "GlobalRuntimeBound",
+            "binding": {
+                "project_scope": root.join("unregistered").display().to_string(),
+                "app_scope_id": "appserver-cli",
+                "agent_id": "agent-x",
+                "runtime_id": "runtime-x",
+                "binding_id": "binding-x",
+                "endpoint_generation": 1,
+            }
+        })
+    );
+    std::fs::write(
+        foreign.join(".agent-collab/server/journal.jsonl"),
+        &unreplayable,
+    )
+    .unwrap();
+    let error = run(
         &Scope {
-            root: other.clone(),
+            root: foreign.clone(),
         },
         &host_paths,
         ResetRequest {
-            approval: "operator authorized the project reset".into(),
+            approval: "operator authorized the host reset".into(),
             discard_legacy: true,
-            ..ResetRequest::default()
+            level: ResetLevel::Host,
+            storage_root: Some(foreign.clone()),
+            include_runs: false,
         },
     )
+    .expect_err("a root the descriptor does not name must be refused")
+    .to_string();
+    assert!(error.contains("journal replay failed"), "{error}");
+    assert!(foreign.join(".agent-collab/server/journal.jsonl").exists());
+    assert!(!state.join("archives").exists());
+    assert!(!state.join("reset.jsonl").exists());
+
+    // (2) A replayable journal that holds records only for another root is
+    // refused: it is not the index of the root the operator named.
+    std::fs::write(
+        foreign.join(".agent-collab/server/journal.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "ev": "GlobalProjectRegistered",
+                "registration": {
+                    "project_scope": other.canonicalize().unwrap().to_string_lossy(),
+                    "app_scope_id": "appserver-cli",
+                    "registered_at_ms": 1,
+                }
+            })
+        ),
+    )
     .unwrap();
-    assert!(
-        is_current_empty_baseline(&other.join(".agent-collab")),
-        "the project level rebuilds an empty baseline"
-    );
+    let error = run(
+        &Scope {
+            root: foreign.clone(),
+        },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the host reset".into(),
+            discard_legacy: true,
+            level: ResetLevel::Host,
+            storage_root: Some(foreign.clone()),
+            include_runs: false,
+        },
+    )
+    .expect_err("a journal that owns no record for this root must be refused")
+    .to_string();
+    assert!(error.contains("RESET_STORAGE_ROOT_INVALID"), "{error}");
+    assert!(!state.join("archives").exists());
+
+    // (3) A root without the index journal is not a collab storage root.
+    let error = run(
+        &Scope {
+            root: foreign.clone(),
+        },
+        &host_paths,
+        ResetRequest {
+            approval: "operator authorized the host reset".into(),
+            discard_legacy: true,
+            level: ResetLevel::Host,
+            storage_root: Some(root.join("missing")),
+            include_runs: false,
+        },
+    )
+    .expect_err("a root without an index journal must be refused")
+    .to_string();
+    assert!(error.contains("RESET_STORAGE_ROOT_INVALID"), "{error}");
 
     std::fs::remove_dir_all(root).ok();
 }

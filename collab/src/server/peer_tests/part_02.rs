@@ -747,12 +747,14 @@ fn goal_deadline_registration_deduplicates_same_deadline() {
         .clone();
         legacy.method = "appserver".into();
         legacy.target = "legacy-thread-master".into();
-        server.commit_locked(
-            &mut state,
-            &[Event::NotificationSubscribed {
-                subscription: legacy,
-            }],
-        );
+        server
+            .commit_locked(
+                &mut state,
+                &[Event::NotificationSubscribed {
+                    subscription: legacy,
+                }],
+            )
+            .expect("commit legacy subscription");
     }
     let second = handle_notification_subscribe(
         &server,

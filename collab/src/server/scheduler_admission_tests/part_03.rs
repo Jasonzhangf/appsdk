@@ -30,27 +30,31 @@
         let old_claim = now_ms() - state::REQUEST_COOLDOWN_MS - 1;
         {
             let mut state = server.state.lock().unwrap();
-            server.commit_locked(
-                &mut state,
-                &[Event::SchedulerAdmissionStatus {
-                    request_id: "req-stale-owner".into(),
-                    status: "notifying".into(),
-                    error: None,
-                    updated_ms: old_claim,
-                }],
-            );
+            server
+                .commit_locked(
+                    &mut state,
+                    &[Event::SchedulerAdmissionStatus {
+                        request_id: "req-stale-owner".into(),
+                        status: "notifying".into(),
+                        error: None,
+                        updated_ms: old_claim,
+                    }],
+                )
+                .expect("commit stale owner claim");
         }
         {
             let mut state = server.state.lock().unwrap();
-            server.commit_locked(
-                &mut state,
-                &[Event::SchedulerAdmissionStatus {
-                    request_id: "req-stale-owner".into(),
-                    status: "notifying".into(),
-                    error: None,
-                    updated_ms: old_claim + 1,
-                }],
-            );
+            server
+                .commit_locked(
+                    &mut state,
+                    &[Event::SchedulerAdmissionStatus {
+                        request_id: "req-stale-owner".into(),
+                        status: "notifying".into(),
+                        error: None,
+                        updated_ms: old_claim + 1,
+                    }],
+                )
+                .expect("commit newer owner claim");
         }
         clear_scheduler_notification_claim(&server, "req-stale-owner", old_claim);
         let state = server.state.lock().unwrap();

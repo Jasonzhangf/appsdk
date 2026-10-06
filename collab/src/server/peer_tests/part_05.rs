@@ -986,29 +986,31 @@ fn tmux_reregistration_replaces_a_persisted_appserver_default_wake_lease() {
     assert!(register(&server, "recipient", "thread-recipient").ok);
     {
         let mut state = server.state.lock().unwrap();
-        server.commit_locked(
-            &mut state,
-            &[Event::NotificationSubscribed {
-                subscription: NotificationSubscription {
-                    id: "sub-default-direct-message-recipient".into(),
-                    worker_id: "recipient".into(),
-                    event: "direct-message".into(),
-                    subject: None,
-                    target: "legacy-thread-recipient".into(),
-                    method: "appserver".into(),
-                    trigger_ms: None,
-                    trigger_times_ms: Vec::new(),
-                    interval_ms: None,
-                    repeat_count: 1,
-                    fired_count: 0,
-                    expires_ms: now_ms() + 60_000,
-                    status: "armed".into(),
-                    created_ms: now_ms(),
-                    updated_ms: now_ms(),
-                    status_reason: None,
-                },
-            }],
-        );
+        server
+            .commit_locked(
+                &mut state,
+                &[Event::NotificationSubscribed {
+                    subscription: NotificationSubscription {
+                        id: "sub-default-direct-message-recipient".into(),
+                        worker_id: "recipient".into(),
+                        event: "direct-message".into(),
+                        subject: None,
+                        target: "legacy-thread-recipient".into(),
+                        method: "appserver".into(),
+                        trigger_ms: None,
+                        trigger_times_ms: Vec::new(),
+                        interval_ms: None,
+                        repeat_count: 1,
+                        fired_count: 0,
+                        expires_ms: now_ms() + 60_000,
+                        status: "armed".into(),
+                        created_ms: now_ms(),
+                        updated_ms: now_ms(),
+                        status_reason: None,
+                    },
+                }],
+            )
+            .expect("commit legacy appserver lease");
     }
 
     assert!(register(&server, "recipient", "thread-recipient").ok);

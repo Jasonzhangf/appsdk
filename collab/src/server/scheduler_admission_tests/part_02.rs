@@ -302,15 +302,17 @@
         {
             let mut state = server.state.lock().unwrap();
             let stale_ms = now_ms() - state::REQUEST_COOLDOWN_MS;
-            server.commit_locked(
-                &mut state,
-                &[Event::SchedulerAdmissionStatus {
-                    request_id: "req-stale-notifying".into(),
-                    status: "notifying".into(),
-                    error: None,
-                    updated_ms: stale_ms,
-                }],
-            );
+            server
+                .commit_locked(
+                    &mut state,
+                    &[Event::SchedulerAdmissionStatus {
+                        request_id: "req-stale-notifying".into(),
+                        status: "notifying".into(),
+                        error: None,
+                        updated_ms: stale_ms,
+                    }],
+                )
+                .expect("commit stale notifying admission");
         }
         let retry = dispatch(
             &server,
@@ -382,15 +384,17 @@
         {
             let mut state = server.state.lock().unwrap();
             let stale_ms = now_ms() - state::REQUEST_COOLDOWN_MS;
-            server.commit_locked(
-                &mut state,
-                &[Event::SchedulerAdmissionStatus {
-                    request_id: "req-stale-unknown".into(),
-                    status: "notifying".into(),
-                    error: None,
-                    updated_ms: stale_ms,
-                }],
-            );
+            server
+                .commit_locked(
+                    &mut state,
+                    &[Event::SchedulerAdmissionStatus {
+                        request_id: "req-stale-unknown".into(),
+                        status: "notifying".into(),
+                        error: None,
+                        updated_ms: stale_ms,
+                    }],
+                )
+                .expect("commit stale unknown admission");
         }
 
         let retry = request();

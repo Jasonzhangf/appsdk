@@ -401,7 +401,21 @@ fn tick_ledger_maintenance_at(server: &Arc<Server>, now: i64) {
     let mut blocked = 0u32;
     let mut events = Vec::new();
     for binding in bindings {
-        let Some(worker) = server.state.lock().unwrap().workers.get(binding.agent_id.as_str()).cloned() else {
+        let Some(worker) = ({
+            let state = server.state.lock().unwrap();
+            // The ledger is resident control state. A host-wide route whose
+            // project scope this daemon never registered is not reducible here:
+            // the global reducer rejects the record, so classifying it would
+            // append an event that replay can never reduce again.
+            let owned = state
+                .global
+                .lookup_registration(&binding.project_scope, &binding.app_scope_id)
+                .is_some()
+                && state.global.lookup_binding(&binding.binding_id).is_some();
+            owned
+                .then(|| state.workers.get(binding.agent_id.as_str()).cloned())
+                .flatten()
+        }) else {
             blocked = blocked.saturating_add(1);
             continue;
         };

@@ -629,6 +629,7 @@ fn validate_cli_register_rebind(
         .map_err(|error| format!("PROJECT_CONTEXT_INVALID: {error}"))?;
     let orphan_recovery;
     let persisted_thread_id;
+    let retired_tombstone;
     {
         let state = server.state.lock().unwrap();
         if state
@@ -681,6 +682,13 @@ fn validate_cli_register_rebind(
             .native_thread_id
             .as_ref()
             .map(|thread_id| thread_id.as_str().to_owned());
+        // A binding that holds neither an App Server thread nor a pane is an
+        // explicit retirement tombstone: the claimant already lost its resource
+        // to a later registrant. It owns nothing, so the persisted-identity
+        // equality fence below and the orphan pane-owner requirement must not
+        // apply to it. The registration still advances the tombstone's
+        // generation and the later registrant takes the pane.
+        retired_tombstone = binding.native_thread_id.is_none() && binding.tmux_endpoint.is_none();
         let persisted_worker = state.workers.get(worker_id);
         orphan_recovery = persisted_worker.is_none();
         if persisted_worker.is_some_and(|worker| worker.token != token) {
@@ -762,13 +770,15 @@ fn validate_cli_register_rebind(
                         .to_owned(),
                 );
             }
-            crate::identity::validate_binding(&registered_runtime, persisted_runtime).map_err(
-                |error| {
-                    format!(
-                        "SESSION_THREAD_BINDING_MISMATCH: persisted identity runtime does not match the registered binding: {error}; preserve the registered binding, obtain the verified host session/thread pair, and explicitly rebind the same identity and runtime; do not edit or infer the binding"
-                    )
-                },
-            )?;
+            if !retired_tombstone {
+                crate::identity::validate_binding(&registered_runtime, persisted_runtime).map_err(
+                    |error| {
+                        format!(
+                            "SESSION_THREAD_BINDING_MISMATCH: persisted identity runtime does not match the registered binding: {error}; preserve the registered binding, obtain the verified host session/thread pair, and explicitly rebind the same identity and runtime; do not edit or infer the binding"
+                        )
+                    },
+                )?;
+            }
         }
     }
 
@@ -807,7 +817,7 @@ fn validate_cli_register_rebind(
         .codex_thread_id
         .as_deref()
         .unwrap_or(&candidate.endpoint.pane_id);
-    if orphan_recovery {
+    if orphan_recovery && !retired_tombstone {
         let Some(candidate_binding) = candidate_binding else {
             return Err(
                 "RUNTIME_BINDING_REJECTED: orphan recovery requires the persisted tmux pane"

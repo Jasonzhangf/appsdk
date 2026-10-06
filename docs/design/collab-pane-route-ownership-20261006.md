@@ -608,6 +608,19 @@ presence edge, so it is neither announced online nor declared offline.
   existed only to authorize the replacement this revision makes unconditional.
 - `validate_cli_register_rebind` no longer fences pane ownership. The typed
   registration path owns that decision.
+- A retirement tombstone owns no resource, so it cannot fence its own worker. A
+  takeover retires the superseded binding by advancing its generation and
+  clearing its thread and its pane. That binding is not a registration any more:
+  `validate_wire_runtime_binding` still routes it to
+  `validate_cli_register_rebind`, because the tombstone is durable evidence that
+  the worker existed, but the rebind validator skips the persisted-identity
+  equality fence and the orphan pane-owner requirement for a binding that holds
+  neither a native thread nor a pane. The worker record is already closed, so
+  `orphan_recovery` is true; the persisted-identity token, scope and ownership
+  checks still run. The freed worker therefore re-registers on its pane and the
+  takeover retires the current owner, which is the same later-writer rule applied
+  one step later. Without this, the losing worker of a takeover could never
+  return, and the pane could only be reclaimed by the winner.
 - `validate_current_thread_candidate` matches the anchor on the pane only
   (socket, tmux session, pane id). The Codex ids are used only for the conflict
   fence above. A claimant that lives in the runtime this registration commits
@@ -724,6 +737,12 @@ does not answer is not.
   a tmux-only peer reports `presence: unknown` and a `null` `endpoint_live`.
 - `presence_edge_skips_a_tmux_only_peer` (renamed): an `Unknown` peer records no
   presence edge.
+- `a_retired_worker_reclaims_the_pane_from_the_later_registrant` (new): a worker
+  whose binding a takeover retired to a tombstone applies again on the same pane
+  with the identity it persisted before the takeover; the daemon accepts it, the
+  pane route moves back to that worker, and the taker is closed. The test is red
+  before the tombstone rule: it fails with `SESSION_THREAD_BINDING_MISMATCH:
+  stale endpoint generation: expected 2, observed 1`.
 - `worker_snapshot_rejects_tmux_without_writing_a_receipt` and
   `ordinary_worker_requires_its_own_snapshot_and_closes_idempotently` (updated):
   the master fixture registers an explicit AppServer session and thread, because
